@@ -464,7 +464,7 @@ impl PostCheck {
             // (`try-restart`, `condrestart`, `reload-or-try-restart`)
             // genuinely no-op when the unit is inactive and stay quiet.
             Regex::new(
-                r"(?m)((?:^|[;`|]|&&|&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:\S*/)?systemctl\s+(?:--?\S+\s+)*(reload-or-restart|reenable|enable|start|restart)\b((?:[^\n;|&]|&[\d-])*)",
+                r"(?m)((?:^|[;`|]|&&|&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:\S*/)?systemctl\s+(?:--?\S+\s+)*(reload-or-restart|reenable|enable|start|restart)\b((?:[^\n;|&]|&[\d-]|&>>?|>&)*)",
             )
             .expect("static regex")
         })
@@ -1164,12 +1164,19 @@ impl PostCheck {
     /// tail: `Some(true)` for a bare operator (`>`, `>>`, `2>`),
     /// whose file target is the following token; `Some(false)` for
     /// an operator with its target glued on (`>/dev/null`,
-    /// `2>/dev/null`); `None` for any other token.
+    /// `2>/dev/null`); `None` for any other token. The both-stream
+    /// forms (`&>`, `&>>`, `>&`) classify the same way once the
+    /// leading `&` is dropped, mirroring the strip
+    /// `cache_target_is_trigger_owned` applies.
     fn redirection(token: &str) -> Option<bool> {
         let digits = token
             .len()
             .saturating_sub(token.trim_start_matches(|c: char| c.is_ascii_digit()).len());
         let rest = &token[digits..];
+        let rest = match rest.strip_prefix('&') {
+            Some(after) if after.starts_with('>') => after,
+            _ => rest,
+        };
         if matches!(rest, ">" | ">>" | "<" | "<<") {
             return Some(true);
         }
@@ -3001,6 +3008,57 @@ mod tests {
         for script in [
             "systemctl enable foo.timer 2>&1 bar.timer",
             "systemctl enable 2>&1 foo.timer",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "{script} must stay quiet: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemctl_enable_timer_with_both_stream_redirect_is_quiet() {
+        for script in [
+            "systemctl enable foo.timer &>/dev/null",
+            "systemctl enable foo.timer &> /dev/null",
+            "systemctl enable foo.timer &>>/var/log/enable.log",
+            "systemctl enable foo.timer >&2",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "{script} must stay quiet: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemctl_enable_service_after_both_stream_redirect_is_flagged() {
+        // The args tail must not stop at the `&` of `&>`: a service
+        // named after the redirection is still enabled by the call.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl enable foo.timer &>/dev/null bar.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl enable".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_enable_timer_with_flag_is_quiet() {
+        for script in [
+            "systemctl enable --now foo.timer",
+            "systemctl start --now foo.timer",
+            "systemctl --now enable foo.timer",
         ] {
             let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
             assert!(

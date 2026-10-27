@@ -79,24 +79,43 @@ fn is_version_tail(s: &str) -> bool {
 
 /// The base name of a version-suffixed binary name: `exe` minus a
 /// trailing version tail (see `is_version_tail`) and one optional
-/// `-`/`.` separator (`luajit-2.1.1756211046` -> `luajit`,
-/// `perl5.44.0` -> `perl`). `None` when the name carries no such
-/// tail or nothing would remain.
+/// separator. The separator on this (binary) side is `-`, `.` or
+/// nothing at all -- the digit run directly abutting the name
+/// (`luajit-2.1.1756211046` -> `luajit`, `cups-genppd.5.3` ->
+/// `cups-genppd`, `perl5.44.0` -> `perl`). `None` when the name
+/// carries no such tail or nothing would remain.
 fn strip_version_tail(exe: &str) -> Option<&str> {
     let bytes = exe.as_bytes();
     let mut start = bytes.len();
     while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
         start -= 1;
     }
-    let tail = exe[start..].strip_prefix('.').unwrap_or(&exe[start..]);
+    // `start` is computed over bytes and can land inside a
+    // multi-byte character (a non-ASCII char directly before the
+    // digit/dot run); slice through `get` so that fails closed
+    // instead of panicking on a non-boundary index.
+    let run = exe.get(start..)?;
+    let tail = run.strip_prefix('.').unwrap_or(run);
     if start == 0 || !is_version_tail(tail) {
         return None;
     }
-    let mut base = &exe[..start];
-    if base.ends_with('-') || base.ends_with('.') {
-        base = &base[..base.len() - 1];
+    let mut base = exe.get(..start)?;
+    if let Some(stripped) = base.strip_suffix(['-', '.']) {
+        base = stripped;
     }
     if base.is_empty() { None } else { Some(base) }
+}
+
+/// Record a man page basename in the package state, together with
+/// every prefix of it that a `-<version>` tail follows, for the
+/// version-affix credit in `version_affix_documented`.
+fn note_man_basename(st: &mut PkgState, basename: &str) {
+    st.man_basenames.insert(basename.to_string());
+    for (i, _) in basename.match_indices('-') {
+        if is_version_tail(&basename[i + 1..]) {
+            st.man_version_bases.insert(basename[..i].to_string());
+        }
+    }
 }
 
 /// Compression suffixes a shipped man page target may carry, mirroring
@@ -809,6 +828,74 @@ fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
             || cl.ends_with("-tests")
             || cl.ends_with("-test")
     })
+}
+
+/// Whether a file carrying an interpreter line is vendored source
+/// payload: a shipped source tree a developer or a build reads,
+/// rather than a script the installed system executes in place
+/// (corpus E audit 2026-10-26, section 5; ruled in by Tom
+/// 2026-10-27 as the D1 extension of the `script_is_test_data`
+/// gate family). Upstream's own build and helper scripts inside
+/// such a tree use the `env` form of the interpreter line as the
+/// portable choice for whoever unpacks the tree, so it is not an
+/// installed entry point's defect there. Every fact is decidable
+/// from the binary package's name and the file's path alone:
+///
+/// - the package's name ends in a `src` or `source` hyphen
+///   component (a bare `src` or `source` name included, matched
+///   case-insensitively) -- the package exists to carry a source
+///   tree (the rust*-src standard-library trees, the bazel,
+///   kafka, boringssl and other -source packages, fpc-src),
+///   wherever in the tree the payload sits (the rust trees live
+///   under /usr/lib/rustlib/src/, fpc's under
+///   /usr/share/fpcsrc/). A `src` or `source` component in any
+///   other position carries no such fact: `source-highlight` is
+///   a regular tool package and `my-source-tools` a tool
+///   collection, so their scripts keep firing;
+/// - or the file sits in the Go source tree
+///   /usr/share/go/<version>/src/, with a digit-led version
+///   component -- the go1.* packages are not source-named
+///   (their payload is the toolchain), but that one directory
+///   is Go's own shipped source tree, build scripts included.
+///
+/// The bounds of the test gate apply the same way. A file
+/// installed directly in a script directory (/bin, /sbin,
+/// /usr/bin, /usr/sbin, /usr/local/bin or /usr/local/sbin) is an
+/// entry point and never counts as source payload, whatever the
+/// package is called: Go's own /usr/bin/go wrappers fall outside
+/// the Go arm by path, and a source package's /usr/bin helper
+/// keeps firing. A `%doc` file never counts either -- the caller
+/// applies this gate only to non-doc rows -- and fused names
+/// carry no fact: a package merely ending in letters like
+/// `resource` glues the word into a single component and stays
+/// outside the gate. The gate is deliberately not package-wide:
+/// the go1.* packages ship /usr/bin binaries and %doc files by
+/// design, so what is exempt is each source-tree row itself,
+/// never the package's entry points or documentation.
+fn script_is_source_data(pkg_name: &str, fname: &str) -> bool {
+    let parent = fname.rsplit_once('/').map_or("", |(parent, _)| parent);
+    if matches!(
+        parent,
+        "/bin" | "/sbin" | "/usr/bin" | "/usr/sbin" | "/usr/local/bin" | "/usr/local/sbin"
+    ) {
+        return false;
+    }
+    if pkg_name
+        .rsplit('-')
+        .next()
+        .is_some_and(|c| c.eq_ignore_ascii_case("src") || c.eq_ignore_ascii_case("source"))
+    {
+        return true;
+    }
+    // /usr/share/go/<version>/src/... -- the version component is
+    // a single digit-led directory between `go` and `src`.
+    let comps: Vec<&str> = fname.split('/').filter(|c| !c.is_empty()).collect();
+    comps.len() >= 6
+        && comps[0] == "usr"
+        && comps[1] == "share"
+        && comps[2] == "go"
+        && comps[3].starts_with(|c: char| c.is_ascii_digit())
+        && comps[4] == "src"
 }
 
 /// One token of the small shell lexer behind
@@ -2107,9 +2194,19 @@ struct PkgState {
     ldconfig_dirs: std::collections::HashSet<String>,
     bindir_exes: IndexMap<String, Vec<String>>,
     man_basenames: std::collections::HashSet<String>,
+    /// The subset of `man_basenames` prefixes a `-<version>` tail
+    /// follows (`abimap` for the page basename `abimap-3.13.1`),
+    /// precomputed when a basename is recorded so the version-affix
+    /// credit is a set lookup instead of a per-miss scan of every
+    /// man basename.
+    man_version_bases: std::collections::HashSet<String>,
     /// Symlink targets by shipped path, for resolving a bindir link to
     /// the file it ultimately invokes.
     link_targets: HashMap<String, String>,
+    /// Bindir symlink paths by executable name, indexed when a link
+    /// is recorded so the alias credit looks up one name's links
+    /// instead of scanning every link path per miss.
+    bindir_links: HashMap<String, Vec<String>>,
     /// Every shipped path; link resolution stops at the package boundary.
     shipped_paths: std::collections::HashSet<String>,
     /// Basenames of regular files by (rdev, inode): files sharing a key
@@ -2894,20 +2991,13 @@ impl FilesCheck {
         }
         // Symlink chains starting at a bindir link with this name
         // (bindir symlinks register with an empty `paths` list).
-        for lpath in st.link_targets.keys() {
-            let Ok(Some(caps)) = self.bin_re.captures(lpath) else {
-                continue;
-            };
-            let Some(name) = caps.get(1).map(|m| m.as_str()) else {
-                continue;
-            };
-            if name != exe || name.contains('/') {
-                continue;
-            }
-            if let Some(target) = self.resolve_shipped_target(st, lpath) {
-                let base = target.rsplit('/').next().unwrap_or(&target);
-                if st.man_basenames.contains(base) {
-                    return true;
+        if let Some(lpaths) = st.bindir_links.get(exe) {
+            for lpath in lpaths {
+                if let Some(target) = self.resolve_shipped_target(st, lpath) {
+                    let base = target.rsplit('/').next().unwrap_or(&target);
+                    if st.man_basenames.contains(base) {
+                        return true;
+                    }
                 }
             }
         }
@@ -2919,19 +3009,18 @@ impl FilesCheck {
     /// flavour-suffixed pages parallel-installable toolchains ship,
     /// e.g. the Python singlespec `abimap-3.13.1`), or the binary is
     /// itself the version-suffixed name of a documented tool
-    /// (`luajit-2.1.1756211046` for `luajit`). A version tail is at
-    /// least two dot-separated numeric components, so single-suffix
-    /// names (`ps2ps2`, `gio-querymodules-64`) keep firing. The
-    /// reference credits neither shape (FilesCheck.py:559-564
-    /// consults only its man_basenames set); the divergence is
-    /// ledgered.
+    /// (`luajit-2.1.1756211046` for `luajit`). The separator sets are
+    /// exact per side: the man-page side credits only the dash form
+    /// above; the binary side credits a tail preceded by `-`, by `.`
+    /// or by no separator (see `strip_version_tail`). A version tail
+    /// is at least two dot-separated numeric components, so
+    /// single-suffix names (`ps2ps2`, `gio-querymodules-64`) keep
+    /// firing. The reference credits neither shape
+    /// (FilesCheck.py:559-564 consults only its man_basenames set);
+    /// the divergence is ledgered.
     fn version_affix_documented(&self, exe: &str, st: &PkgState) -> bool {
-        for b in &st.man_basenames {
-            if let Some(rest) = b.strip_prefix(exe).and_then(|r| r.strip_prefix('-')) {
-                if is_version_tail(rest) {
-                    return true;
-                }
-            }
+        if st.man_version_bases.contains(exe) {
+            return true;
         }
         if let Some(base) = strip_version_tail(exe) {
             if st.man_basenames.contains(base) {
@@ -2943,10 +3032,18 @@ impl FilesCheck {
 
     /// Follow the symlink chain starting at `start` through the
     /// package's own files; the final non-link shipped path, or `None`
-    /// when the chain leaves the package or loops.
+    /// when the chain leaves the package, loops, or runs past 40
+    /// hops -- a loop or an overlong chain earns no credit, so the
+    /// name keeps firing (ledgered). Intermediate links are judged
+    /// only on being shipped; only the final target's basename is
+    /// judged against the man page set.
     fn resolve_shipped_target(&self, st: &PkgState, start: &str) -> Option<String> {
         let mut cur = start.to_string();
-        for _ in 0..8 {
+        let mut visited = std::collections::HashSet::new();
+        for _ in 0..40 {
+            if !visited.insert(cur.clone()) {
+                return None;
+            }
             let linkto = st.link_targets.get(&cur)?;
             let target = if linkto.starts_with('/') {
                 crate::pkg::normalize_path(linkto)
@@ -2955,7 +3052,15 @@ impl FilesCheck {
                     .parent()
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                crate::pkg::normalize_path(&format!("{parent}/{linkto}"))
+                // A root-level link's parent is `/`: joining with a
+                // second slash would spell a `//` path no shipped
+                // path equals.
+                let joined = if parent == "/" {
+                    format!("/{linkto}")
+                } else {
+                    format!("{parent}/{linkto}")
+                };
+                crate::pkg::normalize_path(&joined)
             };
             if !st.shipped_paths.contains(&target) {
                 return None;
@@ -3858,7 +3963,7 @@ impl FilesCheck {
         let filename = caps.name("filename").map(|m| m.as_str()).unwrap_or("");
         if is_reg(pkgfile.mode) {
             if let Some(binary) = man_binary_basename(filename) {
-                st.man_basenames.insert(binary.to_string());
+                note_man_basename(st, binary);
             }
         }
         let suffixes: Vec<&str> = filename.rsplit('.').collect();
@@ -4380,6 +4485,16 @@ impl FilesCheck {
         }
         st.link_targets
             .insert(fname.to_string(), pkgfile.linkto.clone());
+        if let Ok(Some(caps)) = self.bin_re.captures(fname) {
+            if let Some(name) = caps.get(1).map(|m| m.as_str()) {
+                if !name.contains('/') {
+                    st.bindir_links
+                        .entry(name.to_string())
+                        .or_default()
+                        .push(fname.to_string());
+                }
+            }
+        }
         let link = &pkgfile.linkto;
         // devel-file-in-non-devel-package for .so links: the reference
         // gates on the anchored sofile_regex (FilesCheck.py:165,
@@ -4401,7 +4516,7 @@ impl FilesCheck {
         if let Ok(Some(caps)) = self.man_base_re.captures(fname) {
             if let Some(m) = caps.name("filename") {
                 if let Some(binary) = man_binary_basename(m.as_str()) {
-                    st.man_basenames.insert(binary.to_string());
+                    note_man_basename(st, binary);
                 }
             }
         }
@@ -4533,12 +4648,20 @@ impl FilesCheck {
             // credit. The test runs on the verbatim normalised target:
             // a root-level link's `//usr/...` form matches no shipped
             // path, so the class-F parity shape (filesystem's own root
-            // links) keeps firing, as the #547 ledger entry pins. The
-            // reference has no such credit; the divergence is ledgered.
+            // links) keeps firing, as the #547 ledger entry pins. A
+            // target of exactly `/` is the one special case: its
+            // verbatim prefix would be `//`, which no shipped path
+            // starts with, so the prefix is `/` itself. The reference
+            // has no such credit; the divergence is ledgered.
+            let prefix = if abslink == "/" {
+                "/".to_string()
+            } else {
+                format!("{abslink}/")
+            };
             let populated_dir = pkg
                 .files
                 .iter()
-                .any(|f| !f.is_ghost() && f.name.starts_with(&format!("{abslink}/")));
+                .any(|f| !f.is_ghost() && f.name.starts_with(&prefix));
             if !populated_dir
                 && !pkg.files.iter().any(|f| f.name == abslink)
                 && !pkg.req_names.contains(&abslink)
@@ -5013,8 +5136,14 @@ impl FilesCheck {
                 // FilesCheck.py:1169-1171: only regular executable files feed
                 // the duplicate-executable check.
                 if !exe.contains('/') {
-                    st.bindir_inodes
-                        .insert(fname.to_string(), (pkgfile.rdev, pkgfile.inode));
+                    // An unknown inode (0) registers no hardlink
+                    // identity, mirroring the inode_basenames guard:
+                    // a (rdev, 0) key could otherwise alias unrelated
+                    // files whose inode the header does not know.
+                    if pkgfile.inode != 0 {
+                        st.bindir_inodes
+                            .insert(fname.to_string(), (pkgfile.rdev, pkgfile.inode));
+                    }
                     st.bindir_exes
                         .entry(exe.to_string())
                         .or_default()
@@ -5258,11 +5387,12 @@ impl FilesCheck {
     /// example a `cpython-312` cache file under `python3.13`). The tree's
     /// interpreter never consults such a file -- the cache filename is keyed
     /// to the other version -- so its embedded timestamp cannot make the
-    /// shipped source's bytecode stale in this tree. A version mismatch is
-    /// the wrong-magic check's jurisdiction, not the mtime check's.
-    /// Anything that does not parse (no PEP 3147 tag, a non-CPython
-    /// tag, no version in the tree path) returns false: the mtime check
-    /// keeps its say.
+    /// shipped source's bytecode stale in this tree. (The wrong-magic
+    /// check does not take the shape over either: its magic table ends
+    /// at 3.7, so for a current tree version it returns no finding and
+    /// the file is silent in both tags.) Anything that does not parse
+    /// (no PEP 3147 tag, a non-CPython tag, no version in the tree
+    /// path) returns false: the mtime check keeps its say.
     fn pyc_cache_version_mismatch(&self, fname: &str) -> bool {
         let Ok(Some(caps)) = self.python_bytecode_pep3147_re.captures(fname) else {
             return false;
@@ -5628,7 +5758,15 @@ impl FilesCheck {
                             // form of its interpreter line is not a
                             // defect there: `script_is_test_data`
                             // carries the shapes and their guards.
-                            if !script_is_test_data(&pkg.name, fname) {
+                            // Vendored source payload is read or
+                            // built from, not executed in place,
+                            // the same way: `script_is_source_data`
+                            // carries the source-tree shapes, and
+                            // its doc bound is the row itself -- a
+                            // %doc file keeps the finding.
+                            if !script_is_test_data(&pkg.name, fname)
+                                && !(!is_doc && script_is_source_data(&pkg.name, fname))
+                            {
                                 add_info(
                                     out,
                                     Level::Error,
@@ -5640,13 +5778,28 @@ impl FilesCheck {
                         }
                         Ok(Some(_)) => {}
                         _ => {
-                            add_info(
-                                out,
-                                Level::Error,
-                                pkg,
-                                "wrong-script-interpreter",
-                                &[fname, &interpreter, &fd.interpreter_args],
-                            );
+                            // The interpreter line is wrong here,
+                            // but in test or vendored source payload
+                            // it is the harness's or upstream's
+                            // business the same way as the env form
+                            // above (Tom, 2026-10-27): the shared
+                            // `script_is_test_data` and
+                            // `script_is_source_data` gates carry
+                            // the shapes and their guards, doc bound
+                            // included, so the ruling extends the
+                            // gate family to this emission rather
+                            // than adding a second one.
+                            if !script_is_test_data(&pkg.name, fname)
+                                && !(!is_doc && script_is_source_data(&pkg.name, fname))
+                            {
+                                add_info(
+                                    out,
+                                    Level::Error,
+                                    pkg,
+                                    "wrong-script-interpreter",
+                                    &[fname, &interpreter, &fd.interpreter_args],
+                                );
+                            }
                         }
                     }
                 }
@@ -9968,6 +10121,10 @@ mod tests {
             .filter(|f| f.is_ghost())
             .map(|f| f.name.clone())
             .collect();
+        // The fixture header carries its own Requires; clear them so
+        // a case cannot be satisfied through the req_names escape
+        // instead of the population it means to exercise.
+        pkg.req_names.clear();
         pkg.files = files;
         let (results, _levels) = run_files_check_pkgs(&[pkg], &test_config());
         results.iter().map(|(n, _)| n.clone()).collect()
@@ -9988,16 +10145,54 @@ mod tests {
     }
 
     #[test]
-    fn dangling_relative_ancestor_and_dot_targets_stay_silent() {
+    fn dangling_relative_ancestor_target_stays_silent() {
         // A link to an ancestor of its own tree (`../..`, the ntp
-        // chroot-mirror shape) and a link to `.` (the onednn / X11
-        // shape) name directories the package's own payload creates as
-        // leading directories.
+        // chroot-mirror shape) names a directory the package's own
+        // payload creates as a leading directory.
         let names = dangling_names_for_files(vec![
             symlink("/var/lib/foo/var/lib/foo", "../.."),
             plain_file("/var/lib/foo/drift"),
+        ]);
+        assert_lacks(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_dot_target_stays_silent() {
+        // A link to `.` (the onednn / X11 shape): the directory the
+        // link itself sits in.
+        let names = dangling_names_for_files(vec![
             symlink("/usr/include/mkl-foo", "."),
             plain_file("/usr/include/foo.h"),
+        ]);
+        assert_lacks(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_lone_ancestor_and_dot_links_stay_silent() {
+        // Lone-link pins: with no other payload at all, an ancestor
+        // or dot link still resolves -- installing the link creates
+        // its target as a leading directory of the link's own path,
+        // so the link entry itself is the population evidence.
+        for files in [
+            vec![symlink("/var/lib/foo/var/lib/foo", "../..")],
+            vec![symlink("/usr/include/mkl-foo", ".")],
+        ] {
+            let names = dangling_names_for_files(files);
+            assert_lacks(&names, "dangling-relative-symlink");
+        }
+    }
+
+    #[test]
+    fn dangling_relative_root_target_stays_silent() {
+        // A link whose normalised target is `/` itself: every
+        // shipped path is below the root, so the package's payload
+        // populates it. (The verbatim prefix would be `//`, which no
+        // shipped path starts with; the `//usr/...` target form of
+        // the root-link parity pin is a different shape and still
+        // fires.)
+        let names = dangling_names_for_files(vec![
+            symlink("/usr/share/foo/rootlink", "../../.."),
+            plain_file("/usr/share/foo/data.txt"),
         ]);
         assert_lacks(&names, "dangling-relative-symlink");
     }
@@ -10754,6 +10949,116 @@ mod tests {
     }
 
     #[test]
+    fn alias_symlink_loop_keeps_firing() {
+        // A two-link loop never resolves, so the undocumented name
+        // earns no alias credit even though its loop partner's
+        // basename carries a man page (loopb itself is documented
+        // directly and is not the discriminator).
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                linkto: "loopb".to_string(),
+                ..mkfile("/usr/bin/loopa", 0o120777, 51)
+            },
+            PkgFile {
+                linkto: "loopa".to_string(),
+                ..mkfile("/usr/bin/loopb", 0o120777, 52)
+            },
+            mkfile("/usr/share/man/man1/loopb.1.gz", 0o100644, 53),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("loopa")),
+            "loopa must still fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn alias_symlink_chain_length_limit() {
+        // A short chain to a documented target earns the credit; a
+        // chain past the 40-hop cap earns none and keeps firing.
+        let build = |links: usize| {
+            let mut files: Vec<PkgFile> = Vec::new();
+            for i in 0..links {
+                let next = if i + 1 == links {
+                    "realtool".to_string()
+                } else {
+                    format!("hop{}", i + 1)
+                };
+                files.push(PkgFile {
+                    linkto: next,
+                    ..mkfile(&format!("/usr/bin/hop{i}"), 0o120777, 100 + i as u32)
+                });
+            }
+            files.push(mkfile("/usr/bin/realtool", 0o100755, 200));
+            files.push(mkfile("/usr/share/man/man1/realtool.1.gz", 0o100644, 201));
+            files
+        };
+        let (pkg, _dir) = pkg_with_files(build(10));
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("hop0")),
+            "a 10-hop chain resolves: {results:?}"
+        );
+        let (pkg, _dir) = pkg_with_files(build(41));
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("hop0")),
+            "a 41-hop chain is over the cap and must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn alias_symlink_root_level_intermediate_resolves() {
+        // The chain passes through a root-level link whose target is
+        // spelled relative to the root: the join must not produce a
+        // `//` path that no shipped path equals.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                linkto: "/toplink".to_string(),
+                ..mkfile("/usr/bin/viaalias", 0o120777, 61)
+            },
+            PkgFile {
+                linkto: "usr/bin/realtool".to_string(),
+                ..mkfile("/toplink", 0o120777, 62)
+            },
+            mkfile("/usr/bin/realtool", 0o100755, 63),
+            mkfile("/usr/share/man/man1/realtool.1.gz", 0o100644, 64),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("viaalias")),
+            "viaalias resolves through the root-level link: {results:?}"
+        );
+    }
+
+    #[test]
+    fn alias_unknown_inode_earns_no_hardlink_credit() {
+        // Both files carry inode 0 (unknown): no hardlink identity
+        // is registered on either side, so the documented sibling
+        // does not credit the undocumented name.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/zeroexe", 0o100755, 0),
+            mkfile("/usr/bin/zerodoc", 0o100755, 0),
+            mkfile("/usr/share/man/man1/zerodoc.1.gz", 0o100644, 72),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("zeroexe")),
+            "zeroexe must still fire: {results:?}"
+        );
+    }
+
+    #[test]
     fn version_affix_name_forms_for_no_manual_page() {
         // Flavour-suffixed page: the Python singlespec shape -- the
         // generic name is an alternatives link, the shipped page is
@@ -10785,6 +11090,65 @@ mod tests {
                 .any(|(n, _)| n == "no-manual-page-for-binary"),
             "luajit-2.1.1756211046 is documented by luajit.1: {results:?}"
         );
+    }
+
+    #[test]
+    fn version_affix_dot_and_separatorless_forms_for_no_manual_page() {
+        // Binary side, dot separator: cups-genppd.5.3 is documented
+        // by cups-genppd.1.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/cups-genppd.5.3", 0o100755, 31),
+            mkfile("/usr/share/man/man1/cups-genppd.1.gz", 0o100644, 32),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "no-manual-page-for-binary"),
+            "cups-genppd.5.3 is documented by cups-genppd.1: {results:?}"
+        );
+        // Binary side, separatorless: perl5.44.0 is documented by
+        // perl.1.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/perl5.44.0", 0o100755, 33),
+            mkfile("/usr/share/man/man1/perl.1.gz", 0o100644, 34),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "no-manual-page-for-binary"),
+            "perl5.44.0 is documented by perl.1: {results:?}"
+        );
+        // Man side positive: bar is documented by the bar-1.2 page
+        // (shipped as bar-1.2.1, whose man basename is bar-1.2).
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/bar", 0o100755, 35),
+            mkfile("/usr/share/man/man1/bar-1.2.1.gz", 0o100644, 36),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "no-manual-page-for-binary"),
+            "bar is documented by its bar-1.2 page: {results:?}"
+        );
+        // Single-suffix misses keep firing end to end.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/stunnel3", 0o100755, 37),
+            mkfile("/usr/share/man/man1/stunnel.1.gz", 0o100644, 38),
+            mkfile("/usr/bin/foo-2", 0o100755, 39),
+            mkfile("/usr/share/man/man1/foo.1.gz", 0o100644, 40),
+        ]);
+        let results = run_check_binary(&pkg);
+        for exe in ["stunnel3", "foo-2"] {
+            assert!(
+                results
+                    .iter()
+                    .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with(exe)),
+                "{exe} must still fire: {results:?}"
+            );
+        }
     }
 
     #[test]
@@ -10826,6 +11190,14 @@ mod tests {
         assert_eq!(strip_version_tail("ps2ps2"), None);
         assert_eq!(strip_version_tail("gio-querymodules-64"), None);
         assert_eq!(strip_version_tail("plain"), None);
+        // Single-suffix shapes: one trailing component is a name
+        // suffix, not a version.
+        assert_eq!(strip_version_tail("stunnel3"), None);
+        assert_eq!(strip_version_tail("foo-2"), None);
+        // A non-ASCII char directly before the digit/dot run: the
+        // byte-computed split must fail closed or land on a
+        // boundary, never panic.
+        assert_eq!(strip_version_tail("foo\u{e9}5.44.0"), Some("foo\u{e9}"));
     }
 
     #[test]
@@ -15399,6 +15771,521 @@ reason = "warning hook: executable and %config by design"
             "widget",
             "/usr/share/widget/Tests/helper.py"
         ));
+    }
+
+    /// Source packages carry a vendored source tree as payload:
+    /// upstream's own build and helper scripts inside it draw no
+    /// `env-script-interpreter`, wherever in the tree the payload
+    /// sits (the audit's kafka-source tree under /usr/src/, the
+    /// rust*-src trees under /usr/lib/rustlib/src/, fpc-src under
+    /// /usr/share/fpcsrc/).
+    #[test]
+    fn env_script_silent_in_source_packages() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/src/kafka/kafka-merge-pr.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/fpcsrc/rtl/unix/scripts/check_sys.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+            ],
+        );
+        pkg.name = "kafka-source".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/src/kafka/kafka-merge-pr.py",
+            "/usr/share/fpcsrc/rtl/unix/scripts/check_sys.sh",
+        ] {
+            assert!(
+                !flagged(&lines, "env-script-interpreter", path),
+                "no env-script-interpreter for source payload {path}: {lines:?}"
+            );
+        }
+        let dir2 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir2,
+            &[(
+                "/usr/lib/rustlib/src/rust/library/stdarch/ci/run.sh",
+                0o100755,
+                "Bourne-Again shell script, ASCII text executable",
+                b"#!/usr/bin/env bash\n",
+            )],
+        );
+        pkg.name = "rust1.97-src".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            !flagged(
+                &lines,
+                "env-script-interpreter",
+                "/usr/lib/rustlib/src/rust/library/stdarch/ci/run.sh"
+            ),
+            "no env-script-interpreter for rust source payload: {lines:?}"
+        );
+        // A bare `src` name is the suffix arm with no hyphen at
+        // all, and the component match folds case.
+        for name in ["src", "widget-Source"] {
+            let dir3 = tempfile::TempDir::new().expect("tmpdir");
+            let mut pkg = script_mode_pkg(
+                &dir3,
+                &[(
+                    "/usr/share/widget/data/tool.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                )],
+            );
+            pkg.name = name.to_string();
+            let lines = script_finding_lines(&pkg, &config);
+            assert!(
+                !flagged(
+                    &lines,
+                    "env-script-interpreter",
+                    "/usr/share/widget/data/tool.sh"
+                ),
+                "no env-script-interpreter for bare/case-folded suffix {name}: {lines:?}"
+            );
+        }
+    }
+
+    /// The Go source tree is source payload the same way: the
+    /// go1.* packages are not source-named, but
+    /// /usr/share/go/<version>/src/ is Go's own shipped source
+    /// tree, build scripts included, at any depth below `src`.
+    #[test]
+    fn env_script_silent_in_go_source_tree() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/go/1.24/src/make.bash",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
+                    "/usr/share/go/1.24/src/cmd/compile/internal/ssa/_gen/cover.bash",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+            ],
+        );
+        pkg.name = "go1.24".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/share/go/1.24/src/make.bash",
+            "/usr/share/go/1.24/src/cmd/compile/internal/ssa/_gen/cover.bash",
+        ] {
+            assert!(
+                !flagged(&lines, "env-script-interpreter", path),
+                "no env-script-interpreter for Go source payload {path}: {lines:?}"
+            );
+        }
+    }
+
+    /// The source gate's bounds: an entry point in a script
+    /// directory keeps firing whatever the package is called; a
+    /// %doc row in a source package keeps firing; the Go arm
+    /// needs the version component and the `src` directory (the
+    /// wasm helpers under misc/ are executed payload, not source);
+    /// fused names (resource) carry no source fact; a `src` or
+    /// `source` component in prefix or middle position
+    /// (source-highlight, my-source-tools) carries no source
+    /// fact either; an ordinary package's /usr/src payload is
+    /// not covered; and the gate
+    /// does not reach `non-executable-script` -- a source tree's
+    /// non-executable script keeps that finding.
+    #[test]
+    fn env_script_still_fires_at_source_gate_bounds() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/bin/kafka-run.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
+                    "/usr/src/kafka/docs/tool.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+            ],
+        );
+        pkg.name = "kafka-source".to_string();
+        pkg.doc_files = vec!["/usr/src/kafka/docs/tool.py".to_string()];
+        let lines = script_finding_lines(&pkg, &config);
+        for (tag, path) in [
+            ("env-script-interpreter", "/usr/bin/kafka-run.sh"),
+            ("env-script-interpreter", "/usr/src/kafka/docs/tool.py"),
+        ] {
+            assert!(
+                flagged(&lines, tag, path),
+                "{tag} must fire for {path}: {lines:?}"
+            );
+        }
+        // The source gate does not reach `non-executable-script`:
+        // fpc-src's non-executable source script (a shape the
+        // corpus fires on today) keeps that finding.
+        let dir4 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir4,
+            &[(
+                "/usr/share/fpcsrc/packages/odata/regen.sh",
+                0o100644,
+                "Bourne-Again shell script, ASCII text executable",
+                b"#!/bin/bash\n",
+            )],
+        );
+        pkg.name = "fpc-src".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(
+                &lines,
+                "non-executable-script",
+                "/usr/share/fpcsrc/packages/odata/regen.sh"
+            ),
+            "non-executable-script must fire in a source package: {lines:?}"
+        );
+        let dir2 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir2,
+            &[
+                (
+                    "/usr/share/go/1.24/misc/wasm/run.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
+                    "/usr/share/go/src/make.bash",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
+                    "/usr/share/go/latest/src/make.bash",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
+                    "/usr/src/myapp/tool.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+            ],
+        );
+        pkg.name = "go1.24".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/share/go/1.24/misc/wasm/run.sh",
+            "/usr/share/go/src/make.bash",
+            "/usr/share/go/latest/src/make.bash",
+        ] {
+            assert!(
+                flagged(&lines, "env-script-interpreter", path),
+                "env-script-interpreter must fire for {path}: {lines:?}"
+            );
+        }
+        pkg.name = "myapp".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(&lines, "env-script-interpreter", "/usr/src/myapp/tool.sh"),
+            "env-script-interpreter must fire for a plain package's /usr/src payload: {lines:?}"
+        );
+        // A `source` component in prefix or middle position is
+        // not a source-tree carrier: source-highlight is a
+        // regular tool package and my-source-tools a tool
+        // collection, so their scripts keep firing.
+        for name in ["source-highlight", "my-source-tools"] {
+            let dir5 = tempfile::TempDir::new().expect("tmpdir");
+            let mut pkg = script_mode_pkg(
+                &dir5,
+                &[(
+                    "/usr/share/tools/data/tool.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                )],
+            );
+            pkg.name = name.to_string();
+            let lines = script_finding_lines(&pkg, &config);
+            assert!(
+                flagged(
+                    &lines,
+                    "env-script-interpreter",
+                    "/usr/share/tools/data/tool.sh"
+                ),
+                "env-script-interpreter must fire for prefix/middle name {name}: {lines:?}"
+            );
+        }
+        let dir3 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir3,
+            &[(
+                "/usr/share/resource/data/tool.py",
+                0o100755,
+                "Python script, ASCII text executable",
+                b"#!/usr/bin/env python3\n",
+            )],
+        );
+        pkg.name = "resource-compiler".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(
+                &lines,
+                "env-script-interpreter",
+                "/usr/share/resource/data/tool.py"
+            ),
+            "env-script-interpreter must fire for a fused name: {lines:?}"
+        );
+    }
+
+    /// The gate family reaches `wrong-script-interpreter` the
+    /// same way (Tom, 2026-10-27): the bazel wheel fixtures are
+    /// test payload inside a -source package's tests tree, a
+    /// testsuite package's own scripts are its payload wherever
+    /// they sit, a source package's helper scripts are vendored
+    /// source, and the Go source tree is source payload -- a
+    /// wrong interpreter line in any of them is the harness's or
+    /// upstream's business, not an installed entry point's defect.
+    #[test]
+    fn wrong_script_silent_in_test_and_source_payload() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/src/bazel-rules-python/tests/repos/whl_with_data1/whl_with_data1-1.0.data/scripts/whl_with_data1_pythonw",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!pythonw\n",
+                ),
+                (
+                    "/usr/src/bazel-rules-python/tests/repos/whl_with_data1/whl_with_data1-1.0.data/scripts/whl_with_data1_script",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!python\n",
+                ),
+            ],
+        );
+        pkg.name = "bazel-rules-python-source".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/src/bazel-rules-python/tests/repos/whl_with_data1/whl_with_data1-1.0.data/scripts/whl_with_data1_pythonw",
+            "/usr/src/bazel-rules-python/tests/repos/whl_with_data1/whl_with_data1-1.0.data/scripts/whl_with_data1_script",
+        ] {
+            assert!(
+                !flagged(&lines, "wrong-script-interpreter", path),
+                "no wrong-script-interpreter for bazel fixture {path}: {lines:?}"
+            );
+        }
+        let dir2 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir2,
+            &[(
+                "/usr/share/lvm2-testsuite/shell/check.pl",
+                0o100755,
+                "Perl script text executable",
+                b"#!perl\n",
+            )],
+        );
+        pkg.name = "lvm2-testsuite".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            !flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/usr/share/lvm2-testsuite/shell/check.pl"
+            ),
+            "no wrong-script-interpreter for testsuite payload: {lines:?}"
+        );
+        let dir3 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir3,
+            &[(
+                "/usr/src/kafka/kafka-merge-pr.py",
+                0o100755,
+                "Python script, ASCII text executable",
+                b"#!/usr/local/bin/python3\n",
+            )],
+        );
+        pkg.name = "kafka-source".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            !flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/usr/src/kafka/kafka-merge-pr.py"
+            ),
+            "no wrong-script-interpreter for source payload: {lines:?}"
+        );
+        let dir4 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir4,
+            &[(
+                "/usr/share/go/1.24/src/cmd/tool.py",
+                0o100755,
+                "Python script, ASCII text executable",
+                b"#!python3\n",
+            )],
+        );
+        pkg.name = "go1.24".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            !flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/usr/share/go/1.24/src/cmd/tool.py"
+            ),
+            "no wrong-script-interpreter for Go source payload: {lines:?}"
+        );
+    }
+
+    /// The bounds of the family bind this emission identically:
+    /// doc and example payload is not a gate shape (the audit's
+    /// perl and texlive examples keep firing); an entry point in
+    /// a script directory keeps firing whatever the package is
+    /// called; a %doc row in a source package keeps firing;
+    /// fused names carry no fact; a plain package's /usr/src
+    /// payload is not covered; and a private /opt/testing tree
+    /// is not a gate shape either (rpmlint-mini's own script
+    /// keeps the finding).
+    #[test]
+    fn wrong_script_still_fires_at_gate_bounds() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/doc/packages/perl-Dumbbench/examples/timethese.pl",
+                    0o100755,
+                    "Perl script text executable",
+                    b"#!perl\n",
+                ),
+                (
+                    "/usr/share/texmf/doc/metapost/metapost-examples/mp2html.pl",
+                    0o100755,
+                    "Perl script text executable",
+                    b"#!perl -w\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/share/doc/packages/perl-Dumbbench/examples/timethese.pl",
+            "/usr/share/texmf/doc/metapost/metapost-examples/mp2html.pl",
+        ] {
+            assert!(
+                flagged(&lines, "wrong-script-interpreter", path),
+                "wrong-script-interpreter must fire for doc payload {path}: {lines:?}"
+            );
+        }
+        let dir2 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir2,
+            &[
+                (
+                    "/usr/bin/runner.pl",
+                    0o100755,
+                    "Perl script text executable",
+                    b"#!perl\n",
+                ),
+                (
+                    "/usr/src/kafka/docs/tool.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/local/bin/python3\n",
+                ),
+            ],
+        );
+        pkg.name = "lvm2-testsuite".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(&lines, "wrong-script-interpreter", "/usr/bin/runner.pl"),
+            "wrong-script-interpreter must fire in a script directory: {lines:?}"
+        );
+        pkg.name = "kafka-source".to_string();
+        pkg.doc_files = vec!["/usr/src/kafka/docs/tool.py".to_string()];
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/usr/src/kafka/docs/tool.py"
+            ),
+            "wrong-script-interpreter must fire for a %doc row: {lines:?}"
+        );
+        let dir3 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir3,
+            &[
+                (
+                    "/usr/share/resource/data/tool.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!python3\n",
+                ),
+                (
+                    "/usr/src/myapp/tool.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!python3\n",
+                ),
+                (
+                    "/opt/testing/bin/rpmlint.real",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/opt/testing/bin/python3\n",
+                ),
+            ],
+        );
+        pkg.name = "resource-compiler".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/usr/share/resource/data/tool.py"
+            ),
+            "wrong-script-interpreter must fire for a fused name: {lines:?}"
+        );
+        pkg.name = "myapp".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(&lines, "wrong-script-interpreter", "/usr/src/myapp/tool.py"),
+            "wrong-script-interpreter must fire for a plain package's /usr/src payload: {lines:?}"
+        );
+        pkg.name = "rpmlint-mini".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/opt/testing/bin/rpmlint.real"
+            ),
+            "wrong-script-interpreter must fire for the /opt/testing tree: {lines:?}"
+        );
     }
 
     fn eol_flagged(lines: &[(String, String)], path: &str) -> bool {

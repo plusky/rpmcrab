@@ -282,34 +282,71 @@ impl SharedLibraryPolicyCheck {
         Ok((soname, needed))
     }
 
-    /// Whether the ELF file at `path` is evidence that the library loads
-    /// `dep` at runtime: it has an undefined `dlopen`/`dlmopen` import
-    /// (a `@VERSION` suffix on the symbol name ignored, as elsewhere in
-    /// this crate) and its raw bytes contain `dep` as a NUL-delimited
-    /// string - the name it hands to the loader. Any read or parse
+    /// The dlopen-witness evidence for the library file at `path`,
+    /// computed once and reused for every charged SONAME: whether it
+    /// has an undefined, non-weak FUNC or NOTYPE `dlopen`/`dlmopen`
+    /// import (a `@VERSION` suffix on the symbol name ignored, as
+    /// elsewhere in this crate -- the crate's own import model in
+    /// BinariesCheck: a weak import can be null at runtime and a
+    /// defined symbol is not an import), plus its raw bytes for the
+    /// name scan in `LoaderWitness::loads`. Any read or parse
     /// failure is a non-witness.
-    fn dlopen_witness(path: &str, dep: &str) -> bool {
+    fn loader_witness(path: &str) -> LoaderWitness {
+        let non_witness = LoaderWitness {
+            imports_loader: false,
+            data: Vec::new(),
+        };
         let Ok(data) = std::fs::read(path) else {
-            return false;
+            return non_witness;
         };
         let Ok(elf) = crate::checks::binaries::parse_elf(&data) else {
-            return false;
+            return non_witness;
         };
         let imports_loader = elf.dynsyms.iter().any(|sym| {
             sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize
+                && sym.st_bind() != goblin::elf::sym::STB_WEAK
+                && matches!(
+                    sym.st_type(),
+                    goblin::elf::sym::STT_FUNC | goblin::elf::sym::STT_NOTYPE
+                )
                 && elf.dynstrtab.get_at(sym.st_name).is_some_and(|name| {
                     let base = name.split('@').next().unwrap_or("");
                     base == "dlopen" || base == "dlmopen"
                 })
         });
-        if !imports_loader {
+        LoaderWitness {
+            imports_loader,
+            data,
+        }
+    }
+}
+
+/// Dlopen-witness evidence for one shipped library file: see
+/// `SharedLibraryPolicyCheck::loader_witness`.
+struct LoaderWitness {
+    imports_loader: bool,
+    data: Vec<u8>,
+}
+
+impl LoaderWitness {
+    /// Whether this file is evidence that the library loads `dep`
+    /// at runtime: it imports the dynamic loader and its raw bytes
+    /// contain `dep` as a NUL-delimited string -- the name it hands
+    /// to the loader. The NUL delimiters are the boundary test: a
+    /// longer name merely containing `dep` (`libbar.so.20` for
+    /// `libbar.so.2`), or one glued to a preceding character
+    /// (`Xlibbar.so.2`), is not the name being loaded.
+    fn loads(&self, dep: &str) -> bool {
+        if !self.imports_loader {
             return false;
         }
         let mut needle = Vec::with_capacity(dep.len() + 2);
         needle.push(0);
         needle.extend_from_slice(dep.as_bytes());
         needle.push(0);
-        data.windows(needle.len()).any(|w| w == needle.as_slice())
+        self.data
+            .windows(needle.len())
+            .any(|w| w == needle.as_slice())
     }
 }
 
@@ -462,9 +499,13 @@ impl Check for SharedLibraryPolicyCheck {
         // DT_NEEDED of every ELF file in the package, library-named or
         // not: the link-time consumer set for the same credit. The
         // reference never computes this - it only walks library-named
-        // files - so a parse failure here is ignored, never a
-        // readelf-failed finding.
+        // files - so a parse failure here is never a readelf-failed
+        // finding; it does mark the consumer set incomplete, which
+        // withholds the dlopen credit below (the failed file's
+        // DT_NEEDED entries are unobservable, so the absence the
+        // credit requires cannot be shown).
         let mut all_needed: HashSet<String> = HashSet::new();
+        let mut consumer_set_incomplete = false;
 
         for file in &pkg.files {
             let fname = file.name.as_str();
@@ -475,8 +516,9 @@ impl Check for SharedLibraryPolicyCheck {
                 continue;
             }
             if !fname.contains(".so.") && !fname.ends_with(".so") {
-                if let Ok((_, needed)) = Self::elf_dynamic(&file.path) {
-                    all_needed.extend(needed);
+                match Self::elf_dynamic(&file.path) {
+                    Ok((_, needed)) => all_needed.extend(needed),
+                    Err(_) => consumer_set_incomplete = true,
                 }
                 continue;
             }
@@ -588,6 +630,13 @@ impl Check for SharedLibraryPolicyCheck {
         // Non-lib stuff must not add dependencies. Sorted for the same reason
         // as above: one finding per dep, all sharing (check, level).
         if !libs.is_empty() {
+            // Witness evidence per shipped library file, computed
+            // once here instead of re-reading and re-parsing every
+            // library for every charged SONAME in the loop below.
+            let witnesses: Vec<LoaderWitness> = lib_files
+                .iter()
+                .map(|path| Self::loader_witness(path))
+                .collect();
             let mut deps_sorted: Vec<&str> = pkg_requires.iter().copied().collect();
             deps_sorted.sort_unstable();
             for dep in deps_sorted {
@@ -600,14 +649,18 @@ impl Check for SharedLibraryPolicyCheck {
                     // another and loads it by name at runtime, so the
                     // packager's explicit SONAME require is the library's
                     // real dependency, not an excessive one. Credit it
-                    // only when the evidence is complete: no file in the
-                    // package has a DT_NEEDED entry for the name (a link-time consumer
-                    // in a shipped program is the violation this check
+                    // only when the evidence is complete: every shipped
+                    // program parsed (an unparsable one leaves the
+                    // consumer set incomplete and withholds the
+                    // credit), no file in the package has a DT_NEEDED
+                    // entry for the name (a link-time consumer in a
+                    // shipped program is the violation this check
                     // exists to report), and one of the shipped library
                     // files both imports the dynamic loader and embeds
                     // the exact name it loads.
-                    if !all_needed.contains(dep)
-                        && lib_files.iter().any(|path| Self::dlopen_witness(path, dep))
+                    if !consumer_set_incomplete
+                        && !all_needed.contains(dep)
+                        && witnesses.iter().any(|w| w.loads(dep))
                     {
                         continue;
                     }
@@ -1261,7 +1314,7 @@ mod tests {
         files: Vec<(String, Vec<u8>)>,
         requires: Vec<DepInfo>,
     ) -> Vec<(String, String)> {
-        let dir = std::env::temp_dir().join(dir_name);
+        let dir = std::env::temp_dir().join(format!("{dir_name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
         let mut pkg_files = Vec::new();
@@ -1369,6 +1422,113 @@ mod tests {
             vec![dep("libbar.so.2"), dep("libc.so.6()(64bit)")],
         );
         assert_eq!(excessive_deps(&results), vec!["libbar.so.2"], "{results:?}");
+    }
+
+    #[test]
+    fn excessive_dependency_fires_with_unparsable_program() {
+        // The library is a textbook dlopen shim, but a shipped
+        // program fails to parse: its DT_NEEDED set is unobservable,
+        // so the consumer set is incomplete and the credit is
+        // withheld (the absence the credit requires cannot be shown).
+        let lib = loader_elf(
+            Some("libfoo.so"),
+            &["libc.so.6"],
+            &[("dlopen", 1, 2, 0)],
+            Some("libbar.so.2"),
+        );
+        let mut broken = vec![0x7f, b'E', b'L', b'F', 9, 1, 1, 0];
+        broken.extend_from_slice(&[0xff; 64]);
+        let results = run_shlib_pkg(
+            "rpmcrab-shlib-unparsable-program",
+            vec![
+                ("/usr/lib64/libfoo.so".to_string(), lib),
+                ("/usr/bin/footool".to_string(), broken),
+            ],
+            vec![dep("libbar.so.2"), dep("libc.so.6()(64bit)")],
+        );
+        assert_eq!(excessive_deps(&results), vec!["libbar.so.2"], "{results:?}");
+    }
+
+    #[test]
+    fn excessive_dependency_nul_boundary_names_still_fire() {
+        // The embedded name must be the charged SONAME delimited by
+        // NULs: a longer name containing it, or one glued to a
+        // preceding character, is not the name being loaded.
+        for embedded in ["libbar.so.20", "Xlibbar.so.2"] {
+            let lib = loader_elf(
+                Some("libfoo.so"),
+                &["libc.so.6"],
+                &[("dlopen", 1, 2, 0)],
+                Some(embedded),
+            );
+            let results = run_shlib_pkg(
+                "rpmcrab-shlib-nul-boundary",
+                vec![("/usr/lib64/libfoo.so".to_string(), lib)],
+                vec![dep("libbar.so.2"), dep("libc.so.6()(64bit)")],
+            );
+            assert_eq!(
+                excessive_deps(&results),
+                vec!["libbar.so.2"],
+                "embedded {embedded}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn excessive_dependency_credits_loader_import_variants() {
+        // dlmopen, a versioned dlopen name, and a NOTYPE dlopen
+        // import all witness a runtime load.
+        for syms in [
+            vec![("dlmopen", 1, 2, 0)],
+            vec![("dlopen@GLIBC_2.34", 1, 2, 0)],
+            vec![("dlopen", 1, 0, 0)],
+        ] {
+            let lib = loader_elf(
+                Some("libfoo.so"),
+                &["libc.so.6"],
+                &syms,
+                Some("libbar.so.2"),
+            );
+            let results = run_shlib_pkg(
+                "rpmcrab-shlib-loader-variants",
+                vec![("/usr/lib64/libfoo.so".to_string(), lib)],
+                vec![dep("libbar.so.2"), dep("libc.so.6()(64bit)")],
+            );
+            assert_eq!(
+                excessive_deps(&results),
+                Vec::<&str>::new(),
+                "{syms:?}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn excessive_dependency_fires_for_non_import_loader_symbols() {
+        // A weak import (may be null at runtime), a defined symbol
+        // of the loader's name, and an OBJECT-type import are not
+        // the loader import the credit requires.
+        for syms in [
+            vec![("dlopen", 2, 2, 0)],
+            vec![("dlopen", 1, 2, 1)],
+            vec![("dlopen", 1, 1, 0)],
+        ] {
+            let lib = loader_elf(
+                Some("libfoo.so"),
+                &["libc.so.6"],
+                &syms,
+                Some("libbar.so.2"),
+            );
+            let results = run_shlib_pkg(
+                "rpmcrab-shlib-non-import",
+                vec![("/usr/lib64/libfoo.so".to_string(), lib)],
+                vec![dep("libbar.so.2"), dep("libc.so.6()(64bit)")],
+            );
+            assert_eq!(
+                excessive_deps(&results),
+                vec!["libbar.so.2"],
+                "{syms:?}: {results:?}"
+            );
+        }
     }
 
     /// A minimal ELF64 shared object with a single DT_SONAME, parseable by

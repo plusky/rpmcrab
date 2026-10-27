@@ -32,7 +32,7 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     // Config-driven: patterns come from rpmlint configuration.
     (
         "binaries.rs",
-        "filter_map(|r| Regex::new(&format!(\"^(?:{r})$\")).ok())",
+        "filter_map(|r| Regex::new(&format!(r\"\\A(?:{r})\\z\")).ok())",
         "config",
     ),
     ("files.rs", "Regex::new(path).ok()", "config"),
@@ -208,12 +208,12 @@ fn allowlist_matching_is_token_anchored() {
     // Full-call fragments still match as whole tokens.
     assert!(is_allowlisted(
         "binaries.rs",
-        "        filter_map(|r| Regex::new(&format!(\"^(?:{r})$\")).ok()),"
+        "        filter_map(|r| Regex::new(&format!(r\"\\A(?:{r})\\z\")).ok()),"
     ));
     // Wrong file never matches.
     assert!(!is_allowlisted(
         "files.rs",
-        "        filter_map(|r| Regex::new(&format!(\"^(?:{r})$\")).ok()),"
+        "        filter_map(|r| Regex::new(&format!(r\"\\A(?:{r})\\z\")).ok()),"
     ));
 }
 

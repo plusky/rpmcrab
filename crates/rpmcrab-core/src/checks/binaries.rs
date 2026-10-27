@@ -845,7 +845,11 @@ impl ReadelfInfo {
                 self.go_toolchains.push(found);
             }
         }
-        self.go_buildinfo = self.go_buildinfo || has_go_buildinfo_magic(data);
+        // The magic scan walks the whole file; skip it when the
+        // section test already established Go for this file.
+        if !self.go_buildinfo && !self.is_go_binary() {
+            self.go_buildinfo = has_go_buildinfo_magic(data);
+        }
     }
     fn has_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
         self.functions
@@ -1059,11 +1063,18 @@ fn is_ocaml_symbol(name: &str) -> bool {
 /// ` Go buildinf:` (Go's `debug/buildinfo`). It survives stripping of
 /// the section headers, which removes the `.gopclntab` /
 /// `.note.go.buildid` sections `is_go_binary` reads, so sectionless
-/// Go builds are still recognised as Go output.
+/// Go builds are still recognised as Go output. A magic occurrence
+/// counts only as a structurally valid header -- the fixed 32-byte
+/// header `parse_go_buildinfo` reads must fit, and the pointer-size
+/// byte must be 4 or 8 -- mirroring the validation `debug/buildinfo`
+/// itself applies while scanning, so the byte sequence appearing in
+/// unrelated payload does not mark the file as Go output.
 fn has_go_buildinfo_magic(data: &[u8]) -> bool {
-    const GO_BUILDINFO_MAGIC: &[u8] = b"\xff Go buildinf:";
-    data.windows(GO_BUILDINFO_MAGIC.len())
-        .any(|w| w == GO_BUILDINFO_MAGIC)
+    const HEADER_LEN: usize = 32;
+    let magic = GO_BUILDINFO_MAGIC.as_slice();
+    data.windows(magic.len())
+        .enumerate()
+        .any(|(i, w)| w == magic && data.len() - i >= HEADER_LEN && matches!(data[i + 14], 4 | 8))
 }
 
 fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String]) -> bool {
@@ -1108,7 +1119,10 @@ fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String])
 /// combined: the .comment section identifying Zig's LLD fork, and read-only
 /// data sections (.rodata, .data.rel.ro) containing the Zig panic message
 /// for unreachable, which survives strip. Conservative on purpose: an
-/// unrecognized binary is treated as C.
+/// unrecognized binary is treated as C. C output built with `zig cc`
+/// carries the same markers -- the linker is Zig's LLD fork whatever the
+/// source language -- and shares the static-exemption rationale: a fully
+/// static binary is that toolchain's normal output shape.
 fn detect_zig_binary(elf: &goblin::elf::Elf, data: &[u8]) -> bool {
     for sh in &elf.section_headers {
         let sec_name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
@@ -3703,9 +3717,12 @@ impl BinariesCheck {
         // contain a listed name (e.g. /usr/bin/ssh-authorized-keys
         // containing /usr/bin/ssh, or /usr/bin/susedialog containing
         // /usr/bin/su) at error severity instead of the suggestion.
+        // `\A`/`\z` rather than `^`/`$`: `$` also matches before a
+        // trailing newline and `^` goes line-anchored under an embedded
+        // `(?m)`, neither of which `fullmatch` permits.
         let pie_exec_regexes: Vec<Regex> = get_strings("PieExecutables")
             .iter()
-            .filter_map(|r| Regex::new(&format!("^(?:{r})$")).ok())
+            .filter_map(|r| Regex::new(&format!(r"\A(?:{r})\z")).ok())
             .collect();
         let (strings, _) = Tool::probe(&source, "strings", &[]);
         let (ar, _) = Tool::probe(&source, "ar", &["--version"]);
@@ -6596,7 +6613,8 @@ mod tests {
         };
         let mut bytes = craft_shlib_elf(false, None, None, &[]);
         bytes.extend_from_slice(b"\xff Go buildinf:");
-        bytes.extend_from_slice(&[0u8; 32]);
+        bytes.extend_from_slice(&[8, 0]);
+        bytes.extend_from_slice(&[0u8; 30]);
         let path =
             std::env::temp_dir().join(format!("rpmcrab-libdep-gomagic-{}", std::process::id()));
         std::fs::write(&path, &bytes).unwrap();
@@ -6612,6 +6630,52 @@ mod tests {
             results.is_empty(),
             "buildinfo-only Go binary must be quiet: {results:?}"
         );
+    }
+
+    #[test]
+    fn go_buildinfo_magic_with_invalid_header_still_charges() {
+        // The magic byte sequence alone is not enough: a pointer-size
+        // byte outside {4, 8}, or a header truncated before the fixed
+        // 32 bytes, is not a buildinfo block and earns no credit.
+        for (id, tail) in [("badptr", [7u8, 0].as_slice()), ("trunc", [8u8].as_slice())] {
+            let mut bytes = craft_shlib_elf(false, None, None, &[]);
+            bytes.extend_from_slice(b"\xff Go buildinf:");
+            bytes.extend_from_slice(tail);
+            if id == "badptr" {
+                bytes.extend_from_slice(&[0u8; 30]);
+            }
+            let results = libdep_results_for_bytes(id, &bytes, "x86_64");
+            let lines = lines_for(&results, "statically-linked-binary");
+            assert_eq!(lines.len(), 1, "{id} must fire: {results:?}");
+        }
+    }
+
+    #[test]
+    fn static_charge_fail_closed_on_unmapped_arch_and_machine() {
+        // Unmapped package arch: `pkg_arch_family` yields None, so
+        // even a foreign-machine payload still charges -- the gate
+        // cannot classify the file (the #847 principle).
+        let mut bytes = craft_shlib_elf(false, None, None, &[]);
+        bytes[18..20].copy_from_slice(&goblin::elf::header::EM_SPARC.to_le_bytes());
+        let results = libdep_results_for_bytes("unmappedarch", &bytes, "e2k");
+        let lines = lines_for(&results, "statically-linked-binary");
+        assert_eq!(lines.len(), 1, "unmapped arch must fire: {results:?}");
+
+        // Unmapped e_machine: `elf_machine_family` yields None, same
+        // fail-closed outcome in a mapped-arch package.
+        let mut bytes = craft_shlib_elf(false, None, None, &[]);
+        bytes[18..20].copy_from_slice(&0xBEEFu16.to_le_bytes());
+        let results = libdep_results_for_bytes("unmappedmachine", &bytes, "x86_64");
+        let lines = lines_for(&results, "statically-linked-binary");
+        assert_eq!(lines.len(), 1, "unmapped machine must fire: {results:?}");
+
+        // ARM same-family: a 32-bit ARM payload in an AArch64 package
+        // is the package's own family and runs on the host -- charges.
+        let mut bytes = craft_shlib_elf(false, None, None, &[]);
+        bytes[18..20].copy_from_slice(&goblin::elf::header::EM_ARM.to_le_bytes());
+        let results = libdep_results_for_bytes("armfamily", &bytes, "aarch64");
+        let lines = lines_for(&results, "statically-linked-binary");
+        assert_eq!(lines.len(), 1, "ARM same-family must fire: {results:?}");
     }
 
     #[test]
