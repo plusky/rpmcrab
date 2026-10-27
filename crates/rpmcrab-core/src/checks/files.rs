@@ -2009,6 +2009,16 @@ struct PkgState {
     ldconfig_dirs: std::collections::HashSet<String>,
     bindir_exes: IndexMap<String, Vec<String>>,
     man_basenames: std::collections::HashSet<String>,
+    /// Symlink targets by shipped path, for resolving a bindir link to
+    /// the file it ultimately invokes.
+    link_targets: HashMap<String, String>,
+    /// Every shipped path; link resolution stops at the package boundary.
+    shipped_paths: std::collections::HashSet<String>,
+    /// Basenames of regular files by (rdev, inode): files sharing a key
+    /// are hardlinks to one another.
+    inode_basenames: HashMap<(u32, u32), Vec<String>>,
+    /// (rdev, inode) of each registered regular bindir executable path.
+    bindir_inodes: HashMap<String, (u32, u32)>,
 }
 
 impl Check for FilesCheck {
@@ -2753,10 +2763,81 @@ impl FilesCheck {
                     &[exe, &list_repr],
                 );
             }
-            if !st.man_basenames.contains(exe) {
+            if !st.man_basenames.contains(exe) && !self.documented_alias(exe, paths, st) {
                 add_info(out, Level::Info, pkg, "no-manual-page-for-binary", &[exe]);
             }
         }
+    }
+
+    /// A bindir name with no man page of its own is still documented
+    /// when it is the same binary as a documented one: a symlink whose
+    /// resolved in-package target carries a man page under the target's
+    /// name, or a hardlink to a regular file whose name carries one.
+    /// The reference credits neither shape (FilesCheck.py:559-564
+    /// consults only its man_basenames set); the divergence is
+    /// ledgered. Resolution stops at the package boundary: a link
+    /// whose target the package does not ship earns no credit.
+    fn documented_alias(&self, exe: &str, paths: &[String], st: &PkgState) -> bool {
+        // Hardlink identity for the regular executable paths.
+        for path in paths {
+            if let Some(key) = st.bindir_inodes.get(path) {
+                if let Some(names) = st.inode_basenames.get(key) {
+                    if names
+                        .iter()
+                        .any(|n| n != exe && st.man_basenames.contains(n))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Symlink chains starting at a bindir link with this name
+        // (bindir symlinks register with an empty `paths` list).
+        for lpath in st.link_targets.keys() {
+            let Ok(Some(caps)) = self.bin_re.captures(lpath) else {
+                continue;
+            };
+            let Some(name) = caps.get(1).map(|m| m.as_str()) else {
+                continue;
+            };
+            if name != exe || name.contains('/') {
+                continue;
+            }
+            if let Some(target) = self.resolve_shipped_target(st, lpath) {
+                let base = target.rsplit('/').next().unwrap_or(&target);
+                if st.man_basenames.contains(base) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Follow the symlink chain starting at `start` through the
+    /// package's own files; the final non-link shipped path, or `None`
+    /// when the chain leaves the package or loops.
+    fn resolve_shipped_target(&self, st: &PkgState, start: &str) -> Option<String> {
+        let mut cur = start.to_string();
+        for _ in 0..8 {
+            let linkto = st.link_targets.get(&cur)?;
+            let target = if linkto.starts_with('/') {
+                crate::pkg::normalize_path(linkto)
+            } else {
+                let parent = Path::new(&cur)
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                crate::pkg::normalize_path(&format!("{parent}/{linkto}"))
+            };
+            if !st.shipped_paths.contains(&target) {
+                return None;
+            }
+            if !st.link_targets.contains_key(&target) {
+                return Some(target);
+            }
+            cur = target;
+        }
+        None
     }
 
     /// Whether an anchor requirement credits `cand` (issue #862):
@@ -2839,6 +2920,14 @@ impl FilesCheck {
         st: &mut PkgState,
         out: &mut Filter,
     ) {
+        st.shipped_paths.insert(fname.to_string());
+        if is_reg(pkgfile.mode) && pkgfile.inode != 0 {
+            let base = fname.rsplit('/').next().unwrap_or(fname);
+            st.inode_basenames
+                .entry((pkgfile.rdev, pkgfile.inode))
+                .or_default()
+                .push(base.to_string());
+        }
         self.check_file_manpage(pkg, fname, pkgfile, st, out);
         self.check_file_infopage_compressed(pkg, fname, out);
         self.check_file_unexpanded_macro(pkg, fname, out);
@@ -4116,6 +4205,8 @@ impl FilesCheck {
         if !pkgfile::is_symlink(pkgfile.mode) {
             return;
         }
+        st.link_targets
+            .insert(fname.to_string(), pkgfile.linkto.clone());
         let link = &pkgfile.linkto;
         // devel-file-in-non-devel-package for .so links: the reference
         // gates on the anchored sofile_regex (FilesCheck.py:165,
@@ -4749,6 +4840,8 @@ impl FilesCheck {
                 // FilesCheck.py:1169-1171: only regular executable files feed
                 // the duplicate-executable check.
                 if !exe.contains('/') {
+                    st.bindir_inodes
+                        .insert(fname.to_string(), (pkgfile.rdev, pkgfile.inode));
                     st.bindir_exes
                         .entry(exe.to_string())
                         .or_default()
@@ -10136,6 +10229,114 @@ mod tests {
                 .iter()
                 .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("fiz")),
             "no-manual-page-for-binary must not fire for fiz, its man page is a symlink: {results:?}"
+        );
+    }
+
+    #[test]
+    fn symlink_to_documented_binary_suppresses_no_manual_page() {
+        // A bindir symlink invoking a documented binary in the same
+        // package is that binary under another name: the target's man
+        // page documents it. The reference credits only the exe's own
+        // name, so this is a ledgered divergence. The control link to
+        // an undocumented binary must still fire.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/tool", 0o100755, 81),
+            mkfile("/usr/share/man/man1/tool.1.gz", 0o100644, 82),
+            PkgFile {
+                linkto: "/usr/bin/tool".to_string(),
+                ..mkfile("/usr/bin/alias", 0o120777, 83)
+            },
+            PkgFile {
+                linkto: "tool2".to_string(),
+                ..mkfile("/usr/bin/alias2", 0o120777, 84)
+            },
+            mkfile("/usr/bin/tool2", 0o100755, 85),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("alias")),
+            "alias invokes the documented tool and must not fire: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("alias2")),
+            "alias2 invokes undocumented tool2 and must still fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn symlink_chain_and_external_target_for_no_manual_page() {
+        // A chain of links resolves through the package; a link whose
+        // target the package does not ship earns no credit.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/tool", 0o100755, 91),
+            mkfile("/usr/share/man/man1/tool.1.gz", 0o100644, 92),
+            PkgFile {
+                linkto: "/usr/bin/mid".to_string(),
+                ..mkfile("/usr/bin/alias", 0o120777, 93)
+            },
+            PkgFile {
+                linkto: "tool".to_string(),
+                ..mkfile("/usr/bin/mid", 0o120777, 94)
+            },
+            PkgFile {
+                linkto: "/usr/bin/elsewhere".to_string(),
+                ..mkfile("/usr/bin/ext", 0o120777, 95)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("alias")),
+            "alias resolves through mid to the documented tool: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("ext")),
+            "ext leaves the package and must still fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardlink_to_documented_binary_suppresses_no_manual_page() {
+        // Two names for one inode: the documented name's page covers
+        // the alias. A same-named file on a different inode is a
+        // different binary and keeps firing.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/tool", 0o100755, 99),
+            mkfile("/usr/share/man/man1/tool.1.gz", 0o100644, 98),
+            mkfile("/usr/bin/alias", 0o100755, 99),
+            mkfile("/usr/bin/other", 0o100755, 97),
+            PkgFile {
+                linkto: "/usr/bin/tool".to_string(),
+                ..mkfile("/usr/share/man/man1/other.1.gz", 0o120777, 96)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("alias")),
+            "alias is a hardlink to the documented tool: {results:?}"
+        );
+        // `other` has its own (symlink) page, so it is quiet either way;
+        // the pin is on alias only.
+        let (pkg2, _dir2) = pkg_with_files(vec![
+            mkfile("/usr/bin/tool", 0o100755, 99),
+            mkfile("/usr/share/man/man1/tool.1.gz", 0o100644, 98),
+            mkfile("/usr/bin/alias", 0o100755, 100),
+        ]);
+        let results2 = run_check_binary(&pkg2);
+        assert!(
+            results2
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("alias")),
+            "a different inode is a different binary and must fire: {results2:?}"
         );
     }
 

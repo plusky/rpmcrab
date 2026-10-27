@@ -1893,6 +1893,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "no-manual-page-for-binary"
+kind = "behaviour"
+reason = "Deliberate: the port credits a bindir name whose man page it lacks when the name is the same binary as a documented one in the same package: a symlink whose resolved in-package target carries a man page under the target's name (OpenIPMI's ipmicmd -> openipmicmd, shntool's mode links), or a hardlink (same rdev+inode) to a file whose name carries one (gzip's uncompress == gunzip). The reference (FilesCheck.py:559-564) consults only its man_basenames set and fires on every such alias (verified against rpmlint 2.10.0 on the Factory corpus representatives). Resolution stops at the package boundary: a link whose target the package does not ship, and a target without a page, keep firing."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
