@@ -3703,9 +3703,12 @@ impl BinariesCheck {
         // contain a listed name (e.g. /usr/bin/ssh-authorized-keys
         // containing /usr/bin/ssh, or /usr/bin/susedialog containing
         // /usr/bin/su) at error severity instead of the suggestion.
+        // `\A`/`\z` rather than `^`/`$`: `$` also matches before a
+        // trailing newline and `^` goes line-anchored under an embedded
+        // `(?m)`, neither of which `fullmatch` permits.
         let pie_exec_regexes: Vec<Regex> = get_strings("PieExecutables")
             .iter()
-            .filter_map(|r| Regex::new(&format!("^(?:{r})$")).ok())
+            .filter_map(|r| Regex::new(&format!(r"\A(?:{r})\z")).ok())
             .collect();
         let (strings, _) = Tool::probe(&source, "strings", &[]);
         let (ar, _) = Tool::probe(&source, "ar", &["--version"]);
