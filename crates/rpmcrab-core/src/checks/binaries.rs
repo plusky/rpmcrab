@@ -23,13 +23,48 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::pkgfile::{PkgFile, is_symlink};
+use crate::pkg::pkgfile::{PkgFile, is_reg, is_symlink};
 use crate::tools::{Tool, ToolSource, spawn_with_retry, test_source};
 use std::sync::OnceLock;
 
 static VALIDSO_REGEX: OnceLock<Regex> = OnceLock::new();
 fn validso_regex() -> &'static Regex {
     VALIDSO_REGEX.get_or_init(|| Regex::new(r"(\.so\.\d+(\.\d+)*|\d\.so)$").expect("static regex"))
+}
+
+/// The version tail of a SONAME: the part after its first `.so.`,
+/// when that part is non-empty and starts with a letter or a digit
+/// (`libstemmer.so.0d` -> `0d`, `libLimeSuite.so.23.11-1` ->
+/// `23.11-1`, `libSDL_bgi.so.suse0` -> `suse0`). A SONAME with no
+/// such tail (an empty one, `libterminal-nautilus.so.`, or one
+/// starting with punctuation) stays outside the shared-library
+/// arms the tail admits (issue #1029).
+fn soname_tail(soname: &str) -> Option<&str> {
+    let (_, tail) = soname.split_once(".so.")?;
+    (!tail.is_empty() && tail.as_bytes()[0].is_ascii_alphanumeric()).then_some(tail)
+}
+
+/// Whether `path` sits directly in a directory named `lib` or
+/// `lib64` -- its immediate parent directory (the SONAME-arm gate
+/// of issue #1029 for files the shared-library file-name test
+/// misses). A library in a subdirectory of a lib dir (a plugin or
+/// compat tree such as `/usr/lib64/ncurses6nt/`) does not qualify.
+fn in_lib_dir(path: &str) -> bool {
+    let parent = path.rsplit_once('/').map_or("", |(p, _)| p);
+    let dir = parent.rsplit_once('/').map_or(parent, |(_, last)| last);
+    dir == "lib" || dir == "lib64"
+}
+
+/// Whether the basename of `path` is the SONAME itself, or the
+/// SONAME followed by a `.` and a further suffix (the real library
+/// file behind its SONAME symlink, e.g. `libstemmer.so.0d.0.0` for
+/// SONAME `libstemmer.so.0d`).
+fn basename_is_soname(path: &str, soname: &str) -> bool {
+    let base = path.rsplit_once('/').map_or(path, |(_, b)| b);
+    base == soname
+        || base
+            .strip_prefix(soname)
+            .is_some_and(|rest| rest.starts_with('.'))
 }
 
 static SOVERSION_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -4557,6 +4592,247 @@ impl BinariesCheck {
         }
     }
 
+    /// The package-name arm of the shared-library policy: the
+    /// package name is judged against the names derived from the
+    /// SONAME (`shlib-policy-name-error`). `pkgversion` is the
+    /// SONAME's `-<version>` component before `.so` (empty when it
+    /// has none) and `soversion` its version after `.so.` -- the
+    /// numeric capture for a SONAME that passes the validity gate,
+    /// or the whole non-numeric tail for one admitted by the tail
+    /// rule of issue #1029.
+    fn check_shlib_name(
+        &self,
+        pkg: &Pkg,
+        pkgfile: &PkgFile,
+        soname: &str,
+        pkgversion: &str,
+        soversion: &str,
+        out: &mut Filter,
+    ) {
+        let parts: Vec<String> = [pkgversion, soversion]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.replace('.', "_"))
+            .collect();
+        let soversion_str = parts.join("-");
+        let mut pkgname = pkg.name.as_str();
+        if let Some(idx) = pkgname.rfind('.') {
+            pkgname = &pkgname[..idx];
+        }
+        // A baselibs package carries the version
+        // before a trailing -32bit or -64bit.
+        let pkgname = pkgname
+            .strip_suffix("-32bit")
+            .or_else(|| pkgname.strip_suffix("-64bit"))
+            .unwrap_or(pkgname);
+        // A name matches when either limb accepts
+        // it:
+        //
+        // (A) It equals a name derived from the
+        // SONAME itself, per the SLPP construction:
+        // the stem ('.' folded to '_') plus the
+        // version, glued (libfoo.so.1 -> libfoo1)
+        // or dash-separated (libbz2.so.1 ->
+        // libbz2-1); stem + '-' + soversion when
+        // the SONAME carries a -<pkgversion>
+        // (libgame2-1.9.so.10.0.0 ->
+        // libgame2-1_9-10_0_0). Comparing whole
+        // derived names is what tells a digit that
+        // belongs to the stem (libx11.so.1 ->
+        // libx111) from a longer version run
+        // (libkdecorations3private11 for .so.1,
+        // bsc#1237372).
+        //
+        // (B) It ends with the expected suffix at a
+        // non-digit boundary: the trailing version
+        // run matches as a whole, but the stem is
+        // not policed. A package legitimately ships
+        // libraries whose stems its name does not
+        // derive from (libopenssl3 ships
+        // libssl.so.3, libicu73 ships
+        // libicuuc.so.73), and the reference stays
+        // quiet there.
+        //
+        // Both limbs are tried on the name as-is and
+        // once more with a trailing
+        // -<letters><digits> flavour segment
+        // (libgfortran5-gcc15, libnetcdf22-openmpi5)
+        // stripped: the version sits before the
+        // flavour tail, which is not part of the
+        // name.
+        //
+        // Two further derived forms are credited on
+        // limb A only (the stripped or reduced name
+        // must equal a SONAME-derived name exactly;
+        // limb B's stem-blind suffix is not enough):
+        //
+        // (C) A trailing flavour segment of letters
+        // only (-opencl, -mini, -dummy): the same
+        // flavour shape as above with no digit in
+        // the tail (libarmnn36-opencl ships
+        // libarmnn.so.36, libuna1-mini ships
+        // libuna.so.1). Limb A only, so a name whose
+        // own stem merely ends in the version
+        // (libqt5-qtwebengine for libQt5WebEngine.so.5)
+        // still fires.
+        //
+        // (D) A SONAME version whose trailing
+        // components are all zero, with the zeros
+        // elided: libprotobuf.so.3.21.12.0 is
+        // packaged as libprotobuf3_21_12 and
+        // libCppMicroServices.so.4.0.0 as
+        // libCppMicroServices4. A dropped zero
+        // carries no ABI discrimination — any
+        // non-zero change to the elided components
+        // re-fires — while a partially elided form
+        // (libfoo4_0 for libfoo.so.4.0.0) still
+        // fires.
+        let stem = match soname.split_once(".so") {
+            Some((head, _)) => head,
+            None => soname,
+        }
+        .replace('.', "_");
+        let soversion_pkgform = soversion.replace('.', "_");
+        let mut expected: Vec<String> = if pkgversion.is_empty() {
+            vec![
+                format!("{stem}{soversion_pkgform}"),
+                format!("{stem}-{soversion_pkgform}"),
+            ]
+        } else if soversion.is_empty() {
+            vec![stem.clone()]
+        } else {
+            vec![format!("{stem}-{soversion_pkgform}")]
+        };
+        // (D) The trailing-zero-elided derived
+        // names: drop trailing ".0" components of
+        // the SONAME version (keeping at least one)
+        // and derive again by the same construction.
+        let mut reduced: Vec<&str> = soversion.split('.').collect();
+        while reduced.len() > 1 && reduced.last() == Some(&"0") {
+            reduced.pop();
+        }
+        let reduced_form = reduced.join("_");
+        if reduced_form != soversion_pkgform {
+            if pkgversion.is_empty() {
+                expected.push(format!("{stem}{reduced_form}"));
+                expected.push(format!("{stem}-{reduced_form}"));
+            } else if !soversion.is_empty() {
+                expected.push(format!("{stem}-{reduced_form}"));
+            }
+        }
+        fn strip_flavour(name: &str) -> Option<&str> {
+            let (head, tail) = name.rsplit_once('-')?;
+            if !head.is_empty()
+                && tail.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                && tail.chars().last().is_some_and(|c| c.is_ascii_digit())
+                && tail.chars().all(|c| c.is_ascii_alphanumeric())
+            {
+                Some(head)
+            } else {
+                None
+            }
+        }
+        fn strip_alpha_flavour(name: &str) -> Option<&str> {
+            let (head, tail) = name.rsplit_once('-')?;
+            if !head.is_empty() && !tail.is_empty() && tail.chars().all(|c| c.is_ascii_alphabetic())
+            {
+                Some(head)
+            } else {
+                None
+            }
+        }
+        fn whole_suffix(name: &str, suffix: &str) -> bool {
+            name.strip_suffix(suffix).is_some_and(|prefix| {
+                prefix
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !c.is_ascii_digit())
+            })
+        }
+        let accepts =
+            |name: &str| expected.iter().any(|e| e == name) || whole_suffix(name, &soversion_str);
+        let derived_only = |name: &str| expected.iter().any(|e| e == name);
+        let name_matches = accepts(pkgname)
+            || strip_flavour(pkgname).is_some_and(accepts)
+            || strip_alpha_flavour(pkgname).is_some_and(derived_only);
+        if !soversion_str.is_empty() && !name_matches {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "shlib-policy-name-error",
+                &[&format!(
+                    "SONAME: {} ({}), expected package suffix: {}",
+                    soname, pkgfile.name, soversion_str
+                )],
+            );
+        }
+    }
+
+    /// The two SONAME arms of the shared-library policy: the
+    /// ldconfig-symlink arm and the package-name arm. They run for
+    /// a SONAME that passes the validity gate, and -- since issue
+    /// #1029 -- also for one whose version tail is non-numeric (see
+    /// `soname_tail`), where the whole tail is taken as the
+    /// soversion: the existing `.` -> `_` folding derives
+    /// `libLimeSuite23_11-1` from the tail `23.11-1` and
+    /// `libstemmer0d` from `0d`, where the numeric capture would
+    /// stop at the first non-digit.
+    fn check_soname_arms(&self, pkg: &Pkg, pkgfile: &PkgFile, soname: &str, out: &mut Filter) {
+        self.check_soname_symlink(pkg, &pkgfile.name, soname, out);
+        if pkg.name.starts_with("lib")
+            && !self
+                .hpc_locations()
+                .iter()
+                .any(|p| pkgfile.name.starts_with(p))
+        {
+            if validso_regex().is_match(soname).unwrap_or(false) {
+                if let Ok(Some(caps)) = soversion_regex().captures(soname) {
+                    let pkgversion = caps.name("pkgversion").map(|m| m.as_str()).unwrap_or("");
+                    let soversion = caps.name("soversion").map(|m| m.as_str()).unwrap_or("");
+                    self.check_shlib_name(pkg, pkgfile, soname, pkgversion, soversion, out);
+                }
+            } else if let Some(tail) = soname_tail(soname) {
+                self.check_shlib_name(pkg, pkgfile, soname, "", tail, out);
+            }
+        }
+    }
+
+    /// Issue #1029, SONAME arm (b): a regular ELF file that the
+    /// shared-library file-name test misses can still be a shipped
+    /// library under a decorated SONAME spelling -- the real file
+    /// behind its SONAME symlink (`libstemmer.so.0d.0.0` for SONAME
+    /// `libstemmer.so.0d`), or the SONAME-named file itself when no
+    /// dotted-digit spelling exists (`libLimeSuite.so.23.11-1`,
+    /// `libSDL_bgi.so.suse0`). Such a file gets the two SONAME arms
+    /// and nothing else: `is_shlib` is unchanged, so the symbol,
+    /// hash-section and non-PIC findings do not widen to it. The
+    /// basename must be the SONAME, or the SONAME followed by a `.`
+    /// suffix, which keeps a file like `libclang.so.22.0.0.rocm`
+    /// (whose SONAME `libclang.so.22.0.rocm` is not a prefix of its
+    /// name) outside.
+    fn check_soname_tail_library(
+        &self,
+        pkg: &Pkg,
+        pkgfile: &PkgFile,
+        info: &ReadelfInfo,
+        out: &mut Filter,
+    ) {
+        let Some(soname) = &info.soname else {
+            return;
+        };
+        if soname_tail(soname).is_none()
+            || !is_reg(pkgfile.mode)
+            || info.is_debug
+            || pkgfile.name.starts_with("/usr/lib/debug/")
+            || !in_lib_dir(&pkgfile.name)
+            || !basename_is_soname(&pkgfile.name, soname)
+        {
+            return;
+        }
+        self.check_soname_arms(pkg, pkgfile, soname, out);
+    }
+
     fn check_shared_library(
         &self,
         pkg: &Pkg,
@@ -4565,6 +4841,7 @@ impl BinariesCheck {
         out: &mut Filter,
     ) {
         if !info.is_shlib {
+            self.check_soname_tail_library(pkg, pkgfile, info, out);
             return;
         }
         match &info.soname {
@@ -4572,183 +4849,10 @@ impl BinariesCheck {
                 add_info(out, Level::Warning, pkg, "no-soname", &[&pkgfile.name]);
             }
             Some(soname) => {
-                if validso_regex().is_match(soname).unwrap_or(false) {
-                    self.check_soname_symlink(pkg, &pkgfile.name, soname, out);
-                    if pkg.name.starts_with("lib")
-                        && !self
-                            .hpc_locations()
-                            .iter()
-                            .any(|p| pkgfile.name.starts_with(p))
-                    {
-                        if let Ok(Some(caps)) = soversion_regex().captures(soname) {
-                            let pkgversion =
-                                caps.name("pkgversion").map(|m| m.as_str()).unwrap_or("");
-                            let soversion =
-                                caps.name("soversion").map(|m| m.as_str()).unwrap_or("");
-                            let parts: Vec<String> = [pkgversion, soversion]
-                                .iter()
-                                .filter(|s| !s.is_empty())
-                                .map(|s| s.replace('.', "_"))
-                                .collect();
-                            let soversion_str = parts.join("-");
-                            let mut pkgname = pkg.name.as_str();
-                            if let Some(idx) = pkgname.rfind('.') {
-                                pkgname = &pkgname[..idx];
-                            }
-                            // A baselibs package carries the version
-                            // before a trailing -32bit or -64bit.
-                            let pkgname = pkgname
-                                .strip_suffix("-32bit")
-                                .or_else(|| pkgname.strip_suffix("-64bit"))
-                                .unwrap_or(pkgname);
-                            // A name matches when either limb accepts
-                            // it:
-                            //
-                            // (A) It equals a name derived from the
-                            // SONAME itself, per the SLPP construction:
-                            // the stem ('.' folded to '_') plus the
-                            // version, glued (libfoo.so.1 -> libfoo1)
-                            // or dash-separated (libbz2.so.1 ->
-                            // libbz2-1); stem + '-' + soversion when
-                            // the SONAME carries a -<pkgversion>
-                            // (libgame2-1.9.so.10.0.0 ->
-                            // libgame2-1_9-10_0_0). Comparing whole
-                            // derived names is what tells a digit that
-                            // belongs to the stem (libx11.so.1 ->
-                            // libx111) from a longer version run
-                            // (libkdecorations3private11 for .so.1,
-                            // bsc#1237372).
-                            //
-                            // (B) It ends with the expected suffix at a
-                            // non-digit boundary: the trailing version
-                            // run matches as a whole, but the stem is
-                            // not policed. A package legitimately ships
-                            // libraries whose stems its name does not
-                            // derive from (libopenssl3 ships
-                            // libssl.so.3, libicu73 ships
-                            // libicuuc.so.73), and the reference stays
-                            // quiet there.
-                            //
-                            // Both limbs are tried on the name as-is and
-                            // once more with a trailing
-                            // -<letters><digits> flavour segment
-                            // (libgfortran5-gcc15, libnetcdf22-openmpi5)
-                            // stripped: the version sits before the
-                            // flavour tail, which is not part of the
-                            // name.
-                            //
-                            // Two further derived forms are credited on
-                            // limb A only (the stripped or reduced name
-                            // must equal a SONAME-derived name exactly;
-                            // limb B's stem-blind suffix is not enough):
-                            //
-                            // (C) A trailing flavour segment of letters
-                            // only (-opencl, -mini, -dummy): the same
-                            // flavour shape as above with no digit in
-                            // the tail (libarmnn36-opencl ships
-                            // libarmnn.so.36, libuna1-mini ships
-                            // libuna.so.1). Limb A only, so a name whose
-                            // own stem merely ends in the version
-                            // (libqt5-qtwebengine for libQt5WebEngine.so.5)
-                            // still fires.
-                            //
-                            // (D) A SONAME version whose trailing
-                            // components are all zero, with the zeros
-                            // elided: libprotobuf.so.3.21.12.0 is
-                            // packaged as libprotobuf3_21_12 and
-                            // libCppMicroServices.so.4.0.0 as
-                            // libCppMicroServices4. A dropped zero
-                            // carries no ABI discrimination — any
-                            // non-zero change to the elided components
-                            // re-fires — while a partially elided form
-                            // (libfoo4_0 for libfoo.so.4.0.0) still
-                            // fires.
-                            let stem = match soname.split_once(".so") {
-                                Some((head, _)) => head,
-                                None => soname,
-                            }
-                            .replace('.', "_");
-                            let soversion_pkgform = soversion.replace('.', "_");
-                            let mut expected: Vec<String> = if pkgversion.is_empty() {
-                                vec![
-                                    format!("{stem}{soversion_pkgform}"),
-                                    format!("{stem}-{soversion_pkgform}"),
-                                ]
-                            } else if soversion.is_empty() {
-                                vec![stem.clone()]
-                            } else {
-                                vec![format!("{stem}-{soversion_pkgform}")]
-                            };
-                            // (D) The trailing-zero-elided derived
-                            // names: drop trailing ".0" components of
-                            // the SONAME version (keeping at least one)
-                            // and derive again by the same construction.
-                            let mut reduced: Vec<&str> = soversion.split('.').collect();
-                            while reduced.len() > 1 && reduced.last() == Some(&"0") {
-                                reduced.pop();
-                            }
-                            let reduced_form = reduced.join("_");
-                            if reduced_form != soversion_pkgform {
-                                if pkgversion.is_empty() {
-                                    expected.push(format!("{stem}{reduced_form}"));
-                                    expected.push(format!("{stem}-{reduced_form}"));
-                                } else if !soversion.is_empty() {
-                                    expected.push(format!("{stem}-{reduced_form}"));
-                                }
-                            }
-                            fn strip_flavour(name: &str) -> Option<&str> {
-                                let (head, tail) = name.rsplit_once('-')?;
-                                if !head.is_empty()
-                                    && tail.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-                                    && tail.chars().last().is_some_and(|c| c.is_ascii_digit())
-                                    && tail.chars().all(|c| c.is_ascii_alphanumeric())
-                                {
-                                    Some(head)
-                                } else {
-                                    None
-                                }
-                            }
-                            fn strip_alpha_flavour(name: &str) -> Option<&str> {
-                                let (head, tail) = name.rsplit_once('-')?;
-                                if !head.is_empty()
-                                    && !tail.is_empty()
-                                    && tail.chars().all(|c| c.is_ascii_alphabetic())
-                                {
-                                    Some(head)
-                                } else {
-                                    None
-                                }
-                            }
-                            fn whole_suffix(name: &str, suffix: &str) -> bool {
-                                name.strip_suffix(suffix).is_some_and(|prefix| {
-                                    prefix
-                                        .chars()
-                                        .next_back()
-                                        .is_none_or(|c| !c.is_ascii_digit())
-                                })
-                            }
-                            let accepts = |name: &str| {
-                                expected.iter().any(|e| e == name)
-                                    || whole_suffix(name, &soversion_str)
-                            };
-                            let derived_only = |name: &str| expected.iter().any(|e| e == name);
-                            let name_matches = accepts(pkgname)
-                                || strip_flavour(pkgname).is_some_and(accepts)
-                                || strip_alpha_flavour(pkgname).is_some_and(derived_only);
-                            if !soversion_str.is_empty() && !name_matches {
-                                add_info(
-                                    out,
-                                    Level::Error,
-                                    pkg,
-                                    "shlib-policy-name-error",
-                                    &[&format!(
-                                        "SONAME: {} ({}), expected package suffix: {}",
-                                        soname, pkgfile.name, soversion_str
-                                    )],
-                                );
-                            }
-                        }
-                    }
+                if validso_regex().is_match(soname).unwrap_or(false)
+                    || soname_tail(soname).is_some()
+                {
+                    self.check_soname_arms(pkg, pkgfile, soname, out);
                 }
             }
         }
@@ -12387,6 +12491,226 @@ description = "explicit priority string bypasses the system crypto policy"
             lines[0]
         );
         assert_lacks(&results, "no-ldconfig-symlink");
+    }
+
+    #[test]
+    fn soname_tail_shapes() {
+        assert_eq!(soname_tail("libfoo.so.1"), Some("1"));
+        assert_eq!(soname_tail("libstemmer.so.0d"), Some("0d"));
+        assert_eq!(soname_tail("libLimeSuite.so.23.11-1"), Some("23.11-1"));
+        assert_eq!(soname_tail("libSDL_bgi.so.suse0"), Some("suse0"));
+        // An empty tail stays outside the rule, as does a SONAME
+        // with no `.so.` at all or a tail starting with punctuation.
+        assert_eq!(soname_tail("libterminal-nautilus.so."), None);
+        assert_eq!(soname_tail("libfoo.so"), None);
+        assert_eq!(soname_tail("libfoo.so.-1"), None);
+        assert_eq!(soname_tail("b soname"), None);
+    }
+
+    /// Issue #1029, SONAME arm (a): a shared library whose SONAME
+    /// tail is non-numeric gets the package-name arm with the whole
+    /// tail as the soversion. Rows are the corpus shapes of the
+    /// issue's section 4 (SONAMEs read from the Factory RPMs).
+    #[test]
+    fn shlib_policy_name_tail_matrix() {
+        // (package name, SONAME, file, fires?)
+        let rows: &[(&str, &str, &str, bool)] = &[
+            (
+                "libstemmer0d",
+                "libstemmer.so.0d",
+                "/usr/lib64/libstemmer.so.0d",
+                false,
+            ),
+            (
+                "libstemmer1d",
+                "libstemmer.so.0d",
+                "/usr/lib64/libstemmer.so.0d",
+                true,
+            ),
+            (
+                "libLimeSuite23_11-1",
+                "libLimeSuite.so.23.11-1",
+                "/usr/lib64/libLimeSuite.so.23.11-1",
+                false,
+            ),
+            (
+                "libSDL3_bgi-suse0",
+                "libSDL3_bgi.so.suse0",
+                "/usr/lib64/libSDL3_bgi.so.suse0",
+                false,
+            ),
+            (
+                "libSDL3_bgi-suse9",
+                "libSDL3_bgi.so.suse0",
+                "/usr/lib64/libSDL3_bgi.so.suse0",
+                true,
+            ),
+            (
+                "libaws-c-io0unstable",
+                "libaws-c-io.so.0unstable",
+                "/usr/lib64/libaws-c-io.so.1.0.0",
+                false,
+            ),
+            (
+                "libSoapySDR0_8-3",
+                "libSoapySDR.so.0.8-3",
+                "/usr/lib64/libSoapySDR.so.0.8.1",
+                false,
+            ),
+            (
+                "libcmark-gfm0_29_0_gfm_13",
+                "libcmark-gfm.so.0.29.0.gfm.13",
+                "/usr/lib64/libcmark-gfm.so.0.29.0.gfm.13",
+                false,
+            ),
+        ];
+        for (pkgname, soname, file, fires) in rows {
+            let lines = shlib_policy_lines(pkgname, soname, file);
+            assert_eq!(!lines.is_empty(), *fires, "{pkgname} / {soname}: {lines:?}");
+        }
+        // The one gained corpus finding names the whole tail.
+        let lines = shlib_policy_lines(
+            "libstemmer1d",
+            "libstemmer.so.0d",
+            "/usr/lib64/libstemmer.so.0d",
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("expected package suffix: 0d"),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    /// Issue #1029, SONAME arm (b): a regular ELF file the
+    /// file-name test misses still gets the two SONAME arms when it
+    /// sits in a lib directory under its SONAME's name; the
+    /// near-miss shapes stay outside.
+    #[test]
+    fn soname_tail_library_arms() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let elf = "ELF 64-bit LSB shared object";
+        let run = |pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_shared_library(pkg, pkgfile, info, &mut out);
+            out.results().to_vec()
+        };
+        let info_for = |soname: &str| {
+            let mut info = syn_info();
+            info.soname = Some(soname.to_string());
+            info
+        };
+
+        // The stemmer shape: the real file libstemmer.so.0d.0.0 is
+        // not a shlib by name; its SONAME is libstemmer.so.0d, and
+        // the package kept the pre-rename name libstemmer1d.
+        let stemmer_files = vec![
+            syn_file("/usr/lib64/libstemmer.so.0d.0.0", elf),
+            syn_link("/usr/lib64/libstemmer.so.0d", "libstemmer.so.0d.0.0"),
+        ];
+        let pkgfile = syn_file("/usr/lib64/libstemmer.so.0d.0.0", elf);
+        let info = info_for("libstemmer.so.0d");
+        let pkg = synthetic_pkg("libstemmer1d", "x86_64", stemmer_files.clone());
+        let results = run(&pkg, &pkgfile, &info);
+        let lines = lines_for(&results, "shlib-policy-name-error");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert_lacks(&results, "no-ldconfig-symlink");
+        // The correctly named package is quiet.
+        let pkg = synthetic_pkg("libstemmer0d", "x86_64", stemmer_files);
+        let results = run(&pkg, &pkgfile, &info);
+        assert!(
+            results.is_empty(),
+            "correct name must be quiet: {results:?}"
+        );
+
+        // The limesuite shape: the shipped file is the SONAME
+        // itself, under a decorated spelling.
+        let pkgfile = syn_file("/usr/lib64/libLimeSuite.so.23.11-1", elf);
+        let info = info_for("libLimeSuite.so.23.11-1");
+        let pkg = synthetic_pkg(
+            "libLimeSuite23_11-1",
+            "x86_64",
+            vec![syn_file("/usr/lib64/libLimeSuite.so.23.11-1", elf)],
+        );
+        let results = run(&pkg, &pkgfile, &info);
+        assert!(
+            results.is_empty(),
+            "limesuite shape must be quiet: {results:?}"
+        );
+
+        // Near-misses stay outside the arm:
+        let quiet: &[(&str, &str, &str)] = &[
+            // SONAME is not a prefix of the basename (libclang).
+            (
+                "libclang22",
+                "libclang.so.22.0.rocm",
+                "/usr/lib64/libclang.so.22.0.0.rocm",
+            ),
+            // Empty SONAME tail.
+            (
+                "libterminal-nautilus",
+                "libterminal-nautilus.so.",
+                "/usr/lib64/libterminal-nautilus.so.",
+            ),
+            // Outside a lib directory.
+            (
+                "libstemmer0d",
+                "libstemmer.so.0d",
+                "/usr/share/libstemmer.so.0d.0.0",
+            ),
+            // In a subdirectory of a lib dir: a compat tree is not
+            // a lib directory (the libncurses6-compat shape).
+            (
+                "libncurses6-compat",
+                "libtinfo.so.6",
+                "/usr/lib64/ncurses6nt/libtinfo.so.6.6",
+            ),
+            // In a glibc-hwcaps subdirectory (the x86-64-v3 shape).
+            (
+                "libz1-x86-64-v3",
+                "libz.so.1",
+                "/usr/lib64/glibc-hwcaps/x86-64-v3/libz.so.1.3.1",
+            ),
+            // Under the debuginfo tree.
+            (
+                "libstemmer0d",
+                "libstemmer.so.0d",
+                "/usr/lib/debug/usr/lib64/libstemmer.so.0d.0.0",
+            ),
+        ];
+        for (pkgname, soname, file) in quiet {
+            let pkgfile = syn_file(file, elf);
+            let info = info_for(soname);
+            let pkg = synthetic_pkg(pkgname, "x86_64", vec![syn_file(file, elf)]);
+            let results = run(&pkg, &pkgfile, &info);
+            assert!(
+                results.is_empty(),
+                "{pkgname} / {soname} / {file} must be quiet: {results:?}"
+            );
+        }
+
+        // A debuginfo file (`.debug` name) stays outside even in a
+        // lib directory under a SONAME-shaped name.
+        let pkgfile = syn_file("/usr/lib64/libstemmer.so.0d.0.0", elf);
+        let mut info = info_for("libstemmer.so.0d");
+        info.is_debug = true;
+        let pkg = synthetic_pkg(
+            "libstemmer1d",
+            "x86_64",
+            vec![syn_file("/usr/lib64/libstemmer.so.0d.0.0", elf)],
+        );
+        let results = run(&pkg, &pkgfile, &info);
+        assert!(results.is_empty(), "debug file must be quiet: {results:?}");
+
+        // A symlink is not a regular file: no arms.
+        let pkgfile = PkgFile {
+            mode: 0o120777,
+            ..syn_file("/usr/lib64/libstemmer.so.0d.0.0", elf)
+        };
+        let info = info_for("libstemmer.so.0d");
+        let results = run(&pkg, &pkgfile, &info);
+        assert!(results.is_empty(), "symlink must be quiet: {results:?}");
     }
 
     /// Run the shared-library policy-name test for one package/SONAME
