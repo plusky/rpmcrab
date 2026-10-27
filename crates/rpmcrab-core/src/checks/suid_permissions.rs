@@ -11,6 +11,16 @@
 //! Parses the permissions profiles (`/usr/share/permissions/permissions`,
 //! `permissions.secure`, and per-package `permissions.d/` drop-ins) natively.
 //!
+//! The exact-verification findings (`permissions-incorrect`,
+//! `permissions-incorrect-owner`) judge the packaged mode and owner
+//! against the secure profile, as in the reference. The other shipped
+//! profiles (`permissions.easy`, `permissions.paranoid`, composed over
+//! the same `permissions` base) are read as well: when the packaged
+//! mode AND owner exactly match another profile's entry for the path,
+//! the finding reports at warning level and names the matched profile
+//! (Tom's ruling, 2026-10-27); a mismatch with every shipped profile
+//! stays an error.
+//!
 //! The setuid/setgid verdicts (`permissions-file-setuid-bit`,
 //! `permissions-directory-setuid-bit`) are claims about that registration
 //! data, so they are emitted only when at least one central profile was
@@ -240,6 +250,14 @@ fn parse_profile(
 
 pub struct SUIDPermissionsCheck {
     perms: HashMap<String, Vec<PermissionsEntry>>,
+    /// The other shipped central profiles (`easy`, `paranoid`), composed
+    /// exactly like the secure one (the `permissions` base replaced
+    /// per path by the level file, across the same bases) and keyed the
+    /// same way. Consulted only by `verify_entry`'s severity rule; the
+    /// registration set and every verdict stay secure-based. Per-package
+    /// drop-ins are not applied here — a drop-in is the package's own
+    /// registration statement, not a shipped profile.
+    other_profiles: Vec<(&'static str, HashMap<String, Vec<PermissionsEntry>>)>,
     var_handler: VariablesHandler,
     /// Whether any central permissions profile was read at construction.
     /// A profile that reads as empty counts: its content establishes the
@@ -261,33 +279,57 @@ impl SUIDPermissionsCheck {
     /// (`lint.py` `load_checks`) catches it.
     fn new_with(variables_conf: &str, profile_bases: &[&str]) -> Self {
         let var_handler = VariablesHandler::new(variables_conf);
+        let (perms, profiles_read) = Self::load_profile(&var_handler, profile_bases, "secure");
+        // The other shipped profiles feed only the severity rule in
+        // `verify_entry`; whether they were read does not bear on
+        // `profiles_read`, which describes the secure registration set.
+        let other_profiles = ["easy", "paranoid"]
+            .into_iter()
+            .map(|level| {
+                (
+                    level,
+                    Self::load_profile(&var_handler, profile_bases, level).0,
+                )
+            })
+            .collect();
+
+        Self {
+            perms,
+            other_profiles,
+            var_handler,
+            profiles_read,
+        }
+    }
+
+    /// Compose one central profile: the `permissions` base files
+    /// replaced per path by the `permissions.<level>` files. Parse order
+    /// mirrors the reference's `_paths_to('permissions',
+    /// 'permissions.secure')` — every `permissions` file before every
+    /// level file — and a later profile's entry list REPLACES the
+    /// earlier one for the same path (`self.perms.update(parser.entries)`).
+    /// Returns the composed map and whether any file was read.
+    fn load_profile(
+        var_handler: &VariablesHandler,
+        profile_bases: &[&str],
+        level: &str,
+    ) -> (HashMap<String, Vec<PermissionsEntry>>, bool) {
+        let level_file = format!("permissions.{level}");
         let mut perms: HashMap<String, Vec<PermissionsEntry>> = HashMap::new();
         let mut profiles_read = false;
-
-        // Parse order mirrors the reference's `_paths_to('permissions',
-        // 'permissions.secure')` — every `permissions` file before every
-        // `permissions.secure` file — and a later profile's entry list
-        // REPLACES the earlier one for the same path
-        // (`self.perms.update(parser.entries)`).
-        for name in ["permissions", "permissions.secure"] {
+        for name in ["permissions", level_file.as_str()] {
             for base in profile_bases {
                 let path = format!("{base}/{name}");
                 if !Path::new(&path).exists() {
                     continue;
                 }
-                let entries = parse_profile(&var_handler, &path).unwrap_or_else(|e| panic!("{e}"));
+                let entries = parse_profile(var_handler, &path).unwrap_or_else(|e| panic!("{e}"));
                 profiles_read = true;
                 for (k, v) in entries {
                     perms.insert(k, v);
                 }
             }
         }
-
-        Self {
-            perms,
-            var_handler,
-            profiles_read,
-        }
+        (perms, profiles_read)
     }
 
     fn is_suid(mode: u32) -> bool {
@@ -333,6 +375,34 @@ impl SUIDPermissionsCheck {
             .unwrap_or(false)
     }
 
+    /// The shipped non-secure profile whose entry for `path` the
+    /// packaged mode AND owner match exactly (the mode compared the way
+    /// `permissions-incorrect` compares, the owner string the way
+    /// `permissions-incorrect-owner` compares), honouring the entry's
+    /// `:package:` scoping — `Some("easy")` or `Some("paranoid")`, in
+    /// that order, when one matches.
+    fn other_profile_match(
+        &self,
+        pkg: &Pkg,
+        path: &str,
+        pkgfile: &PkgFile,
+    ) -> Option<&'static str> {
+        let pkg_owner = format!("{}:{}", pkgfile.user, pkgfile.group);
+        for (level, perms) in &self.other_profiles {
+            if let Some(entries) = perms.get(path) {
+                for entry in entries {
+                    if entry.matches_pkg(&pkg.name)
+                        && entry.mode == (pkgfile.mode & 0o7777)
+                        && format!("{}:{}", entry.owner, entry.group) == pkg_owner
+                    {
+                        return Some(level);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Complain about disagreements between the package metadata and the
     /// permissions profile settings.
     fn verify_entry(
@@ -364,14 +434,26 @@ impl SUIDPermissionsCheck {
             );
         }
 
+        // Severity rule (Tom, 2026-10-27): the verdicts below judge the
+        // packaged values against the secure profile, but when mode AND
+        // owner exactly match another shipped profile's entry for this
+        // path the packaging follows a distro-shipped configuration, so
+        // the findings report at warning level and name that profile.
+        // A mismatch with every shipped profile stays an error.
+        let matched_profile = self.other_profile_match(pkg, path, pkgfile);
+        let (level, profile_note) = match matched_profile {
+            Some(level) => (Level::Warning, format!(" (matches the {level} profile)")),
+            None => (Level::Error, String::new()),
+        };
+
         if (pkgfile.mode & 0o7777) != entry.mode {
             add_info(
                 out,
-                Level::Error,
+                level,
                 pkg,
                 "permissions-incorrect",
                 &[&format!(
-                    "{path} has mode 0{:o} but should be 0{:o}",
+                    "{path} has mode 0{:o} but should be 0{:o}{profile_note}",
                     pkgfile.mode & 0o7777,
                     entry.mode
                 )],
@@ -398,11 +480,11 @@ impl SUIDPermissionsCheck {
         if pkg_owner != entry_owner {
             add_info(
                 out,
-                Level::Error,
+                level,
                 pkg,
                 "permissions-incorrect-owner",
                 &[&format!(
-                    "{path} belongs to {pkg_owner} but should be {entry_owner}"
+                    "{path} belongs to {pkg_owner} but should be {entry_owner}{profile_note}"
                 )],
             );
         }
@@ -707,13 +789,34 @@ mod tests {
     /// environment-independent; the data state is set explicitly because
     /// an entry-injected check stands for one whose profiles were read.
     fn check_with(entries: Vec<PermissionsEntry>) -> SUIDPermissionsCheck {
+        check_with_profiles(entries, Vec::new())
+    }
+
+    /// `check_with` plus injected non-secure profiles for the severity
+    /// rule, each a list of entries under a level name ("easy",
+    /// "paranoid"). Anything `new()` picked up from the host is cleared
+    /// from both maps, as in `check_with`.
+    fn check_with_profiles(
+        entries: Vec<PermissionsEntry>,
+        others: Vec<(&'static str, Vec<PermissionsEntry>)>,
+    ) -> SUIDPermissionsCheck {
         let mut check = SUIDPermissionsCheck::new(&test_config());
         check.perms.clear();
+        check.other_profiles.clear();
         check.profiles_read = true;
         for e in entries {
             let key = e.path.trim_end_matches('/').to_string();
             let key = if key.is_empty() { "/".to_string() } else { key };
             check.perms.entry(key).or_default().push(e);
+        }
+        for (level, level_entries) in others {
+            let mut map: HashMap<String, Vec<PermissionsEntry>> = HashMap::new();
+            for e in level_entries {
+                let key = e.path.trim_end_matches('/').to_string();
+                let key = if key.is_empty() { "/".to_string() } else { key };
+                map.entry(key).or_default().push(e);
+            }
+            check.other_profiles.push((level, map));
         }
         check
     }
@@ -731,6 +834,52 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check(pkg, &config, &mut out);
         out.results().to_vec()
+    }
+
+    /// `run_check` with each finding's level alongside its name and line.
+    fn run_check_levels(
+        pkg: &Pkg,
+        check: &mut SUIDPermissionsCheck,
+    ) -> Vec<(String, Level, String)> {
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check(pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .cloned()
+            .zip(out.result_levels().iter().copied())
+            .map(|((name, line), level)| (name, level, line))
+            .collect()
+    }
+
+    /// An entry with explicit owner and group.
+    fn entry_owned(
+        path: &str,
+        mode: u32,
+        owner: &str,
+        group: &str,
+        profile: &str,
+    ) -> PermissionsEntry {
+        let mut e = entry(path, mode, profile);
+        e.owner = owner.to_string();
+        e.group = group.to_string();
+        e
+    }
+
+    /// A packaged file with explicit owner and group.
+    fn pkgfile_owned(name: &str, mode: u32, user: &str, group: &str) -> PkgFile {
+        let mut f = pkgfile(name, mode);
+        f.user = user.to_string();
+        f.group = group.to_string();
+        f
+    }
+
+    /// The (level, line) of one finding in a `run_check_levels` result.
+    fn finding<'a>(results: &'a [(String, Level, String)], name: &str) -> Option<(Level, &'a str)> {
+        results
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, level, line)| (*level, line.as_str()))
     }
 
     #[test]
@@ -767,6 +916,319 @@ mod tests {
             names.contains(&"permissions-missing-requires"),
             "{results:?}"
         );
+    }
+
+    #[test]
+    fn secure_exact_match_stays_silent() {
+        // Packaged values equal the secure entry (and the easy one too):
+        // neither incorrect finding fires at any level.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned(
+            "/usr/bin/exactbin",
+            0o1004750,
+            "root",
+            "trusted",
+        )];
+        let mut check = check_with_profiles(
+            vec![entry_owned(
+                "/usr/bin/exactbin",
+                0o4750,
+                "root",
+                "trusted",
+                "/usr/share/permissions/permissions.secure",
+            )],
+            vec![(
+                "easy",
+                vec![entry_owned(
+                    "/usr/bin/exactbin",
+                    0o4750,
+                    "root",
+                    "trusted",
+                    "/usr/share/permissions/permissions.easy",
+                )],
+            )],
+        );
+        let results = run_check_levels(&pkg, &mut check);
+        assert!(
+            finding(&results, "permissions-incorrect").is_none(),
+            "{results:?}"
+        );
+        assert!(
+            finding(&results, "permissions-incorrect-owner").is_none(),
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn easy_exact_match_demotes_both_tags_to_warning() {
+        // physlock shape: the packaged mode+owner are the easy entry,
+        // secure registers plain 0755 root:root. Both findings report
+        // at warning level and name the matched profile.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned(
+            "/usr/bin/physbin",
+            0o1004750,
+            "root",
+            "trusted",
+        )];
+        let mut check = check_with_profiles(
+            vec![entry_owned(
+                "/usr/bin/physbin",
+                0o0755,
+                "root",
+                "root",
+                "/usr/share/permissions/permissions.secure",
+            )],
+            vec![(
+                "easy",
+                vec![entry_owned(
+                    "/usr/bin/physbin",
+                    0o4750,
+                    "root",
+                    "trusted",
+                    "/usr/share/permissions/permissions.easy",
+                )],
+            )],
+        );
+        let results = run_check_levels(&pkg, &mut check);
+        let (level, line) = finding(&results, "permissions-incorrect").expect("mode finding");
+        assert_eq!(level, Level::Warning, "{results:?}");
+        assert!(line.contains("matches the easy profile"), "{line}");
+        let (level, line) =
+            finding(&results, "permissions-incorrect-owner").expect("owner finding");
+        assert_eq!(level, Level::Warning, "{results:?}");
+        assert!(line.contains("matches the easy profile"), "{line}");
+    }
+
+    #[test]
+    fn paranoid_exact_match_demotes_both_tags_to_warning() {
+        // seunshare shape: the packaged values are the paranoid entry,
+        // secure and easy both register the setgid form.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned("/usr/bin/seunbin", 0o1000755, "root", "root")];
+        let mut check = check_with_profiles(
+            vec![entry_owned(
+                "/usr/bin/seunbin",
+                0o4750,
+                "root",
+                "wheel",
+                "/usr/share/permissions/permissions.secure",
+            )],
+            vec![
+                (
+                    "easy",
+                    vec![entry_owned(
+                        "/usr/bin/seunbin",
+                        0o4750,
+                        "root",
+                        "wheel",
+                        "/usr/share/permissions/permissions.easy",
+                    )],
+                ),
+                (
+                    "paranoid",
+                    vec![entry_owned(
+                        "/usr/bin/seunbin",
+                        0o0755,
+                        "root",
+                        "root",
+                        "/usr/share/permissions/permissions.paranoid",
+                    )],
+                ),
+            ],
+        );
+        let results = run_check_levels(&pkg, &mut check);
+        let (level, line) = finding(&results, "permissions-incorrect").expect("mode finding");
+        assert_eq!(level, Level::Warning, "{results:?}");
+        assert!(line.contains("matches the paranoid profile"), "{line}");
+        let (level, line) =
+            finding(&results, "permissions-incorrect-owner").expect("owner finding");
+        assert_eq!(level, Level::Warning, "{results:?}");
+        assert!(line.contains("matches the paranoid profile"), "{line}");
+    }
+
+    #[test]
+    fn mode_only_demotion_when_owner_matches_secure() {
+        // newrole shape: the owner already matches secure, the mode
+        // matches the easy entry exactly — the mode finding demotes
+        // and no owner finding fires.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned("/usr/bin/rolebin", 0o1004755, "root", "root")];
+        let mut check = check_with_profiles(
+            vec![entry_owned(
+                "/usr/bin/rolebin",
+                0o0755,
+                "root",
+                "root",
+                "/usr/share/permissions/permissions.secure",
+            )],
+            vec![(
+                "easy",
+                vec![entry_owned(
+                    "/usr/bin/rolebin",
+                    0o4755,
+                    "root",
+                    "root",
+                    "/usr/share/permissions/permissions.easy",
+                )],
+            )],
+        );
+        let results = run_check_levels(&pkg, &mut check);
+        let (level, line) = finding(&results, "permissions-incorrect").expect("mode finding");
+        assert_eq!(level, Level::Warning, "{results:?}");
+        assert!(line.contains("matches the easy profile"), "{line}");
+        assert!(
+            finding(&results, "permissions-incorrect-owner").is_none(),
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn no_profile_match_stays_error() {
+        // 389-ds shape: every shipped profile registers 0750
+        // root:dirsrv and the package ships 0755 root:root — the
+        // packaged pair matches no profile, so both findings stay
+        // errors.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned(
+            "/usr/sbin/slapdbin",
+            0o1000755,
+            "root",
+            "root",
+        )];
+        let registered =
+            |profile: &str| entry_owned("/usr/sbin/slapdbin", 0o0750, "root", "dirsrv", profile);
+        let mut check = check_with_profiles(
+            vec![registered("/usr/share/permissions/permissions.secure")],
+            vec![
+                (
+                    "easy",
+                    vec![registered("/usr/share/permissions/permissions.easy")],
+                ),
+                (
+                    "paranoid",
+                    vec![registered("/usr/share/permissions/permissions.paranoid")],
+                ),
+            ],
+        );
+        let results = run_check_levels(&pkg, &mut check);
+        let (level, _) = finding(&results, "permissions-incorrect").expect("mode finding");
+        assert_eq!(level, Level::Error, "{results:?}");
+        let (level, _) = finding(&results, "permissions-incorrect-owner").expect("owner finding");
+        assert_eq!(level, Level::Error, "{results:?}");
+    }
+
+    #[test]
+    fn near_miss_mode_match_only_stays_error() {
+        // The packaged mode equals easy's mode, but the owner matches
+        // no profile: the pair matches no profile exactly, so both
+        // findings stay errors.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned(
+            "/usr/bin/nearmode",
+            0o1004750,
+            "root",
+            "trusted",
+        )];
+        let mut check = check_with_profiles(
+            vec![entry_owned(
+                "/usr/bin/nearmode",
+                0o0755,
+                "root",
+                "root",
+                "/usr/share/permissions/permissions.secure",
+            )],
+            vec![(
+                "easy",
+                vec![entry_owned(
+                    "/usr/bin/nearmode",
+                    0o4750,
+                    "root",
+                    "wheel",
+                    "/usr/share/permissions/permissions.easy",
+                )],
+            )],
+        );
+        let results = run_check_levels(&pkg, &mut check);
+        let (level, _) = finding(&results, "permissions-incorrect").expect("mode finding");
+        assert_eq!(level, Level::Error, "{results:?}");
+        let (level, _) = finding(&results, "permissions-incorrect-owner").expect("owner finding");
+        assert_eq!(level, Level::Error, "{results:?}");
+    }
+
+    #[test]
+    fn near_miss_owner_match_only_stays_error() {
+        // The packaged owner equals easy's owner, but the mode matches
+        // no profile: the pair matches no profile exactly, so both
+        // findings stay errors.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned(
+            "/usr/bin/nearowner",
+            0o1000700,
+            "root",
+            "wheel",
+        )];
+        let mut check = check_with_profiles(
+            vec![entry_owned(
+                "/usr/bin/nearowner",
+                0o0755,
+                "root",
+                "root",
+                "/usr/share/permissions/permissions.secure",
+            )],
+            vec![(
+                "easy",
+                vec![entry_owned(
+                    "/usr/bin/nearowner",
+                    0o4750,
+                    "root",
+                    "wheel",
+                    "/usr/share/permissions/permissions.easy",
+                )],
+            )],
+        );
+        let results = run_check_levels(&pkg, &mut check);
+        let (level, _) = finding(&results, "permissions-incorrect").expect("mode finding");
+        assert_eq!(level, Level::Error, "{results:?}");
+        let (level, _) = finding(&results, "permissions-incorrect-owner").expect("owner finding");
+        assert_eq!(level, Level::Error, "{results:?}");
+    }
+
+    #[test]
+    fn other_profile_match_honours_package_scoping() {
+        // The easy entry carrying the packaged values is scoped to a
+        // different package: it is not this package's shipped-profile
+        // match, so both findings stay errors.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned(
+            "/usr/bin/scopebin",
+            0o1004750,
+            "root",
+            "trusted",
+        )];
+        let mut scoped = entry_owned(
+            "/usr/bin/scopebin",
+            0o4750,
+            "root",
+            "trusted",
+            "/usr/share/permissions/permissions.easy",
+        );
+        scoped.packages = vec!["otherpkg".to_string()];
+        let mut check = check_with_profiles(
+            vec![entry_owned(
+                "/usr/bin/scopebin",
+                0o0755,
+                "root",
+                "root",
+                "/usr/share/permissions/permissions.secure",
+            )],
+            vec![("easy", vec![scoped])],
+        );
+        let results = run_check_levels(&pkg, &mut check);
+        let (level, _) = finding(&results, "permissions-incorrect").expect("mode finding");
+        assert_eq!(level, Level::Error, "{results:?}");
+        let (level, _) = finding(&results, "permissions-incorrect-owner").expect("owner finding");
+        assert_eq!(level, Level::Error, "{results:?}");
     }
 
     #[test]
