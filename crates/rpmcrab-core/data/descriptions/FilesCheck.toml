@@ -149,6 +149,15 @@ non-root-group-log-file="""
 If you need log files owned by a non-root group, just create a subdir in
 /var/log and put your log files in it.
 """
+ghost-file-with-buildroot-content="""
+The build left N bytes at this path, and `%ghost` ships none of them. If the
+content is host-specific, secret or generated (a per-host key, a cache, a
+compiled index), delete it from the buildroot in `%install`, keep an empty
+`touch`ed `%ghost`, and create it at install time. Otherwise drop `%ghost`
+and ship it: as `%config(noreplace)` under `/etc`, as a plain file under
+`/usr/etc`, and elsewhere with its existing `%config` mark.
+"""
+
 non-ghost-file="""
 File should be tagged %ghost.
 """
