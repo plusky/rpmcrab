@@ -438,8 +438,9 @@ SYSTEMD_PRESET_PACKAGES = [
 # FilesCheck honours a grant only when package, path and finding all
 # match exactly, and rejects an entry whose reason is missing or
 # empty. The set records the 2026-10-26 corpus E audit's core-package
-# clusters: rpm ships no ldconfig scriptlets by design (the platform
-# maintains the cache via glibc file triggers) and systemd's %post
+# clusters: rpm ships no ldconfig scriptlets by design (openSUSE
+# has no ldconfig file triggers -- #569; an earlier wording here
+# credited glibc file triggers, which was wrong) and systemd's %post
 # runs ldconfig for its NSS modules under an explicit spec comment,
 # while the smartmontools and tuned files are executables that are
 # config by design. The key is rpmcrab-only; upstream configs carry
@@ -457,9 +458,8 @@ FILE_GRANTS = [
             "library-without-ldconfig-postun",
         ],
         "reason": "the package ships no ldconfig scriptlets by design; "
-        "the platform maintains the ldconfig cache via glibc file "
-        "triggers, so per-package scriptlets are the pre-trigger "
-        "mechanism",
+        "openSUSE has no ldconfig file triggers (#569), so no "
+        "platform mechanism maintains the cache in their place",
     },
     {
         "package": "systemd",
