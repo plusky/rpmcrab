@@ -108,7 +108,6 @@ hardcoded-path-in-menu-icon = W
 hardlink-across-config-files = E
 hardlink-across-partition = E
 hidden-file-or-dir = W
-htaccess-file = E
 incoherent-logrotate-file = E
 incoherent-package-value-in-menu = W
 incorrect-fsf-address = W
@@ -384,7 +383,7 @@ zero-perms = W
 zero-perms-ghost = W
 
 [unresolved-sites]
-# count = 41
+# count = 42
 alternatives.rs: add_info( out, level, pkg, "li
 atomic_update.rs: add_info( out, level, pkg, "dir-or-file-outsid
 binaries.rs: add_info( out, info_type, pkg, "unused-direct-
@@ -407,6 +406,7 @@ filelist.rs: add_info(out, Level::Error, pkg, &rule.message, &[f])
 files.rs: add_info( out, level, pkg, "ex
 files.rs: add_info(finding)
 files.rs: add_info(out, Level::Error, pkg, &tag, &[fname])
+files.rs: add_info(out, level, pkg, "htaccess-file", &[fname])
 files.rs: add_info(out, level, pkg, "python-bytecode-wrong-magic-value", &refs)
 i18n.rs: add_info(out, level, pkg, &check, &detail_refs)
 menu.rs: add_info( out, Level::Error,

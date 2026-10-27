@@ -3178,7 +3178,7 @@ impl FilesCheck {
         self.check_file_siteperl_in_perl_module(pkg, fname, out);
         self.check_file_backup_file_in_package(pkg, fname, out);
         self.check_file_version_control_internal_file(pkg, fname, out);
-        self.check_file_htaccess_file(pkg, fname, out);
+        self.check_file_htaccess_file(pkg, fname, pkgfile, out);
         self.check_file_hidden_file_or_dir(pkg, fname, out);
         self.check_file_manifest_in_perl_module(pkg, fname, out);
         self.check_file_info_dir_file(pkg, fname, out);
@@ -4231,9 +4231,31 @@ impl FilesCheck {
         }
     }
 
-    fn check_file_htaccess_file(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
+    fn check_file_htaccess_file(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) {
         if fname.ends_with("/.htaccess") {
-            add_info(out, Level::Error, pkg, "htaccess-file", &[fname]);
+            // Severity split on the %doc flag plus doc-tree path
+            // (Tom's ruling, 2026-10-27; see the divergence ledger):
+            // a .htaccess shipped as documentation under
+            // /usr/share/doc/packages/ is a website artefact of the
+            // shipped docs (a DirectoryIndex for a website source,
+            // Sphinx redirect maps written for the upstream docs
+            // website) -- inert unless an admin serves the doc tree,
+            // so it warns instead of erroring. Both conditions are
+            // required: an unflagged .htaccess inside the doc tree
+            // and a %doc-flagged one outside it keep the reference's
+            // error, as do all web-root and application payloads.
+            let level = if pkgfile.is_doc() && fname.starts_with("/usr/share/doc/packages/") {
+                Level::Warning
+            } else {
+                Level::Error
+            };
+            add_info(out, level, pkg, "htaccess-file", &[fname]);
         }
     }
 
@@ -6047,7 +6069,7 @@ mod tests {
     use super::*;
     use crate::color::Color;
     use crate::pkg::dep::{DepInfo, account_capability};
-    use crate::pkg::pkgfile::{RPMFILE_CONFIG, RPMFILE_GHOST, RPMFILE_NOREPLACE};
+    use crate::pkg::pkgfile::{RPMFILE_CONFIG, RPMFILE_DOC, RPMFILE_GHOST, RPMFILE_NOREPLACE};
 
     fn test_config() -> Config {
         // Load the bundled defaults so the check sees the same configuration
@@ -6496,6 +6518,85 @@ mod tests {
             &["/etc/fcprobe/hook.sh"],
             &[],
         );
+        assert_eq!(levels, vec![Level::Error]);
+    }
+
+    /// Build a package from `files`, run the full FilesCheck over it,
+    /// and return the levels `htaccess-file` fired at, in emission
+    /// order.
+    fn htaccess_levels(files: Vec<PkgFile>) -> Vec<Level> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.ghost_files = files
+            .iter()
+            .filter(|f| f.is_ghost())
+            .map(|f| f.name.clone())
+            .collect();
+        pkg.files = files;
+        let (results, levels) = run_files_check_pkgs(&[pkg], &test_config());
+        results
+            .iter()
+            .zip(&levels)
+            .filter(|((name, _), _)| name == "htaccess-file")
+            .map(|(_, level)| *level)
+            .collect()
+    }
+
+    /// A regular non-executable file carrying the given header flags.
+    fn flagged_file(name: &str, flags: u32) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode: 0o100644,
+            flags,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn htaccess_doc_in_doc_tree_warns() {
+        // Tom's ruling (2026-10-27): a %doc-flagged .htaccess under
+        // /usr/share/doc/packages/ is a documentation website
+        // artefact -- it warns, it does not error, and it is not
+        // dropped.
+        let levels = htaccess_levels(vec![flagged_file(
+            "/usr/share/doc/packages/fcprobe-doc/html/.htaccess",
+            RPMFILE_DOC,
+        )]);
+        assert_eq!(levels, vec![Level::Warning]);
+    }
+
+    #[test]
+    fn htaccess_doc_outside_doc_tree_stays_error() {
+        // The %doc flag alone is not enough: outside the doc tree
+        // the file keeps the reference's error.
+        let levels = htaccess_levels(vec![flagged_file(
+            "/srv/www/htdocs/fcprobe/.htaccess",
+            RPMFILE_DOC,
+        )]);
+        assert_eq!(levels, vec![Level::Error]);
+    }
+
+    #[test]
+    fn htaccess_unflagged_in_doc_tree_stays_error() {
+        // The doc-tree path alone is not enough either: an
+        // unflagged .htaccess there is payload, not a documentation
+        // artefact, and keeps the error.
+        let levels = htaccess_levels(vec![flagged_file(
+            "/usr/share/doc/packages/fcprobe/html/.htaccess",
+            0,
+        )]);
+        assert_eq!(levels, vec![Level::Error]);
+    }
+
+    #[test]
+    fn htaccess_webroot_stays_error() {
+        // Ordinary web-root payload: the check's core case.
+        let levels = htaccess_levels(vec![flagged_file(
+            "/srv/www/htdocs/nextcloud/config/.htaccess",
+            0,
+        )]);
         assert_eq!(levels, vec![Level::Error]);
     }
 
