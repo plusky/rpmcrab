@@ -751,3 +751,10 @@ check = "missing-dependency-to-crontabs"
 kind = "behaviour"
 reason = "Only non-directory entries inside a /etc/cron.* directory are charged. The reference charges every '/etc/cron.' path, including the cron.* directory entries themselves (the #552 base-dir false positive, replicated until now) and daemon files sitting directly in /etc -- /etc/cron.deny is cronie's own access-control file, not a cron script. Measured on the Factory corpus, 11 of the check's 14 findings are those two shapes (cron x5 directory entries, systemd-generator-cron2timer x5, cronie /etc/cron.deny); the 3 remaining findings are real cron scripts whose packages depend on the cron stack under its current names and keep firing. The reference fires all 14 (verified against rpmlint 2.10.0, openSUSE config)."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "no-manual-page-for-binary"
+kind = "behaviour"
+reason = "Deliberate: the port credits a bindir name whose man page it lacks when the name is the same binary as a documented one in the same package: a symlink whose resolved in-package target carries a man page under the target's name (OpenIPMI's ipmicmd -> openipmicmd, shntool's mode links), or a hardlink (same rdev+inode) to a file whose name carries one (gzip's uncompress == gunzip). The reference (FilesCheck.py:559-564) consults only its man_basenames set and fires on every such alias (verified against rpmlint 2.10.0 on the Factory corpus representatives). Resolution stops at the package boundary: a link whose target the package does not ship, and a target without a page, keep firing."
+since = "0.4.1"
