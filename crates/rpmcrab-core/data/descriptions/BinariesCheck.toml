@@ -4,7 +4,8 @@ The package is marked as noarch and contains a binary or object file.
 arch-dependent-file-in-usr-share="""
 This package installs an ELF binary in the /usr/share hierarchy, which is
 reserved for architecture-independent files only. Payload for a foreign
-target (emulator firmware, cross-toolchain data) whose bytes are the same
+target -- a machine outside the package architecture's own family
+(emulator firmware, cross-toolchain data) -- whose bytes are the same
 in every architecture build of the package is not reported.
 """
 binary-in-etc="""
