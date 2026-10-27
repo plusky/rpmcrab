@@ -246,9 +246,10 @@ unexpectedly stripped and that the intended compiler flags are used.
 """
 missing-dependency-to-crontabs="""
 This package installs a file in /etc/cron.*/ but
-doesn't require crontabs to be installed. As crontabs is not part of the essential packages,
-your package should explicitly require crontabs to make sure that your cron job is
-executed. If it is an optional feature of your package, recommend or suggest crontabs.
+doesn't require a cron daemon to be installed. As the cron daemon is not part
+of the essential packages, your package should explicitly require crontabs,
+cron or cronie to make sure that your cron job is executed. If it is an
+optional feature of your package, recommend or suggest one of them.
 """
 missing-dependency-to-logrotate="""
 This package installs a file in /etc/logrotate.d/ but
@@ -318,8 +319,9 @@ as part of the example documentation means that someone will sooner or later
 use it and setup an insecure configuration.
 """
 tcl-extension-file="""
-Script libraries for Tcl extensions should be in a package-specific
-subdir of /usr/share/tcl.
+Tcl extensions should be in a package-specific subdir of the Tcl
+package directory: /usr/lib64/tcl for extensions that load shared
+libraries, /usr/share/tcl for script-only extensions.
 """
 makefile-junk="""
 Your package contains makefiles that only make sense in a
