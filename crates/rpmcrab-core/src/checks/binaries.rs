@@ -3531,29 +3531,43 @@ fn usr_share_binary_is_foreign_target(pkgfile: &PkgFile, arch: &str) -> bool {
 }
 
 /// Whether a binary-class file in a noarch package is a GRUB module:
-/// an `ET_REL` object for a host machine
-/// carrying GRUB's `.module_license` ABI section and not defining
-/// the `grub_main` entry point. A GRUB module is loadable only
-/// inside GRUB itself -- it is the bootloader's payload, not host
-/// code -- so the foreign-target gate's host-machine rule (#848),
-/// which guards runnable and linkable host binaries, does not reach
-/// it: a module is neither. The signature is the measured one over
-/// the grub2 family's 2,682 module files in the Factory corpus:
-/// every module, the final `.mod` files and the debug packages'
-/// `.module` intermediates alike, is a host-machine relocatable
-/// carrying `.module_license`, the ABI section GRUB's build stamps
-/// into each module object. The sibling ABI sections cannot serve:
-/// `.modname` and `.moddeps` are added only when a module is
-/// finalised (the debug intermediates carry neither), and
-/// `.moddeps` is present only on modules that have dependencies.
-/// GRUB's linked kernel images are the one other relocatable
-/// output carrying the section -- the EFI platform kernels are
-/// ET_REL -- and they define `grub_main`, which no module defines,
-/// so a file defining it keeps firing; so do the ET_EXEC core
-/// images, the section-less intermediate objects (efiemu's) and an
-/// ordinary host `.o`, which carries no GRUB section at all. The
-/// exemption takes the full signature from the payload bytes; a
-/// file that cannot be read or parsed keeps firing.
+/// an `ET_REL` object for a host machine carrying GRUB's
+/// `.module_license` ABI section and not defining the `grub_main`
+/// entry point. A GRUB module is loadable only inside GRUB itself --
+/// it is the bootloader's payload, not host code -- so the
+/// foreign-target gate's host-machine rule, which guards runnable
+/// and linkable host binaries, does not reach it: a module is
+/// neither. The signature is the measured one over the grub2
+/// family's 2,682 module files in the Factory corpus: every module,
+/// the final `.mod` files and the debug packages' `.module`
+/// intermediates alike, is a host-machine relocatable carrying
+/// `.module_license`, the ABI section GRUB's build stamps into each
+/// module object. The sibling ABI sections cannot serve: `.modname`
+/// and `.moddeps` are added only when a module is finalised (the
+/// debug intermediates carry neither), and `.moddeps` is present
+/// only on modules that have dependencies. GRUB's linked kernel
+/// images are the one other relocatable output carrying the
+/// section -- the EFI platform kernels are ET_REL -- and they
+/// define `grub_main`, which no module defines, so a file defining
+/// it keeps firing; so do the ET_EXEC core images, the section-less
+/// intermediate objects (efiemu's) and an ordinary host `.o`, which
+/// carries no GRUB section at all. The exemption takes the full
+/// signature from the payload bytes; a file that cannot be read or
+/// parsed keeps firing.
+///
+/// The signature's parts are exact, not nominal: the license
+/// section must be a `PROGBITS` section with content (the stamp
+/// GRUB's build emits carries the licence string), and the
+/// not-defining test must be decidable -- it reads the symbol
+/// table, so a file with no `SHT_SYMTAB` fails closed and keeps
+/// firing, with one exception: an object carrying no executable
+/// content at all cannot define an entry point, symtab or not.
+/// The corpus's three symtab-less modules (the `all_video`
+/// aggregators and `linuxefi`) are that shape -- link-only modules
+/// whose `.text` is empty. A defined `grub_main` is recognised in
+/// the symtab and the dynsym alike, under its plain name and under
+/// a versioned spelling (`grub_main@...`); an undefined import of
+/// the name is not a definition and does not block the credit.
 fn noarch_binary_is_grub_module(pkgfile: &PkgFile) -> bool {
     let Ok(data) = std::fs::read(&pkgfile.path) else {
         return false;
@@ -3566,17 +3580,92 @@ fn noarch_binary_is_grub_module(pkgfile: &PkgFile) -> bool {
     {
         return false;
     }
-    if !elf
+    if !elf.section_headers.iter().any(|sh| {
+        elf.shdr_strtab.get_at(sh.sh_name) == Some(".module_license")
+            && sh.sh_type == goblin::elf::section_header::SHT_PROGBITS
+            && sh.sh_size > 0
+    }) {
+        return false;
+    }
+    let has_symtab = elf
         .section_headers
         .iter()
-        .any(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(".module_license"))
-    {
-        return false;
+        .any(|sh| sh.sh_type == goblin::elf::section_header::SHT_SYMTAB);
+    if !has_symtab {
+        // Fail closed: without a symbol table the not-defining test
+        // is undecidable. The one credited shape is an object with
+        // no executable content, which cannot define the entry
+        // point; anything carrying code keeps firing.
+        let has_exec_content = elf.section_headers.iter().any(|sh| {
+            sh.sh_flags & u64::from(goblin::elf::section_header::SHF_EXECINSTR) != 0
+                && sh.sh_size > 0
+        });
+        return !has_exec_content;
     }
     !elf.syms.iter().any(|sym| {
         sym.st_shndx != goblin::elf::section_header::SHN_UNDEF as usize
-            && elf.strtab.get_at(sym.st_name) == Some("grub_main")
+            && is_grub_main_name(elf.strtab.get_at(sym.st_name))
+    }) && !dynsym_section_defines_grub_main(&elf, &data)
+}
+
+/// Whether the file's `SHT_DYNSYM` section defines `grub_main`.
+/// The parser's own dynsym view is populated from the dynamic
+/// segment, which relocatable images do not carry, so the section
+/// is read directly; an unreadable section counts as not defining
+/// (the symtab test above is the primary one, and its absence
+/// already fails closed).
+fn dynsym_section_defines_grub_main(elf: &goblin::elf::Elf, data: &[u8]) -> bool {
+    use goblin::elf::section_header::{SHN_UNDEF, SHT_DYNSYM};
+
+    let Some(sh) = elf
+        .section_headers
+        .iter()
+        .find(|sh| sh.sh_type == SHT_DYNSYM)
+    else {
+        return false;
+    };
+    let Some(str_sh) = elf.section_headers.get(sh.sh_link as usize) else {
+        return false;
+    };
+    let Ok(strtab) =
+        goblin::strtab::Strtab::parse(data, str_sh.sh_offset as usize, str_sh.sh_size as usize, 0)
+    else {
+        return false;
+    };
+    let Ok(container) = elf.header.container() else {
+        return false;
+    };
+    let Ok(endian) = elf.header.endianness() else {
+        return false;
+    };
+    let ctx = goblin::container::Ctx::new(container, endian);
+    let entsize = if sh.sh_entsize > 0 {
+        sh.sh_entsize
+    } else if elf.is_64 {
+        24
+    } else {
+        16
+    };
+    let Ok(syms) = goblin::elf::sym::Symtab::parse(
+        data,
+        sh.sh_offset as usize,
+        (sh.sh_size / entsize) as usize,
+        ctx,
+    ) else {
+        return false;
+    };
+    syms.iter().any(|sym| {
+        sym.st_shndx != SHN_UNDEF as usize && is_grub_main_name(strtab.get_at(sym.st_name))
     })
+}
+
+/// Whether a symbol name is the `grub_main` entry point, plain or
+/// under a versioned spelling (`grub_main@VERSION`).
+fn is_grub_main_name(name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    name == "grub_main" || name.starts_with("grub_main@")
 }
 
 /// Collect the forbidden-function calls one file makes: for every
@@ -10390,6 +10479,293 @@ description = "explicit priority string bypasses the system crypto policy"
         out
     }
 
+    /// Craft a minimal ELF object with explicit section types,
+    /// flags and sizes, and optional symbol tables whose entries
+    /// carry explicit section indices -- the knobs the GRUB-module
+    /// hardening pins need (a missing symtab, an empty or non-PROGBITS
+    /// license section, an undefined import, a dynsym definition).
+    /// `sections` are `(name, sh_type, sh_flags, size)`; contents are
+    /// zero bytes of the stated size. `symtab` / `dynsym` are
+    /// `(name, st_shndx)` lists; `None` omits the table entirely.
+    fn elf_object2(
+        is_64: bool,
+        machine: u16,
+        elf_type: u16,
+        sections: &[(&str, u32, u64, u64)],
+        symtab: Option<&[(&str, u16)]>,
+        dynsym: Option<&[(&str, u16)]>,
+    ) -> Vec<u8> {
+        let ehsize: usize = if is_64 { 64 } else { 52 };
+        let shentsize: usize = if is_64 { 64 } else { 40 };
+        let syment: usize = if is_64 { 24 } else { 16 };
+
+        let build_strtab = |syms: &[(&str, u16)]| -> Vec<u8> {
+            let mut tab: Vec<u8> = vec![0];
+            for (name, _) in syms {
+                tab.extend_from_slice(name.as_bytes());
+                tab.push(0);
+            }
+            tab
+        };
+        let build_symtab = |syms: &[(&str, u16)], strtab: &[u8]| -> Vec<u8> {
+            let mut offs: Vec<u32> = Vec::new();
+            let mut cursor = 1usize;
+            for (name, _) in syms {
+                offs.push(u32::try_from(cursor).unwrap());
+                cursor += name.len() + 1;
+            }
+            let _ = strtab;
+            let mut tab: Vec<u8> = vec![0; syment];
+            for (i, (_, shndx)) in syms.iter().enumerate() {
+                if is_64 {
+                    tab.extend_from_slice(&offs[i].to_le_bytes());
+                    tab.push(0x12); // STB_GLOBAL | STT_FUNC
+                    tab.push(0);
+                    tab.extend_from_slice(&shndx.to_le_bytes());
+                    tab.extend_from_slice(&0u64.to_le_bytes());
+                    tab.extend_from_slice(&0u64.to_le_bytes());
+                } else {
+                    tab.extend_from_slice(&offs[i].to_le_bytes());
+                    tab.extend_from_slice(&0u32.to_le_bytes());
+                    tab.extend_from_slice(&0u32.to_le_bytes());
+                    tab.push(0x12);
+                    tab.push(0);
+                    tab.extend_from_slice(&shndx.to_le_bytes());
+                }
+            }
+            tab
+        };
+
+        let strtab: Vec<u8> = symtab.map(build_strtab).unwrap_or_default();
+        let symtab_bytes: Vec<u8> = symtab.map(|s| build_symtab(s, &strtab)).unwrap_or_default();
+        let dynstr: Vec<u8> = dynsym.map(build_strtab).unwrap_or_default();
+        let dynsym_bytes: Vec<u8> = dynsym.map(|s| build_symtab(s, &dynstr)).unwrap_or_default();
+
+        // Section order: NULL, the named sections, then .symtab,
+        // .strtab, .dynsym, .dynstr (each pair only when present),
+        // then .shstrtab.
+        let nsec = sections.len();
+        let strtab_idx = nsec + 2;
+        let dynsym_idx = if symtab.is_some() { nsec + 3 } else { nsec + 1 };
+        let dynstr_idx = dynsym_idx + 1;
+        let shstrtab_idx = if dynsym.is_some() {
+            dynstr_idx + 1
+        } else if symtab.is_some() {
+            nsec + 3
+        } else {
+            nsec + 1
+        };
+        let shnum = shstrtab_idx + 1;
+
+        let mut all_names: Vec<&str> = sections.iter().map(|(n, _, _, _)| *n).collect();
+        if symtab.is_some() {
+            all_names.extend([".symtab", ".strtab"]);
+        }
+        if dynsym.is_some() {
+            all_names.extend([".dynsym", ".dynstr"]);
+        }
+        all_names.push(".shstrtab");
+        let mut shstrtab: Vec<u8> = vec![0];
+        let mut sec_name_offs: Vec<u32> = Vec::new();
+        for s in &all_names {
+            sec_name_offs.push(u32::try_from(shstrtab.len()).unwrap());
+            shstrtab.extend_from_slice(s.as_bytes());
+            shstrtab.push(0);
+        }
+
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut cursor = ehsize;
+        for (_, _, _, size) in sections {
+            offsets.push(cursor);
+            cursor += *size as usize;
+        }
+        let symtab_off = cursor;
+        cursor += symtab_bytes.len();
+        let strtab_off = cursor;
+        cursor += strtab.len();
+        let dynsym_off = cursor;
+        cursor += dynsym_bytes.len();
+        let dynstr_off = cursor;
+        cursor += dynstr.len();
+        let shstrtab_off = cursor;
+        cursor += shstrtab.len();
+        let shoff = cursor;
+
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(ELF_MAGIC);
+        out.push(if is_64 { 2 } else { 1 });
+        out.push(1);
+        out.push(1);
+        out.extend_from_slice(&[0; 9]);
+        out.extend_from_slice(&elf_type.to_le_bytes());
+        out.extend_from_slice(&machine.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        if is_64 {
+            out.extend_from_slice(&0u64.to_le_bytes());
+            out.extend_from_slice(&0u64.to_le_bytes());
+            out.extend_from_slice(&(shoff as u64).to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&(ehsize as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&(shentsize as u16).to_le_bytes());
+            out.extend_from_slice(&(shnum as u16).to_le_bytes());
+            out.extend_from_slice(&(shstrtab_idx as u16).to_le_bytes());
+        } else {
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&(shoff as u32).to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&(ehsize as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&(shentsize as u16).to_le_bytes());
+            out.extend_from_slice(&(shnum as u16).to_le_bytes());
+            out.extend_from_slice(&(shstrtab_idx as u16).to_le_bytes());
+        }
+        debug_assert_eq!(out.len(), ehsize);
+        for (_, _, _, size) in sections {
+            out.resize(out.len() + *size as usize, 0);
+        }
+        out.extend_from_slice(&symtab_bytes);
+        out.extend_from_slice(&strtab);
+        out.extend_from_slice(&dynsym_bytes);
+        out.extend_from_slice(&dynstr);
+        out.extend_from_slice(&shstrtab);
+        debug_assert_eq!(out.len(), shoff);
+
+        struct Shdr {
+            name: u32,
+            stype: u32,
+            flags: u64,
+            off: usize,
+            size: usize,
+            link: u32,
+            entsize: u64,
+        }
+        fn push_sh(out: &mut Vec<u8>, is_64: bool, sh: &Shdr) {
+            out.extend_from_slice(&sh.name.to_le_bytes());
+            out.extend_from_slice(&sh.stype.to_le_bytes());
+            if is_64 {
+                out.extend_from_slice(&sh.flags.to_le_bytes());
+                out.extend_from_slice(&0u64.to_le_bytes());
+                out.extend_from_slice(&(sh.off as u64).to_le_bytes());
+                out.extend_from_slice(&(sh.size as u64).to_le_bytes());
+                out.extend_from_slice(&sh.link.to_le_bytes());
+                out.extend_from_slice(&0u32.to_le_bytes());
+                out.extend_from_slice(&1u64.to_le_bytes());
+                out.extend_from_slice(&sh.entsize.to_le_bytes());
+            } else {
+                out.extend_from_slice(&(sh.flags as u32).to_le_bytes());
+                out.extend_from_slice(&0u32.to_le_bytes());
+                out.extend_from_slice(&(sh.off as u32).to_le_bytes());
+                out.extend_from_slice(&(sh.size as u32).to_le_bytes());
+                out.extend_from_slice(&sh.link.to_le_bytes());
+                out.extend_from_slice(&0u32.to_le_bytes());
+                out.extend_from_slice(&1u32.to_le_bytes());
+                out.extend_from_slice(&(sh.entsize as u32).to_le_bytes());
+            }
+        }
+        let null = Shdr {
+            name: 0,
+            stype: 0,
+            flags: 0,
+            off: 0,
+            size: 0,
+            link: 0,
+            entsize: 0,
+        };
+        push_sh(&mut out, is_64, &null);
+        for (i, (_, stype, flags, size)) in sections.iter().enumerate() {
+            push_sh(
+                &mut out,
+                is_64,
+                &Shdr {
+                    name: sec_name_offs[i],
+                    stype: *stype,
+                    flags: *flags,
+                    off: offsets[i],
+                    size: *size as usize,
+                    link: 0,
+                    entsize: 0,
+                },
+            );
+        }
+        let mut name_cursor = nsec;
+        if symtab.is_some() {
+            push_sh(
+                &mut out,
+                is_64,
+                &Shdr {
+                    name: sec_name_offs[name_cursor],
+                    stype: 2, // SHT_SYMTAB
+                    flags: 0,
+                    off: symtab_off,
+                    size: symtab_bytes.len(),
+                    link: u32::try_from(strtab_idx).unwrap(),
+                    entsize: syment as u64,
+                },
+            );
+            push_sh(
+                &mut out,
+                is_64,
+                &Shdr {
+                    name: sec_name_offs[name_cursor + 1],
+                    stype: 3, // SHT_STRTAB
+                    flags: 0,
+                    off: strtab_off,
+                    size: strtab.len(),
+                    link: 0,
+                    entsize: 0,
+                },
+            );
+            name_cursor += 2;
+        }
+        if dynsym.is_some() {
+            push_sh(
+                &mut out,
+                is_64,
+                &Shdr {
+                    name: sec_name_offs[name_cursor],
+                    stype: 11, // SHT_DYNSYM
+                    flags: 0,
+                    off: dynsym_off,
+                    size: dynsym_bytes.len(),
+                    link: u32::try_from(dynstr_idx).unwrap(),
+                    entsize: syment as u64,
+                },
+            );
+            push_sh(
+                &mut out,
+                is_64,
+                &Shdr {
+                    name: sec_name_offs[name_cursor + 1],
+                    stype: 3,
+                    flags: 0,
+                    off: dynstr_off,
+                    size: dynstr.len(),
+                    link: 0,
+                    entsize: 0,
+                },
+            );
+            name_cursor += 2;
+        }
+        push_sh(
+            &mut out,
+            is_64,
+            &Shdr {
+                name: sec_name_offs[name_cursor],
+                stype: 3,
+                flags: 0,
+                off: shstrtab_off,
+                size: shstrtab.len(),
+                link: 0,
+                entsize: 0,
+            },
+        );
+        out
+    }
+
     /// A `PkgFile` backed by a real temp file holding `bytes`, so the
     /// classification reads the payload header and archive members
     /// instead of the magic string.
@@ -11000,6 +11376,235 @@ description = "explicit priority string bypasses the system crypto policy"
             "arch-independent-package-contains-binary-or-object",
         );
         assert_eq!(lines.len(), 1, "an archived module fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_grub_stripped_image_still_fires() {
+        // A module-shaped object with executable content but no
+        // symbol table: the not-defining-grub_main test is
+        // undecidable, so the gate fails closed and the file keeps
+        // firing (the stripped kernel-image shape).
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let bytes = elf_object2(
+            true,
+            goblin::elf::header::EM_X86_64,
+            goblin::elf::header::ET_REL,
+            &[(".text", 1, 0x6, 64), (".module_license", 1, 0x2, 15)],
+            None,
+            None,
+        );
+        let file = real_file_pkgfile(
+            &dir,
+            "stripped.mod",
+            "/usr/share/grub2/x86_64-efi/stripped.mod",
+            "ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), stripped",
+            &bytes,
+        );
+        assert!(!noarch_binary_is_grub_module(&file));
+        let pkg = synthetic_pkg("grub2-x86_64-efi", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "a stripped image fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_grub_aggregator_without_symtab_is_quiet() {
+        // The corpus's symtab-less modules are link-only aggregators:
+        // no executable content, so there is no entry point they
+        // could define and the credit holds without a symbol table.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let bytes = elf_object2(
+            false,
+            goblin::elf::header::EM_386,
+            goblin::elf::header::ET_REL,
+            &[
+                (".text", 1, 0x6, 0),
+                (".module_license", 1, 0x2, 15),
+                (".moddeps", 1, 0, 29),
+                (".modname", 1, 0, 10),
+            ],
+            None,
+            None,
+        );
+        let file = real_file_pkgfile(
+            &dir,
+            "all_video.mod",
+            "/usr/share/grub2/i386-pc/all_video.mod",
+            "ELF 32-bit LSB relocatable, Intel 80386, version 1 (SYSV), stripped",
+            &bytes,
+        );
+        assert!(noarch_binary_is_grub_module(&file));
+        let pkg = synthetic_pkg("grub2-i386-pc", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_grub_license_section_must_be_progbits_with_content() {
+        // The license stamp is a PROGBITS section carrying the
+        // licence string; a name-only section -- empty, or of
+        // another type -- is not the stamp and does not credit.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        for (tag, license) in [
+            ("empty", (".module_license", 1u32, 0x2u64, 0u64)),
+            ("note", (".module_license", 7, 0x2, 15)),
+        ] {
+            let bytes = elf_object2(
+                true,
+                goblin::elf::header::EM_X86_64,
+                goblin::elf::header::ET_REL,
+                &[(".text", 1, 0x6, 32), license],
+                Some(&[("grub_mod_init", 1)]),
+                None,
+            );
+            let file = real_file_pkgfile(
+                &dir,
+                "fake.mod",
+                "/usr/share/grub2/x86_64-efi/fake.mod",
+                "ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped",
+                &bytes,
+            );
+            assert!(
+                !noarch_binary_is_grub_module(&file),
+                "{tag} license section must not credit"
+            );
+            let pkg = synthetic_pkg("grub2-x86_64-efi", "noarch", vec![file]);
+            let results = driver_results(&pkg, &config);
+            let lines = lines_for(
+                &results,
+                "arch-independent-package-contains-binary-or-object",
+            );
+            assert_eq!(lines.len(), 1, "{tag} shape fires: {results:?}");
+        }
+    }
+
+    #[test]
+    fn noarch_grub_dynsym_or_versioned_main_still_fires() {
+        // A defined grub_main blocks the credit wherever it is
+        // recorded: in the dynsym, or under a versioned spelling in
+        // either table.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sections: &[(&str, u32, u64, u64)] =
+            &[(".text", 1, 0x6, 32), (".module_license", 1, 0x2, 15)];
+        for (tag, symtab, dynsym) in [
+            (
+                "dynsym",
+                Some(&[("grub_mod_init", 1u16)][..]),
+                Some(&[("grub_main", 1u16)][..]),
+            ),
+            (
+                "versioned-symtab",
+                Some(&[("grub_main@@GRUB_1.0", 1u16)][..]),
+                None,
+            ),
+            (
+                "versioned-dynsym",
+                Some(&[("grub_mod_init", 1u16)][..]),
+                Some(&[("grub_main@GRUB_1.0", 1u16)][..]),
+            ),
+        ] {
+            let bytes = elf_object2(
+                true,
+                goblin::elf::header::EM_X86_64,
+                goblin::elf::header::ET_REL,
+                sections,
+                symtab,
+                dynsym,
+            );
+            let file = real_file_pkgfile(
+                &dir,
+                "linked.mod",
+                "/usr/share/grub2/x86_64-efi/linked.mod",
+                "ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped",
+                &bytes,
+            );
+            assert!(
+                !noarch_binary_is_grub_module(&file),
+                "{tag} grub_main must block the credit"
+            );
+            let pkg = synthetic_pkg("grub2-x86_64-efi", "noarch", vec![file]);
+            let results = driver_results(&pkg, &config);
+            let lines = lines_for(
+                &results,
+                "arch-independent-package-contains-binary-or-object",
+            );
+            assert_eq!(lines.len(), 1, "{tag} shape fires: {results:?}");
+        }
+    }
+
+    #[test]
+    fn noarch_grub_undefined_main_import_is_quiet() {
+        // Modules reference the kernel's entry points; an undefined
+        // import of grub_main is not a definition and does not block
+        // the credit.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let bytes = elf_object2(
+            true,
+            goblin::elf::header::EM_X86_64,
+            goblin::elf::header::ET_REL,
+            &[(".text", 1, 0x6, 32), (".module_license", 1, 0x2, 15)],
+            Some(&[("grub_main", 0), ("grub_mod_init", 1)]),
+            None,
+        );
+        let file = real_file_pkgfile(
+            &dir,
+            "importer.mod",
+            "/usr/share/grub2/x86_64-efi/importer.mod",
+            "ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped",
+            &bytes,
+        );
+        assert!(noarch_binary_is_grub_module(&file));
+        let pkg = synthetic_pkg("grub2-x86_64-efi", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_grub_module_library_without_init_fini_is_quiet() {
+        // A full platform module library (the grub2-i386-pc shape,
+        // ~350 modules) is quiet as a set; the credit reads the
+        // license section and the entry-point test only, so modules
+        // defining neither grub_mod_init nor grub_mod_fini are
+        // credited on the same signature.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let bytes = elf_object(
+            false,
+            goblin::elf::header::EM_386,
+            goblin::elf::header::ET_REL,
+            &[".text", ".module_license", ".moddeps", ".modname"],
+            &["grub_mod_register"],
+        );
+        let mut files = Vec::new();
+        for i in 0..350 {
+            files.push(real_file_pkgfile(
+                &dir,
+                &format!("mod{i}.mod"),
+                &format!("/usr/share/grub2/i386-pc/mod{i}.mod"),
+                "ELF 32-bit LSB relocatable, Intel 80386, version 1 (SYSV), not stripped",
+                &bytes,
+            ));
+        }
+        let pkg = synthetic_pkg("grub2-i386-pc", "noarch", files);
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
     }
 
     #[test]
