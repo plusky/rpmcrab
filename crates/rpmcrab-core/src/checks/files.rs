@@ -2135,6 +2135,10 @@ struct PkgState {
     /// Symlink targets by shipped path, for resolving a bindir link to
     /// the file it ultimately invokes.
     link_targets: HashMap<String, String>,
+    /// Bindir symlink paths by executable name, indexed when a link
+    /// is recorded so the alias credit looks up one name's links
+    /// instead of scanning every link path per miss.
+    bindir_links: HashMap<String, Vec<String>>,
     /// Every shipped path; link resolution stops at the package boundary.
     shipped_paths: std::collections::HashSet<String>,
     /// Basenames of regular files by (rdev, inode): files sharing a key
@@ -2919,20 +2923,13 @@ impl FilesCheck {
         }
         // Symlink chains starting at a bindir link with this name
         // (bindir symlinks register with an empty `paths` list).
-        for lpath in st.link_targets.keys() {
-            let Ok(Some(caps)) = self.bin_re.captures(lpath) else {
-                continue;
-            };
-            let Some(name) = caps.get(1).map(|m| m.as_str()) else {
-                continue;
-            };
-            if name != exe || name.contains('/') {
-                continue;
-            }
-            if let Some(target) = self.resolve_shipped_target(st, lpath) {
-                let base = target.rsplit('/').next().unwrap_or(&target);
-                if st.man_basenames.contains(base) {
-                    return true;
+        if let Some(lpaths) = st.bindir_links.get(exe) {
+            for lpath in lpaths {
+                if let Some(target) = self.resolve_shipped_target(st, lpath) {
+                    let base = target.rsplit('/').next().unwrap_or(&target);
+                    if st.man_basenames.contains(base) {
+                        return true;
+                    }
                 }
             }
         }
@@ -2967,10 +2964,18 @@ impl FilesCheck {
 
     /// Follow the symlink chain starting at `start` through the
     /// package's own files; the final non-link shipped path, or `None`
-    /// when the chain leaves the package or loops.
+    /// when the chain leaves the package, loops, or runs past 40
+    /// hops -- a loop or an overlong chain earns no credit, so the
+    /// name keeps firing (ledgered). Intermediate links are judged
+    /// only on being shipped; only the final target's basename is
+    /// judged against the man page set.
     fn resolve_shipped_target(&self, st: &PkgState, start: &str) -> Option<String> {
         let mut cur = start.to_string();
-        for _ in 0..8 {
+        let mut visited = std::collections::HashSet::new();
+        for _ in 0..40 {
+            if !visited.insert(cur.clone()) {
+                return None;
+            }
             let linkto = st.link_targets.get(&cur)?;
             let target = if linkto.starts_with('/') {
                 crate::pkg::normalize_path(linkto)
@@ -2979,7 +2984,15 @@ impl FilesCheck {
                     .parent()
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                crate::pkg::normalize_path(&format!("{parent}/{linkto}"))
+                // A root-level link's parent is `/`: joining with a
+                // second slash would spell a `//` path no shipped
+                // path equals.
+                let joined = if parent == "/" {
+                    format!("/{linkto}")
+                } else {
+                    format!("{parent}/{linkto}")
+                };
+                crate::pkg::normalize_path(&joined)
             };
             if !st.shipped_paths.contains(&target) {
                 return None;
@@ -4372,6 +4385,16 @@ impl FilesCheck {
         }
         st.link_targets
             .insert(fname.to_string(), pkgfile.linkto.clone());
+        if let Ok(Some(caps)) = self.bin_re.captures(fname) {
+            if let Some(name) = caps.get(1).map(|m| m.as_str()) {
+                if !name.contains('/') {
+                    st.bindir_links
+                        .entry(name.to_string())
+                        .or_default()
+                        .push(fname.to_string());
+                }
+            }
+        }
         let link = &pkgfile.linkto;
         // devel-file-in-non-devel-package for .so links: the reference
         // gates on the anchored sofile_regex (FilesCheck.py:165,
@@ -5013,8 +5036,14 @@ impl FilesCheck {
                 // FilesCheck.py:1169-1171: only regular executable files feed
                 // the duplicate-executable check.
                 if !exe.contains('/') {
-                    st.bindir_inodes
-                        .insert(fname.to_string(), (pkgfile.rdev, pkgfile.inode));
+                    // An unknown inode (0) registers no hardlink
+                    // identity, mirroring the inode_basenames guard:
+                    // a (rdev, 0) key could otherwise alias unrelated
+                    // files whose inode the header does not know.
+                    if pkgfile.inode != 0 {
+                        st.bindir_inodes
+                            .insert(fname.to_string(), (pkgfile.rdev, pkgfile.inode));
+                    }
                     st.bindir_exes
                         .entry(exe.to_string())
                         .or_default()
@@ -10638,6 +10667,116 @@ mod tests {
                 .iter()
                 .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("alias")),
             "a different inode is a different binary and must fire: {results2:?}"
+        );
+    }
+
+    #[test]
+    fn alias_symlink_loop_keeps_firing() {
+        // A two-link loop never resolves, so the undocumented name
+        // earns no alias credit even though its loop partner's
+        // basename carries a man page (loopb itself is documented
+        // directly and is not the discriminator).
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                linkto: "loopb".to_string(),
+                ..mkfile("/usr/bin/loopa", 0o120777, 51)
+            },
+            PkgFile {
+                linkto: "loopa".to_string(),
+                ..mkfile("/usr/bin/loopb", 0o120777, 52)
+            },
+            mkfile("/usr/share/man/man1/loopb.1.gz", 0o100644, 53),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("loopa")),
+            "loopa must still fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn alias_symlink_chain_length_limit() {
+        // A short chain to a documented target earns the credit; a
+        // chain past the 40-hop cap earns none and keeps firing.
+        let build = |links: usize| {
+            let mut files: Vec<PkgFile> = Vec::new();
+            for i in 0..links {
+                let next = if i + 1 == links {
+                    "realtool".to_string()
+                } else {
+                    format!("hop{}", i + 1)
+                };
+                files.push(PkgFile {
+                    linkto: next,
+                    ..mkfile(&format!("/usr/bin/hop{i}"), 0o120777, 100 + i as u32)
+                });
+            }
+            files.push(mkfile("/usr/bin/realtool", 0o100755, 200));
+            files.push(mkfile("/usr/share/man/man1/realtool.1.gz", 0o100644, 201));
+            files
+        };
+        let (pkg, _dir) = pkg_with_files(build(10));
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("hop0")),
+            "a 10-hop chain resolves: {results:?}"
+        );
+        let (pkg, _dir) = pkg_with_files(build(41));
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("hop0")),
+            "a 41-hop chain is over the cap and must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn alias_symlink_root_level_intermediate_resolves() {
+        // The chain passes through a root-level link whose target is
+        // spelled relative to the root: the join must not produce a
+        // `//` path that no shipped path equals.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                linkto: "/toplink".to_string(),
+                ..mkfile("/usr/bin/viaalias", 0o120777, 61)
+            },
+            PkgFile {
+                linkto: "usr/bin/realtool".to_string(),
+                ..mkfile("/toplink", 0o120777, 62)
+            },
+            mkfile("/usr/bin/realtool", 0o100755, 63),
+            mkfile("/usr/share/man/man1/realtool.1.gz", 0o100644, 64),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("viaalias")),
+            "viaalias resolves through the root-level link: {results:?}"
+        );
+    }
+
+    #[test]
+    fn alias_unknown_inode_earns_no_hardlink_credit() {
+        // Both files carry inode 0 (unknown): no hardlink identity
+        // is registered on either side, so the documented sibling
+        // does not credit the undocumented name.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/zeroexe", 0o100755, 0),
+            mkfile("/usr/bin/zerodoc", 0o100755, 0),
+            mkfile("/usr/share/man/man1/zerodoc.1.gz", 0o100644, 72),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("zeroexe")),
+            "zeroexe must still fire: {results:?}"
         );
     }
 
