@@ -2025,6 +2025,44 @@ fn errors_only_unused_rpmlintrc_filter_names_skipped_check_finding() {
     );
 }
 
+/// An rpmlintrc `setBadness` line is reported as
+/// `rpmlintrc-uses-setbadness` at W, once per occurrence, with and
+/// without `--ignore-unused-rpmlintrc` (that flag gates only the
+/// unused-filter audit). Comment mentions and `addFilter` lines in
+/// the same file stay quiet. The warning alone does not fail the run.
+#[test]
+fn rpmlintrc_setbadness_is_reported_with_and_without_ignore_unused() {
+    let dir = std::env::temp_dir().join("rpmcrab-setbadness-report");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rc = dir.join("test.rc");
+    std::fs::write(
+        &rc,
+        "# setBadness in a comment stays quiet\naddFilter(\"some-check\")\nsetBadness('first-check', 0)\n  setBadness('second-check', 10)\n",
+    )
+    .unwrap();
+    let rpm = "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm";
+    for extra in [[].as_slice(), ["--ignore-unused-rpmlintrc"].as_slice()] {
+        let mut args = vec!["-r", rc.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        args.push(rpm);
+        let out = rpmcrab(&args);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            stdout.matches("W: rpmlintrc-uses-setbadness").count(),
+            2,
+            "one warning per occurrence (extra args {extra:?}): {stdout}"
+        );
+        assert!(
+            stdout.contains("line 3: setBadness('first-check', 0)"),
+            "the detail names the occurrence: {stdout}"
+        );
+        assert!(
+            stdout.contains("line 4: setBadness('second-check', 10)"),
+            "the detail names the occurrence: {stdout}"
+        );
+    }
+}
+
 /// The apparmor shape (#816): an rpmlintrc whose only unmatched pattern is
 /// reported by the audit while every error the package itself draws is
 /// filtered. The matching patterns cover the fixture's own errors: the

@@ -310,6 +310,112 @@ fn a_used_rpmlintrc_filter_is_not_reported() {
     assert!(!out.contains("unused-rpmlintrc-filter"), "stdout: {out}");
 }
 
+/// Build a config from rpmlintrc text through the real loader.
+fn config_with_rpmlintrc_text(text: &str) -> Config {
+    let dir = tempfile::tempdir().unwrap();
+    let rc = dir.path().join("pkg-rpmlintrc");
+    std::fs::write(&rc, text).unwrap();
+    let mut config = Config::default();
+    rpmcrab_core::config::load_rpmlintrc(&mut config, &rc).expect("load rpmlintrc");
+    config
+}
+
+fn recorder_lint(
+    log: &Arc<Mutex<Log>>,
+    config: Config,
+) -> (Lint, impl Fn() -> Vec<Box<dyn Check>>) {
+    let log = Arc::clone(log);
+    lint_with(
+        move || Recorder {
+            name: "Recorder",
+            log: Arc::clone(&log),
+            emit: false,
+        },
+        config,
+    )
+}
+
+/// Every `setBadness` occurrence recorded at rpmlintrc load is
+/// reported once, at warning level, on the last package.
+#[test]
+fn setbadness_occurrences_are_reported_once_per_occurrence() {
+    let log = Arc::new(Mutex::new(Log::default()));
+    let (mut lint, make_checks) = recorder_lint(
+        &log,
+        config_with_rpmlintrc_text(
+            "setBadness('first-check', 0)\n  setBadness('second-check', 10)\n",
+        ),
+    );
+    lint.check_batch(tasks(2), 1, &make_checks, true);
+    lint.report_rpmlintrc_setbadness();
+    lint.audit_unused_filters();
+    let out = lint.render_report("text", "rpmlint", "2.10.0", 2, false, 0.1);
+    assert_eq!(
+        out.matches("rpmlintrc-uses-setbadness").count(),
+        2,
+        "one finding per occurrence: {out}"
+    );
+    assert!(
+        out.contains("W: rpmlintrc-uses-setbadness"),
+        "the report is at warning level: {out}"
+    );
+    assert!(
+        out.contains("line 1: setBadness('first-check', 0)"),
+        "the detail names the first occurrence: {out}"
+    );
+    assert!(
+        out.contains("line 2: setBadness('second-check', 10)"),
+        "the detail names the second occurrence: {out}"
+    );
+}
+
+/// `--ignore-unused-rpmlintrc` suppresses the unused-filter audit,
+/// never the `setBadness` report.
+#[test]
+fn setbadness_report_fires_regardless_of_ignore_unused_rpmlintrc() {
+    let log = Arc::new(Mutex::new(Log::default()));
+    let (mut lint, make_checks) = recorder_lint(
+        &log,
+        config_with_rpmlintrc_text(
+            "addFilter('never-matches-anything')\nsetBadness('some-check', 0)\n",
+        ),
+    );
+    lint.set_audit_rpmlintrc(false);
+    lint.check_batch(tasks(1), 1, &make_checks, true);
+    lint.report_rpmlintrc_setbadness();
+    lint.audit_unused_filters();
+    let out = lint.render_report("text", "rpmlint", "2.10.0", 1, false, 0.1);
+    assert!(
+        out.contains("W: rpmlintrc-uses-setbadness"),
+        "the setBadness report fires under the flag: {out}"
+    );
+    assert!(
+        !out.contains("unused-rpmlintrc-filter"),
+        "the audit stays suppressed under the flag: {out}"
+    );
+}
+
+/// Comment lines mentioning `setBadness` and `addFilter` lines record
+/// no occurrence, so the report stays quiet.
+#[test]
+fn setbadness_report_is_quiet_on_comments_and_addfilter() {
+    let log = Arc::new(Mutex::new(Log::default()));
+    let (mut lint, make_checks) = recorder_lint(
+        &log,
+        config_with_rpmlintrc_text(
+            "# setBadness('x', 0) was removed\n  # setBadness again\naddFilter('some-check')\n",
+        ),
+    );
+    lint.check_batch(tasks(1), 1, &make_checks, true);
+    lint.report_rpmlintrc_setbadness();
+    lint.audit_unused_filters();
+    let out = lint.render_report("text", "rpmlint", "2.10.0", 1, false, 0.1);
+    assert!(
+        !out.contains("rpmlintrc-uses-setbadness"),
+        "no occurrence was recorded: {out}"
+    );
+}
+
 /// `Pkg.timers` reaches the duration map the `-t` report reads.
 #[test]
 fn package_phase_timers_reach_the_time_report() {

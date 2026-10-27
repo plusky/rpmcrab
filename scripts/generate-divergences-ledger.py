@@ -68,6 +68,7 @@ RUN_TOPICS = frozenset({
     "pkg-layer",
     "report",
     "rpmlintrc-discovery",
+    "rpmlintrc-uses-setbadness",
     "session-header",
     "time-report",
     "unused-rpmlintrc-filter",

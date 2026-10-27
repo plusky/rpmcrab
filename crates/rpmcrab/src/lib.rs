@@ -752,6 +752,12 @@ pub fn run() -> ExitCode {
         warn!(color, "{fatal}");
     }
 
+    // The `setBadness` occurrences recorded at rpmlintrc load are
+    // reported once, after all batches, on the last processed package.
+    // The report is not gated by `--ignore-unused-rpmlintrc`: that flag
+    // suppresses only the unused-filter audit below.
+    lint.report_rpmlintrc_setbadness();
+
     // The unused-rpmlintrc-filter audit runs once, after all batches, on the
     // last processed package.
     lint.audit_unused_filters();

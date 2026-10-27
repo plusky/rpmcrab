@@ -6,3 +6,9 @@ inconsistent-file-extension="""
 The file name extension indicates a different compression format than
 what is actually used (as checked by file(1)).
 """
+rpmlintrc-uses-setbadness="""
+An rpmlintrc checked with this package contains a setBadness line.
+setBadness does not adjust finding levels in rpmcrab, and Factory
+submissions cannot use it: suppress the finding it names with
+addFilter instead.
+"""

@@ -285,6 +285,7 @@ read-error = W
 readelf-failed = E
 rpath-in-buildconfig = E
 rpm-buildroot-usage = E
+rpmlintrc-uses-setbadness = W
 script-without-shebang = E
 scriptlet-service-restart = W
 scriptlet-writes-outside-snapshot = W

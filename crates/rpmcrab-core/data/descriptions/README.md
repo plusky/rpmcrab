@@ -124,7 +124,10 @@ Provenance, verified against the pinned reference (`84848c0`):
   `tests/parity/divergences.toml`.
 - `SourceCheck.toml` — the reference file, minus the
   `multiple-specfiles` entry dropped with the deliberately-removed
-  finding (issue #883). Ledgered in `tests/parity/divergences.toml`.
+  finding (issue #883), plus the port-only
+  `rpmlintrc-uses-setbadness` entry. The reference has no such
+  finding, so `--explain` would print `Unknown message` for it
+  there. Ledgered in `tests/parity/divergences.toml`.
 - `DBusPolicyCheck.toml` — the reference file, with the
   `dbus-parsing-exception` entry reworded (the port parses the policy
   natively; no Python exception exists). Ledgered in
