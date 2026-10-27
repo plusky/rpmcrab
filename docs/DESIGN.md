@@ -370,6 +370,7 @@ vendored scoring tables were dropped by #699.
 - The override rewrites the level only, in either direction.
 - `Filters` regexes and `--format json` see the overridden level: suppression matches on the post-override `level.letter()`, and JSON `level` is rendered from the rewritten finding.
 - Checks emit finding tags ad hoc, so a name that never matches an emitted finding is accepted at load and warned on stderr after the run — the typo signal. A non-table `SeverityOverrides` value is a fatal configuration error, like every other table key.
+One mechanism sits after even the override: the build-env severity cap (§5), which no promotion or override can raise back to `E`.
 
 ### 4.10 CLI flags
 
@@ -521,6 +522,20 @@ plus, where one exists, a linked upstream issue.
   the finding's tag, and an unknown class name is a configuration error at
   Filter construction. The reference compiles every `Filters` string as a
   plain regex. Recorded in `tests/parity/divergences.toml`.
+
+- **The build-env severity cap.** A binary package whose own header
+  requires `this-is-only-for-build-envs` — the SUSE marker for packages
+  that exist only inside OBS build environments (the `-mini` flavours,
+  bootstrap/stage1 helpers, `rpmlint-mini`); nothing provides the name,
+  so such a package cannot be installed on a real system — has every
+  finding capped at `W`: all findings still fire and print, but none
+  can fail the run (exit 64 is driven by printed errors, and a capped
+  package prints none). The cap sits in `Filter::add_info` after
+  scoring, strict promotion and `[SeverityOverrides]`; `W` and `I`
+  findings are byte-identical, and findings not tied to a binary
+  package's header (spec inputs, cross-package `after_checks`) are
+  unaffected. The reference has no marker semantics and reports the
+  same findings at `E`. Recorded in `tests/parity/divergences.toml`.
 
 - **The defect-pattern class** (issue #959). A finding tag whose pattern
   is a decidable defect pattern with a recorded defect history is

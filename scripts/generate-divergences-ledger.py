@@ -55,6 +55,7 @@ RUN_TOPICS = frozenset({
     "after_checks",
     "all",
     "argument-globbing",
+    "build-env-severity-cap",
     "check-error-handling",
     "cli",
     "config",

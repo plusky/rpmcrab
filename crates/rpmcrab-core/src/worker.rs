@@ -241,6 +241,14 @@ impl<'a> Worker<'a> {
             }
         }
 
+        // A build-env-only package's findings are capped at W in the
+        // filter (see `Filter::set_build_env_only`). The flag is set
+        // here, per package, because the filter is fresh per task; a
+        // spec input has no binary header to carry the marker.
+        if let Package::Rpm(pkg) = &package {
+            filter.set_build_env_only(pkg.is_build_env_only());
+        }
+
         // The check dispatch runs inside `pkg::guarded`, so a librpm decoder
         // panic becomes a fatal read error instead of aborting the run.
         let checked = crate::pkg::guarded(|| {
@@ -587,6 +595,161 @@ mod tests {
             .map(|i| dir.path().join(format!("t{i}.spec")).display().to_string())
             .collect();
         assert_eq!(order, expected, "results not in task order");
+    }
+
+    /// One finding per level through the shared `add_info` funnel, for
+    /// whatever binary package it is handed: the probe proves the
+    /// build-env cap lives in the emission layer, not in any check.
+    struct LevelProbe;
+
+    impl Check for LevelProbe {
+        fn name(&self) -> &'static str {
+            "LevelProbe"
+        }
+        fn check(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+            use crate::level::Level;
+            crate::check::add_info(out, Level::Error, pkg, "cap-probe-error", &[]);
+            crate::check::add_info(out, Level::Warning, pkg, "cap-probe-warning", &[]);
+            crate::check::add_info(out, Level::Info, pkg, "cap-probe-info", &[]);
+        }
+    }
+
+    fn buildenv_fixture(name: &str) -> Task {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../tests/parity/pkg/inputs/{name}"));
+        Task::File(path)
+    }
+
+    /// A rendered line without its `name.arch:` prefix, so lines from
+    /// different fixture packages compare on level + tag alone.
+    fn line_tail(line: &str) -> &str {
+        line.split_once(": ").map(|(_, tail)| tail).unwrap_or(line)
+    }
+
+    fn line_tails(f: &Filter) -> Vec<&str> {
+        f.results()
+            .iter()
+            .map(|(_, line)| line_tail(line))
+            .collect()
+    }
+
+    /// The marked fixture's probe error is capped at W; its W and I
+    /// pass through byte-identical; the unmarked sibling in the same
+    /// batch keeps its error. Nothing is swallowed on either side.
+    #[test]
+    fn build_env_cap_demotes_probe_errors_and_passes_the_rest_through() {
+        use crate::level::Level;
+        let config = Config::default();
+        let results = run_tasks(
+            vec![
+                buildenv_fixture("buildenv-cap-marked-1.0-1.noarch.rpm"),
+                buildenv_fixture("buildenv-cap-unmarked-1.0-1.noarch.rpm"),
+            ],
+            2,
+            &config,
+            &|| vec![Box::new(LevelProbe) as Box<dyn Check>],
+            Color::for_tty(false),
+        );
+        let marked = &results[0].filter;
+        let unmarked = &results[1].filter;
+        assert_eq!(marked.results().len(), 3, "nothing swallowed (marked)");
+        assert_eq!(unmarked.results().len(), 3, "nothing swallowed (control)");
+        assert_eq!(
+            marked.result_levels(),
+            [Level::Warning, Level::Warning, Level::Info]
+        );
+        assert_eq!(
+            unmarked.result_levels(),
+            [Level::Error, Level::Warning, Level::Info]
+        );
+        assert_eq!(
+            line_tails(marked),
+            [
+                "W: cap-probe-error",
+                "W: cap-probe-warning",
+                "I: cap-probe-info"
+            ]
+        );
+        assert_eq!(
+            line_tails(unmarked),
+            [
+                "E: cap-probe-error",
+                "W: cap-probe-warning",
+                "I: cap-probe-info"
+            ]
+        );
+        assert_eq!(marked.printed(Level::Error), 0);
+        assert_eq!(unmarked.printed(Level::Error), 1);
+    }
+
+    /// Near misses stay at native levels: the marker as a Provides does
+    /// not block installation, and a misspelled Requires is not the
+    /// marker.
+    #[test]
+    fn build_env_cap_ignores_provides_and_misspelled_markers() {
+        use crate::level::Level;
+        let config = Config::default();
+        let results = run_tasks(
+            vec![
+                buildenv_fixture("buildenv-cap-provides-1.0-1.noarch.rpm"),
+                buildenv_fixture("buildenv-cap-typo-1.0-1.noarch.rpm"),
+            ],
+            2,
+            &config,
+            &|| vec![Box::new(LevelProbe) as Box<dyn Check>],
+            Color::for_tty(false),
+        );
+        for result in &results {
+            assert_eq!(
+                result.filter.result_levels(),
+                [Level::Error, Level::Warning, Level::Info],
+                "{}",
+                result.display
+            );
+        }
+    }
+
+    /// The cap covers real checks, not just the probe: the marked
+    /// fixture earns `htaccess-file` (FilesCheck) and `invalid-license`
+    /// (TagsCheck) at E natively -- two unrelated checks -- and both
+    /// print at W, while the unmarked control keeps both at E.
+    #[test]
+    fn build_env_cap_covers_unrelated_real_checks() {
+        use crate::level::Level;
+        let config = Config::default();
+        let make = || {
+            vec![
+                crate::check::build("FilesCheck", &config).expect("FilesCheck builds"),
+                crate::check::build("TagsCheck", &config).expect("TagsCheck builds"),
+            ]
+        };
+        let results = run_tasks(
+            vec![
+                buildenv_fixture("buildenv-cap-marked-1.0-1.noarch.rpm"),
+                buildenv_fixture("buildenv-cap-unmarked-1.0-1.noarch.rpm"),
+            ],
+            1,
+            &config,
+            &make,
+            Color::for_tty(false),
+        );
+        let level_of = |f: &Filter, tag: &str| {
+            f.findings()
+                .iter()
+                .find(|x| x.check == tag)
+                .map(|x| x.level)
+        };
+        let marked = &results[0].filter;
+        assert_eq!(level_of(marked, "htaccess-file"), Some(Level::Warning));
+        assert_eq!(level_of(marked, "invalid-license"), Some(Level::Warning));
+        assert_eq!(
+            marked.printed(Level::Error),
+            0,
+            "a marked package can never error"
+        );
+        let unmarked = &results[1].filter;
+        assert_eq!(level_of(unmarked, "htaccess-file"), Some(Level::Error));
+        assert_eq!(level_of(unmarked, "invalid-license"), Some(Level::Error));
     }
 
     /// `jobs` is clamped to the task count and the machine's parallelism:

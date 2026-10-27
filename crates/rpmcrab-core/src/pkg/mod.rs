@@ -347,6 +347,13 @@ fn read_header(path: &Path) -> Result<PackageHeader, PkgError> {
     })
 }
 
+/// The build-env-only marker: a `Requires` on this exact name. SUSE
+/// specs put it on packages that exist only inside OBS build
+/// environments (the `-mini` flavours, bootstrap/stage1 helpers,
+/// rpmlint-mini): nothing provides the name, so the package cannot be
+/// installed on a real system.
+const BUILD_ENV_ONLY_REQUIRE: &str = "this-is-only-for-build-envs";
+
 impl Pkg {
     /// Open a `.rpm` file, unpack its payload into a tempdir under
     /// `extract_dir`, and build the package. Signature checks are skipped, as
@@ -583,6 +590,17 @@ impl Pkg {
             timers,
             header,
         }
+    }
+
+    /// Whether this package is build-env-only: its own header requires
+    /// the [`BUILD_ENV_ONLY_REQUIRE`] marker, so it can never be
+    /// installed outside an OBS build environment. Acquiring the marker
+    /// is self-penalising — the same line is the install block — so the
+    /// class is exactly the packages whose own spec author marked them
+    /// as build-environment hacks. The emission layer caps such a
+    /// package's findings at W (see `crate::filter::Filter`).
+    pub fn is_build_env_only(&self) -> bool {
+        self.req_names.iter().any(|n| n == BUILD_ENV_ONLY_REQUIRE)
     }
 
     /// The directory reads resolve against: the extraction directory, the
@@ -1238,6 +1256,35 @@ mod tests {
         let re = fancy_regex::Regex::new(".").expect("static regex");
         assert_eq!(pkg.grep(&re, "/etc/hosts"), None);
     }
+    /// The build-env-only predicate reads the package's OWN requires:
+    /// the exact marker counts; a Provides of the name, and a
+    /// misspelling, do not.
+    #[test]
+    fn build_env_only_reads_the_own_requires() {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture");
+        assert!(!pkg.is_build_env_only(), "unmarked fixture");
+        pkg.provides.push(DepInfo {
+            name: BUILD_ENV_ONLY_REQUIRE.to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        });
+        assert!(
+            !pkg.is_build_env_only(),
+            "a Provides of the marker is not the marker"
+        );
+        pkg.req_names.push("this-is-only-for-build-env".to_string());
+        assert!(
+            !pkg.is_build_env_only(),
+            "a misspelled marker is not the marker"
+        );
+        pkg.req_names.push(BUILD_ENV_ONLY_REQUIRE.to_string());
+        assert!(pkg.is_build_env_only());
+    }
+
     /// `tag_i18n_str` over a real two-locale header (follow-up to #248).
     ///
     /// The fixture RPM carries SUMMARY/DESCRIPTION in C and de, so

@@ -21,6 +21,11 @@ use crate::level::Level;
 /// renders the sorted result block.
 pub struct Filter {
     strict: bool,
+    /// The package this filter accumulates for is build-env-only
+    /// (`Pkg::is_build_env_only`): its findings are capped at W in
+    /// [`Filter::add_info`]. Set by the worker per package; a filter is
+    /// fresh per package, so the flag cannot leak across packages.
+    build_env_only: bool,
     scoring: HashMap<String, i64>,
     severity_overrides: HashMap<String, Level>,
     filter_titles: HashSet<String>,
@@ -205,6 +210,7 @@ impl Filter {
         }
         Ok(Self {
             strict: config.strict,
+            build_env_only: false,
             scoring,
             severity_overrides: config.severity_overrides.clone(),
             filter_titles: config.filter_titles.iter().cloned().collect(),
@@ -225,6 +231,16 @@ impl Filter {
             printed_warnings: 0,
             printed_infos: 0,
         })
+    }
+
+    /// Mark the package this filter accumulates for as build-env-only
+    /// (its own header carries the `this-is-only-for-build-envs`
+    /// marker). Such a package's findings are capped at W in
+    /// [`Filter::add_info`]: everything still fires and prints, but
+    /// nothing reaches Error, so the package can never fail a build —
+    /// it cannot be installed on a real system anyway.
+    pub fn set_build_env_only(&mut self, build_env_only: bool) {
+        self.build_env_only = build_env_only;
     }
 
     /// The exit-code-relevant counters.
@@ -278,6 +294,17 @@ impl Filter {
         if let Some(level) = self.severity_overrides.get(&finding.check) {
             self.used_overrides.insert(finding.check.clone());
             finding.level = *level;
+        }
+
+        // The build-env severity cap (Tom's ruling, 2026-10-27): a
+        // build-env-only package can never emit at Error. Applied last
+        // -- after Scoring, strict promotion and [SeverityOverrides] --
+        // so no promotion can raise a marked package's finding back to
+        // E; the packager still sees every finding, at W. Nothing is
+        // suppressed: the finding proceeds to the suppression matching
+        // below exactly like a native warning.
+        if self.build_env_only && finding.level == Level::Error {
+            finding.level = Level::Warning;
         }
 
         // Suppression at emit time, on the de-coloured match string.
@@ -512,6 +539,60 @@ mod tests {
 
     fn cfg() -> Config {
         Config::default()
+    }
+
+    #[test]
+    fn build_env_only_package_never_emits_at_error() {
+        let mut f = Filter::new(&cfg(), Color::for_tty(false)).unwrap();
+        f.set_build_env_only(true);
+        f.add_info(finding("some-error", Level::Error));
+        f.add_info(finding("some-warning", Level::Warning));
+        f.add_info(finding("some-info", Level::Info));
+        // Nothing is swallowed: all three findings are retained, the
+        // error is a warning in every rendered form, W and I pass
+        // through byte-identical.
+        assert_eq!(f.results().len(), 3);
+        assert_eq!(
+            f.result_levels(),
+            [Level::Warning, Level::Warning, Level::Info]
+        );
+        assert_eq!(f.printed(Level::Error), 0);
+        assert_eq!(f.printed(Level::Warning), 2);
+        assert_eq!(f.printed(Level::Info), 1);
+        assert_eq!(f.results()[0].1, "pkg.src: W: some-error");
+        assert_eq!(f.results()[1].1, "pkg.src: W: some-warning");
+        assert_eq!(f.results()[2].1, "pkg.src: I: some-info");
+        assert_eq!(f.findings()[0].json_value()["level"], "W");
+    }
+
+    #[test]
+    fn build_env_cap_applies_after_severity_overrides_and_strict() {
+        // A [SeverityOverrides] entry raising a warning to E is still
+        // capped: the cap is the final word on the level.
+        let mut c = cfg();
+        c.severity_overrides
+            .insert("some-warning".to_string(), Level::Error);
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.set_build_env_only(true);
+        f.add_info(finding("some-warning", Level::Warning));
+        assert_eq!(f.result_levels(), [Level::Warning]);
+        assert_eq!(f.printed(Level::Error), 0);
+
+        // Same under strict promotion.
+        let mut c = cfg();
+        c.strict = true;
+        let mut f = Filter::new(&c, Color::for_tty(false)).unwrap();
+        f.set_build_env_only(true);
+        f.add_info(finding("some-info", Level::Info));
+        assert_eq!(f.result_levels(), [Level::Warning]);
+    }
+
+    #[test]
+    fn build_env_cap_is_off_by_default() {
+        let mut f = Filter::new(&cfg(), Color::for_tty(false)).unwrap();
+        f.add_info(finding("some-error", Level::Error));
+        assert_eq!(f.result_levels(), [Level::Error]);
+        assert_eq!(f.printed(Level::Error), 1);
     }
 
     #[test]
