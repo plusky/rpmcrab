@@ -5224,7 +5224,7 @@ impl FilesCheck {
                 // but it does not fail the build. A plain %config
                 // executable carries no such signal and keeps the
                 // reference's error.
-                let level = if pkg.noreplace_files.iter().any(|c| c == fname) {
+                let level = if pkgfile.is_noreplace() {
                     Level::Warning
                 } else {
                     Level::Error
@@ -6059,9 +6059,9 @@ mod tests {
             &["/etc/fcprobe/a.sh", "/etc/fcprobe/b.sh"],
             &["/etc/fcprobe/a.sh"],
         );
-        assert_eq!(levels.len(), 2, "both arms fire: {levels:?}");
-        assert!(levels.contains(&Level::Warning), "{levels:?}");
-        assert!(levels.contains(&Level::Error), "{levels:?}");
+        // Emission follows pkg.files order, so the pair is ordered:
+        // the noreplace arm warns first, the plain arm errors.
+        assert_eq!(levels, vec![Level::Warning, Level::Error]);
     }
 
     #[test]
