@@ -1,8 +1,11 @@
 //! `SourceCheck` — validate the files in a source package.
 //!
-//! Ported from `rpmlint/checks/SourceCheck.py`. Four findings:
-//! `inconsistent-file-extension`, `strange-permission`,
-//! `source-not-compressed` and `prebuilt-binary-in-sources` (warnings).
+//! Ported from `rpmlint/checks/SourceCheck.py`. Findings:
+//! `inconsistent-file-extension`, `strange-permission` and
+//! `source-not-compressed` (warnings), plus the rpmcrab-new archive
+//! content warnings `prebuilt-binary-in-sources`,
+//! `source-archive-contains-vcs-metadata` and
+//! `source-archive-contains-lfs-pointer`.
 //!
 //! `prebuilt-binary-in-sources` is rpmcrab-new (upstream rpmlint#4, still
 //! open): the reference never unpacks source archives.
@@ -201,13 +204,18 @@ impl SourceCheck {
         }
     }
 
-    /// `prebuilt-binary-in-sources` (issue #150, upstream rpmlint#4): scan
-    /// every file of the source package for prebuilt binaries — directly by
-    /// magic bytes, and inside source archives (tar, gzip/xz/zstd/bzip2-
-    /// compressed tar, zip), recursing into nested archives. The reference never
-    /// implemented this (the upstream issue is still open), so the finding
-    /// is rpmcrab-new and ledgered as `kind = "behaviour"`.
-    fn check_prebuilt_binaries(&self, pkg: &Pkg, out: &mut Filter) {
+    /// The archive-content findings, all rpmcrab-new and ledgered as
+    /// `kind = "behaviour"`: `prebuilt-binary-in-sources` (issue #150,
+    /// upstream rpmlint#4) scans every file of the source package for
+    /// prebuilt binaries — directly by magic bytes, and inside source
+    /// archives (tar, gzip/xz/zstd/bzip2-compressed tar, zip), recursing
+    /// into nested archives; `source-archive-contains-vcs-metadata` and
+    /// `source-archive-contains-lfs-pointer` (issue #1022) inspect only
+    /// the direct members of each source archive. The VCS finding is
+    /// scoped to sources without an upstream URL, so metadata shipped
+    /// inside an upstream tarball stays quiet.
+    fn check_archive_contents(&self, pkg: &Pkg, out: &mut Filter) {
+        let url_sources = source_url_files(pkg);
         for f in &pkg.files {
             let size = std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0);
             if size > prebuilt::MAX_ARCHIVE_BYTES as u64 {
@@ -228,8 +236,94 @@ impl SourceCheck {
                     &[&path, kind.as_str()],
                 );
             }
+            let members = prebuilt::top_level_members(&data);
+            if !url_sources.contains(&f.name) {
+                for root in prebuilt::vcs_roots(&members) {
+                    let entries = format!("{} entries", root.entries);
+                    let bytes = format!("{} bytes", root.bytes);
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "source-archive-contains-vcs-metadata",
+                        &[&f.name, &root.root, &entries, &bytes],
+                    );
+                }
+            }
+            for member in prebuilt::lfs_pointers(&members) {
+                let path = format!("{}: {}", f.name, member);
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "source-archive-contains-lfs-pointer",
+                    &[&path],
+                );
+            }
         }
     }
+}
+
+/// The source files whose spec declaration carries an upstream URL,
+/// judged from librpm's parsed source list: the expanded full path of
+/// a URL source is the URL itself, while a bare filename expands to a
+/// path under `_sourcedir`. The header-named spec is tried first, then
+/// the remaining payload specs in file order; the first spec that
+/// parses decides. An empty set — no payload spec, or none that
+/// parses — scopes every source as URL-less.
+fn source_url_files(pkg: &Pkg) -> std::collections::HashSet<String> {
+    use librpm::build::SpecFlags;
+
+    let header_spec = format!("{}.spec", pkg.name);
+    let mut specs: Vec<&crate::pkg::pkgfile::PkgFile> = pkg
+        .files
+        .iter()
+        .filter(|f| f.name.ends_with(".spec"))
+        .collect();
+    specs.sort_by_key(|f| f.name != header_spec);
+    for spec in specs {
+        let _ = crate::pkg::init();
+        // The define, the parse, the source iteration and the parsed
+        // spec's drop all touch process-global librpm state, so the
+        // macro lock is held for the whole sequence.
+        let _macro_guard = crate::pkg::global_macro_lock();
+        let macros = librpm::macro_context::MacroContext::default();
+        let dir = std::path::Path::new(&spec.path)
+            .parent()
+            .map(|d| d.to_string_lossy().into_owned())
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| ".".to_string());
+        let _ = macros.define(&format!("_sourcedir {dir}"), 0);
+        let parsed =
+            librpm::build::Spec::parse(&spec.path, SpecFlags::ANYARCH | SpecFlags::FORCE, None);
+        let _ = macros.pop("_sourcedir");
+        let Some(parsed) = parsed else { continue };
+        let mut url_files = std::collections::HashSet::new();
+        for src in parsed.sources() {
+            if src.is_source() && has_url_scheme(src.full_path()) {
+                url_files.insert(src.filename().to_string());
+            }
+        }
+        return url_files;
+    }
+    std::collections::HashSet::new()
+}
+
+/// Whether `s` starts with a URI scheme (`scheme://`): the scheme is
+/// an ASCII letter followed by ASCII alphanumerics, `+`, `-` or `.`.
+fn has_url_scheme(s: &str) -> bool {
+    let Some(idx) = s.find("://") else {
+        return false;
+    };
+    let scheme = &s[..idx];
+    !scheme.is_empty()
+        && scheme
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 /// Prebuilt-binary detection inside source archives (issue #150).
@@ -360,7 +454,7 @@ mod prebuilt {
     }
 
     fn walk_tar(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<(BinaryKind, String)>) {
-        for (name, off, len) in read_tar(data) {
+        for (name, off, len, _size) in read_tar(data) {
             let entry = &data[off..off + len];
             inspect_entry(&name, entry, &format!("{ctx}: {name}"), depth, hits);
         }
@@ -399,6 +493,198 @@ mod prebuilt {
             }
             inspect_entry(&name, &bytes, &format!("{ctx}: {name}"), depth, hits);
         }
+    }
+
+    /// One direct member of a source archive. `head` carries the
+    /// member's full bytes when it is at most 1023 bytes long (the
+    /// git-lfs pointer size arm), and is empty for larger members.
+    pub struct TopLevelMember {
+        pub name: String,
+        pub size: u64,
+        pub head: Vec<u8>,
+    }
+
+    /// The direct members of the archive in `data` (depth 1 only:
+    /// nested archives appear as opaque members and are not opened).
+    /// A compressed stream that does not hold a tarball is a single
+    /// file, not an archive, and yields no members.
+    pub fn top_level_members(data: &[u8]) -> Vec<TopLevelMember> {
+        if data.starts_with(b"\x1f\x8b") {
+            decompress_gzip(data)
+                .map(|d| tar_members(&d))
+                .unwrap_or_default()
+        } else if data.starts_with(b"\xfd7zXZ\x00") {
+            decompress_xz(data)
+                .map(|d| tar_members(&d))
+                .unwrap_or_default()
+        } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
+            decompress_zstd(data)
+                .map(|d| tar_members(&d))
+                .unwrap_or_default()
+        } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
+            decompress_bzip2(data)
+                .map(|d| tar_members(&d))
+                .unwrap_or_default()
+        } else if data.starts_with(b"PK\x03\x04") {
+            zip_members(data)
+        } else if is_tar(data) {
+            tar_members(data)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn tar_members(data: &[u8]) -> Vec<TopLevelMember> {
+        if !is_tar(data) {
+            return Vec::new();
+        }
+        read_tar(data)
+            .into_iter()
+            .map(|(name, off, len, size)| TopLevelMember {
+                name: normalize_member_name(&name),
+                size,
+                head: if size <= 1023 {
+                    data[off..off + len].to_vec()
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect()
+    }
+
+    fn zip_members(data: &[u8]) -> Vec<TopLevelMember> {
+        let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(data)) {
+            Ok(a) => a,
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for i in 0..archive.len() {
+            let entry = match archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.is_file() {
+                continue;
+            }
+            let name = match entry.name() {
+                Ok(name) => normalize_member_name(&name),
+                Err(_) => continue,
+            };
+            let size = entry.size();
+            let head = if size <= 1023 {
+                let mut bytes = Vec::new();
+                if entry.take(1024).read_to_end(&mut bytes).is_err() {
+                    continue;
+                }
+                bytes
+            } else {
+                Vec::new()
+            };
+            out.push(TopLevelMember { name, size, head });
+        }
+        out
+    }
+
+    /// Member names are matched and reported without leading `./` or
+    /// `/` segments.
+    fn normalize_member_name(name: &str) -> String {
+        let mut s = name;
+        loop {
+            if let Some(rest) = s.strip_prefix("./") {
+                s = rest;
+            } else if let Some(rest) = s.strip_prefix('/') {
+                s = rest;
+            } else {
+                break;
+            }
+        }
+        s.to_string()
+    }
+
+    /// A version-control metadata tree found among the members.
+    pub struct VcsRoot {
+        pub root: String,
+        pub entries: usize,
+        pub bytes: u64,
+    }
+
+    /// Group the members matching the VCS predicate by metadata
+    /// root, counting entries and bytes per root.
+    pub fn vcs_roots(members: &[TopLevelMember]) -> Vec<VcsRoot> {
+        let mut by_root: std::collections::BTreeMap<String, (usize, u64)> =
+            std::collections::BTreeMap::new();
+        for m in members {
+            if let Some(root) = vcs_root(&m.name) {
+                let e = by_root.entry(root).or_default();
+                e.0 += 1;
+                e.1 += m.size;
+            }
+        }
+        by_root
+            .into_iter()
+            .map(|(root, (entries, bytes))| VcsRoot {
+                root,
+                entries,
+                bytes,
+            })
+            .collect()
+    }
+
+    /// The metadata root a member belongs to, if it matches the
+    /// predicate: with `/` prefixed, the name contains a
+    /// `.(bzr|git|hg|svn)/` tree component, or ends with a file
+    /// directly inside a `CVS` directory. The `,v` and `RCS/` arms of
+    /// the file-list pattern are out: a CVS repository fixture's `,v`
+    /// files are content, not a metadata tree. Working-tree dotfiles
+    /// (`.gitignore`, `.gitmodules`, `.github/`) and a `sub/.git`
+    /// gitlink file do not match: the tree component must be a
+    /// directory.
+    fn vcs_root(name: &str) -> Option<String> {
+        let prefixed = format!("/{name}");
+        let mut best: Option<(usize, String)> = None;
+        for kind in [".bzr", ".git", ".hg", ".svn"] {
+            let needle = format!("/{kind}/");
+            if let Some(idx) = prefixed.find(&needle) {
+                let root = prefixed[1..idx + kind.len() + 1].to_string();
+                if best.as_ref().is_none_or(|(i, _)| idx < *i) {
+                    best = Some((idx, root));
+                }
+            }
+        }
+        if let Some(idx) = prefixed.rfind("/CVS/") {
+            let rest = &prefixed[idx + 5..];
+            if !rest.is_empty() && !rest.contains('/') {
+                let root = prefixed[1..idx + 4].to_string();
+                if best.as_ref().is_none_or(|(i, _)| idx < *i) {
+                    best = Some((idx, root));
+                }
+            }
+        }
+        best.map(|(_, root)| root)
+    }
+
+    /// The names of members holding a git-lfs pointer stub: a regular
+    /// member of 1-1023 bytes that starts with the pointer version
+    /// line (the current git-lfs URL or the legacy hawser one) and
+    /// carries an `oid sha256:` line. A document merely quoting the
+    /// version line after offset 0 is not a pointer.
+    pub fn lfs_pointers(members: &[TopLevelMember]) -> Vec<String> {
+        members
+            .iter()
+            .filter(|m| {
+                m.size >= 1
+                    && m.size <= 1023
+                    && (m
+                        .head
+                        .starts_with(b"version https://git-lfs.github.com/spec/v1\n")
+                        || m.head
+                            .starts_with(b"version https://hawser.github.com/spec/v1\n"))
+                    && m.head
+                        .split(|&b| b == b'\n')
+                        .any(|line| line.starts_with(b"oid sha256:"))
+            })
+            .map(|m| m.name.clone())
+            .collect()
     }
 
     /// Capped decompression: one byte past the cap means "too big".
@@ -473,7 +759,7 @@ mod prebuilt {
     /// symlinks and pax headers with their data; stops at the first
     /// corrupt header or the end-of-archive zero blocks. Entry sizes are
     /// capped — oversized entries are skipped, not read.
-    fn read_tar(data: &[u8]) -> Vec<(String, usize, usize)> {
+    fn read_tar(data: &[u8]) -> Vec<(String, usize, usize, u64)> {
         let mut out = Vec::new();
         let mut pos = 0;
         let mut long_name: Option<String> = None;
@@ -520,7 +806,7 @@ mod prebuilt {
                 };
                 let len = (size as usize).min(MAX_ENTRY_BYTES);
                 if size <= MAX_ENTRY_BYTES as u64 && pos + len <= data.len() {
-                    out.push((name, pos, len));
+                    out.push((name, pos, len, size));
                 }
             } else {
                 // Directories, symlinks, pax headers: a pending long name
@@ -759,7 +1045,7 @@ impl Check for SourceCheck {
             }
         }
         self.check_rpmlintrc_setbadness(pkg, config, out);
-        self.check_prebuilt_binaries(pkg, out);
+        self.check_archive_contents(pkg, out);
     }
 }
 
@@ -1637,5 +1923,176 @@ mod prebuilt_tests {
         super::prebuilt::inspect_entry("t.tar", &tar, "t.tar", 0, &mut hits);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert!(hits[0].1.ends_with("src/prebuilt.o"));
+    }
+
+    const LFS_POINTER: &[u8] =
+        b"version https://git-lfs.github.com/spec/v1\noid sha256:0123456789abcdef\nsize 4242\n";
+    const LFS_POINTER_LEGACY: &[u8] =
+        b"version https://hawser.github.com/spec/v1\noid sha256:0123456789abcdef\nsize 4242\n";
+
+    fn spec_with_source(source: &str) -> Vec<u8> {
+        format!(
+            "Name: prebuilt-test\nVersion: 1.0\nRelease: 1\nSummary: test package\nLicense: MIT\nSource0: {source}\n\n%description\ntest package\n"
+        )
+        .into_bytes()
+    }
+
+    fn archive_lines(findings: &[(String, String, Level)], tag: &str) -> Vec<String> {
+        let mut lines: Vec<String> = findings
+            .iter()
+            .filter(|(n, _, l)| n == tag && *l == Level::Warning)
+            .map(|(_, line, _)| line.clone())
+            .collect();
+        lines.sort();
+        lines
+    }
+
+    #[test]
+    fn vcs_metadata_in_url_less_source_fires_per_root() {
+        let tar = tarball(&[
+            ("pkg-1.0/.git/config", b"x"),
+            ("pkg-1.0/.git/objects/ab/cdef", b"yy"),
+            ("pkg-1.0/CVS/Entries", b"eee"),
+            ("pkg-1.0/src/main.c", b"int main(void) { return 0; }\n"),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", spec_with_source("vcs-1.0.tar.gz")),
+            ("vcs-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-vcs-metadata"),
+            [
+                "prebuilt-test.src: W: source-archive-contains-vcs-metadata \
+                 vcs-1.0.tar.gz pkg-1.0/.git 2 entries 3 bytes",
+                "prebuilt-test.src: W: source-archive-contains-vcs-metadata \
+                 vcs-1.0.tar.gz pkg-1.0/CVS 1 entries 3 bytes",
+            ]
+        );
+    }
+
+    #[test]
+    fn vcs_metadata_in_url_source_stays_quiet_but_lfs_fires() {
+        let tar = tarball(&[
+            ("pkg-1.0/.git/config", b"x"),
+            ("tests/a.test.xz", LFS_POINTER),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            (
+                "prebuilt-test.spec",
+                spec_with_source("https://example.com/vcs-1.0.tar.gz"),
+            ),
+            ("vcs-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(
+            archive_lines(&findings, "source-archive-contains-vcs-metadata").is_empty(),
+            "{findings:?}"
+        );
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-lfs-pointer"),
+            ["prebuilt-test.src: W: source-archive-contains-lfs-pointer \
+              vcs-1.0.tar.gz: tests/a.test.xz"]
+        );
+    }
+
+    #[test]
+    fn lfs_pointers_fire_and_lookalikes_stay_quiet() {
+        let mut big = LFS_POINTER.to_vec();
+        big.resize(1500, b' ');
+        let tar = tarball(&[
+            ("tests/a.test.xz", LFS_POINTER),
+            ("tests/b.test.xz", LFS_POINTER_LEGACY),
+            (
+                "docs/quote.txt",
+                b"see: version https://git-lfs.github.com/spec/v1\noid sha256:0123\n",
+            ),
+            ("tests/empty", b""),
+            ("tests/big.test.xz", &big),
+            (
+                "tests/no-oid",
+                b"version https://git-lfs.github.com/spec/v1\nsize 12\n",
+            ),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", spec_with_source("lfs-1.0.tar.gz")),
+            ("lfs-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-lfs-pointer"),
+            [
+                "prebuilt-test.src: W: source-archive-contains-lfs-pointer \
+                 lfs-1.0.tar.gz: tests/a.test.xz",
+                "prebuilt-test.src: W: source-archive-contains-lfs-pointer \
+                 lfs-1.0.tar.gz: tests/b.test.xz",
+            ]
+        );
+    }
+
+    #[test]
+    fn vcs_lookalikes_and_nested_archives_stay_quiet() {
+        let nested_zip = zip_bytes(&[("r/.git/config", b"x")]);
+        let nested_tar = tarball(&[(".git/config", b"x")]);
+        let tar = tarball(&[
+            ("pkg/.gitignore", b"x"),
+            ("pkg/.gitattributes", b"x"),
+            ("pkg/.gitmodules", b"x"),
+            ("pkg/.github/workflows/ci.yml", b"x"),
+            ("pkg/sub/.git", b"x"),
+            ("pkg/git/notes.txt", b"x"),
+            ("pkg/bare.git/config", b"x"),
+            ("pkg/CVS/Entries/Log", b"x"),
+            ("pkg/RCS/foo,v", b"x"),
+            ("pkg/nested.zip", &nested_zip),
+            ("pkg/nested.tar", &nested_tar),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", spec_with_source("near-1.0.tar.gz")),
+            ("near-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(
+            archive_lines(&findings, "source-archive-contains-vcs-metadata").is_empty(),
+            "{findings:?}"
+        );
+        assert!(
+            archive_lines(&findings, "source-archive-contains-lfs-pointer").is_empty(),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn vcs_metadata_in_zip_source_fires() {
+        let z = zip_bytes(&[("pkg/.svn/entries", b"svn"), ("pkg/readme", b"hi")]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", spec_with_source("vcs-1.0.zip")),
+            ("vcs-1.0.zip", z),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-vcs-metadata"),
+            [
+                "prebuilt-test.src: W: source-archive-contains-vcs-metadata \
+              vcs-1.0.zip pkg/.svn 1 entries 3 bytes"
+            ]
+        );
+    }
+
+    #[test]
+    fn top_level_member_predicates_pin() {
+        let tar = tarball(&[
+            ("a/.git/config", b"xx"),
+            ("a/CVS/Entries", b"e"),
+            ("a/.gitignore", b"i"),
+        ]);
+        let members = super::prebuilt::top_level_members(&tar);
+        let roots = super::prebuilt::vcs_roots(&members);
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].root, "a/.git");
+        assert_eq!((roots[0].entries, roots[0].bytes), (1, 2));
+        assert_eq!(roots[1].root, "a/CVS");
+        assert_eq!((roots[1].entries, roots[1].bytes), (1, 1));
+        assert!(super::prebuilt::lfs_pointers(&members).is_empty());
     }
 }

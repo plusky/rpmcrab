@@ -32,3 +32,19 @@ kind = "missing"
 reason = "Deliberate removal (issue #883): a source package carrying several spec files is valid; OBS builds the spec the package defines. rpmcrab does not emit it."
 since = "0.4.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/SourceCheck.py"
+
+[[divergence]]
+case = "global"
+check = "SourceCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1022): a new `source-archive-contains-vcs-metadata` warning fires when a direct member of a source archive belongs to a version-control metadata tree: a `.(bzr|git|hg|svn)` directory, or a file directly inside a `CVS` directory. One finding per metadata root, with the entry count and total bytes. It is scoped to sources the spec declares without an upstream URL (librpm's parsed source list), so metadata inside an upstream tarball stays quiet; the `,v` and `RCS/` shapes are not charged, since a CVS repository fixture's `,v` files are content. Nested archives are not opened. The frozen 2.10.0 reference has no such check."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1022"
+
+[[divergence]]
+case = "global"
+check = "SourceCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1022): a new `source-archive-contains-lfs-pointer` warning fires when a direct member of a source archive is a git-lfs pointer stub: a regular member of 1-1023 bytes that starts with the pointer version line (`version https://git-lfs.github.com/spec/v1`, or the legacy hawser URL) and carries an `oid sha256:` line. A document quoting the version line after offset 0 is not a pointer and stays quiet. Nested archives are not opened. The frozen 2.10.0 reference has no such check."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1022"
