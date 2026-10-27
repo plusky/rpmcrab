@@ -130,6 +130,24 @@ impl AlternativesCheck {
         link.contains('$')
     }
 
+    /// Whether the package actually registers an alternative with
+    /// update-alternatives: it ships an `/etc/alternatives` entry, or
+    /// its `%post` installs (or slaves) at least one link — the install
+    /// set computed by this check itself. A package whose scriptlets
+    /// only mention the tool to remove or inspect legacy registrations
+    /// (the post-libalternatives cleanup shape: `--remove`,
+    /// `--remove-all`, `--display`) registers nothing, so the
+    /// informational `package-supports-update-alternatives` marker
+    /// does not apply to it. The presence gate and every error finding
+    /// are unaffected: they still run for such packages.
+    fn registers_update_alternatives(
+        has_etc_alternatives: bool,
+        install: &[(String, String)],
+        slaves: &[(String, String)],
+    ) -> bool {
+        has_etc_alternatives || !install.is_empty() || !slaves.is_empty()
+    }
+
     /// Validate the `%post` phase. Returns the install binaries found.
     fn check_post_phase(lines: &[String]) -> Result<Vec<(String, String)>, &'static str> {
         if lines.is_empty() {
@@ -513,22 +531,27 @@ impl Check for AlternativesCheck {
         let post = pkg.tag_str(Tag::POSTIN).unwrap_or_default();
         let postun = pkg.tag_str(Tag::POSTUN).unwrap_or_default();
 
-        let has_ua = pkg
+        let has_etc_alternatives = pkg
             .files
             .iter()
-            .any(|f| f.name.starts_with("/etc/alternatives"))
+            .any(|f| f.name.starts_with("/etc/alternatives"));
+        let has_ua = has_etc_alternatives
             || post.contains("update-alternatives")
             || postun.contains("update-alternatives");
         if !has_ua {
             return;
         }
-        add_info(
-            out,
-            Level::Info,
-            pkg,
-            "package-supports-update-alternatives",
-            &[],
-        );
+        let post_lines = Self::normalize_script(&post);
+        let (install_binaries, slaves) = Self::find_binaries(&post_lines);
+        if Self::registers_update_alternatives(has_etc_alternatives, &install_binaries, &slaves) {
+            add_info(
+                out,
+                Level::Info,
+                pkg,
+                "package-supports-update-alternatives",
+                &[],
+            );
+        }
 
         if !pkg
             .prereq
@@ -544,7 +567,6 @@ impl Check for AlternativesCheck {
             );
         }
 
-        let post_lines = Self::normalize_script(&post);
         let install = match Self::check_post_phase(&post_lines) {
             Ok(install) => install,
             Err(finding) => {
@@ -681,6 +703,52 @@ mod tests {
             install,
             vec![("/usr/bin/$bin".to_string(), "$bin".to_string())]
         );
+        assert!(slaves.is_empty());
+    }
+
+    #[test]
+    fn supports_marker_needs_a_registration() {
+        let install = vec![("/usr/bin/foo".to_string(), "foo".to_string())];
+        let slaves = vec![("/usr/bin/bar".to_string(), "bar".to_string())];
+        // A shipped /etc/alternatives entry is a registration even
+        // when %post installs nothing (the sibling-split shape).
+        assert!(AlternativesCheck::registers_update_alternatives(
+            true,
+            &[],
+            &[]
+        ));
+        // An --install in %post registers; so does a lone --slave.
+        assert!(AlternativesCheck::registers_update_alternatives(
+            false,
+            &install,
+            &[]
+        ));
+        assert!(AlternativesCheck::registers_update_alternatives(
+            false,
+            &[],
+            &slaves
+        ));
+        // Scriptlet mentions that only remove or inspect legacy
+        // registrations register nothing: no marker.
+        assert!(!AlternativesCheck::registers_update_alternatives(
+            false,
+            &[],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn cleanup_only_post_install_set_is_empty() {
+        // The decidable core of the supports marker: the check's own
+        // parser finds no install or slave in a cleanup-only %post.
+        let lines = vec![
+            "if [ -x /usr/sbin/update-alternatives ]; then".to_string(),
+            "update-alternatives --display foo >/dev/null 2>&1 && update-alternatives --remove-all foo"
+                .to_string(),
+            "update-alternatives --remove foo /usr/bin/foo-1.0".to_string(),
+        ];
+        let (install, slaves) = AlternativesCheck::find_binaries(&lines);
+        assert!(install.is_empty());
         assert!(slaves.is_empty());
     }
 

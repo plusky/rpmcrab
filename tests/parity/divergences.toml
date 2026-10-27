@@ -99,6 +99,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "AlternativesCheck"
+kind = "behaviour"
+reason = "The `package-supports-update-alternatives` marker fires only when the package registers an alternative: it ships an /etc/alternatives entry, or its %post installs or slaves at least one link (the install set this check itself computes). The reference emits the marker on any presence signal, including packages whose scriptlets only remove or inspect legacy registrations left over from a libalternatives migration -- the java and nodejs families and the remove-only deregistration packages, 45 packages in the Tumbleweed corpus, register nothing with update-alternatives. The presence gate and all error findings for such packages are unchanged. Pinned by supports_marker_needs_a_registration and cleanup_only_post_install_set_is_empty in alternatives.rs and by the wave6 entry test alternatives_cleanup_only_has_no_supports_marker."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "AppDataCheck"
 kind = "behaviour"
 reason = "Also scans /usr/share/metainfo/; the reference (AppDataCheck.py) only matches /usr/share/appdata/, but metainfo/ is the current AppStream location, so files there would otherwise never be validated."
