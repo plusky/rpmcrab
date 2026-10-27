@@ -75,3 +75,11 @@ kind = "behaviour"
 reason = "The missing-lib decision also credits a regular ELF file that the check's ELF pass (over files whose name contains .so. or ends in .so) reads as carrying a DT_SONAME under a name the library-file test misses (a word-only version tail). The decision is taken after that pass; a file the pass cannot read counts as carrying no SONAME, and its readelf-failed finding is still emitted, after the missing-lib decision, in the order the two were emitted before. Measured over the Factory corpus (51,589 RPMs, pristine vs patched): the finding is unchanged at 8 -- the four packages the issue's census expected the credit to clear (libLimeSuite23_11-1, libcmark-gfm0_29_0_gfm_13, libcmark-gfm-extensions0_29_0_gfm_13, libSDL3_bgi-suse0) are already credited by the widened library-file test recorded in this file, so on the current corpus the SONAME credit is a unit-pinned guard for spellings that test cannot foresee."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1029"
+
+[[divergence]]
+case = "global"
+check = "shlib-policy-truncated-soname-path"
+kind = "behaviour"
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1028"
+reason = "rpmlint has no equivalent: a <stem>.so.<v> entry shipped beside an ELF whose SONAME is <stem>.so.<w> with w extending v, in a package whose name encodes the whole of w, is not reported. The next SONAME generation ships the same short path and the two co-installable packages conflict on it. Factory corpus (4,566 scheme-named packages): 15 findings in 13 packages, all upstream-created (8 symlinks, 7 regular files installed under the short name), matching the issue census."
