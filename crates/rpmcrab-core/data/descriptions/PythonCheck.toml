@@ -29,6 +29,35 @@ requirements declaration. Please verify that all dependencies are
 really needed.
 """
 
+python-unflavoured-require="""
+A requirement declared by the package's Python metadata is satisfied
+only by a bare "python-<name>" Require. That name is not tied to any
+Python flavour, so it does not by itself guarantee the module is
+installed for the interpreter this package targets. Require the
+flavour-specific name instead (for example
+"python3.13-<name>" or "python3.13dist(<name>)").
+"""
+
+python-dist-info-version-mismatch="""
+The Version in the package's own dist-info METADATA does not match
+the RPM package version. Python tooling (pip, importlib.metadata)
+reports the metadata version, so the disagreement breaks
+version-based dependency resolution and confuses debugging. Make
+them agree: stamp the real version into the metadata at build time
+(a dist-info left at 0.0.0 was never stamped at all), or correct the
+RPM version.
+"""
+
+python-require-floor-below-metadata="""
+The package's Python metadata declares a minimum version for this
+requirement, but the matching RPM Require carries a lower floor (or
+no version at all), so the RPM dependency can be satisfied by a
+version the metadata itself rejects. Raise the RPM Require floor to
+at least the version the metadata declares (regenerating the
+Requires with the current Python macros usually does this), or relax
+the metadata.
+"""
+
 python-pyc-multiple-versions="""
 There are .pyc files in the rpm that are from different Python
 interpreters. Please, verify that all files are needed for this package.
