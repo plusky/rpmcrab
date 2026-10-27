@@ -835,3 +835,19 @@ check = "tcl-extension-file"
 kind = "detail"
 reason = "The staged `--explain` text prescribed /usr/share/tcl as the home for Tcl extensions. That is only the script-only home: the distribution's tcl_pkgPath is /usr/lib64/tcl:/usr/share/tcl, extensions that load shared libraries live under /usr/lib64/tcl (expect, itk, sqlite3-tcl), and prescribing /usr/share/tcl for them would trade this finding for arch-dependent-file-in-usr-share. The text now prescribes /usr/lib64/tcl for extensions that load shared libraries and /usr/share/tcl for script-only extensions."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "udev-rule-world-writable-mode"
+kind = "behaviour"
+reason = "New crab-only Warning with no reference counterpart (issue #1023): a regular file under a udev/rules.d directory whose name ends in .rules is read as udev rules -- logical lines joined at a trailing backslash, comment lines skipped -- and each line carrying a MODE= or MODE:= assignment whose quoted octal value has the other-write bit fires once with the file and the line as detail. An exact KERNEL match against the shipped allowlist stays silent: the list holds the nine device nodes upstream systemd's 50-udev-default.rules makes 0666 by default (ptmx, tty, tun, fuse, vfio, vsock, kvm, vhost-vsock, vhost-net, the last three through DEV_KVM_MODE) and ships as check data with one provenance line per name; glob kernel matches still fire, and additions to the list need the security team's sign-off. RUN+= shell text (a chmod command is not a MODE assignment) and a uaccess tag without a MODE assignment stay silent. Corpus measurement (Factory corpus, 51,589 RPMs): 215 RPMs ship a matching rules file holding 152 world-writable MODE lines; the allowlist silences 19 (udev 9, udev-mini 9, qemu 1 -- its kvm line), the node-creator tag takes 2, and this tag fires 131 lines in 18 packages. Every firing line was classified: 8 lines are the still-open security-team audits libiio (boo#1202160) and sc-controller (boo#1274923), the fixed audit classes no longer fire (the VirtualBox vboxguest/vboxuser rules and the DRM render-node rules are not world-writable in the corpus), and the remaining 123 lines in 16 packages are vendor-scoped hardware-access rules -- USB vendor/product-scoped, per-vendor hidraw, or a named kernel-driver node (dlm-control, dlm-monitor, dlm_plock, hfi1, xillybus, iio) -- the population the security team's hand audit of the same shape produced. An independent census of the 152 lines reproduced the counts exactly. Warning, not Error: the firing population is the deliberate vendor-access shape whose per-package disposition belongs to package review."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1023"
+
+[[divergence]]
+case = "global"
+check = "udev-rule-world-writable-node-creator"
+kind = "behaviour"
+reason = "New crab-only Warning with no reference counterpart (issue #1023): on a world-writable MODE line (the udev-rule-world-writable-mode predicate) whose exact KERNEL match names uinput, uhid or cuse, this tag fires instead of the bare tag, one finding per line. The three are misc-device node creators: a world-writable node lets any local user register a device with the kernel -- the class of CVE-2016-1233, where /dev/uinput at 0666 lets an unprivileged user inject input events. The registry records the class gate as no-safe-use: no shipped default grants these nodes world access. Corpus measurement (Factory corpus, 51,589 RPMs; 215 ship a matching rules file): exactly 2 lines in 2 packages -- sc-controller (still-open audit boo#1274923) and ds4drv, whose line has no public bug. No world-writable userio or vhci line exists in the corpus; whether those two join the set is left to the evidence of a later corpus run."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1023"

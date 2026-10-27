@@ -1,0 +1,57 @@
+# The allowlist for the `udev-rule-world-writable-mode` finder (issue
+# #1023): the device-node names for which a world-writable MODE in a
+# shipped udev rule is an upstream systemd default, not a package
+# defect. The finder and its parsing live in src/checks/files.rs,
+# which embeds this file.
+#
+# The nine names are the MODE="0666" assignments of upstream systemd
+# v261 rules.d/50-udev-default.rules.in. Six are fixed in that file
+# (ptmx, tty, tun, fuse, vfio, vsock); the three KVM nodes (kvm,
+# vhost-vsock, vhost-net) take DEV_KVM_MODE, whose compiled default is
+# 0666. A rule is allowlisted only on an exact KERNEL=="<name>" match:
+# a glob or alternation in the KERNEL match (tun*, mem|kmem|port) is a
+# different rule shape and keeps firing.
+#
+# Governance: additions to this list need the security team's
+# sign-off, the model the tmpfiles, permissions and world-writable
+# whitelists use -- each name records its provenance below, and a name
+# is added only with the shipped upstream default that carries it.
+# boo#1217118 is the standing example: renderD* was in systemd's 0666
+# set and the security team removed it, so it is deliberately absent
+# here and fires.
+
+[[entry]]
+name = "ptmx"
+provenance = "systemd v261 50-udev-default.rules.in: SUBSYSTEM==\"tty\", KERNEL==\"ptmx\", GROUP=\"tty\", MODE=\"0666\" (fixed in the file)."
+
+[[entry]]
+name = "tty"
+provenance = "systemd v261 50-udev-default.rules.in: SUBSYSTEM==\"tty\", KERNEL==\"tty\", GROUP=\"tty\", MODE=\"0666\" (fixed in the file)."
+
+[[entry]]
+name = "tun"
+provenance = "systemd v261 50-udev-default.rules.in: KERNEL==\"tun\", MODE=\"0666\", OPTIONS+=\"static_node=net/tun\" (fixed in the file)."
+
+[[entry]]
+name = "fuse"
+provenance = "systemd v261 50-udev-default.rules.in: KERNEL==\"fuse\", MODE=\"0666\", OPTIONS+=\"static_node=fuse\" (fixed in the file)."
+
+[[entry]]
+name = "vfio"
+provenance = "systemd v261 50-udev-default.rules.in: KERNEL==\"vfio\", MODE=\"0666\", OPTIONS+=\"static_node=vfio/vfio\" (fixed in the file)."
+
+[[entry]]
+name = "vsock"
+provenance = "systemd v261 50-udev-default.rules.in: KERNEL==\"vsock\", MODE=\"0666\" (fixed in the file)."
+
+[[entry]]
+name = "kvm"
+provenance = "systemd v261 50-udev-default.rules.in: KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"<DEV_KVM_MODE>\", with DEV_KVM_MODE defaulting to 0666."
+
+[[entry]]
+name = "vhost-vsock"
+provenance = "systemd v261 50-udev-default.rules.in: KERNEL==\"vhost-vsock\", GROUP=\"kvm\", MODE=\"<DEV_KVM_MODE>\", with DEV_KVM_MODE defaulting to 0666."
+
+[[entry]]
+name = "vhost-net"
+provenance = "systemd v261 50-udev-default.rules.in: KERNEL==\"vhost-net\", GROUP=\"kvm\", MODE=\"<DEV_KVM_MODE>\", with DEV_KVM_MODE defaulting to 0666."

@@ -23,8 +23,9 @@ const REGISTRY_TOML: &str = include_str!("../data/defect-patterns.toml");
 /// its own that no filter or counter ever names.
 const KNOWN_CLASSES: &[&str] = &["defect-pattern"];
 
-/// The family a member belongs to: a dangerous-API / call pattern, or
-/// a mitigation-absence (hardening) pattern.
+/// The family a member belongs to: a decidable defect pattern in
+/// shipped artefacts (calls, file content), or a mitigation-absence
+/// (hardening) pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     Pattern,
@@ -277,6 +278,8 @@ mod tests {
                 "executable-stack",
                 "non-position-independent-executable",
                 "go-toolchain-outdated",
+                "udev-rule-world-writable-mode",
+                "udev-rule-world-writable-node-creator",
             ]
         );
     }
@@ -290,7 +293,7 @@ mod tests {
     #[test]
     fn class_members_come_in_registry_order() {
         let members = class_members("defect-pattern");
-        assert_eq!(members.len(), 19);
+        assert_eq!(members.len(), 21);
 
         assert_eq!(members[0].tag, "binary-or-shlib-calls-gethostbyname");
         assert!(class_members("no-such-class").is_empty());
@@ -315,6 +318,12 @@ mod tests {
         let go_toolchain = member("go-toolchain-outdated").unwrap();
         assert_eq!(go_toolchain.family, Family::Pattern);
         assert_eq!(go_toolchain.gate, Gate::None);
+        let udev_mode = member("udev-rule-world-writable-mode").unwrap();
+        assert_eq!(udev_mode.family, Family::Pattern);
+        assert_eq!(udev_mode.gate, Gate::None);
+        let udev_creator = member("udev-rule-world-writable-node-creator").unwrap();
+        assert_eq!(udev_creator.family, Family::Pattern);
+        assert_eq!(udev_creator.gate, Gate::NoSafeUse);
     }
 
     #[test]
