@@ -89,10 +89,14 @@ You must let rpm find the library dependencies by itself. Do not put
 unneeded explicit Requires: tags.
 """
 useless-provides="""
-This package provides multiple times the same capacity.
-Identical automated and manual provides exist, so the redundant manual
-provide is useless: the same provide name is listed more than once
-(e.g. 'foo' together with 'foo = 1.0').
+This package provides the same capacity more than once: the same provide
+name appears in both unversioned and versioned form (e.g. 'foo' together
+with 'foo = 1.0'), so one of the two forms is redundant. When both forms
+are produced by a dependency generator (e.g. a Perl module declared in
+several shipped files, carrying a version in one of them and none in
+another), the duplication is the generator's doing: the finding is a
+warning. When a hand-written provide duplicates the other form, the
+finding is an error: remove the redundant manual provide.
 """
 no-url-tag="""
 The URL tag is missing.

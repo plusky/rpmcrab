@@ -1542,7 +1542,10 @@ fn explain_known_id() {
 
 /// --explain for useless-provides: the staged description carries the
 /// upstream rpmlint#427 reword ahead of the reference (the reference
-/// versioned-and-unversioned claim is not always accurate).
+/// versioned-and-unversioned claim is not always accurate), extended by
+/// the 2026-10-27 reword: no claim that the redundant provide is manual
+/// (dependency-generator pairs have no manual provide), and the warning
+/// split for generator pairs is documented.
 #[test]
 fn explain_useless_provides_reworded() {
     let out = rpmcrab(&["-e", "useless-provides"]);
@@ -1551,10 +1554,14 @@ fn explain_useless_provides_reworded() {
     assert_eq!(
         stdout,
         "useless-provides:
-This package provides multiple times the same capacity. Identical automated
-and manual provides exist, so the redundant manual provide is useless: the
-same provide name is listed more than once (e.g. 'foo' together with 'foo =
-1.0').
+This package provides the same capacity more than once: the same provide name
+appears in both unversioned and versioned form (e.g. 'foo' together with 'foo
+= 1.0'), so one of the two forms is redundant. When both forms are produced by
+a dependency generator (e.g. a Perl module declared in several shipped files,
+carrying a version in one of them and none in another), the duplication is the
+generator's doing: the finding is a warning. When a hand-written provide
+duplicates the other form, the finding is an error: remove the redundant
+manual provide.
 
 
 ",

@@ -457,7 +457,7 @@ mod tests {
             ),
             (
                 "TagsCheck.toml",
-                "91f785d2f0c91a7e99419f9dcd8157696d8eeaa3274d9812280453f7af78b53c",
+                "35e8bd645a186ff92ec496f7651115fc6908a8e3b96efe99fa446564ecc1dbb3",
             ),
             (
                 "TmpFilesCheck.toml",
@@ -504,25 +504,36 @@ mod tests {
         }
     }
 
-    /// Upstream rpmlint#427: the reference useless-provides text claims
-    /// versioned and unversioned symbols are provided at once, which is not
-    /// always accurate (duplicate versioned provides trigger the check too).
-    /// The staged text is reworded ahead of the reference, per the
-    /// fix-in-port rule.
+    /// Upstream rpmlint#427: the staged text is reworded ahead of the
+    /// reference, per the fix-in-port rule, and scoped to what the check
+    /// actually fires on — a name in both unversioned and versioned form.
+    /// The 2026-10-27 reword (Tom's ruling) drops the earlier text's
+    /// claim that the redundant provide is manual: when both forms are
+    /// produced by a dependency generator no manual provide exists, and
+    /// the text now documents the warning split for those generator
+    /// pairs.
     #[test]
     fn useless_provides_description_is_reworded() {
         let descriptions = staged_descriptions();
         let detail = &descriptions["useless-provides"];
         assert_eq!(
             detail,
-            "This package provides multiple times the same capacity.\n\
-             Identical automated and manual provides exist, so the redundant manual\n\
-             provide is useless: the same provide name is listed more than once\n\
-             (e.g. 'foo' together with 'foo = 1.0').\n"
+            "This package provides the same capacity more than once: the same provide\n\
+             name appears in both unversioned and versioned form (e.g. 'foo' together\n\
+             with 'foo = 1.0'), so one of the two forms is redundant. When both forms\n\
+             are produced by a dependency generator (e.g. a Perl module declared in\n\
+             several shipped files, carrying a version in one of them and none in\n\
+             another), the duplication is the generator's doing: the finding is a\n\
+             warning. When a hand-written provide duplicates the other form, the\n\
+             finding is an error: remove the redundant manual provide.\n"
         );
         assert!(
             !detail.contains("versioned and unversioned symbols are provided at once"),
             "inaccurate reference wording still present: {detail}"
+        );
+        assert!(
+            !detail.contains("Identical automated and manual provides exist"),
+            "false manual-provide claim still present: {detail}"
         );
     }
 
