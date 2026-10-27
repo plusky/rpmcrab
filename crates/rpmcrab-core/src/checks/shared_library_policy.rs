@@ -468,21 +468,6 @@ impl Check for SharedLibraryPolicyCheck {
             }
         }
 
-        // A policy-named package with no library files at all. The
-        // one credited exception is the KDE categories-only split,
-        // whose sole payload is a logging-categories data file (see
-        // `sole_payload_is_qlogging_categories`).
-        let has_lib_files = pkg
-            .files
-            .iter()
-            .any(|f| is_match(&self.re_so_files, &f.name));
-        if !has_lib_files
-            && is_match(&self.re_soname_pkg, &pkg.name)
-            && !self.sole_payload_is_qlogging_categories(pkg)
-        {
-            add_info(out, Level::Error, pkg, "shlib-policy-missing-lib", &[]);
-        }
-
         let pkg_requires: HashSet<&str> = pkg
             .requires
             .iter()
@@ -507,6 +492,18 @@ impl Check for SharedLibraryPolicyCheck {
         let mut all_needed: HashSet<String> = HashSet::new();
         let mut consumer_set_incomplete = false;
 
+        // The `shlib-policy-missing-lib` decision is taken after this
+        // walk (issue #1029): a library-named file the walk reads as an
+        // ELF carrying a DT_SONAME proves the package ships a library
+        // even when its name fails the `re_so_files` file-name test (a
+        // word-only version tail, e.g. `libfoo.so.beta`). A file the
+        // walk cannot read counts as carrying no SONAME, and the walk
+        // stops there, as it did when it returned early; the
+        // `readelf-failed` finding is then emitted after the
+        // missing-lib decision, in the order the two were emitted
+        // before.
+        let mut elf_carries_soname = false;
+        let mut readelf_failed: Option<(&str, String)> = None;
         for file in &pkg.files {
             let fname = file.name.as_str();
             if file.mode & S_IFMT != S_IFREG {
@@ -524,14 +521,15 @@ impl Check for SharedLibraryPolicyCheck {
             }
             match Self::elf_dynamic(&file.path) {
                 Err(reason) => {
-                    add_info(out, Level::Error, pkg, "readelf-failed", &[fname, &reason]);
-                    return;
+                    readelf_failed = Some((fname, reason));
+                    break;
                 }
                 Ok((soname, needed)) => {
                     lib_files.push(file.path.as_str());
                     all_needed.extend(needed.iter().cloned());
                     libs_needed.extend(needed);
                     if let Some(soname) = soname {
+                        elf_carries_soname = true;
                         let dir = match fname.rfind('/') {
                             Some(i) => fname[..i].to_string(),
                             None => String::new(),
@@ -544,6 +542,27 @@ impl Check for SharedLibraryPolicyCheck {
                     }
                 }
             }
+        }
+
+        // A policy-named package with no library files at all. The
+        // one credited exception is the KDE categories-only split,
+        // whose sole payload is a logging-categories data file (see
+        // `sole_payload_is_qlogging_categories`).
+        let has_lib_files = elf_carries_soname
+            || pkg
+                .files
+                .iter()
+                .any(|f| is_match(&self.re_so_files, &f.name));
+        if !has_lib_files
+            && is_match(&self.re_soname_pkg, &pkg.name)
+            && !self.sole_payload_is_qlogging_categories(pkg)
+        {
+            add_info(out, Level::Error, pkg, "shlib-policy-missing-lib", &[]);
+        }
+
+        if let Some((fname, reason)) = readelf_failed {
+            add_info(out, Level::Error, pkg, "readelf-failed", &[fname, &reason]);
+            return;
         }
 
         // The reference returns early when libs - reqlibs is empty, but
@@ -868,6 +887,88 @@ mod tests {
         assert!(
             !names.contains(&"shlib-policy-missing-lib"),
             "decorated-tail libraries must not be charged as missing: {names:?}"
+        );
+    }
+
+    #[test]
+    fn missing_lib_silent_when_elf_carries_soname_under_word_tail() {
+        // Issue #1029 (B1): the file name `libfoo.so.beta` fails the
+        // file-name test (a word-only version tail), but the file is
+        // a regular ELF carrying that string as its DT_SONAME,
+        // which proves the package ships a library.
+        let dir = std::env::temp_dir().join("rpmcrab-shlib-missinglib-wordtail");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let so = dir.join("libfoo.so.beta");
+        std::fs::write(&so, minimal_elf("libfoo.so.beta")).expect("write elf");
+        let files = vec![PkgFile {
+            name: "/usr/lib64/libfoo.so.beta".to_string(),
+            path: so.to_string_lossy().into_owned(),
+            mode: 0o100755,
+            magic: "ELF 64-bit LSB shared object".to_string(),
+            ..Default::default()
+        }];
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        pkg.name = "libfoo1".to_string();
+        pkg.files = files;
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SharedLibraryPolicyCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"shlib-policy-missing-lib"),
+            "an ELF carrying a SONAME is a shipped library: {names:?}"
+        );
+        assert!(
+            !names.contains(&"readelf-failed"),
+            "the fixture ELF must parse: {names:?}"
+        );
+    }
+
+    #[test]
+    fn missing_lib_and_readelf_failed_for_unreadable_elf() {
+        // Issue #1029 (B1) pins the readelf-failure interplay: a
+        // policy-named package whose only library-shaped file is an
+        // unreadable ELF gets BOTH findings, as it did when the
+        // decision came from file names alone -- the unreadable
+        // file counts as carrying no SONAME, and the walk still
+        // stops there.
+        let dir = std::env::temp_dir().join("rpmcrab-shlib-missinglib-unreadable");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let so = dir.join("libfoo.so.beta");
+        let mut bytes = minimal_elf("libfoo.so.beta");
+        bytes.truncate(32);
+        std::fs::write(&so, bytes).expect("write truncated elf");
+        let files = vec![PkgFile {
+            name: "/usr/lib64/libfoo.so.beta".to_string(),
+            path: so.to_string_lossy().into_owned(),
+            mode: 0o100755,
+            magic: "ELF 64-bit LSB shared object".to_string(),
+            ..Default::default()
+        }];
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        pkg.name = "libfoo1".to_string();
+        pkg.files = files;
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SharedLibraryPolicyCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"shlib-policy-missing-lib"),
+            "an unreadable ELF carries no SONAME credit: {names:?}"
+        );
+        assert!(
+            names.contains(&"readelf-failed"),
+            "the unreadable ELF must still be reported: {names:?}"
         );
     }
 
