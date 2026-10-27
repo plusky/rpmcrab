@@ -3232,8 +3232,11 @@ const STANDARD_DIRS: &[&str] = &[
     "/var/tmp",
 ];
 
-/// Packages allowed to own standard directories.
-const FILESYS_PACKAGES: &[&str] = &["filesystem"];
+/// Packages allowed to own standard directories: `filesystem` itself
+/// and `filesystem-media`, openSUSE's designated split owner of /media.
+/// The reference exempts only `filesystem`; see the FilesCheck
+/// divergence ledger.
+const FILESYS_PACKAGES: &[&str] = &["filesystem", "filesystem-media"];
 
 /// Scan window for the whole-file incorrect-fsf-address scan: the file is
 /// streamed in windows of this size so peak memory stays bounded no matter
@@ -6600,6 +6603,58 @@ mod tests {
         assert_lacks(&names, "non-standard-executable-perm");
         assert_lacks(&names, "perl-temp-file");
         assert_lacks(&names, "dir-or-file-in-opt");
+    }
+
+    /// A synthetic package carrying a single standard-dir entry,
+    /// mirroring the world-writable tests' construction.
+    fn standard_dir_pkg(name: &str, dir: &str) -> (Pkg, Config) {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = name.to_string();
+        pkg.files = vec![PkgFile {
+            name: dir.to_string(),
+            path: dir.to_string(),
+            mode: 0o040755,
+            ..Default::default()
+        }];
+        let config = test_config();
+        (pkg, config)
+    }
+
+    fn standard_dir_names(pkg: &Pkg, config: &Config) -> Vec<String> {
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(config);
+        check.check(pkg, config, &mut out);
+        out.results().iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    #[test]
+    fn standard_dir_silent_for_filesystem_media() {
+        // filesystem-media is openSUSE's designated split owner of
+        // /media (the filesystem package ships no /media entry), so it
+        // joins the FILESYS_PACKAGES exemption (Tom, 2026-10-27).
+        let (pkg, config) = standard_dir_pkg("filesystem-media", "/media");
+        let names = standard_dir_names(&pkg, &config);
+        assert_lacks(&names, "standard-dir-owned-by-package");
+    }
+
+    #[test]
+    fn standard_dir_fires_for_non_exempt_owner_of_media() {
+        // virtualbox-guest-tools duplicates filesystem-media's /media
+        // entry; not being the designated owner, it keeps firing.
+        let (pkg, config) = standard_dir_pkg("virtualbox-guest-tools", "/media");
+        let names = standard_dir_names(&pkg, &config);
+        assert_has(&names, "standard-dir-owned-by-package");
+    }
+
+    #[test]
+    fn standard_dir_fires_for_near_miss_filesystem_name() {
+        // The exemption is an exact name match, not a prefix: a
+        // filesystem-* name outside the set keeps firing.
+        let (pkg, config) = standard_dir_pkg("filesystem-media-doc", "/media");
+        let names = standard_dir_names(&pkg, &config);
+        assert_has(&names, "standard-dir-owned-by-package");
     }
 
     /// Build a package of executable files with real on-disk content (so
