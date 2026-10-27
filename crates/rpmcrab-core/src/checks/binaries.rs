@@ -378,6 +378,9 @@ const LTO_TEXT_LIKE_SECTIONS: &[&str] = &[
 struct ElfSection {
     name: String,
     size: u64,
+    /// The section header type (`SHT_SYMTAB`, `SHT_PROGBITS`, ...):
+    /// the symbol-table test reads the type, not the name.
+    sh_type: u32,
 }
 
 struct ElfProgramHeader {
@@ -911,6 +914,7 @@ impl ReadelfInfo {
             self.sections.push(vec![ElfSection {
                 name: name.clone(),
                 size: sh.sh_size,
+                sh_type: sh.sh_type,
             }]);
         }
 
@@ -921,8 +925,10 @@ impl ReadelfInfo {
         // architectures' notes are not read.
         if elf.header.e_machine == goblin::elf::header::EM_X86_64 {
             for sh in &elf.section_headers {
-                let start = sh.sh_offset as usize;
-                let end = start.saturating_add(sh.sh_size as usize).min(data.len());
+                let Some((start, end)) = section_range(sh) else {
+                    continue;
+                };
+                let end = end.min(data.len());
                 let Some(bytes) = data.get(start..end) else {
                     continue;
                 };
@@ -1086,8 +1092,9 @@ impl ReadelfInfo {
                 if elf.shdr_strtab.get_at(sh.sh_name) != Some(".comment") {
                     continue;
                 }
-                let start = sh.sh_offset as usize;
-                let end = start.saturating_add(sh.sh_size as usize);
+                let Some((start, end)) = section_range(sh) else {
+                    continue;
+                };
                 if let Some(bytes) = data.get(start..end)
                     && comment_has_ghc_version(bytes)
                 {
@@ -1362,15 +1369,30 @@ fn has_go_buildinfo_magic(data: &[u8]) -> bool {
         .any(|(i, w)| w == magic && data.len() - i >= HEADER_LEN && matches!(data[i + 14], 4 | 8))
 }
 
+/// The byte range a section header claims in the file image. The
+/// header's 64-bit fields convert with `try_from`, not `as`: on a
+/// narrower `usize` an unrepresentable range is unreadable, never
+/// truncated into an in-range one.
+fn section_range(sh: &goblin::elf::SectionHeader) -> Option<(usize, usize)> {
+    let start = usize::try_from(sh.sh_offset).ok()?;
+    let size = usize::try_from(sh.sh_size).ok()?;
+    Some((start, start.saturating_add(size)))
+}
+
 /// Whether `.comment` section bytes carry a `GHC <version>` string:
 /// the NUL-separated compiler stamps GHC writes into every output
 /// file read `GHC ` directly followed by the version digits (a real
 /// GHC library's `.comment` is exactly `GHC 9.12.4`). A `GHC ` prefix
 /// not followed by a digit is not a version stamp and does not count.
 fn comment_has_ghc_version(bytes: &[u8]) -> bool {
-    bytes
-        .windows(5)
-        .any(|w| w.starts_with(b"GHC ") && w[4].is_ascii_digit())
+    bytes.windows(5).enumerate().any(|(i, w)| {
+        w.starts_with(b"GHC ")
+            && w[4].is_ascii_digit()
+            // "GHC" must start a stamp: preceded by an ASCII letter
+            // it is embedded in a longer word, the guard the Rust
+            // marker scan applies to its own token.
+            && (i == 0 || !bytes[i - 1].is_ascii_alphabetic())
+    })
 }
 
 fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String]) -> bool {
@@ -1387,8 +1409,9 @@ fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String])
         if !is_gdb_scripts && !is_rodata {
             continue;
         }
-        let start = sh.sh_offset as usize;
-        let end = start.saturating_add(sh.sh_size as usize);
+        let Some((start, end)) = section_range(sh) else {
+            continue;
+        };
         let bytes = match data.get(start..end) {
             Some(b) => b,
             None => continue,
@@ -1430,8 +1453,9 @@ fn detect_zig_binary(elf: &goblin::elf::Elf, data: &[u8]) -> bool {
         if !is_comment && !is_rodata {
             continue;
         }
-        let start = sh.sh_offset as usize;
-        let end = start.saturating_add(sh.sh_size as usize);
+        let Some((start, end)) = section_range(sh) else {
+            continue;
+        };
         let bytes = match data.get(start..end) {
             Some(b) => b,
             None => continue,
@@ -4956,15 +4980,20 @@ impl BinariesCheck {
         if pkgfile.mode & 0o111 == 0 && !so_named {
             return;
         }
-        let has_symtab_or_debuglink = info
-            .sections
-            .iter()
-            .flatten()
-            .any(|sec| sec.name == ".symtab" || sec.name == ".gnu_debuglink");
+        // The symbol-table arm reads the section type, not the
+        // name: a section merely named `.symtab` is not a symbol
+        // table. The debuglink arm stays name-based -- the section
+        // has no dedicated type.
+        let has_symtab_or_debuglink = info.sections.iter().flatten().any(|sec| {
+            sec.sh_type == goblin::elf::section_header::SHT_SYMTAB
+                || sec.name == ".gnu_debuglink"
+        });
         if has_symtab_or_debuglink {
             return;
         }
-        if info.ghc_comment {
+        // The libHS arm covers comment-stripped Haskell binaries,
+        // whose `.comment` carries no GHC stamp.
+        if info.ghc_comment || info.is_haskell_binary() {
             return;
         }
         add_info(
@@ -10955,6 +10984,11 @@ description = "explicit priority string bypasses the system crypto policy"
         let sec = |name: &str| ElfSection {
             name: name.to_string(),
             size: 100,
+            sh_type: if name == ".symtab" {
+                goblin::elf::section_header::SHT_SYMTAB
+            } else {
+                0
+            },
         };
 
         let results = run(vec![
@@ -11100,6 +11134,11 @@ description = "explicit priority string bypasses the system crypto policy"
         ElfSection {
             name: name.to_string(),
             size: 100,
+            sh_type: if name == ".symtab" {
+                goblin::elf::section_header::SHT_SYMTAB
+            } else {
+                0
+            },
         }
     }
 
@@ -14480,6 +14519,28 @@ description = "explicit priority string bypasses the system crypto policy"
         );
         assert!(results.is_empty(), "symtab file must be quiet: {results:?}");
 
+        // A section merely NAMED `.symtab` is not a symbol table:
+        // the gate reads the section type (issue #1157).
+        let mut info = stripped(vec![vec![sec(".text")]]);
+        info.sections[0].push(ElfSection {
+            name: ".symtab".to_string(),
+            size: 100,
+            sh_type: goblin::elf::section_header::SHT_PROGBITS,
+        });
+        let results = run("x86_64", "/usr/bin/foo", 0o100755, &info);
+        let lines = lines_for(&results, "binary-or-shlib-without-debuginfo");
+        assert_eq!(lines.len(), 1, "name-only .symtab must fire: {results:?}");
+
+        // A comment-stripped dynamic Haskell binary carries no GHC
+        // stamp, but its libHS dependency marks it (issue #1157).
+        let mut info = stripped(vec![vec![sec(".text")]]);
+        info.needed = vec!["libHSrts-1.0.2.so".to_string()];
+        let results = run("x86_64", "/usr/bin/foo", 0o100755, &info);
+        assert!(
+            results.is_empty(),
+            "libHS-linked binary must be quiet: {results:?}"
+        );
+
         // Relocatable objects are not linked binaries or libraries.
         let mut info = stripped(vec![vec![sec(".text")]]);
         info.elf_type = goblin::elf::header::ET_REL;
@@ -14489,7 +14550,7 @@ description = "explicit priority string bypasses the system crypto policy"
         // Foreign-machine payload belongs to the foreign target.
         let mut info = stripped(vec![vec![sec(".text")]]);
         info.elf_machine = goblin::elf::header::EM_S390;
-        let results = run("x86_64", "/usr/share/qemu/s390-ccw.img", 0o100755, &info);
+        let results = run("x86_64", "/usr/share/misc/foreign-code.img", 0o100755, &info);
         assert!(
             results.is_empty(),
             "foreign machine must be quiet: {results:?}"
@@ -14575,6 +14636,14 @@ description = "explicit priority string bypasses the system crypto policy"
         let info =
             parse_crafted_sections("ghcword", &[(".comment", b"GHC \0"), (".text", b"\x90")]);
         assert!(!info.ghc_comment, "a bare GHC word is not a version stamp");
+
+        // `GHC ` embedded in a longer word is not a stamp either:
+        // the token must start at a boundary (issue #1157).
+        let info = parse_crafted_sections(
+            "ghcembedded",
+            &[(".comment", b"XGHC 9.12.4\0"), (".text", b"\x90")],
+        );
+        assert!(!info.ghc_comment, "an embedded GHC word is not a version stamp");
     }
 
     #[test]
@@ -15380,6 +15449,11 @@ description = "explicit priority string bypasses the system crypto policy"
         let zsec = |name: &str| ElfSection {
             name: name.to_string(),
             size: 0,
+            sh_type: if name == ".symtab" {
+                goblin::elf::section_header::SHT_SYMTAB
+            } else {
+                0
+            },
         };
 
         let mut info = syn_info();
