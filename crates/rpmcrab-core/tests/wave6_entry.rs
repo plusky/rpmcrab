@@ -219,6 +219,32 @@ fn alternatives_flags_missing_prereqs_and_links() {
     );
 }
 
+/// The cleanup fixture's scriptlets only remove legacy
+/// update-alternatives registrations: it registers nothing and ships
+/// no /etc/alternatives entry, so the
+/// `package-supports-update-alternatives` marker must not fire —
+/// while the error findings for the missing registration still do
+/// (the reference fires the marker here; this is the ledgered
+/// divergence for the cleanup-only shape).
+#[test]
+fn alternatives_cleanup_only_has_no_supports_marker() {
+    let mut check = AlternativesCheck::new(&Config::default());
+    let results = run_check(&mut check, "w6-alternatives-cleanup-1.0-1.noarch.rpm");
+    assert_findings(
+        &results,
+        &[
+            ("update-alternatives-requirement-missing", ""),
+            ("update-alternatives-post-call-missing", ""),
+        ],
+    );
+    assert!(
+        !results
+            .iter()
+            .any(|(name, _)| name == "package-supports-update-alternatives"),
+        "cleanup-only package must not carry the supports marker: {results:?}"
+    );
+}
+
 #[test]
 fn alternatives_template_link_draws_no_filelist_findings() {
     let mut check = AlternativesCheck::new(&Config::default());
