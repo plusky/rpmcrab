@@ -441,6 +441,20 @@ install, so the finding is an error. Restore the fillup call (for
 example %fillup_only in %post), or finish the migration: drop the
 template and the EnvironmentFile line.
 """
+fillup-usage-discouraged="""
+The package uses fillup: it ships a fillup template or calls fillup from a
+scriptlet to create or merge its configuration. Migrate away from the fillup
+model: ship vendor defaults with the package, under /usr/etc or the
+application's native default location under /usr, and reserve /etc for
+administrator overrides and drop-in snippets. For a KEY=value file read
+through a systemd EnvironmentFile, ship the vendor file under /usr and add an
+optional administrator file under /etc -- the two-layer pattern irqbalance
+adopted in March 2025. Use tmpfiles.d for file and directory creation and
+sysusers.d for users and groups instead of install-time generation, and prefer
+the application's native configuration with built-in defaults over a
+shell-sourced /etc/sysconfig file. This is migration guidance; fillup is not
+formally deprecated.
+"""
 spdx-license-not-in-license-tag="""
 A shipped file declares a license in an SPDX-License-Identifier header
 that the package's License tag does not cover. The detail names the

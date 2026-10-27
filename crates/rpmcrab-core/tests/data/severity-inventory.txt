@@ -100,6 +100,7 @@ filename-not-utf8 = E
 files-duplicate = W
 files-duplicated-waste = W
 fillup-template-without-fillup-call = E,W
+fillup-usage-discouraged = W
 forbidden-controlchar-found = E,W
 forbidden-optflags = E
 ghost-file-with-buildroot-content = W
