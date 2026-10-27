@@ -375,7 +375,7 @@ One mechanism sits after even the override: the build-env severity cap (§5), wh
 ### 4.10 CLI flags
 
 The CLI is the deliberate exception to §3.2's contract rule: it follows
-Tom's rpmlint PR #1595, not the `opensuse` branch's option design. The pinned
+rpmlint PR #1595, not the `opensuse` branch's option design. The pinned
 branch's option surface carries illogical aliases (`--file`, `--info`) and a
 misleading `--profile`; straightening them is a designed divergence, ledgered
 per flag. Positionals (with per-arg `*`/`?` globbing, re-expanded and
@@ -515,7 +515,7 @@ plus, where one exists, a linked upstream issue.
 - **The program-identity banner.** The session-starts banner and version line
   identify rpmcrab itself (`rpmcrab: X.Y.Z`, the crate's own version) rather
   than the emulated reference — nobody greps for that part, so the emulation
-  was dropped (Tom's call). Recorded in `tests/parity/divergences.toml`.
+  was dropped. Recorded in `tests/parity/divergences.toml`.
 - **`class:` filter patterns** (issue #959). A `Filters` string of the form
   `class:<name>` is class syntax, not a regex: it suppresses exactly the
   findings whose tag belongs to the named defect-pattern class, matched on
