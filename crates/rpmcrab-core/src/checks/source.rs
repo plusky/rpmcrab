@@ -167,23 +167,26 @@ impl SourceCheck {
     /// `rpmlintrc-uses-setbadness`: scan every rpmlintrc file in the
     /// source package (a file whose name ends in `rpmlintrc`, the
     /// source-review bot's `*rpmlintrc` glob) for lines matching
-    /// `^\s*setBadness`, one warning per occurrence. A file whose name
-    /// matches an rpmlintrc already loaded for this run is skipped --
-    /// the load path reports its occurrences -- and a name is scanned
-    /// only once per package, so the same directive file is never
-    /// reported twice under one name.
+    /// `^\s*setBadness`, one warning per occurrence. Files are keyed
+    /// by full path, not basename: a payload file that was itself
+    /// loaded for this run is skipped -- the load path reports its
+    /// occurrences -- but a different file that merely shares the
+    /// basename (a loaded file elsewhere, or another payload file
+    /// in a different directory) does not shadow it, and each file
+    /// is scanned only once, so the same directive file is never
+    /// reported twice.
     fn check_rpmlintrc_setbadness(&self, pkg: &Pkg, config: &Config, out: &mut Filter) {
-        let loaded: std::collections::HashSet<String> = config
+        let loaded: std::collections::HashSet<&str> = config
             .rpmlintrc_display
             .iter()
-            .map(|path| path.rsplit('/').next().unwrap_or(path.as_str()).to_string())
+            .map(String::as_str)
             .collect();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for f in &pkg.files {
             let name = f.name.rsplit('/').next().unwrap_or(f.name.as_str());
             if !name.ends_with("rpmlintrc")
-                || loaded.contains(name)
-                || !seen.insert(name.to_string())
+                || loaded.contains(f.path.as_str())
+                || !seen.insert(f.path.as_str())
             {
                 continue;
             }
@@ -192,7 +195,7 @@ impl SourceCheck {
             };
             let text = String::from_utf8_lossy(&bytes);
             for (line_no, line) in crate::config::setbadness_occurrences(&text) {
-                let detail = format!("{name} line {line_no}: {line}");
+                let detail = format!("{} line {line_no}: {line}", f.name);
                 add_info(
                     out,
                     Level::Warning,
@@ -1646,10 +1649,42 @@ mod prebuilt_tests {
     }
 
     #[test]
-    fn setbadness_payload_scan_skips_a_name_already_loaded() {
-        // The load path reports a loaded rpmlintrc's occurrences, so a
-        // payload file of the same name is not reported a second time;
-        // a differently named payload file still fires.
+    fn setbadness_payload_scan_skips_the_loaded_file_itself() {
+        // The load path reports a loaded rpmlintrc's occurrences, so
+        // the payload file that was itself loaded is not reported a
+        // second time; a differently named payload file still fires.
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            (
+                "loaded-rpmlintrc",
+                b"setBadness('loaded-check', 0)\n".to_vec(),
+            ),
+            (
+                "payload-rpmlintrc",
+                b"setBadness('payload-check', 0)\n".to_vec(),
+            ),
+        ]);
+        let loaded_path = pkg
+            .files
+            .iter()
+            .find(|f| f.name == "loaded-rpmlintrc")
+            .map(|f| f.path.clone())
+            .expect("payload file present");
+        let mut config = test_config();
+        config.rpmlintrc_display = vec![loaded_path];
+        let findings = run_source_with_config(&pkg, &config);
+        assert_eq!(
+            setbadness_lines(&findings),
+            ["prebuilt-test.src: W: rpmlintrc-uses-setbadness \
+              payload-rpmlintrc line 1: setBadness('payload-check', 0)"]
+        );
+    }
+
+    #[test]
+    fn setbadness_payload_scan_does_not_shadow_a_same_named_file() {
+        // The dedup keys on the full path: a loaded file elsewhere
+        // that merely shares the basename does not shadow the
+        // payload file -- both payload rpmlintrc files fire.
         let (pkg, _src, _extract) = source_pkg(&[
             ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
             (
@@ -1666,8 +1701,34 @@ mod prebuilt_tests {
         let findings = run_source_with_config(&pkg, &config);
         assert_eq!(
             setbadness_lines(&findings),
-            ["prebuilt-test.src: W: rpmlintrc-uses-setbadness \
-              payload-rpmlintrc line 1: setBadness('payload-check', 0)"]
+            [
+                "prebuilt-test.src: W: rpmlintrc-uses-setbadness \
+              loaded-rpmlintrc line 1: setBadness('loaded-check', 0)",
+                "prebuilt-test.src: W: rpmlintrc-uses-setbadness \
+              payload-rpmlintrc line 1: setBadness('payload-check', 0)"
+            ]
+        );
+    }
+
+    #[test]
+    fn setbadness_payload_scan_reports_same_named_files_in_different_dirs() {
+        // Two payload files sharing a basename in different
+        // directories are different files: both are scanned, and
+        // the detail names each by its full package-relative name.
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("a/dup-rpmlintrc", b"setBadness('a-check', 0)\n".to_vec()),
+            ("b/dup-rpmlintrc", b"setBadness('b-check', 0)\n".to_vec()),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            setbadness_lines(&findings),
+            [
+                "prebuilt-test.src: W: rpmlintrc-uses-setbadness \
+              a/dup-rpmlintrc line 1: setBadness('a-check', 0)",
+                "prebuilt-test.src: W: rpmlintrc-uses-setbadness \
+              b/dup-rpmlintrc line 1: setBadness('b-check', 0)"
+            ]
         );
     }
 
