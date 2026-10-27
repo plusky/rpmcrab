@@ -151,6 +151,23 @@ itself must carry one (`ld -z cet-report` names such inputs).
 Verify with `readelf -n` that the GNU property list includes `IBT`
 and `SHSTK`.
 """
+optflags-not-applied="""
+The package's build flags (the `OPTFLAGS` header tag, `%{optflags}`
+as expanded at packaging time) request the stack protector and
+`_FORTIFY_SOURCE`, but no ELF file in the package carries a
+stack-protector or fortify symbol: the distribution flags never
+reached the compiler for any file in the package. One build defect
+strips both mitigations from every binary at once -- a spec that
+overrides `CFLAGS`/`CXXFLAGS` without `%{optflags}`, or a build
+system that drops them (for example a `%install` step that rebuilds
+without the flags `%build` used). Rebuild so `%{optflags}` reaches
+every compilation; where a package deliberately builds with its own
+flags, this finding is the one to filter in its rpmlintrc, with the
+reason recorded there. The per-file `missing-stack-protector` and
+`missing-fortify` findings name the affected files; when the flags
+also request `-fcf-protection` and no file records it, the finding
+names `cf-protection` as well.
+"""
 missing-call-to-setgroups-before-setuid="""
 This executable is calling setuid and setgid without setgroups or initgroups.
 This means it didn't relinquish all groups, and this would be a potential

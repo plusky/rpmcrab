@@ -275,6 +275,7 @@ mod tests {
                 "missing-relro",
                 "partial-relro",
                 "missing-cf-protection",
+                "optflags-not-applied",
                 "executable-stack",
                 "non-position-independent-executable",
                 "go-toolchain-outdated",
@@ -293,7 +294,7 @@ mod tests {
     #[test]
     fn class_members_come_in_registry_order() {
         let members = class_members("defect-pattern");
-        assert_eq!(members.len(), 21);
+        assert_eq!(members.len(), 22);
 
         assert_eq!(members[0].tag, "binary-or-shlib-calls-gethostbyname");
         assert!(class_members("no-such-class").is_empty());
