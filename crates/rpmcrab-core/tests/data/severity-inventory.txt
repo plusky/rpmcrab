@@ -406,8 +406,8 @@ device_files.rs: add_info(out, level, pkg, check, &refs)
 fhs.rs: add_info(out, Level::Warning, pkg, &check, &[&subdir])
 file_digest.rs: add_info( out, Level::Error, pkg,
 file_digest.rs: add_info( out, Level::Error, pkg, &format!("{c
-filelist.rs: add_info( out, Level::Warning,
 filelist.rs: add_info(out, Level::Error, pkg, &rule.message, &[f])
+filelist.rs: add_info(out, Level::Warning, pkg, &rule.message, &[f])
 files.rs: add_info( out, level, pkg, "ex
 files.rs: add_info( out, level, pkg, "no
 files.rs: add_info(finding)
