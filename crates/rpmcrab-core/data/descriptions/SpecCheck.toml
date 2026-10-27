@@ -267,3 +267,28 @@ reports that no tests were found and the build still succeeds, so
 the %check run proves nothing. Pass -DBUILD_TESTING:BOOL=ON to the
 cmake macro to actually run the tests.
 """
+
+subpackage-without-files="""
+The spec file declares a subpackage in a %package section, but no
+%files section names it, so the subpackage is never built and no
+package is published for it. Add a %files section for the subpackage,
+or remove the %package declaration.
+"""
+
+comment-in-continued-command="""
+A comment line directly follows a line that ends in a backslash
+continuation. The comment ends the continued command: the lines after
+the comment are not part of it, so later lines run as their own
+command or lose the assignments and options the earlier lines set up.
+Move the comment out of the continued command.
+"""
+
+spec-tag-as-shell-variable="""
+A shell variable named $name, $version or $release is used in a build
+section or a scriptlet. rpm does not set shell variables with those
+names, so the expansion is empty and paths built from it lose the
+package name, version or release component. Use the rpm macro
+%{name}, %{version} or %{release} instead; in build sections rpm
+also exports $RPM_PACKAGE_NAME, $RPM_PACKAGE_VERSION and
+$RPM_PACKAGE_RELEASE.
+"""

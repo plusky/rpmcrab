@@ -3317,6 +3317,27 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "subpackage-without-files"
+kind = "behaviour"
+reason = "New port-only Warning: a %package header that no %files header names, decided from the spec text alone, emits subpackage-without-files. The reference has no such finding. The scan stays quiet when the coverage cannot be decided from the text: a name or a %files header that macro expansion leaves unresolved, a spec using %include, a %files section generated from %{lua:} or from a macro body, and the %kernel_module_package template. %{python_files X} counts as covering the subpackage X, and the no-argument form covers the declared python subpackages. Over the 16,501 spec files of the Factory corpus the scan fires 62 times; of 30,540 %package headers in 6,135 specs, 28,700 are decidable from the text (undecidable: a spec using %include 387, an unresolved %files header 1,172, an unresolved %package header 200, a macro-generated %files 40; 41 further headers are %kernel_module_package templates)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "comment-in-continued-command"
+kind = "behaviour"
+reason = "New port-only Warning: a comment line that directly follows a line ending in an unescaped backslash outside quotes, in a shell section, emits comment-in-continued-command, because the comment ends the continued command. The reference has no such finding. The scan carries quote and heredoc state across lines, restores the continuation state saved at a %if when a %else or %elif is reached, and skips %define/%global bodies and heredoc bodies. It fires even when the comment harmlessly ends the chain today: the next line appended to the chain would fall out of the command. Over the 16,501 spec files of the Factory corpus the scan fires 13 times."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "spec-tag-as-shell-variable"
+kind = "behaviour"
+reason = "New port-only Warning: $name, $version or $release used as a shell variable in a shell section that never assigns the variable emits spec-tag-as-shell-variable, because rpm sets no shell variables with those names and the expansion is empty. The reference has no such finding. Occurrences inside single quotes, inside quoted-delimiter heredoc bodies and escaped occurrences are quiet, as are sections that assign the variable by =, for, read or local. In build sections the finding names %{name} (respectively %{version}, %{release}) or $RPM_PACKAGE_NAME (_VERSION, _RELEASE); in install-time scriptlets it names the macro only, because rpm exports no RPM_PACKAGE_* variables there. Over the 16,501 spec files of the Factory corpus the scan fires 17 times."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "SysVInitOnSystemdCheck"
 kind = "behaviour"
 reason = "The reference accumulates basenames in sets (SysVInitOnSystemdCheck.py:11-13), so a basename reachable by two init scripts yields one finding; the port sorts and dedups explicitly, giving the same single finding in sorted order rather than set order."
