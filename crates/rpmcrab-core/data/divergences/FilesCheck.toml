@@ -78,6 +78,13 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/40"
 
 [[divergence]]
 case = "global"
+check = "incorrect-fsf-address"
+kind = "behaviour"
+reason = "The port counts the 02139 ZIP code as wrong-address evidence only when it stands alone as a token: the byte before the digit sequence is neither alphanumeric nor a dot, and the byte after it is not alphanumeric. The reference pattern matches the bare digit sequence anywhere in the file, so digit runs inside unrelated numbers (an IEEE OUI registry entry 002139, tokenizer indices such as 102139, hex test vectors, decimal coordinates such as 7.0213973) count as a stale FSF address. The street alternatives are unchanged, and a standalone 02139 still fires, including ZIP+4 forms and files that spell the street as Massachusetts Ave in full, where only the ZIP alternative can match. Measured over a 3,155-RPM slice of the Factory corpus (2,955 RPMs firing one of the two scoped tags plus a 200-RPM control sample): incorrect-fsf-address findings 20,133 before, 19,841 after; all 292 silenced findings verified file by file to carry no street pattern and no standalone 02139; zero new findings."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "FilesCheck"
 kind = "behaviour"
 reason = "Upstream rpmlint#435: a new `mimeinfo-cache-packaged` error fires when usr/share/applications/mimeinfo.cache is packaged as a real file; it is generated at install time. The frozen 2.10.0 reference has no such check. A %ghost entry (the desktop-file-utils exception) is exempt."

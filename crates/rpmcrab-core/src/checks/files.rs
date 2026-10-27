@@ -436,9 +436,54 @@ fn fsf_license_regex() -> &'static Regex {
 static FSF_WRONG_ADDRESS_REGEX: OnceLock<Regex> = OnceLock::new();
 fn fsf_wrong_address_regex() -> &'static Regex {
     FSF_WRONG_ADDRESS_REGEX.get_or_init(|| {
-        Regex::new(r"(?i)(675\s+Mass\s+Ave|59\s+Temple\s+Place|02139|51\s+Franklin\s+St)")
+        Regex::new(r"(?i)(675\s+Mass\s+Ave|59\s+Temple\s+Place|51\s+Franklin\s+St)")
             .expect("static regex")
     })
+}
+
+/// The FSF's old Cambridge ZIP as it appears in the reference's
+/// wrong-address pattern. It is not matched by the regex above: the
+/// digit string also occurs inside longer numbers, decimal fractions
+/// and hex strings that carry no address meaning (token tables index
+/// `102139`, the IEEE OUI registry lists `002139`, ECDSA test vectors
+/// embed it in signatures, SVG path data in coordinates). An
+/// occurrence is address evidence only as a standalone token: the
+/// byte before it (if any) is neither alphanumeric nor `.`, and the
+/// byte after it (if any) is not alphanumeric.
+const FSF_ZIP: &[u8] = b"02139";
+
+/// Whether `buf` holds a standalone `FSF_ZIP` occurrence. `left_edge`
+/// is the byte just before `buf` in the file (`None` at the start of
+/// the file) and `right_edge` the byte just after it (`None` at the
+/// end of the file); occurrences touching a buffer edge are judged
+/// against those, so a caller scanning in windows classifies an
+/// occurrence exactly as if it had the whole file.
+fn fsf_zip_in_window(buf: &[u8], left_edge: Option<u8>, right_edge: Option<u8>) -> bool {
+    let mut from = 0usize;
+    while let Some(rel) = buf[from..]
+        .windows(FSF_ZIP.len())
+        .position(|w| w == FSF_ZIP)
+    {
+        let start = from + rel;
+        let end = start + FSF_ZIP.len();
+        let left = if start > 0 {
+            Some(buf[start - 1])
+        } else {
+            left_edge
+        };
+        let right = if end < buf.len() {
+            Some(buf[end])
+        } else {
+            right_edge
+        };
+        let left_clean = left.is_none_or(|b| !(b.is_ascii_alphanumeric() || b == b'.'));
+        let right_clean = right.is_none_or(|b| !b.is_ascii_alphanumeric());
+        if left_clean && right_clean {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 static SCALABLE_ICON_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -3497,6 +3542,13 @@ impl FilesCheck {
         let mut carry = 0usize;
         let mut found_license = false;
         let mut found_address = false;
+        // The ZIP alternative is adjudicated one window behind the
+        // read loop: an occurrence is classified by its neighbouring
+        // bytes, and the byte after a window's last byte is only known
+        // once the next window (or EOF) arrives. `prev` holds the
+        // window awaiting that adjudication and `prev_left` the byte
+        // just before it in the file.
+        let mut prev: Option<(Vec<u8>, Option<u8>)> = None;
         loop {
             let n =
                 match std::io::Read::read(&mut file, &mut window[carry..FSF_SCAN_WINDOW + carry]) {
@@ -3515,11 +3567,38 @@ impl FilesCheck {
             if !found_address && is_match(&self.fsf_wrong_address_re, text.as_ref()) {
                 found_address = true;
             }
+            if !found_address && let Some((pbuf, pleft)) = &prev {
+                // The byte just after the previous window's content is
+                // the first freshly read byte of this window.
+                if fsf_zip_in_window(pbuf, *pleft, Some(window[carry])) {
+                    found_address = true;
+                }
+            }
             if found_license && found_address {
                 return true;
             }
+            // The byte just before this window in the file: for the
+            // first window there is none; later windows start with the
+            // previous window's carried tail, so it is the byte just
+            // before that tail in the previous window.
+            let left_edge = match &prev {
+                None => None,
+                Some((pbuf, pleft)) => {
+                    if carry > 0 && pbuf.len() > carry {
+                        Some(pbuf[pbuf.len() - carry - 1])
+                    } else {
+                        *pleft
+                    }
+                }
+            };
+            prev = Some((window[..len].to_vec(), left_edge));
             carry = len.min(FSF_SCAN_OVERLAP);
             window.copy_within(len - carry..len, 0);
+        }
+        if !found_address && let Some((pbuf, pleft)) = &prev {
+            if fsf_zip_in_window(pbuf, *pleft, None) {
+                found_address = true;
+            }
         }
         found_license && found_address
     }
@@ -9451,6 +9530,83 @@ mod tests {
             ..Default::default()
         };
         assert!(!check.fsf_address_matches(&pkg, &ok_file, &mut out));
+    }
+
+    #[test]
+    fn fsf_zip_must_be_a_standalone_token() {
+        // The 02139 alternative of the wrong-address pattern counts
+        // only as a standalone token: embedded in a longer number, a
+        // decimal fraction or a hex string, the digit string is data
+        // (token-table indices, IEEE OUI entries, test-vector
+        // signatures, SVG coordinates), not the FSF's old ZIP.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let pkg = Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = FilesCheck::new(&config);
+        let licence = b"GNU General Public License\n";
+        let mut run = |name: &str, body: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).expect("write temp file");
+            let pkgfile = PkgFile {
+                path: path.to_string_lossy().into_owned(),
+                ..Default::default()
+            };
+            check.fsf_address_matches(&pkg, &pkgfile, &mut out)
+        };
+        let with_licence = |tail: &[u8]| {
+            let mut v = licence.to_vec();
+            v.extend_from_slice(tail);
+            v
+        };
+        // Standalone forms fire: the spelled-out street name is not a
+        // street alternative, so the ZIP alone carries these.
+        assert!(run(
+            "zip.txt",
+            &with_licence(b"675 Massachusetts Ave, Cambridge, MA 02139, USA\n"),
+        ));
+        assert!(run(
+            "zip4.txt",
+            &with_licence(b"Cambridge, MA 02139-1234\n")
+        ));
+        // ZIP at the very start of the file, and at EOF with no
+        // trailing byte.
+        let mut start = b"02139\n".to_vec();
+        start.extend_from_slice(licence);
+        assert!(run("zip-start.txt", &start));
+        assert!(run("zip-eof.txt", &with_licence(b"Cambridge, MA 02139"),));
+        // Embedded forms stay silent.
+        assert!(!run(
+            "oui.txt",
+            &with_licence(b"002139\tEscherlogic Inc.\n")
+        ));
+        assert!(!run("token.txt", &with_licence(b"\"lacak\": 102139,\n")));
+        assert!(!run(
+            "float.txt",
+            &with_licence(b"matrix(0.2073796,7.0213973)\n")
+        ));
+        assert!(!run("decimal.txt", &with_licence(b"score 0.02139\n")));
+        assert!(!run("hexstr.txt", &with_licence(b"sig 9abc02139def0\n")));
+        assert!(!run("suffix.txt", &with_licence(b"\"02139abc\"\n")));
+        // Window boundaries: a standalone ZIP straddling the first
+        // window edge still fires (its right neighbour arrives with
+        // the next window); an embedded one straddling it stays
+        // silent.
+        let mut strad = licence.to_vec();
+        strad.resize(FSF_SCAN_WINDOW - 2, b'x');
+        strad.extend_from_slice(b" 02139, USA\n");
+        assert!(run("zip-straddle.txt", &strad));
+        let mut estrad = licence.to_vec();
+        estrad.resize(FSF_SCAN_WINDOW - 3, b'x');
+        estrad.extend_from_slice(b"102139, token index\n");
+        assert!(!run("zip-embedded-straddle.txt", &estrad));
+        // A standalone ZIP ending exactly at EOF after a full window
+        // fires through the end-of-file adjudication.
+        let mut eof = licence.to_vec();
+        eof.resize(FSF_SCAN_WINDOW, b'x');
+        eof.extend_from_slice(b" 02139");
+        assert!(run("zip-eof-window.txt", &eof));
     }
 
     #[test]
