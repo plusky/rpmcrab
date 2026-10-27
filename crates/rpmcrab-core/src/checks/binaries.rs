@@ -3087,6 +3087,7 @@ fn elf_machine_class_from_magic(magic: &str) -> ElfMachineClass {
         return ElfMachineClass::Host;
     }
     const FOREIGN_TOKENS: &[&str] = &[
+        "Atmel AVR",
         "ARM",
         "UCB RISC-V",
         "LoongArch",
@@ -3199,19 +3200,44 @@ fn archive_elf_class(pkgfile: &PkgFile) -> ArchiveElfClass {
     }
 }
 
+/// The second-level directories of the host `/usr` layout: the set
+/// the `filesystem` package owns (bin, etc, include, lib, lib64,
+/// libexec, local, sbin, share, src) plus the remaining FHS names
+/// (games, lib32, libx32, tmp, X11R6). A `sys-root` component below
+/// one of these is a directory inside host layout that happens to be
+/// named sys-root, not a cross sys-root.
+const HOST_USR_DIRS: &[&str] = &[
+    "X11R6", "bin", "etc", "games", "include", "lib", "lib32", "lib64", "libexec", "libx32",
+    "local", "sbin", "share", "src", "tmp",
+];
+
+/// Whether the path segment above a `sys-root` component names a
+/// target prefix: a triplet (riscv64-suse-linux,
+/// x86_64-w64-mingw32) carries its dashes, and a bare target name
+/// (avr, the AVR toolchain's /usr/avr/sys-root; the MinGW
+/// /usr/<arch>/sys-root layouts) is a single component that is not
+/// a host /usr layout directory.
+fn sysroot_parent_is_target_prefix(seg: &str) -> bool {
+    seg.contains('-') || !HOST_USR_DIRS.contains(&seg)
+}
+
 /// Whether `fname` sits in a location that holds target payload by
-/// layout: a cross sys-root (`/usr/<triplet>/sys-root/...`, the layout
+/// layout: a cross sys-root (`/usr/<target>/sys-root/...`, the layout
 /// the MinGW sys-root predicate in FilesCheck also recognises, with
-/// any target triplet) or a firmware directory, whose files the
-/// device executes and the host only stores.
+/// any target triplet or bare target prefix), a firmware directory,
+/// or `/boot` -- locations whose files the boot chain or the device
+/// executes and the host only stores.
 fn in_target_payload_location(fname: &str) -> bool {
-    if fname.starts_with("/usr/lib/firmware/") || fname.starts_with("/lib/firmware/") {
+    if fname.starts_with("/usr/lib/firmware/")
+        || fname.starts_with("/lib/firmware/")
+        || fname.starts_with("/boot/")
+    {
         return true;
     }
     let mut segments = fname.split('/');
     matches!(segments.next(), Some(""))
         && matches!(segments.next(), Some("usr"))
-        && segments.next().is_some_and(|triplet| triplet.contains('-'))
+        && segments.next().is_some_and(sysroot_parent_is_target_prefix)
         && matches!(segments.next(), Some("sys-root"))
         && segments.next().is_some_and(|rest| !rest.is_empty())
 }
@@ -9720,12 +9746,31 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(in_target_payload_location(
             "/usr/x86_64-w64-mingw32/sys-root/mingw/lib/libfoo.a"
         ));
+        // A bare target prefix is a sys-root parent too: the AVR
+        // toolchain's single-component target directory, and the
+        // MinGW /usr/<arch>/sys-root layouts.
+        assert!(in_target_payload_location(
+            "/usr/avr/sys-root/lib/avr/libc.a"
+        ));
+        assert!(in_target_payload_location(
+            "/usr/x86_64/sys-root/win32/lib/libfoo.a"
+        ));
         assert!(in_target_payload_location("/usr/lib/firmware/miXart8.elf"));
         assert!(in_target_payload_location("/lib/firmware/miXart8.elf"));
-        // The segment after /usr must be a triplet: a bare `sys-root`
-        // component further down does not make a location a sys-root.
+        // The boot partition holds boot payload by layout: the
+        // Raspberry Pi GPU firmware lives under /boot/vc.
+        assert!(in_target_payload_location("/boot/vc/start.elf"));
+        assert!(!in_target_payload_location("/boot"));
+        assert!(!in_target_payload_location("/bootx/start.elf"));
+        // The segment after /usr must name a target: a bare `sys-root`
+        // component below a host /usr layout directory does not make
+        // a location a sys-root.
         assert!(!in_target_payload_location("/usr/lib/sys-root/libfoo.so"));
         assert!(!in_target_payload_location("/usr/share/sys-root/libfoo.so"));
+        assert!(!in_target_payload_location("/usr/local/sys-root/libfoo.so"));
+        assert!(!in_target_payload_location(
+            "/usr/libexec/sys-root/libfoo.so"
+        ));
         // A triplet directory without the sys-root level is host layout.
         assert!(!in_target_payload_location(
             "/usr/riscv64-suse-linux/lib/libc.so.6"
@@ -9799,6 +9844,52 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn noarch_boot_foreign_elf_bytes_are_quiet() {
+        // The Raspberry Pi boot firmware: a VideoCore III image
+        // (e_machine 137) the GPU executes before the ARM cores
+        // start, shipped under /boot/vc. Foreign by header, in a
+        // boot-payload location.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let file = real_file_pkgfile(
+            &dir,
+            "start.elf",
+            "/boot/vc/start.elf",
+            "ELF 32-bit LSB executable, Broadcom VideoCore III, version 1 (SYSV), \
+             statically linked, stripped",
+            &elf_with_machine(137),
+        );
+        let pkg = synthetic_pkg("raspberrypi-firmware", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_boot_host_elf_still_fires() {
+        // Near-miss: the boot location saves foreign payload, not a
+        // host binary stored there.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let file = real_file_pkgfile(
+            &dir,
+            "tool",
+            "/boot/efi/tool",
+            "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked",
+            &elf_with_machine(goblin::elf::header::EM_X86_64),
+        );
+        let pkg = synthetic_pkg("noarchpkg", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "host ELF under /boot fires: {results:?}");
+    }
+
+    #[test]
     fn noarch_sysroot_foreign_archive_is_quiet() {
         // Issue #848: a sys-root static library whose ELF members are
         // all for the target machine (a data member does not change
@@ -9819,6 +9910,123 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_lacks(
             &results,
             "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_avr_sysroot_foreign_elf_bytes_are_quiet() {
+        // The AVR toolchain's sys-root sits under a bare target
+        // directory (/usr/avr, no triplet dashes): its payload is
+        // EM_AVR objects, foreign by header.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let file = real_file_pkgfile(
+            &dir,
+            "crtmega328p.o",
+            "/usr/avr/sys-root/lib/avr5/crtmega328p.o",
+            "ELF 32-bit LSB relocatable, Atmel AVR 8-bit, version 1 (SYSV), not stripped",
+            &elf_with_machine(goblin::elf::header::EM_AVR),
+        );
+        let pkg = synthetic_pkg("avr-libc", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_avr_sysroot_foreign_elf_magic_is_quiet() {
+        // The magic fallback names the machine when no payload can
+        // be opened: libmagic spells the AVR machine "Atmel AVR".
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "avr-libc",
+            "noarch",
+            vec![syn_file(
+                "/usr/avr/sys-root/lib/avr5/crtmega328p.o",
+                "ELF 32-bit LSB relocatable, Atmel AVR 8-bit, version 1 (SYSV), not stripped",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_avr_sysroot_foreign_archive_is_quiet() {
+        // An AVR static library: every ELF member is EM_AVR.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let avr = elf_with_machine(goblin::elf::header::EM_AVR);
+        let archive = craft_ar_archive(&[("a.o", &avr), ("note.o", b"data\n")]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libc.a",
+            "/usr/avr/sys-root/lib/libc.a",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("avr-libc", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_avr_sysroot_host_elf_still_fires() {
+        // Near-miss: the bare-target sys-root location saves foreign
+        // payload, not a host object that strayed into it.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.o",
+            "/usr/avr/sys-root/lib/libfoo.o",
+            "ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped",
+            &elf_with_machine(goblin::elf::header::EM_X86_64),
+        );
+        let pkg = synthetic_pkg("noarchpkg", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "host ELF in the AVR sys-root fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn noarch_foreign_elf_in_host_dir_sysroot_still_fires() {
+        // Near-miss: a directory named sys-root below a host /usr
+        // layout directory is host layout, so foreign payload there
+        // is not in a target-payload location.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.so",
+            "/usr/share/sys-root/lib/libfoo.so",
+            "ELF 64-bit LSB shared object, UCB RISC-V, version 1 (SYSV)",
+            &elf_with_machine(goblin::elf::header::EM_RISCV),
+        );
+        let pkg = synthetic_pkg("noarchpkg", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "foreign ELF below a host-dir sys-root fires: {results:?}"
         );
     }
 
