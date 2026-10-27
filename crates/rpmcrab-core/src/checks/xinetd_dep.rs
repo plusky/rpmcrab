@@ -2,8 +2,10 @@
 //!
 //! `obsolete-xinetd-requirement` is ported from
 //! `rpmlint/checks/XinetdDepCheck.py`. `deprecated-xinetd-config` has no
-//! reference counterpart: shipping an xinetd config is an error, and the
-//! replacement is a systemd socket unit (deliberate, ledgered).
+//! reference counterpart: shipping an xinetd config is an error (the
+//! `xinetd` package itself is exempt -- Tom's ruling, 2026-10-27), and
+//! the replacement is a systemd timer unit, or a socket unit where the
+//! service was socket-activated (deliberate, ledgered).
 
 use crate::check::{Check, add_info};
 use crate::config::Config;
@@ -38,15 +40,26 @@ impl Check for XinetdDepCheck {
         if Self::requires_xinetd(reqs) {
             add_info(out, Level::Error, pkg, "obsolete-xinetd-requirement", &[]);
         }
-        for file in &pkg.files {
-            if file.name.starts_with("/etc/xinetd.d/") {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "deprecated-xinetd-config",
-                    &[file.name.as_str(), "use a systemd socket unit instead"],
-                );
+        // The xinetd package itself is exempt (Tom's ruling,
+        // 2026-10-27): the deprecation tells every other package not
+        // to ship xinetd configuration; xinetd's own bundled configs
+        // are its to retire. The exemption keys on the package name,
+        // not on the config state -- an enabled definition shipped by
+        // the xinetd package stays silent too.
+        if pkg.name != "xinetd" {
+            for file in &pkg.files {
+                if file.name.starts_with("/etc/xinetd.d/") {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "deprecated-xinetd-config",
+                        &[
+                            file.name.as_str(),
+                            "use a systemd timer or socket unit instead",
+                        ],
+                    );
+                }
             }
         }
     }
@@ -112,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn xinetd_config_file_is_an_error_pointing_at_socket_units() {
+    fn xinetd_config_file_is_an_error_pointing_at_timer_or_socket_units() {
         let pkg = pkg_named_with_files("daytime", &["/etc/xinetd.d/daytime"]);
         let results = run_check(&pkg);
         assert_eq!(results.len(), 1, "{results:?}");
@@ -123,7 +136,7 @@ mod tests {
             "unexpected line: {line}"
         );
         assert!(
-            line.contains("use a systemd socket unit instead"),
+            line.contains("use a systemd timer or socket unit instead"),
             "detail must name the replacement: {line}"
         );
     }
@@ -142,11 +155,29 @@ mod tests {
     }
 
     #[test]
-    fn xinetd_package_itself_is_not_exempt() {
-        // The old `missing-dependency-to-xinetd` rule exempted the xinetd
-        // package; the deprecation does not — its own configs are obsolete
-        // too.
-        let pkg = pkg_named_with_files("xinetd", &["/etc/xinetd.d/daytime"]);
+    fn xinetd_package_itself_is_exempt() {
+        // Tom's ruling (2026-10-27), reversing this test's previous
+        // pin: the deprecation tells every OTHER package not to ship
+        // xinetd configuration; the xinetd package's own bundled
+        // configs are exempt. The exemption keys on the package name,
+        // not on the config state, so it holds whatever the bundled
+        // definitions say.
+        let pkg = pkg_named_with_files(
+            "xinetd",
+            &["/etc/xinetd.d/daytime", "/etc/xinetd.d/chargen"],
+        );
+        let results = run_check(&pkg);
+        assert!(
+            results.iter().all(|(n, _)| n != "deprecated-xinetd-config"),
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn xinetd_named_lookalikes_still_fire() {
+        // Only the exact package name `xinetd` is exempt; a package
+        // that merely carries xinetd in its name keeps firing.
+        let pkg = pkg_named_with_files("uucp-xinetd", &["/etc/xinetd.d/uucp"]);
         let results = run_check(&pkg);
         assert!(
             results.iter().any(|(n, _)| n == "deprecated-xinetd-config"),

@@ -473,7 +473,7 @@ mod tests {
             ),
             (
                 "XinetdDepCheck.toml",
-                "b06d87b46bbd576b8ae3064d541d08ddcfb308c68901bf1ec7406a88743d8f0b",
+                "ae264f79431ec6c7ee86488fe236541e047ee4a6388e97ca9e6ace6f0d3a8dca",
             ),
             (
                 "ZipCheck.toml",

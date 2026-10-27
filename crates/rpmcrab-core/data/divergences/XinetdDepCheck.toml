@@ -6,7 +6,7 @@
 case = "global"
 check = "deprecated-xinetd-config"
 kind = "behaviour"
-reason = "New port-only Error: any file shipped under /etc/xinetd.d/ emits E deprecated-xinetd-config with the detail 'use a systemd socket unit instead'. The reference has no such finding -- its xinetd file rule is typo-dead (FilesCheck.py:783) and its deprecation signal is only E obsolete-xinetd-requirement on the dependency. Deliberate: systemd socket units are the replacement, and validating the dependency plumbing of a dead service manager is wasted effort. Pinned by emission-path tests in xinetd_dep.rs."
+reason = "New port-only Error: any file shipped under /etc/xinetd.d/ by a package other than xinetd itself emits E deprecated-xinetd-config with the detail 'use a systemd timer or socket unit instead' (the xinetd package itself is exempt since 0.4.1; see the refinement entry below). The reference has no such finding -- its xinetd file rule is typo-dead (FilesCheck.py:783) and its deprecation signal is only E obsolete-xinetd-requirement on the dependency. Deliberate: systemd timer units (socket units for socket-activated services) are the replacement, and validating the dependency plumbing of a dead service manager is wasted effort. Pinned by emission-path tests in xinetd_dep.rs."
 since = "0.1.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/214"
 
@@ -16,3 +16,10 @@ check = "XinetdDepCheck"
 kind = "behaviour"
 reason = "Deliberate config divergence: rpmcrab enables XinetdDepCheck in its bundled default config (crates/rpmcrab-core/data/configdefaults.toml) and in the vendored openSUSE flavour config (crates/rpmcrab-core/data/distro/opensuse/opensuse.toml, appended by EXTRA_OPENSUSE_CHECKS in scripts/generate-distro-configs.py). The reference lists the check in no shipped config -- neither its configdefaults.toml nor the openSUSE branch's opensuse.toml -- so it never runs there. The port implements the check and its message is the point (xinetd is obsolete; the replacement is a systemd socket unit), so it runs by default: packages requiring xinetd or shipping /etc/xinetd.d/ files now error, and the run header reports checks: 45 where the reference reports 43. The Fedora flavour config is untouched."
 since = "0.3.0"
+
+[[divergence]]
+case = "global"
+check = "deprecated-xinetd-config"
+kind = "behaviour"
+reason = "Refinement (Tom's ruling, 2026-10-27): the xinetd package itself no longer fires. The deprecation tells every other package not to ship xinetd configuration; xinetd's own bundled configs are its to retire. The exemption keys on the binary package name `xinetd` exactly, so an enabled definition in that package is as silent as a disabled one, while lookalike names (uucp-xinetd) keep firing; there is no disable-based scoping and no severity change for the packages that still fire. The finding detail and the --explain text now direct packagers to systemd timer units, with socket units named for socket-activated services. Measured on the Factory corpus: the tag's 20 findings over 4 packages (xinetd 12, krb5-appl-servers 4, amanda 3, uucp-xinetd 1) become 8 over 3, the removed set exactly xinetd's 12. Pinned by tests in xinetd_dep.rs."
+since = "0.4.1"
