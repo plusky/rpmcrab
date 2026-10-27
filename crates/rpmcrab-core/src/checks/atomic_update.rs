@@ -1988,6 +1988,68 @@ fi
     }
 
     #[test]
+    fn srv_www_ghost_is_quiet_under_the_flavour_allowed_dirs() {
+        // The same vendored /srv/www/ entry quiets the ghost arm:
+        // AtomicAllowedDirs is shared, so a %ghost under the web
+        // root stays quiet while a ghost in the /var tail fires.
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            regular("/usr/bin/ok"),
+            ghost("/srv/www/app/state"),
+            ghost("/var/cache/state"),
+        ];
+        pkg.ghost_files = vec![
+            "/srv/www/app/state".to_string(),
+            "/var/cache/state".to_string(),
+        ];
+        let mut check = check_with(
+            &[
+                "/etc/",
+                "/usr/",
+                "/bin/",
+                "/lib/",
+                "/lib64/",
+                "/sbin/",
+                "/boot/",
+                "/srv/www/",
+            ],
+            &["/usr/local/", "/boot/efi/"],
+            true,
+        );
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "ghost-outside-snapshot");
+        assert!(
+            results[0].1.contains("/var/cache/state"),
+            "detail: {}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn srv_www_scriptlet_target_is_quiet_under_the_flavour_allowed_dirs() {
+        // The scriptlet arm reads the same AtomicAllowedDirs list:
+        // a write target under /srv/www/ is not outside, while the
+        // near-miss prefix keeps firing.
+        let check = check_with(
+            &[
+                "/etc/",
+                "/usr/",
+                "/bin/",
+                "/lib/",
+                "/lib64/",
+                "/sbin/",
+                "/boot/",
+                "/srv/www/",
+            ],
+            &["/usr/local/", "/boot/efi/"],
+            false,
+        );
+        assert!(!check.scriptlet_target_outside("/srv/www/app/seed.conf"));
+        assert!(check.scriptlet_target_outside("/srv/www2/seed.conf"));
+    }
+
+    #[test]
     fn srv_www_payload_is_quiet_under_the_flavour_allowed_dirs() {
         // The vendored SUSE flavour config whitelists /srv/www/ in
         // AtomicAllowedDirs (EXTRA_ATOMIC_ALLOWED_DIRS in the distro
@@ -2626,8 +2688,9 @@ fi
         pkg
     }
 
-    /// The shipped configuration lists (configdefaults and both
-    /// flavours carry the same Atomic* keys).
+    /// The shipped configuration lists (configdefaults' Atomic*
+    /// keys; the vendored SUSE flavour carries the same keys, with
+    /// "/srv/www/" appended to AtomicAllowedDirs).
     fn shipped_check() -> AtomicUpdateCheck {
         check_with(
             &[
