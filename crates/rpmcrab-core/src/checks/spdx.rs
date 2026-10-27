@@ -805,14 +805,17 @@ fn license_family(s: &str) -> String {
 /// `MPL-2.0-no-copyleft-exception` are many edits away). A spelling
 /// suggestion that changes the licence family is not a correction,
 /// so cross-family candidates are dropped even when they are the
-/// closest by distance.
+/// closest by distance. A query with no leading alphabetic run has
+/// no family to restrict by -- an empty family is no family, not a
+/// family shared with every other empty-family string -- so no
+/// restriction is applied to it.
 pub fn suggest_licenses(query: &str, n: usize) -> Vec<&'static str> {
     let q = query.to_lowercase();
     let cap = suggestion_distance_cap(q.chars().count());
     let family = license_family(&q);
     let mut scored: Vec<(usize, &'static str)> = SPDX_LICENSE_IDS
         .iter()
-        .filter(|id| license_family(id) == family)
+        .filter(|id| family.is_empty() || license_family(id) == family)
         .filter_map(|id| levenshtein_capped(&q, &id.to_lowercase(), cap).map(|d| (d, *id)))
         .collect();
     scored.sort();
@@ -842,6 +845,18 @@ mod tests {
         assert_eq!(first[0], "GPL-2.0-or-later");
         // Case-insensitive: an all-lowercase query still resolves.
         assert_eq!(suggest_licenses("mit", 1), vec!["MIT"]);
+    }
+
+    #[test]
+    fn empty_family_query_is_unrestricted() {
+        // A digit-leading query has no alphabetic run, hence no
+        // family: the family restriction does not apply, and its
+        // near neighbour in a real family is suggested. Before the
+        // fix the empty family lumped the query together with every
+        // empty-family ID and the neighbour was filtered out.
+        assert_eq!(suggest_licenses("0GPL-2.0-only", 1), vec!["GPL-2.0-only"]);
+        // A letter-leading query keeps its restriction as before.
+        assert!(suggest_licenses("MPL-2.0-or-later", 3).is_empty());
     }
 
     #[test]
