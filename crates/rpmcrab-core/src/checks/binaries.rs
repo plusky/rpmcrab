@@ -64,7 +64,7 @@ fn basename_is_soname(path: &str, soname: &str) -> bool {
     base == soname
         || base
             .strip_prefix(soname)
-            .is_some_and(|rest| rest.starts_with('.'))
+            .is_some_and(|rest| rest.len() > 1 && rest.starts_with('.'))
 }
 
 static SOVERSION_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -5094,8 +5094,9 @@ impl BinariesCheck {
     /// SONAME's `-<version>` component before `.so` (empty when it
     /// has none) and `soversion` its version after `.so.` -- the
     /// numeric capture for a SONAME that passes the validity gate,
-    /// or the whole non-numeric tail for one admitted by the tail
-    /// rule of issue #1029.
+    /// or the whole tail for one admitted by the tail rule of
+    /// issue #1029 (the rule takes only a non-empty tail starting
+    /// with a letter or a digit).
     fn check_shlib_name(
         &self,
         pkg: &Pkg,
@@ -5268,8 +5269,9 @@ impl BinariesCheck {
     /// The two SONAME arms of the shared-library policy: the
     /// ldconfig-symlink arm and the package-name arm. They run for
     /// a SONAME that passes the validity gate, and -- since issue
-    /// #1029 -- also for one whose version tail is non-numeric (see
-    /// `soname_tail`), where the whole tail is taken as the
+    /// #1029 -- also for one whose version tail the validity gate
+    /// misses but the tail rule admits (see `soname_tail`), where
+    /// the whole tail is taken as the
     /// soversion: the existing `.` -> `_` folding derives
     /// `libLimeSuite23_11-1` from the tail `23.11-1` and
     /// `libstemmer0d` from `0d`, where the numeric capture would
@@ -5304,9 +5306,11 @@ impl BinariesCheck {
     /// and nothing else: `is_shlib` is unchanged, so the symbol,
     /// hash-section and non-PIC findings do not widen to it. The
     /// basename must be the SONAME, or the SONAME followed by a `.`
-    /// suffix, which keeps a file like `libclang.so.22.0.0.rocm`
+    /// and a further suffix, which keeps a file like `libclang.so.22.0.0.rocm`
     /// (whose SONAME `libclang.so.22.0.rocm` is not a prefix of its
-    /// name) outside.
+    /// name) outside. Only a SONAME the validity gate misses is
+    /// covered: a plain numeric SONAME (one passing `validso_regex`)
+    /// on such a file stays with the classic path.
     fn check_soname_tail_library(
         &self,
         pkg: &Pkg,
@@ -5318,6 +5322,7 @@ impl BinariesCheck {
             return;
         };
         if soname_tail(soname).is_none()
+            || validso_regex().is_match(soname).unwrap_or(false)
             || !is_reg(pkgfile.mode)
             || info.is_debug
             || pkgfile.name.starts_with("/usr/lib/debug/")
@@ -13790,9 +13795,28 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(soname_tail("b soname"), None);
     }
 
+    #[test]
+    fn basename_is_soname_shapes() {
+        assert!(basename_is_soname("/usr/lib64/libfoo.so.1", "libfoo.so.1"));
+        assert!(basename_is_soname(
+            "/usr/lib64/libstemmer.so.0d.0.0",
+            "libstemmer.so.0d"
+        ));
+        // A bare trailing dot is not a suffix: a further component
+        // must follow the dot.
+        assert!(!basename_is_soname(
+            "/usr/lib64/libfoo.so.1.",
+            "libfoo.so.1"
+        ));
+        assert!(!basename_is_soname(
+            "/usr/lib64/libclang.so.22.0.0.rocm",
+            "libclang.so.22.0.rocm"
+        ));
+    }
+
     /// Issue #1029, SONAME arm (a): a shared library whose SONAME
-    /// tail is non-numeric gets the package-name arm with the whole
-    /// tail as the soversion. Rows are the corpus shapes of the
+    /// tail the validity gate misses gets the package-name arm with
+    /// the whole tail as the soversion. Rows are the corpus shapes of the
     /// issue's section 4 (SONAMEs read from the Factory RPMs).
     #[test]
     fn shlib_policy_name_tail_matrix() {
@@ -13935,6 +13959,18 @@ description = "explicit priority string bypasses the system crypto policy"
                 "libterminal-nautilus",
                 "libterminal-nautilus.so.",
                 "/usr/lib64/libterminal-nautilus.so.",
+            ),
+            // A plain numeric SONAME on a file the name test
+            // misses: the validity gate's own shape, which arm (b)
+            // does not cover (the package name would fire if it
+            // ran).
+            ("libfoo2", "libfoo.so.1", "/usr/lib64/libfoo.so.1"),
+            // A bare trailing dot after the SONAME is not a
+            // suffix: the basename rule needs a further component.
+            (
+                "libstemmer1d",
+                "libstemmer.so.0d",
+                "/usr/lib64/libstemmer.so.0d.",
             ),
             // Outside a lib directory.
             (
