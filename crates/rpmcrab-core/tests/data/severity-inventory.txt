@@ -221,8 +221,6 @@ non-ghost-in-run = E
 non-owner-writeable-only-crontab-file = E
 non-position-independent-executable = E
 non-readable-menu-file = E
-non-root-group-log-file = E
-non-root-user-log-file = E
 non-standard-gid = E
 non-standard-uid = E
 non-transparent-xpm = W
@@ -383,7 +381,7 @@ zero-perms = W
 zero-perms-ghost = W
 
 [unresolved-sites]
-# count = 42
+# count = 43
 alternatives.rs: add_info( out, level, pkg, "li
 atomic_update.rs: add_info( out, level, pkg, "dir-or-file-outsid
 binaries.rs: add_info( out, info_type, pkg, "unused-direct-
@@ -404,6 +402,7 @@ file_digest.rs: add_info( out, Level::Error, pkg, &format!("{c
 filelist.rs: add_info( out, Level::Warning,
 filelist.rs: add_info(out, Level::Error, pkg, &rule.message, &[f])
 files.rs: add_info( out, level, pkg, "ex
+files.rs: add_info( out, level, pkg, "no
 files.rs: add_info(finding)
 files.rs: add_info(out, Level::Error, pkg, &tag, &[fname])
 files.rs: add_info(out, level, pkg, "htaccess-file", &[fname])

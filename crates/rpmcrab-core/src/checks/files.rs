@@ -2528,6 +2528,27 @@ fn sysusers_declared(text: &str) -> (HashSet<String>, HashSet<String>) {
     (users, groups)
 }
 
+/// The `(users, groups)` this package itself declares through the
+/// sysusers.d snippets it ships -- the per-package counterpart of the
+/// source-wide merge `note_declared_owners` performs for
+/// `non-standard-uid` / `non-standard-gid`. Only snippets in this
+/// package's own file list count: a sibling subpackage's snippet does
+/// not install with this package, so it is no evidence about this
+/// package's intent, and neither a `user()` / `group()` Requires nor
+/// a Provides credits here -- the shipped snippet is the declaration.
+fn own_sysusers_declared(pkg: &Pkg) -> (HashSet<String>, HashSet<String>) {
+    let mut users = HashSet::new();
+    let mut groups = HashSet::new();
+    for f in &pkg.files {
+        if is_sysusers_snippet(&f.name) {
+            let (snippet_users, snippet_groups) = sysusers_declared(&pkg.read_file(&f.name));
+            users.extend(snippet_users);
+            groups.extend(snippet_groups);
+        }
+    }
+    (users, groups)
+}
+
 /// Whether `pkg`'s own Requires -- plain, or the scriptlet-context
 /// split into `prereq` (a packager-written `Requires(pre):
 /// user(<name>)`) -- name the `user(<name>)` / `group(<name>)`
@@ -4942,23 +4963,49 @@ impl FilesCheck {
             return;
         }
         fd.nonexec_file = true;
-        if pkgfile.user != "root" {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "non-root-user-log-file",
-                &[fname, &pkgfile.user],
-            );
-        }
-        if pkgfile.group != "root" {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "non-root-group-log-file",
-                &[fname, &pkgfile.group],
-            );
+        if pkgfile.user != "root" || pkgfile.group != "root" {
+            // Severity split (maintainer ruling, 2026-10-27; see the
+            // divergence ledger): an owner this package itself declares
+            // through a sysusers.d snippet it ships warns instead of
+            // erroring. The snippet is the service's runtime identity
+            // -- the package creates the very account its daemon drops
+            // to -- so the ghost's recorded ownership is the design,
+            // and the finding stays visible for the packager's call
+            // without failing the build. Only the package's own
+            // snippets count, per tag: a `u` line credits the user
+            // (and the like-named primary group it creates), a `g`
+            // line the group; an owner carried only by a Requires, or
+            // declared by a sibling package, carries no such signal
+            // and keeps the reference's error.
+            let (declared_users, declared_groups) = own_sysusers_declared(pkg);
+            if pkgfile.user != "root" {
+                let level = if declared_users.contains(&pkgfile.user) {
+                    Level::Warning
+                } else {
+                    Level::Error
+                };
+                add_info(
+                    out,
+                    level,
+                    pkg,
+                    "non-root-user-log-file",
+                    &[fname, &pkgfile.user],
+                );
+            }
+            if pkgfile.group != "root" {
+                let level = if declared_groups.contains(&pkgfile.group) {
+                    Level::Warning
+                } else {
+                    Level::Error
+                };
+                add_info(
+                    out,
+                    level,
+                    pkg,
+                    "non-root-group-log-file",
+                    &[fname, &pkgfile.group],
+                );
+            }
         }
         if !pkg.ghost_files.iter().any(|g| g == fname) {
             add_info(out, Level::Error, pkg, "non-ghost-file", &[fname]);
@@ -7095,6 +7142,260 @@ mod tests {
         let (pkg, config) = standard_dir_pkg("filesystem-media-doc", "/media");
         let names = standard_dir_names(&pkg, &config);
         assert_has(&names, "standard-dir-owned-by-package");
+    }
+
+    /// Build an extracted package shipping `files` -- (path, user,
+    /// group, content) -- with real on-disk content, so the sysusers.d
+    /// snippets a test ships parse for real. Every `/var/log/` entry is
+    /// marked %ghost, mirroring the live population (flat log files are
+    /// always placeholders).
+    fn logfile_pkg(dir: &tempfile::TempDir, files: &[(&str, &str, &str, &[u8])]) -> Pkg {
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.name = "logfile-test".to_string();
+        // Content must land in the package's own extraction dir:
+        // `Pkg::read_file` resolves against it, not the parent `dir`.
+        let root = pkg
+            .extracted_dir()
+            .expect("extracted fixture")
+            .to_path_buf();
+        pkg.files = files
+            .iter()
+            .map(|(name, user, group, content)| {
+                let path = root.join(name.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+                std::fs::write(&path, content).expect("write temp file");
+                PkgFile {
+                    name: name.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: 0o100644,
+                    user: user.to_string(),
+                    group: group.to_string(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        pkg.ghost_files = pkg
+            .files
+            .iter()
+            .filter(|f| f.name.starts_with("/var/log/"))
+            .map(|f| f.name.clone())
+            .collect();
+        pkg.requires = vec![];
+        pkg
+    }
+
+    /// (tag, level) pairs for the two non-root log-file tags, in
+    /// emission order.
+    fn logfile_tag_levels(pkgs: &[Pkg], config: &Config) -> Vec<(String, Level)> {
+        let (results, levels) = run_files_check_pkgs(pkgs, config);
+        results
+            .iter()
+            .zip(levels.iter())
+            .filter(|((name, _), _)| {
+                name == "non-root-user-log-file" || name == "non-root-group-log-file"
+            })
+            .map(|((name, _), level)| (name.clone(), *level))
+            .collect()
+    }
+
+    fn user_group_levels(user: Level, group: Level) -> Vec<(String, Level)> {
+        vec![
+            ("non-root-user-log-file".to_string(), user),
+            ("non-root-group-log-file".to_string(), group),
+        ]
+    }
+
+    #[test]
+    fn non_root_logfile_warns_when_owner_declared_by_own_sysusers() {
+        // fapolicyd's shape: one `u` line declares the user and the
+        // like-named primary group it creates, so both tags warn.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg = logfile_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib/sysusers.d/svc.conf",
+                    "root",
+                    "root",
+                    b"u svc - \"Service\" /var/lib/svc /sbin/nologin\n",
+                ),
+                ("/var/log/svc.log", "svc", "svc", b""),
+            ],
+        );
+        let config = test_config();
+        assert_eq!(
+            logfile_tag_levels(&[pkg], &config),
+            user_group_levels(Level::Warning, Level::Warning)
+        );
+    }
+
+    #[test]
+    fn non_root_logfile_warns_for_declared_user_with_root_group() {
+        // openQA's shape: the user is declared by the package's own
+        // snippet (its `m` membership line declares no account), the
+        // group is root, so only the user tag fires, at W.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg = logfile_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib/sysusers.d/geekotest.conf",
+                    "root",
+                    "root",
+                    b"u geekotest - \"openQA user\" /var/lib/openqa /bin/bash\nm geekotest nogroup\n",
+                ),
+                ("/var/log/openqa", "geekotest", "root", b""),
+            ],
+        );
+        let config = test_config();
+        assert_eq!(
+            logfile_tag_levels(&[pkg], &config),
+            vec![("non-root-user-log-file".to_string(), Level::Warning)]
+        );
+    }
+
+    #[test]
+    fn non_root_logfile_membership_line_declares_no_group() {
+        // The `m` line above records membership only: a group named by
+        // an `m` line is not declared, so the group tag keeps E.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg = logfile_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib/sysusers.d/geekotest.conf",
+                    "root",
+                    "root",
+                    b"u geekotest - \"openQA user\" /var/lib/openqa /bin/bash\nm geekotest nogroup\n",
+                ),
+                ("/var/log/openqa", "root", "nogroup", b""),
+            ],
+        );
+        let config = test_config();
+        assert_eq!(
+            logfile_tag_levels(&[pkg], &config),
+            vec![("non-root-group-log-file".to_string(), Level::Error)]
+        );
+    }
+
+    #[test]
+    fn non_root_logfile_errors_when_owner_not_declared() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg = logfile_pkg(&dir, &[("/var/log/svc.log", "svc", "svc", b"")]);
+        let config = test_config();
+        assert_eq!(
+            logfile_tag_levels(&[pkg], &config),
+            user_group_levels(Level::Error, Level::Error)
+        );
+    }
+
+    #[test]
+    fn non_root_logfile_errors_when_snippet_declares_another_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg = logfile_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib/sysusers.d/alice.conf",
+                    "root",
+                    "root",
+                    b"u alice - \"Alice\" /var/lib/alice /sbin/nologin\n",
+                ),
+                ("/var/log/svc.log", "svc", "svc", b""),
+            ],
+        );
+        let config = test_config();
+        assert_eq!(
+            logfile_tag_levels(&[pkg], &config),
+            user_group_levels(Level::Error, Level::Error)
+        );
+    }
+
+    #[test]
+    fn non_root_logfile_errors_when_owner_only_required() {
+        // A user()/group() Requires without a shipped snippet declares
+        // nothing for this split: both tags keep E.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pkg = logfile_pkg(&dir, &[("/var/log/svc.log", "svc", "svc", b"")]);
+        pkg.requires = crate::pkg::dep::parse_dep_infos("user(svc) group(svc)");
+        let config = test_config();
+        assert_eq!(
+            logfile_tag_levels(&[pkg], &config),
+            user_group_levels(Level::Error, Level::Error)
+        );
+    }
+
+    #[test]
+    fn non_root_logfile_g_line_does_not_credit_the_user() {
+        // A `g` line declares its group only: the group tag warns, a
+        // user of the same name still errors.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg = logfile_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib/sysusers.d/svcgrp.conf",
+                    "root",
+                    "root",
+                    b"g svcgrp -\n",
+                ),
+                ("/var/log/svc.log", "svcgrp", "svcgrp", b""),
+            ],
+        );
+        let config = test_config();
+        assert_eq!(
+            logfile_tag_levels(&[pkg], &config),
+            user_group_levels(Level::Error, Level::Warning)
+        );
+    }
+
+    #[test]
+    fn non_root_logfile_u_line_does_not_credit_another_group() {
+        // A `u` line credits its user and the like-named group only;
+        // an unrelated charged group keeps E.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg = logfile_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib/sysusers.d/svc.conf",
+                    "root",
+                    "root",
+                    b"u svc - \"Service\" /var/lib/svc /sbin/nologin\n",
+                ),
+                ("/var/log/svc.log", "svc", "other", b""),
+            ],
+        );
+        let config = test_config();
+        assert_eq!(
+            logfile_tag_levels(&[pkg], &config),
+            user_group_levels(Level::Warning, Level::Error)
+        );
+    }
+
+    #[test]
+    fn non_root_logfile_sibling_snippet_does_not_credit() {
+        // The snippet ships in a different package than the log file:
+        // no credit crosses the package boundary.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let declarer = logfile_pkg(
+            &dir,
+            &[(
+                "/usr/lib/sysusers.d/svc.conf",
+                "root",
+                "root",
+                b"u svc - \"Service\" /var/lib/svc /sbin/nologin\n",
+            )],
+        );
+        let dir2 = tempfile::tempdir().expect("tempdir");
+        let owner = logfile_pkg(&dir2, &[("/var/log/svc.log", "svc", "svc", b"")]);
+        let config = test_config();
+        assert_eq!(
+            logfile_tag_levels(&[declarer, owner], &config),
+            user_group_levels(Level::Error, Level::Error)
+        );
     }
 
     /// Build a package of executable files with real on-disk content (so
