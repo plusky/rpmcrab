@@ -40,6 +40,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "python-bytecode-inconsistent-mtime"
+kind = "behaviour"
+reason = "python-bytecode-inconsistent-mtime does not fire on a PEP 3147 cache file whose cache tag names a different CPython version than the pythonX.Y tree it ships in (for example a cpython-312 cache file under python3.13). That tree's interpreter never consults the file -- the cache filename is keyed to the other version -- so its embedded timestamp cannot make the shipped source's bytecode stale in this tree; a version mismatch is the wrong-magic check's jurisdiction, not this one's. The reference compares the timestamp regardless of the cache tag. On the 2026-10-26 corpus snapshot the class is exactly 2 files repo-wide (tree-sitter-objc's python313/python314 flavours), which were the tag's entire live population."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "FilesCheck.is-utf8-decompressor"
 kind = "behaviour"
 reason = "The reference decompresses IN-PROCESS for is_utf8 (pkg.py imports bz2, gzip, lzma and zstandard), so it never invokes a decompressor binary and always reaches the real bytes. rpmcrab shells out to gzip/bzip2/xz/zstd, which is a divergence of its own; when the binary is absent rpmcrab reads as UTF-8, matching the reference's `except OSError: return True`. Reading the still-compressed file instead would report file-not-utf8 for every .gz man page on a host without gzip, which the reference never does."

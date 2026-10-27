@@ -3992,6 +3992,43 @@ impl FilesCheck {
         }
     }
 
+    /// True when `fname` is a PEP 3147 cache file whose cache tag names a
+    /// different CPython version than the `pythonX.Y` tree it ships in (for
+    /// example a `cpython-312` cache file under `python3.13`). The tree's
+    /// interpreter never consults such a file -- the cache filename is keyed
+    /// to the other version -- so its embedded timestamp cannot make the
+    /// shipped source's bytecode stale in this tree. A version mismatch is
+    /// the wrong-magic check's jurisdiction, not the mtime check's.
+    /// Anything that does not parse (no PEP 3147 tag, a non-CPython
+    /// tag, no version in the tree path) returns false: the mtime check
+    /// keeps its say.
+    fn pyc_cache_version_mismatch(&self, fname: &str) -> bool {
+        let Ok(Some(caps)) = self.python_bytecode_pep3147_re.captures(fname) else {
+            return false;
+        };
+        let Some(tag) = caps.get(3).map(|m| m.as_str()) else {
+            return false;
+        };
+        let Some(digits) = tag.strip_prefix("cpython-") else {
+            return false;
+        };
+        if digits.len() < 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        let tag_version = format!("{}.{}", &digits[..1], &digits[1..]);
+        let Ok(Some(tree)) = self.python_re.captures(fname) else {
+            return false;
+        };
+        let Some(tree_version) = tree.get(1).map(|m| m.as_str()) else {
+            return false;
+        };
+        // A bare `python3` tree pins no minor version to compare against.
+        if !tree_version.contains('.') {
+            return false;
+        }
+        tag_version != tree_version
+    }
+
     fn python_bytecode_to_script(&self, path: &str) -> Option<String> {
         if let Ok(Some(caps)) = self.python_bytecode_pep3147_re.captures(path) {
             return Some(format!(
@@ -4049,13 +4086,18 @@ impl FilesCheck {
                 }
 
                 // Verify the timestamp embedded in the .pyc header matches
-                // the mtime of the .py file.
-                if let Some(details) = Self::pyc_mtime_check(
-                    Self::pyc_mtime_from_chunk(&fd.chunk),
-                    srcfile.mtime,
-                    fname,
-                    &srcfile.name,
-                ) {
+                // the mtime of the .py file. A cache file keyed to a
+                // different CPython version than its tree is never read by
+                // that tree's interpreter, so skip it here (see
+                // pyc_cache_version_mismatch).
+                if !self.pyc_cache_version_mismatch(fname)
+                    && let Some(details) = Self::pyc_mtime_check(
+                        Self::pyc_mtime_from_chunk(&fd.chunk),
+                        srcfile.mtime,
+                        fname,
+                        &srcfile.name,
+                    )
+                {
                     let refs: Vec<&str> = details.iter().map(|s| s.as_str()).collect();
                     add_info(
                         out,
@@ -8385,6 +8427,163 @@ mod tests {
             .is_none()
         );
     }
+
+    #[test]
+    fn pyc_cache_version_mismatch_foreign_tag() {
+        let check = FilesCheck::new(&test_config());
+        // The live shape: a cpython-312 cache file in a python3.13 tree
+        // (and in a python3.14 tree), plain and opt-1 forms.
+        assert!(check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.cpython-312.pyc"
+        ));
+        assert!(check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.14/site-packages/foo/__pycache__/__init__.cpython-312.opt-1.pyc"
+        ));
+        assert!(check.pyc_cache_version_mismatch(
+            "/usr/lib/python3.13/site-packages/foo/__pycache__/mod.cpython-27.pyc"
+        ));
+    }
+
+    #[test]
+    fn pyc_cache_version_mismatch_matching_tag_is_no_mismatch() {
+        let check = FilesCheck::new(&test_config());
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.cpython-313.pyc"
+        ));
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.cpython-313.opt-2.pyc"
+        ));
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib/python2.7/site-packages/foo/__pycache__/__init__.cpython-27.pyc"
+        ));
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.9/site-packages/foo/__pycache__/__init__.cpython-39.pyc"
+        ));
+    }
+
+    #[test]
+    fn pyc_cache_version_mismatch_fails_closed() {
+        let check = FilesCheck::new(&test_config());
+        // Direct (non-PEP 3147) layout: no cache tag at all.
+        assert!(
+            !check
+                .pyc_cache_version_mismatch("/usr/lib64/python3.13/site-packages/foo/__init__.pyc")
+        );
+        // No versioned tree in the path: nothing to compare against.
+        assert!(
+            !check
+                .pyc_cache_version_mismatch("/usr/share/foo/__pycache__/__init__.cpython-312.pyc")
+        );
+        // A bare python3 tree pins no minor version.
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib/python3/site-packages/foo/__pycache__/__init__.cpython-312.pyc"
+        ));
+        // Non-CPython cache tags do not parse as a CPython version.
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.pypy-41.pyc"
+        ));
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.graalpy-310.pyc"
+        ));
+    }
+
+    /// Build a package holding one .py and one .pyc with real on-disk
+    /// content, so the .pyc header chunk is read for real.
+    fn pyc_mtime_pkg(
+        dir: &tempfile::TempDir,
+        py_name: &str,
+        py_mtime: u64,
+        pyc_name: &str,
+        pyc_header: &[u8],
+    ) -> Pkg {
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.name = "pyc-mtime-test".to_string();
+        let mk = |name: &str, content: &[u8], mtime: u64| {
+            let path = dir.path().join(name.trim_start_matches('/'));
+            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+            std::fs::write(&path, content).expect("write temp file");
+            PkgFile {
+                name: name.to_string(),
+                path: path.to_string_lossy().into_owned(),
+                mode: 0o100644,
+                mtime,
+                ..Default::default()
+            }
+        };
+        pkg.files = vec![
+            mk(py_name, b"x = 1\n", py_mtime),
+            mk(pyc_name, pyc_header, py_mtime),
+        ];
+        pkg
+    }
+
+    fn pyc_header(magic: u32, flags: u32, ts: u32) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&magic.to_le_bytes());
+        v.extend_from_slice(&flags.to_le_bytes());
+        v.extend_from_slice(&ts.to_le_bytes());
+        v.extend_from_slice(&4u32.to_le_bytes());
+        v
+    }
+
+    fn inconsistent_mtime_lines(pkg: &Pkg) -> Vec<String> {
+        run_check_binary(pkg)
+            .iter()
+            .filter(|(n, _)| n == "python-bytecode-inconsistent-mtime")
+            .map(|(_, l)| l.clone())
+            .collect()
+    }
+
+    #[test]
+    fn pyc_mtime_foreign_cache_version_is_silent() {
+        // Stale embedded timestamp (1000 < 2000), but the cache file is
+        // keyed to CPython 3.12 while the tree is python3.13: the tree's
+        // interpreter never reads it, so no mtime finding.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pyc_mtime_pkg(
+            &dir,
+            "/usr/lib64/python3.13/site-packages/foo/__init__.py",
+            2000,
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.cpython-312.pyc",
+            &pyc_header(3531, 0, 1000),
+        );
+        assert!(inconsistent_mtime_lines(&pkg).is_empty());
+    }
+
+    #[test]
+    fn pyc_mtime_matching_cache_version_stale_fires() {
+        // Same staleness with the tree's own cache tag: the finding fires.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pyc_mtime_pkg(
+            &dir,
+            "/usr/lib64/python3.13/site-packages/foo/__init__.py",
+            2000,
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.cpython-313.pyc",
+            &pyc_header(3571, 0, 1000),
+        );
+        let lines = inconsistent_mtime_lines(&pkg);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("1000"), "{}", lines[0]);
+        assert!(lines[0].contains("2000"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn pyc_mtime_unversioned_tree_stale_fires() {
+        // Fail closed: no version in the tree path, so the foreign tag
+        // cannot be credited and the stale finding stands.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pyc_mtime_pkg(
+            &dir,
+            "/usr/share/foo/__init__.py",
+            2000,
+            "/usr/share/foo/__pycache__/__init__.cpython-312.pyc",
+            &pyc_header(3531, 0, 1000),
+        );
+        assert_eq!(inconsistent_mtime_lines(&pkg).len(), 1);
+    }
+
     #[test]
     fn duplicate_executable_fires_for_two_real_executables() {
         // Drives check_binary (the real emission path): two regular executable
