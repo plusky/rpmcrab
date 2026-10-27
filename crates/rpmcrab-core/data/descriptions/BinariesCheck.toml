@@ -272,16 +272,19 @@ at or above its release line's minimum.
 bundled-library-without-provides="""
 The named binary links a vendored C library (the named -sys crate's
 library) into itself, but the package declares no bundled() provide
-for that library under its source package name. The only marker
-present is the crate-level bundled(rust-crate:...) one that
-cargo-packaging generates from the binary's .dep-v0, and the
+for that library under its source package name. The package's
+only marker, where it has one at all, is the crate-level
+bundled(rust-crate:...) one that cargo-packaging generates from
+the binary's .dep-v0 -- a package built without cargo-packaging
+carries no marker at all -- and the
 maintenance query defined by the bundled software policy --
 whatprovides 'bundled(<source package>)' -- does not match it, so
 the package stays invisible when the library needs a security
-update. Either link the system library instead of the vendored
-copy, or add Provides: bundled(<source package>) = <version>,
-naming the source package and the version of the library that is
-actually linked. The finding fires only when the library's own
+update. Where the library has a system shared form, link that
+instead of the vendored copy; the vendored copy can always be
+declared instead: add Provides: bundled(<source package>), with
+`= <version>` naming the version of the library that is actually
+linked where the binary names one. The finding fires only when the library's own
 byte pattern is present in the binary; a crate that was resolved
 but not linked, and a binary that links the system library, stay
 silent.

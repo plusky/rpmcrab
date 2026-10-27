@@ -6,10 +6,18 @@
 # only ever earns a crate-level bundled(rust-crate:...) marker from
 # cargo-packaging, which the maintenance query for bundled(<srpm>)
 # misses. A library joins this map one at a time, with a measured
-# witness: a byte string the library's code leaves in every binary
-# that actually links it. The witness is what separates "the crate
-# was resolved" (.dep-v0 lists the whole crate graph) from "the C
-# code is in this binary".
+# witness: a byte string the library's code typically leaves in a
+# binary that actually links it. The witness is what separates "the
+# crate was resolved" (.dep-v0 lists the whole crate graph) from "the
+# C code is in this binary" -- and it is a one-sided test: the suite
+# pins shapes where a linked library leaves no witness (an
+# unreachable error string, a remapped __FILE__ path), so absence
+# never proves the library is not linked.
+#
+# The detail's remedies follow the fields below: it prescribes
+# linking the system library only where a system_soname_prefix is
+# recorded (the library has a system shared form to link), and a
+# version only where a c_version_source is recorded.
 #
 # Fields:
 #   name                  the -sys crate name in .dep-v0
@@ -35,9 +43,22 @@
 #                         them, and the version is named only when
 #                         the strings of that major agree on one
 #                         value.
+#
+# The sqlite witness is the database header string every SQLite
+# database starts with, `SQLite format 3`: in the census behind the
+# ledger entry, 26 of its 29 findings were confirmed against the
+# vendored library's DWARF compile units; the other three sit in
+# debuginfo carrying no DWARF for the library, so the witness is the
+# only evidence there. The witness cannot tell SQLite from its
+# SQLCipher fork (see the libsqlite3-sys entry below).
 
 as_of = "2026-10-27"
 
+# libsqlite3-sys's `sqlcipher` feature builds the SQLCipher fork
+# from the same crate: .dep-v0 still names libsqlite3-sys and the
+# witness cannot distinguish the fork from SQLite itself, so
+# bundled(sqlcipher) is an accepted name here and satisfies a
+# finding whose detail prescribes bundled(sqlite3).
 [[crate]]
 name = "libsqlite3-sys"
 srpm = "sqlite3"
