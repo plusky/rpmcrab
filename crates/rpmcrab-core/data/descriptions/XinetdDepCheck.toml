@@ -4,6 +4,8 @@ Please stop using xinetd and switch to socket activation
 from systemd.
 """
 deprecated-xinetd-config="""
-Xinetd is obsolete; its per-service configs have no place on a systemd
-system. Ship a systemd socket unit instead.
+Do not ship xinetd configuration files: xinetd is obsolete and its
+per-service configs have no place on a systemd system. Use systemd
+units instead: a timer unit for a scheduled service, or a socket
+unit where the xinetd entry was socket-activated.
 """
