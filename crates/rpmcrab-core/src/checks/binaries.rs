@@ -5401,6 +5401,17 @@ impl BinariesCheck {
         let is_rust = info.is_rust_binary();
         let is_haskell = info.is_haskell_binary();
         let is_ocaml = info.is_ocaml_binary();
+        // The two compile-time findings judge code built for the
+        // package's own architecture: a foreign-machine binary (a
+        // cross-compiler's target libraries, payload for another
+        // target) is built by that target's toolchain under that
+        // target's flags, so this distro's `%{optflags}` story does
+        // not apply to it -- the host gate
+        // `check_binary_without_debuginfo` applies to its finding.
+        // An unmapped package arch charges, as there.
+        let host_machines = host_elf_machines(&pkg.arch);
+        let foreign_machine =
+            !host_machines.is_empty() && !host_machines.contains(&info.elf_machine);
         // Each finding applies only when the binary has "something to
         // protect" (rpmcrab#447): a binary that imports fewer than three
         // distinct fortifiable libc functions cannot be told apart from
@@ -5424,6 +5435,7 @@ impl BinariesCheck {
             && !is_haskell
             && !is_ocaml
             && is_fortify_applicable(info)
+            && !foreign_machine
             && !has_fortify_symbol
         {
             add_info(
@@ -5443,6 +5455,7 @@ impl BinariesCheck {
             && !is_haskell
             && !is_ocaml
             && is_stack_protector_applicable(info)
+            && !foreign_machine
             && !has_ssp_symbol
         {
             add_info(
@@ -8595,6 +8608,65 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_hardening(&pkg, &pkgfile, &info, &mut out);
         out.results().to_vec()
+    }
+
+    #[test]
+    fn hardening_foreign_machine_quiet_for_compile_time_findings() {
+        use goblin::elf::header::{EM_AARCH64, EM_PPC64, EM_X86_64};
+        let run = |arch: &str, machine: u16| {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let pkg = synthetic_pkg("testpkg", arch, vec![]);
+            let pkgfile = syn_file("/usr/lib64/libprobe.so.1", "ELF 64-bit LSB shared object");
+            let mut info = flagless_info(FLAGLESS_IMPORTS);
+            info.elf_type = goblin::elf::header::ET_DYN;
+            info.elf_machine = machine;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+            out.results().to_vec()
+        };
+
+        // A flagless binary for the package's own machine fires both
+        // compile-time findings.
+        let results = run("x86_64", EM_X86_64);
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "{results:?}"
+        );
+
+        // The same flagless shape for a foreign machine stays quiet
+        // for the two compile-time findings; the linker-level
+        // missing-relro (no GNU_RELRO in the synthetic headers) is
+        // not gated and still fires.
+        let results = run("x86_64", EM_PPC64);
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "{results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "{results:?}"
+        );
+        assert_eq!(lines_for(&results, "missing-relro").len(), 1, "{results:?}");
+
+        // A machine that is the package arch's own is not foreign.
+        let results = run("aarch64", EM_AARCH64);
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "{results:?}"
+        );
     }
 
     #[test]
