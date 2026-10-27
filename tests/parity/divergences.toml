@@ -1979,6 +1979,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "standard-dir-owned-by-package"
+kind = "behaviour"
+reason = "Tom's ruling (2026-10-27): `filesystem-media` is exempt alongside `filesystem`. openSUSE splits the designated ownership of /media out of the filesystem package into filesystem-media, which is the dir's designated owner; the reference's filesys_packages list names only `filesystem`, so crab fired on the designated owner itself. The exemption stays an exact name match -- other filesystem-* names keep firing, and virtualbox-guest-tools' /media entry, a true duplicate of filesystem-media's, keeps firing. Measured on the Factory corpus (51,589 RPMs, FilesCheck): 76 findings before, 75 after; the removed set is exactly filesystem-media's /media finding. The remaining tail (/etc/xinetd.d x4, the dir's only owners, which the filesystem package does not ship at all) was left firing: its distinguishing feature is the repo-wide ownership landscape, which a per-package check cannot use; the venue is distro-side (the filesystem package adopting the dir, precedent bsc#834681)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
