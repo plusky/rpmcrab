@@ -272,7 +272,7 @@ unexpectedly stripped and that the intended compiler flags are used.
 """
 missing-dependency-to-crontabs="""
 This package installs a file in /etc/cron.*/ but
-doesn't require a cron daemon to be installed. As the cron daemon is not part
+doesn't require cron support to be installed. As cron support is not part
 of the essential packages, your package should explicitly require crontabs,
 cron or cronie to make sure that your cron job is executed. If it is an
 optional feature of your package, recommend or suggest one of them.
@@ -346,7 +346,7 @@ use it and setup an insecure configuration.
 """
 tcl-extension-file="""
 Tcl extensions should be in a package-specific subdir of the Tcl
-package directory: /usr/lib64/tcl for extensions that load shared
+package directory: /usr/lib(64)/tcl for extensions that load shared
 libraries, /usr/share/tcl for script-only extensions.
 """
 makefile-junk="""

@@ -2027,7 +2027,7 @@ since = "0.4.1"
 case = "global"
 check = "missing-dependency-to-crontabs"
 kind = "behaviour"
-reason = "Only non-directory entries inside a /etc/cron.* directory are charged, and a dependency on `cron` or `cronie` satisfies the check. The reference charges every '/etc/cron.' path, including the cron.* directory entries themselves (the #552 base-dir false positive, replicated until now) and daemon files sitting directly in /etc -- /etc/cron.deny is cronie's own access-control file, not a cron script. Measured on the Factory corpus, 11 of the check's 14 findings are those two shapes (cron x5 directory entries, systemd-generator-cron2timer x5, cronie /etc/cron.deny). The 3 remaining findings are real cron scripts (cronie-anacron, matomo, nextcloud) whose packages depend on the cron stack under its current names: the provider the reference demands, `crontabs`, was renamed and exists nowhere in the corpus (no package named, providing, requiring or recommending it), so crediting `cron` and `cronie` by exact name match is the only satisfiable reading; lookalike names (cronie-anacron, systemd-cron, cron-utils) keep firing. The reference fires all 14 (verified against rpmlint 2.10.0, openSUSE config); with both parts of this divergence the check fires none of them. A package that is itself one of the providers (crontabs, cron, cronie) needs no dependency. Pinned by the missing_dependency_to_crontabs_* tests in files.rs."
+reason = "Only non-directory entries inside a /etc/cron.* directory are charged, and a dependency on `cron` or `cronie` satisfies the check. The reference charges every '/etc/cron.' path, including the cron.* directory entries themselves (the #552 base-dir false positive, replicated until now) and daemon files sitting directly in /etc -- /etc/cron.deny is cronie's own access-control file, not a cron script. Measured on the Factory corpus, 11 of the check's 14 findings are those two shapes (cron x5 directory entries, systemd-generator-cron2timer x5, cronie /etc/cron.deny). The 3 remaining findings are real cron scripts (cronie-anacron, matomo, nextcloud) whose packages depend on the cron stack under its current names: the provider the reference demands, `crontabs`, was renamed and exists nowhere in the corpus (no package named, providing, requiring, recommending or suggesting it), so crediting `cron` and `cronie` by exact name match is the only satisfiable reading; lookalike names (cronie-anacron, systemd-cron, cron-utils) keep firing. The reference fires all 14 (verified against rpmlint 2.10.0, openSUSE config); with both parts of this divergence the check fires none of them. A package that is itself one of the providers (crontabs, cron, cronie) needs no dependency. Pinned by the missing_dependency_to_crontabs_* tests in files.rs."
 since = "0.4.1"
 
 [[divergence]]
@@ -2069,7 +2069,7 @@ since = "0.4.1"
 case = "global"
 check = "missing-dependency-to-crontabs"
 kind = "detail"
-reason = "The staged `--explain` text prescribed requiring `crontabs`, but that provider was renamed and the name exists nowhere in the distribution (no package named, providing, requiring or recommending it): the cron.* directories are shipped by `cron`, the daemon is `cronie`, and the check credits a dependency on any of `crontabs`, `cron` or `cronie` (see the behaviour divergence for this check). The text now names the credited set instead of prescribing the one name no package can satisfy."
+reason = "The staged `--explain` text prescribed requiring `crontabs`, but that provider was renamed and the name exists nowhere in the distribution (no package named, providing, requiring, recommending or suggesting it): the cron.* directories are shipped by `cron`, the daemon is `cronie`, and the check credits a dependency on any of `crontabs`, `cron` or `cronie` (see the behaviour divergence for this check). The text now names the credited set instead of prescribing the one name no package can satisfy, and speaks of cron support rather than a cron daemon: a dependency on `cron` alone, the directory shipper rather than the daemon, satisfies the check."
 since = "0.4.1"
 
 [[divergence]]
@@ -2097,7 +2097,7 @@ since = "0.4.1"
 case = "global"
 check = "tcl-extension-file"
 kind = "detail"
-reason = "The staged `--explain` text prescribed /usr/share/tcl as the home for Tcl extensions. That is only the script-only home: the distribution's tcl_pkgPath is /usr/lib64/tcl:/usr/share/tcl, extensions that load shared libraries live under /usr/lib64/tcl (expect, itk, sqlite3-tcl), and prescribing /usr/share/tcl for them would trade this finding for arch-dependent-file-in-usr-share. The text now prescribes /usr/lib64/tcl for extensions that load shared libraries and /usr/share/tcl for script-only extensions."
+reason = "The staged `--explain` text prescribed /usr/share/tcl as the home for Tcl extensions. That is only the script-only home: the distribution's tcl_pkgPath is /usr/lib(64)/tcl:/usr/share/tcl, extensions that load shared libraries live under /usr/lib(64)/tcl (expect, itk, sqlite3-tcl), and prescribing /usr/share/tcl for them would trade this finding for arch-dependent-file-in-usr-share. The text now prescribes /usr/lib(64)/tcl for extensions that load shared libraries and /usr/share/tcl for script-only extensions."
 since = "0.4.1"
 
 [[divergence]]
