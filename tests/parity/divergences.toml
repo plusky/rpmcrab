@@ -3375,6 +3375,14 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "invalid-license-spellcheck"
+kind = "behaviour"
+reason = "Did-you-mean suggestions are restricted to the invalid piece's own licence family (its leading alphabetic run, case-insensitive): the short family codes sit within an edit or two of each other, so raw Levenshtein distance corrects one family into another -- on the Factory snapshot, lapce's `MPL-2.0-or-later` was offered `GPL-2.0-or-later, GPL-1.0-or-later, GPL-3.0-or-later` (its real SPDX forms `MPL-2.0` / `MPL-2.0-no-copyleft-exception` are beyond the distance cap), dssim's `VP8` was offered `IPA, PPL, Vim` and its `AOMPL-1.0` offered `APL-1.0, MPL-1.0, OPL-1.0`. A suggestion that changes the licence family is not a spelling correction, so cross-family candidates are dropped; when none remain in-family, no Info finding is emitted (the `invalid-license` error is untouched). Measured on the public Tumbleweed snapshot (repomd 1792894150, 52,984 packages): the tag's live population goes 4 I to 3 I (lapce's cross-family list removed; sheldon's in-family `BSD-4-clause: BSD-4-Clause, BSD-1-Clause, BSD-2-Clause` suggestions on all three sheldon binaries unchanged), 0 added. The reference has no such check at all (see the since-0.1.0 entry above), so there is no parity surface. Pinned by cross_family_candidates_are_not_suggestions in spdx.rs and invalid_license_spellcheck_omits_cross_family_guesses in tags.rs."
+since = "0.4.1"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/818"
+
+[[divergence]]
+case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
 reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."

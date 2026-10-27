@@ -783,15 +783,36 @@ fn suggestion_distance_cap(query_len: usize) -> usize {
     3.max(query_len / 2)
 }
 
+/// The licence family of an ID or query: its leading alphabetic run,
+/// lowercased (`BSD` for `BSD-4-clause`, `apache` for `Apache2`).
+fn license_family(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
 /// The `n` closest SPDX IDs to `query` by case-insensitive edit
 /// distance, ties broken alphabetically for determinism. Candidates
 /// farther than the distance cap are noise, not did-you-mean, and are
 /// dropped; an empty vec means nothing was close enough to suggest.
+///
+/// Candidates are also restricted to the query's licence family:
+/// the short family codes sit within an edit or two of each other
+/// (`MPL`/`GPL`/`APL`), so raw distance happily "corrects" one
+/// licence family into a different one (`MPL-2.0-or-later` is one
+/// edit from `GPL-2.0-or-later`, but its real SPDX forms `MPL-2.0` /
+/// `MPL-2.0-no-copyleft-exception` are many edits away). A spelling
+/// suggestion that changes the licence family is not a correction,
+/// so cross-family candidates are dropped even when they are the
+/// closest by distance.
 pub fn suggest_licenses(query: &str, n: usize) -> Vec<&'static str> {
     let q = query.to_lowercase();
     let cap = suggestion_distance_cap(q.chars().count());
+    let family = license_family(&q);
     let mut scored: Vec<(usize, &'static str)> = SPDX_LICENSE_IDS
         .iter()
+        .filter(|id| license_family(id) == family)
         .filter_map(|id| levenshtein_capped(&q, &id.to_lowercase(), cap).map(|d| (d, *id)))
         .collect();
     scored.sort();
@@ -821,6 +842,22 @@ mod tests {
         assert_eq!(first[0], "GPL-2.0-or-later");
         // Case-insensitive: an all-lowercase query still resolves.
         assert_eq!(suggest_licenses("mit", 1), vec!["MIT"]);
+    }
+
+    #[test]
+    fn cross_family_candidates_are_not_suggestions() {
+        // One edit from a different licence family is a different
+        // licence, not a spelling correction: `MPL-2.0-or-later` has
+        // no SPDX form within the cap in its own family, and `VP8`
+        // is not a misspelling of `Vim`/`PPL`/`IPA`.
+        assert!(suggest_licenses("MPL-2.0-or-later", 3).is_empty());
+        assert!(suggest_licenses("VP8", 3).is_empty());
+        // In-family near misses still resolve, case included.
+        assert_eq!(
+            suggest_licenses("BSD-4-clause", 3),
+            vec!["BSD-4-Clause", "BSD-1-Clause", "BSD-2-Clause"]
+        );
+        assert_eq!(suggest_licenses("GPL-2.0-Only", 1), vec!["GPL-2.0-only"]);
     }
 
     #[test]

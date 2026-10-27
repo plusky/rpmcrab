@@ -2598,6 +2598,21 @@ mod tests {
     }
 
     #[test]
+    fn invalid_license_spellcheck_omits_cross_family_guesses() {
+        // `MPL-2.0-or-later` is not an SPDX id, so the error stands,
+        // but the closest IDs by edit distance are GPL-family: a
+        // suggestion that changes licence family is not emitted.
+        let results = license_findings("MPL-2.0-or-later");
+        assert_eq!(
+            results,
+            vec![(
+                "invalid-license".to_string(),
+                "fcprobe.noarch: E: invalid-license MPL-2.0-or-later".to_string(),
+            )]
+        );
+    }
+
+    #[test]
     fn invalid_license_spellcheck_matches_upstream_example() {
         // The #818 reporter's own example: "Apache 2" should point at Apache-2.0.
         let results = license_findings("Apache 2");
