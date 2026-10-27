@@ -3242,7 +3242,7 @@ fn explain_reworded_dbus_file_parse_error() {
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: reworded `SpecCheck.toml` entry `macro-in-comment` pins the fixed wording.
+/// `--explain`: `SpecCheck.toml` entry `macro-in-comment` pins the #1026 wording.
 #[test]
 fn explain_reworded_macro_in_comment() {
     let out = rpmcrab(&["-e", "macro-in-comment"]);
@@ -3250,7 +3250,7 @@ fn explain_reworded_macro_in_comment() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "macro-in-comment:\nThere is an effectful macro expansion after a shell style comment in the\nspecfile. Shell (%(...)), Lua (%{lua:...}), macro file (%{load:...}) and macro\ndirectives (%define, %global, %undefine, %lua, %load and the braced\n%{define:...}, %{global:...}, %{undefine:...} and %{error:...} forms) are\nperformed by rpm while the specfile is parsed, even inside comments, so check\nif it can cause a problem in this case and escape the macro with another\nleading % if appropriate.\n\n\n",
+        "macro-in-comment:\nThere is an unescaped macro mention after a shell style comment in the\nspecfile. rpm expands macros on a comment line before treating the line as a\ncomment, so the mention is expanded even though it looks inert: when the\nexpansion runs to several lines, only the first line stays commented and the\nrest becomes live spec text or shell — a commented %python_subpackages can\nmove following tags into a phantom package, and a commented-out build macro\nsuch as %configure or %pytest actually runs. The effectful forms — shell\n(%(...)), Lua (%{lua:...}), macro file (%{load:...}) and the executing\ndirectives (%define, %global, %undefine, %lua, %load and the braced\n%{define:...}, %{global:...}, %{undefine:...} and %{error:...} forms) — are\nperformed by rpm while the specfile is parsed, even inside comments. Escape\nthe macro with another leading % (%%) if the mention is only prose, or reword\nthe comment so it does not name the macro.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
