@@ -425,6 +425,16 @@ fn is_skippable_chunk(chunk: &str) -> bool {
     }
 }
 
+/// Whether `lang` (an entry of the header i18n table) is checked
+/// against the en_US dictionary: the `C` locale and English strings.
+/// Any other language is not checked at all — the reference consults
+/// a dictionary for the text's own language and stays silent when it
+/// has none, while this checker holds only en_US, so checking a
+/// translation against it flags ordinary prose wholesale.
+pub fn spellcheckable_language(lang: &str) -> bool {
+    lang == "C" || lang.starts_with("C.") || lang.starts_with("en")
+}
+
 fn is_wiki_word(word: &str) -> bool {
     // CamelCase: an uppercase letter after the first character
     // (e.g. "HelloWorld"), not just a leading capital like "Wrld".

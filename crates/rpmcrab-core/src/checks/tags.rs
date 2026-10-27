@@ -1030,8 +1030,11 @@ impl TagsCheck {
         ignored: &[String],
     ) {
         self.unexpanded_macro(out, pkg, &format!("Summary({lang})"), summary);
-        // Spellcheck via `spellbook`; skipped in mini-mode (checker is None).
-        if let Some(checker) = &self.spellchecker {
+        // Spellcheck via `spellbook`; skipped in mini-mode (checker is
+        // None) and for languages the checker has no dictionary for.
+        if let Some(checker) = &self.spellchecker
+            && crate::spellcheck::spellcheckable_language(lang)
+        {
             for (word, suggestions) in checker.check(summary, &pkg.name, ignored) {
                 let sug = if suggestions.is_empty() {
                     String::new()
@@ -1163,8 +1166,11 @@ impl TagsCheck {
         ignored: &[String],
     ) {
         self.unexpanded_macro(out, pkg, &format!("%description -l {lang}"), description);
-        // Spellcheck via `spellbook`; skipped in mini-mode (checker is None).
-        if let Some(checker) = &self.spellchecker {
+        // Spellcheck via `spellbook`; skipped in mini-mode (checker is
+        // None) and for languages the checker has no dictionary for.
+        if let Some(checker) = &self.spellchecker
+            && crate::spellcheck::spellcheckable_language(lang)
+        {
             for (word, suggestions) in checker.check(description, &pkg.name, ignored) {
                 let sug = if suggestions.is_empty() {
                     String::new()
