@@ -2922,6 +2922,31 @@ mod tests {
     }
 
     #[test]
+    fn spelling_summary_skips_language_without_dictionary() {
+        // The summary branch of the language gate, symmetric to the
+        // description pin (issue #1155).
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-spell-1.0-1.noarch.rpm");
+        let config = test_config();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_summary(&pkg, &mut out, "hello wrld", "de", &[]);
+        let results = out.results().to_vec();
+        assert!(
+            tag_hits(&results, "spelling-error").is_empty(),
+            "all: {results:?}"
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_summary(&pkg, &mut out, "hello wrld", "C", &[]);
+        let results = out.results().to_vec();
+        assert_eq!(
+            tag_hits(&results, "spelling-error").len(),
+            1,
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
     fn obsolete_not_provided_emits() {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-obsolete-1.0-1.noarch.rpm");
         let results = run_check(&pkg);
