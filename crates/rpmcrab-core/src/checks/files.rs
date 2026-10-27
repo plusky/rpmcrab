@@ -463,6 +463,16 @@ fn subdir_in_bin_is_companion_dir(pkg: &Pkg, bindir: &str, fname: &str) -> bool 
         .any(|f| f.name == sibling && is_reg(f.mode) && f.mode & 0o111 != 0)
 }
 
+/// Whether the interpreter program is a Python interpreter:
+/// `python` with an optional version suffix of digits and dots
+/// (`python3`, `python3.13`, `python2.7`) — a bare prefix match
+/// would also claim names like `pythonwibble`.
+fn is_python_program(program: &str) -> bool {
+    program
+        .strip_prefix("python")
+        .is_some_and(|rest| rest.chars().all(|ch| ch.is_ascii_digit() || ch == '.'))
+}
+
 /// Whether a non-executable file carrying an interpreter line is
 /// content the owning program consumes by reading, importing,
 /// sourcing or rendering, so the interpreter line marks data rather
@@ -511,12 +521,16 @@ fn subdir_in_bin_is_companion_dir(pkg: &Pkg, bindir: &str, fname: &str) -> bool 
 ///   name is the name an instantiation step rewrites, so the
 ///   shipped file is the template's content, not an entry point
 ///   (`.ex` is the Debian example-file suffix, dh-make's
-///   maintainer-script templates above all);
+///   maintainer-script templates above all — except that an
+///   Elixir interpreter line takes a `.ex` file out of this arm,
+///   `.ex` being Elixir's own script extension);
 /// - a Python package directory (inside the data and library
 ///   trees): a `.py` file with a Python interpreter whose own
 ///   directory is a package directory — the package ships an
-///   `__init__.py` in the same directory, the caller-verified
-///   `python_pkg_dir` fact — so the file is a module of an
+///   `__init__.py` in the same directory, a fact the predicate
+///   judges itself from the package's file list (an `__init__.py`
+///   matches its own marker: it is the package's module by
+///   definition) — so the file is a module of an
 ///   application-private package tree (kitty's, calibre's and
 ///   hplip's module trees), imported by the owning program;
 /// - a sourced-fragment, documentation or CI directory (inside
@@ -536,8 +550,9 @@ fn subdir_in_bin_is_companion_dir(pkg: &Pkg, bindir: &str, fname: &str) -> bool 
 fn non_executable_script_is_data(
     fname: &str,
     interpreter: &str,
+    interpreter_args: &str,
+    files: &[PkgFile],
     python_lib_tree_re: &Regex,
-    python_pkg_dir: bool,
 ) -> bool {
     // Script directories hold entry points: no shape exempts a
     // file installed directly in one.
@@ -551,11 +566,36 @@ fn non_executable_script_is_data(
     if interpreter.rsplit('/').next() == Some("false") {
         return true;
     }
+    // The effective interpreter program: the interpreter's
+    // basename, or its first argument's for the `env` form.
+    let interp_base = interpreter.rsplit('/').next().unwrap_or("");
+    let program = if interp_base == "env" {
+        interpreter_args
+            .split_whitespace()
+            .next()
+            .map(|arg| arg.rsplit('/').next().unwrap_or(""))
+            .unwrap_or("")
+    } else {
+        interp_base
+    };
     if is_match(python_lib_tree_re, fname) {
         return true;
     }
-    if python_pkg_dir {
-        return true;
+    // A Python package directory: a `.py` file with a Python
+    // interpreter line, inside the data and library trees, whose
+    // package ships an `__init__.py` in the same directory.
+    let data_tree = fname.starts_with("/usr/src/")
+        || fname.starts_with("/usr/share/")
+        || fname.starts_with("/usr/lib/")
+        || fname.starts_with("/usr/lib64/")
+        || fname.starts_with("/usr/etc/")
+        || fname.starts_with("/etc/");
+    if is_python_program(program) && fname.ends_with(".py") && data_tree {
+        let parent = fname.rsplit_once('/').map_or("", |(p, _)| p);
+        let init = format!("{parent}/__init__.py");
+        if files.iter().any(|f| f.name == init) {
+            return true;
+        }
     }
     if fname.starts_with("/usr/share/bash-completion/") {
         return true;
@@ -590,10 +630,10 @@ fn non_executable_script_is_data(
         ".template",
         ".skel",
         ".j2",
-        ".ex",
     ]
     .iter()
     .any(|suffix| base.ends_with(suffix))
+        || (base.ends_with(".ex") && program != "elixir")
     {
         return true;
     }
@@ -614,12 +654,6 @@ fn non_executable_script_is_data(
     // The remaining shapes are bare directory components, whose
     // names also occur on entry points; they count only inside
     // the data and library trees.
-    let data_tree = fname.starts_with("/usr/src/")
-        || fname.starts_with("/usr/share/")
-        || fname.starts_with("/usr/lib/")
-        || fname.starts_with("/usr/lib64/")
-        || fname.starts_with("/usr/etc/")
-        || fname.starts_with("/etc/");
     if !data_tree {
         return false;
     }
@@ -704,7 +738,9 @@ fn non_executable_script_is_data(
 /// packager naming here, installed content shapes there. And
 /// fused names carry no fact:
 /// blktests and xfstests glue the word into a single component,
-/// so they and their `common/` fragments stay outside this gate --
+/// so they stay outside this gate -- their `common/` fragments
+/// are covered by the data-shape gate's fragment-library shape
+/// instead --
 /// a raw suffix match would also claim non-test names
 /// (perftest, minetest) whose scripts are real entry points.
 fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
@@ -5572,41 +5608,13 @@ impl FilesCheck {
             // cover keep the reference behaviour.
             if !mode_is_exec && !is_doc {
                 if let Some(interpreter) = &fd.interpreter {
-                    // Python package evidence for
-                    // `non_executable_script_is_data`: a `.py` file
-                    // carrying a Python interpreter line, inside the
-                    // data and library trees, whose package ships an
-                    // `__init__.py` in the same directory is a module
-                    // of an application-private package tree, not a
-                    // script executed in place.
-                    let parent = fname.rsplit_once('/').map_or("", |(p, _)| p);
-                    let interp_base = interpreter.rsplit('/').next().unwrap_or("");
-                    let pythonish =
-                        interp_base.starts_with("python")
-                            || (interp_base == "env"
-                                && fd.interpreter_args.split_whitespace().next().is_some_and(
-                                    |arg| {
-                                        arg.rsplit('/').next().unwrap_or("").starts_with("python")
-                                    },
-                                ));
-                    let in_python_pkg_dir = pythonish
-                        && fname.ends_with(".py")
-                        && (fname.starts_with("/usr/src/")
-                            || fname.starts_with("/usr/share/")
-                            || fname.starts_with("/usr/lib/")
-                            || fname.starts_with("/usr/lib64/")
-                            || fname.starts_with("/usr/etc/")
-                            || fname.starts_with("/etc/"))
-                        && pkg
-                            .files
-                            .iter()
-                            .any(|f| f.name == format!("{parent}/__init__.py"));
                     if interpreter.starts_with('/')
                         && !non_executable_script_is_data(
                             fname,
                             interpreter,
+                            &fd.interpreter_args,
+                            &pkg.files,
                             &self.python_lib_tree_re,
-                            in_python_pkg_dir,
                         )
                         && !script_is_test_data(&pkg.name, fname)
                         && !non_executable_script_is_provable_fragment(
@@ -14614,14 +14622,14 @@ reason = "warning hook: executable and %config by design"
     }
 
     /// Sourced-fragment directories (`include`, `common`),
-    /// documentation trees (`doc`), CI harness directories (`ci`),
-    /// image payload under a `rootfs` component and `.ex` example
-    /// templates are content the owning program sources, reads or
-    /// assembles elsewhere: non-executable files there draw no
-    /// `non-executable-script`. The bounds: the same components in
-    /// an entry-point tree or outside the data trees, and a
-    /// `rootfs` basename rather than a directory component, all
-    /// keep firing.
+    /// documentation trees (`doc`, `docs`), CI harness directories
+    /// (`ci`), image payload under a `rootfs` component and `.ex`
+    /// example templates are content the owning program sources,
+    /// reads or assembles elsewhere: non-executable files there
+    /// draw no `non-executable-script`. The bounds: the same
+    /// components in an entry-point tree or outside the data
+    /// trees, a `rootfs` basename rather than a directory
+    /// component, and an Elixir `.ex` script, all keep firing.
     #[test]
     fn non_executable_script_silent_for_fragment_doc_and_image_trees() {
         let config = test_config();
@@ -14666,6 +14674,18 @@ reason = "warning hook: executable and %config by design"
                     b"#!/bin/sh\n",
                 ),
                 (
+                    "/usr/share/myapp/docs/tool.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/beam/serve.ex",
+                    0o100644,
+                    "ASCII text executable",
+                    b"#!/usr/bin/env elixir\n",
+                ),
+                (
                     "/usr/libexec/myapp/common/helper.sh",
                     0o100644,
                     "Bourne-Again shell script, ASCII text executable",
@@ -14699,6 +14719,7 @@ reason = "warning hook: executable and %config by design"
             "/usr/share/ceph/mgr/dashboard/ci/run.sh",
             "/var/lib/warewulf/overlays/ignition/rootfs/warewulf/wwinit.d/10-ignition.sh",
             "/usr/share/debhelper/dh_make/debian/postinst.ex",
+            "/usr/share/myapp/docs/tool.sh",
         ] {
             assert!(
                 !lines
@@ -14712,6 +14733,9 @@ reason = "warning hook: executable and %config by design"
             "/usr/share/myapp/scripts/build.sh",
             "/usr/share/myapp/rootfs.sh",
             "/opt/myapp/doc/build.sh",
+            // An Elixir script is no Debian example template:
+            // `.ex` is Elixir's own extension.
+            "/usr/share/myapp/beam/serve.ex",
         ] {
             assert!(
                 lines
