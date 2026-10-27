@@ -463,8 +463,12 @@ impl PostCheck {
             // three activate just as `enable`/`start` do. The try-forms
             // (`try-restart`, `condrestart`, `reload-or-try-restart`)
             // genuinely no-op when the unit is inactive and stay quiet.
+            // In the args tail, `>&` is tried before the single-character
+            // class: the class would consume the `>` first and truncate
+            // the capture at the `&`, dropping units named after a
+            // `>&` redirection.
             Regex::new(
-                r"(?m)((?:^|[;`|]|&&|&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:\S*/)?systemctl\s+(?:--?\S+\s+)*(reload-or-restart|reenable|enable|start|restart)\b((?:[^\n;|&]|&[\d-]|&>>?|>&)*)",
+                r"(?m)((?:^|[;`|]|&&|&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:\S*/)?systemctl\s+(?:--?\S+\s+)*(reload-or-restart|reenable|enable|start|restart)\b((?:>&|[^\n;|&]|&[\d-]|&>>?)*)",
             )
             .expect("static regex")
         })
@@ -1165,9 +1169,10 @@ impl PostCheck {
     /// whose file target is the following token; `Some(false)` for
     /// an operator with its target glued on (`>/dev/null`,
     /// `2>/dev/null`); `None` for any other token. The both-stream
-    /// forms (`&>`, `&>>`, `>&`) classify the same way once the
-    /// leading `&` is dropped, mirroring the strip
-    /// `cache_target_is_trigger_owned` applies.
+    /// forms classify the same way: `&>` and `&>>` once the leading
+    /// `&` is dropped, and the bare `>&` -- whose `&` trails, so no
+    /// strip applies -- is itself a bare operator, while a glued
+    /// `>&2` or `>&/dev/null` stays in the glued arm.
     fn redirection(token: &str) -> Option<bool> {
         let digits = token
             .len()
@@ -1177,7 +1182,7 @@ impl PostCheck {
             Some(after) if after.starts_with('>') => after,
             _ => rest,
         };
-        if matches!(rest, ">" | ">>" | "<" | "<<") {
+        if matches!(rest, ">" | ">>" | "<" | "<<" | ">&") {
             return Some(true);
         }
         if rest.starts_with('>') || rest.starts_with('<') {
@@ -3051,6 +3056,45 @@ mod tests {
         assert!(found.iter().any(|(l, f, d)| *l == Level::Error
             && f == "daemon-activation-in-%post"
             && d == &vec!["systemctl enable".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_enable_service_after_fd_redirect_is_flagged() {
+        // The `>&` form must not truncate the args tail either: the
+        // single-character class would consume the `>` first and cut
+        // the capture at the `&`, dropping a unit named after the
+        // redirection. `>&` is tried before the single-character
+        // class in the tail alternation.
+        for script in [
+            "systemctl enable foo.timer >&/dev/null bar.service",
+            "systemctl enable foo.timer >& /dev/null bar.service",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Error
+                    && f == "daemon-activation-in-%post"
+                    && d == &vec!["systemctl enable".to_string()]),
+                "{script} must be flagged: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemctl_enable_timer_with_fd_redirect_only_is_quiet() {
+        // The `>&` forms with no unit after them stay quiet, glued
+        // and separated alike.
+        for script in [
+            "systemctl enable foo.timer >&/dev/null",
+            "systemctl enable foo.timer >& /dev/null",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "{script} must stay quiet: {found:?}"
+            );
+        }
     }
 
     #[test]
