@@ -5,6 +5,7 @@ and not directly by listing all the alternative brandings in it.
 """
 branding-requires-specific-flavor="""
 Packages must not require a specific branding or theme package to allow for different themes.
+The finding is charged on package names; an ELF shared-library capability name is not a package name.
 """
 branding-provides-missing="""
 Please add a provides entry similar to:

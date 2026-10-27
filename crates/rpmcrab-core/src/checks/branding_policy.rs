@@ -28,8 +28,9 @@
 //! still charged `branding-provides-unversioned` for an unversioned
 //! provide, and the excessive-dependency warnings apply on both arms.
 //! On the requirer side, `branding-requires-specific-flavor` is charged
-//! only on package names: an ELF shared-library capability name
-//! (`lib....so...`) is not a package name and pins no flavour.
+//! on package names — require names that parse as a flavour pin; an ELF
+//! shared-library capability name (`lib....so...`) is not a package
+//! name and pins no flavour.
 
 use fancy_regex::Regex;
 
@@ -67,16 +68,36 @@ impl BrandingPolicyCheck {
 
     /// Whether `name` is an ELF shared-library capability name
     /// (`lib-theme-resources.so()(64bit)`, `libfoo.so.6(GLIBC_2.4)(64bit)`):
-    /// a `.so` component followed only by version or symbol decoration.
-    /// Such names live in the library-capability namespace, not the
-    /// package-name namespace this check polices.
+    /// a `.so` component followed only by version or symbol decoration
+    /// — version groups of `.` plus digits and parenthesised symbol
+    /// sets, nothing else. A name that continues past the decoration
+    /// (a flavour spelled after a soname version, say) is a package
+    /// name, not a capability. Such names live in the
+    /// library-capability namespace, not the package-name namespace
+    /// this check polices.
     fn is_elf_capability(name: &str) -> bool {
-        match name.find(".so") {
-            Some(i) => {
-                let rest = &name[i + 3..];
-                rest.is_empty() || rest.starts_with(['.', '('])
+        let Some(i) = name.find(".so") else {
+            return false;
+        };
+        let mut rest = &name[i + 3..];
+        loop {
+            if rest.is_empty() {
+                return true;
             }
-            None => false,
+            if let Some(tail) = rest.strip_prefix('.') {
+                let digits = tail.bytes().take_while(|b| b.is_ascii_digit()).count();
+                if digits == 0 {
+                    return false;
+                }
+                rest = &tail[digits..];
+            } else if let Some(tail) = rest.strip_prefix('(') {
+                match tail.find(')') {
+                    Some(j) => rest = &tail[j + 1..],
+                    None => return false,
+                }
+            } else {
+                return false;
+            }
         }
     }
 
@@ -406,7 +427,8 @@ mod tests {
 
     // An ELF capability name whose soname is branding-shaped is not a
     // flavour pin: it names a library, not a package. Package-name
-    // near-misses (no `.so` component) keep firing.
+    // near-misses (no `.so` component) keep firing, as does a dotted
+    // name that continues past its soname decoration.
     #[test]
     fn soname_requires_are_not_flavor_pins() {
         let mut pkg = fixture_pkg();
@@ -414,13 +436,20 @@ mod tests {
         pkg.requires = vec![
             dep("lib-theme-resources.so()(64bit)", 0),
             dep("lib-theme.so.1()(64bit)", 0),
+            // The versioned-dot branch on a name that does parse as
+            // a theme flavour pin.
+            dep("lib-theme-resources.so.1()(64bit)", 0),
             dep("libtheme-branding-openSUSE", 0),
             dep("testingpackage-branding-openSUSE", 0),
+            // The stripped stem is a plain theme-arm package name.
+            dep("lib-theme-resources", 0),
+            // Decoration followed by more name is no capability.
+            dep("libfoo.so.1-theme-openSUSE", 0),
         ];
         let results = run(&pkg);
 
         let specific = has(&results, "branding-requires-specific-flavor");
-        assert_eq!(specific.len(), 2, "{results:?}");
+        assert_eq!(specific.len(), 4, "{results:?}");
         assert!(
             specific
                 .iter()
@@ -430,6 +459,12 @@ mod tests {
             specific
                 .iter()
                 .any(|l| l.contains("testingpackage-branding-openSUSE"))
+        );
+        assert!(specific.iter().any(|l| l.ends_with("lib-theme-resources")));
+        assert!(
+            specific
+                .iter()
+                .any(|l| l.contains("libfoo.so.1-theme-openSUSE"))
         );
     }
 
