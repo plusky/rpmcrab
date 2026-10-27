@@ -239,6 +239,7 @@ obsolete-tag = W
 obsolete-tmpfiles-macro = I
 obsolete-xinetd-requirement = E
 old-menu-entry = E
+optflags-not-applied = W
 package-supports-libalternatives = I
 package-supports-update-alternatives = I
 package-with-huge-docs = W

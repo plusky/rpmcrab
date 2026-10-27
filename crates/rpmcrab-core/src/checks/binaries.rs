@@ -2929,6 +2929,105 @@ fn is_gplib_archive(data: &[u8]) -> bool {
     members > 0 && off == data.len()
 }
 
+/// One file's contribution to the package-level hardening rollup
+/// behind `optflags-not-applied` (rpmcrab#1025), returned by
+/// `check_hardening` for every file it judges. The default is a file
+/// outside the judged population (an archive, a Go or Zig binary, a
+/// debuginfo file, or a non-EXEC/DYN object): it contributes nothing.
+#[derive(Default)]
+struct HardeningObservation {
+    in_population: bool,
+    /// The file is judged for the C findings and passes
+    /// `is_stack_protector_applicable`.
+    ssp_applicable: bool,
+    /// The file is judged for the C findings and passes
+    /// `is_fortify_applicable`.
+    fortify_applicable: bool,
+    has_ssp_symbol: bool,
+    has_fortify_symbol: bool,
+    /// The file is a C-judged x86_64 ELF whose `.note.gnu.property`
+    /// state the cf-protection arm reads.
+    cet_judged: bool,
+    /// The file's property note lacks the full IBT|SHSTK bits. An
+    /// unreadable note is not absence -- it proves nothing either
+    /// way -- so it records false here and blocks the CET listing.
+    cet_absent: bool,
+}
+
+/// The per-package accumulation of `HardeningObservation`s, reset at
+/// the top of `check_binary` and judged once the file loop ends.
+#[derive(Default)]
+struct HardeningRollup {
+    files: usize,
+    first_paths: Vec<String>,
+    any_ssp_applicable: bool,
+    any_fortify_applicable: bool,
+    any_ssp_symbol: bool,
+    any_fortify_symbol: bool,
+    cet_judged: bool,
+    cet_absent_everywhere: bool,
+}
+
+impl HardeningRollup {
+    fn absorb(&mut self, path: &str, obs: HardeningObservation) {
+        if !obs.in_population {
+            return;
+        }
+        self.files += 1;
+        if self.first_paths.len() < 3 {
+            self.first_paths.push(path.to_string());
+        }
+        self.any_ssp_applicable |= obs.ssp_applicable;
+        self.any_fortify_applicable |= obs.fortify_applicable;
+        self.any_ssp_symbol |= obs.has_ssp_symbol;
+        self.any_fortify_symbol |= obs.has_fortify_symbol;
+        if obs.cet_judged {
+            if !self.cet_judged {
+                self.cet_judged = true;
+                self.cet_absent_everywhere = true;
+            }
+            self.cet_absent_everywhere &= obs.cet_absent;
+        }
+    }
+}
+
+/// What a package's RPMTAG_OPTFLAGS asks the compiler to emit, read
+/// token by token. The tag is `%{optflags}` as expanded at packaging
+/// time, so a spec that redefines the macro opts out here, while a
+/// shell-level override of CFLAGS leaves the tag (and so the
+/// expectation) intact.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct OptflagsExpectations {
+    ssp: bool,
+    fortify: bool,
+    cet: bool,
+}
+
+fn optflags_expectations(optflags: &str) -> OptflagsExpectations {
+    let mut expected = OptflagsExpectations::default();
+    for token in optflags.split_whitespace() {
+        match token {
+            "-fstack-protector" | "-fstack-protector-strong" | "-fstack-protector-all" => {
+                expected.ssp = true;
+            }
+            // A `-D_FORTIFY_SOURCE` counts only while it stands: a
+            // later `-U_FORTIFY_SOURCE` or `=0` undefines it again.
+            "-U_FORTIFY_SOURCE" | "-D_FORTIFY_SOURCE=0" => expected.fortify = false,
+            "-D_FORTIFY_SOURCE"
+            | "-D_FORTIFY_SOURCE=1"
+            | "-D_FORTIFY_SOURCE=2"
+            | "-D_FORTIFY_SOURCE=3" => expected.fortify = true,
+            "-fcf-protection" => expected.cet = true,
+            _ => {
+                if token.starts_with("-fcf-protection=") {
+                    expected.cet = true;
+                }
+            }
+        }
+    }
+    expected
+}
+
 pub struct BinariesCheck {
     checked_files: usize,
     strings: Tool,
@@ -2969,6 +3068,10 @@ pub struct BinariesCheck {
     pending_state: Option<BinariesState>,
     deferred_state: BinariesState,
     defer_undefined: bool,
+    // The current package's `optflags-not-applied` rollup
+    // (rpmcrab#1025): reset by `check_binary`, fed by
+    // `run_elf_checks` from `check_hardening`'s return value.
+    hardening_rollup: HardeningRollup,
 }
 
 /// A `_FORTIFY_SOURCE` wrapper from libc, i.e. a `__foo_chk` symbol
@@ -4223,6 +4326,7 @@ impl BinariesCheck {
             pending_state: None,
             deferred_state: BinariesState::default(),
             defer_undefined: false,
+            hardening_rollup: HardeningRollup::default(),
         }
     }
 
@@ -4745,20 +4849,32 @@ impl BinariesCheck {
     /// `is_ocaml_binary`); the linker-level RELRO checks still apply.
     /// AMDGPU code objects skip the RELRO findings: no dynamic linker
     /// ever loads them, so BIND_NOW has nothing to govern.
-    fn check_hardening(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
+    ///
+    /// Returns the file's contribution to the package-level
+    /// `optflags-not-applied` rollup: a file that passes the gates
+    /// above is in the population, carrying the applicability and
+    /// symbol-presence facts the package decision reads; a file
+    /// behind an early return contributes the default (nothing).
+    fn check_hardening(
+        &self,
+        pkg: &Pkg,
+        pkgfile: &PkgFile,
+        info: &ReadelfInfo,
+        out: &mut Filter,
+    ) -> HardeningObservation {
         use goblin::elf::header::{ET_DYN, ET_EXEC};
         if self.is_archive || info.is_go_binary() || info.is_zig_binary() {
-            return;
+            return HardeningObservation::default();
         }
         // Separate debuginfo files are never executed or loaded by the
         // dynamic linker: hardening findings on them are unactionable noise.
         // `is_debug` covers the `.debug` name suffix; the path covers the
         // rest of the canonical debuginfo location (e.g. ovmf's GdbSyms.dll).
         if info.is_debug || pkgfile.name.starts_with("/usr/lib/debug/") {
-            return;
+            return HardeningObservation::default();
         }
         if info.elf_type != ET_EXEC && info.elf_type != ET_DYN {
-            return;
+            return HardeningObservation::default();
         }
         // Rust, Haskell and OCaml emit neither `_FORTIFY_SOURCE`
         // instrumentation nor default stack-protector instrumentation
@@ -4880,6 +4996,80 @@ impl BinariesCheck {
                 &[&pkgfile.name],
             );
         }
+        HardeningObservation {
+            in_population: true,
+            ssp_applicable: !is_rust
+                && !is_haskell
+                && !is_ocaml
+                && is_stack_protector_applicable(info),
+            fortify_applicable: !is_rust && !is_haskell && !is_ocaml && is_fortify_applicable(info),
+            has_ssp_symbol,
+            has_fortify_symbol,
+            cet_judged: info.elf_machine == goblin::elf::header::EM_X86_64
+                && !is_rust
+                && !is_haskell
+                && !is_ocaml,
+            cet_absent: match info.x86_feature_1_and {
+                X86Feature1And::Present(f) => {
+                    f & X86_FEATURE_1_IBT_SHSTK != X86_FEATURE_1_IBT_SHSTK
+                }
+                X86Feature1And::Absent => true,
+                X86Feature1And::Unreadable => false,
+            },
+        }
+    }
+
+    /// The package-level companion of the per-file hardening
+    /// findings (rpmcrab#1025): when the package's OPTFLAGS tag asks
+    /// for stack protector and FORTIFY but no judged ELF file
+    /// carries either symbol, the distribution flags never reached
+    /// the compiler anywhere in the package, and one
+    /// `optflags-not-applied` warning names that package-wide cause
+    /// alongside the per-file findings. CET joins the named
+    /// mitigations when the tag asks for it and every judged x86_64
+    /// file lacks it in its property note; it is never required on
+    /// its own -- CRT glue carries ENDBR64 even in flagless builds,
+    /// so the note, not the instruction, is the evidence.
+    fn check_optflags_not_applied(&self, pkg: &Pkg, out: &mut Filter) {
+        if pkg.arch == "noarch" {
+            return;
+        }
+        let optflags = pkg.tag_str(librpm::Tag::OPTFLAGS).unwrap_or_default();
+        if let Some(detail) = self.optflags_not_applied_detail(&optflags) {
+            add_info(out, Level::Warning, pkg, "optflags-not-applied", &[&detail]);
+        }
+    }
+
+    /// The `optflags-not-applied` decision over the accumulated
+    /// rollup: the detail string when the finding fires, `None` when
+    /// it stays quiet. Split from the emission so tests can drive the
+    /// decision with a synthetic OPTFLAGS value.
+    fn optflags_not_applied_detail(&self, optflags: &str) -> Option<String> {
+        let expected = optflags_expectations(optflags);
+        if !expected.ssp || !expected.fortify {
+            return None;
+        }
+        let rollup = &self.hardening_rollup;
+        if rollup.files == 0 || !rollup.any_ssp_applicable || !rollup.any_fortify_applicable {
+            return None;
+        }
+        if rollup.any_ssp_symbol || rollup.any_fortify_symbol {
+            return None;
+        }
+        let mut mitigations = vec!["stack-protector", "fortify"];
+        if expected.cet && rollup.cet_judged && rollup.cet_absent_everywhere {
+            mitigations.push("cf-protection");
+        }
+        let mut paths = rollup.first_paths.join(", ");
+        if rollup.files > rollup.first_paths.len() {
+            paths.push_str(", \u{2026}");
+        }
+        Some(format!(
+            "{} absent from all {} ELF files ({})",
+            mitigations.join(","),
+            rollup.files,
+            paths
+        ))
     }
 
     fn check_soname_symlink(&self, pkg: &Pkg, shlib: &str, soname: &str, out: &mut Filter) {
@@ -5915,7 +6105,8 @@ impl BinariesCheck {
         self.check_missing_symtab_in_archive(pkg, pkgfile, info, out);
         self.check_missing_debug_info_in_archive(pkg, pkgfile, info, out);
         self.check_executable_stack(pkg, pkgfile, info, out);
-        self.check_hardening(pkg, pkgfile, info, out);
+        let hardening = self.check_hardening(pkg, pkgfile, info, out);
+        self.hardening_rollup.absorb(&pkgfile.name, hardening);
         self.check_shared_library(pkg, pkgfile, info, out);
         if let Some(l) = analysis.ldd.as_ref() {
             self.check_dependency(pkg, pkgfile, info, l, out);
@@ -5938,6 +6129,7 @@ impl Check for BinariesCheck {
     }
 
     fn check_binary(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
+        self.hardening_rollup = HardeningRollup::default();
         let mut pkg_has_binary = false;
         let mut pkg_has_file_in_lib64 = false;
         // The no-binary exemption covers the package's native libdir only:
@@ -6127,6 +6319,7 @@ impl Check for BinariesCheck {
 
         self.check_no_binary(pkg, pkg_has_binary, pkg_has_file_in_libdir, out);
         self.check_noarch_with_lib64(pkg, pkg_has_file_in_lib64, out);
+        self.check_optflags_not_applied(pkg, out);
     }
 
     fn checked_files(&self) -> Option<usize> {
@@ -7810,6 +8003,247 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_hardening(&pkg, &pkgfile, &info, &mut out);
         out.results().to_vec()
+    }
+
+    #[test]
+    fn optflags_expectations_read_the_tag() {
+        let both = optflags_expectations("-O2 -g -fstack-protector-strong -D_FORTIFY_SOURCE=3");
+        assert!(both.ssp && both.fortify && !both.cet);
+        // Every SSP spelling in the proposal counts.
+        for flag in [
+            "-fstack-protector",
+            "-fstack-protector-strong",
+            "-fstack-protector-all",
+        ] {
+            assert!(optflags_expectations(flag).ssp, "{flag}");
+        }
+        assert!(!optflags_expectations("-fstack-protector-explicit").ssp);
+        assert!(!optflags_expectations("-fno-stack-protector").ssp);
+        // FORTIFY stands only while defined: a later -U or =0 clears it.
+        assert!(optflags_expectations("-D_FORTIFY_SOURCE=2").fortify);
+        assert!(!optflags_expectations("-D_FORTIFY_SOURCE=2 -U_FORTIFY_SOURCE").fortify);
+        assert!(optflags_expectations("-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2").fortify);
+        assert!(!optflags_expectations("-D_FORTIFY_SOURCE=2 -D_FORTIFY_SOURCE=0").fortify);
+        assert!(!optflags_expectations("-D_FORTIFY_SOURCE=4").fortify);
+        // CET: bare and `=` forms.
+        assert!(optflags_expectations("-fcf-protection").cet);
+        assert!(optflags_expectations("-fcf-protection=full").cet);
+        assert!(!optflags_expectations("-O2 -g").cet);
+        assert_eq!(optflags_expectations(""), OptflagsExpectations::default());
+    }
+
+    /// Four distinct fortifiable, SSP-relevant imports: a file
+    /// importing these is applicable for both C hardening findings.
+    const FLAGLESS_IMPORTS: &[&str] = &["memcpy", "strcpy", "strcat", "sprintf"];
+
+    fn flagless_info(undefined: &[&str]) -> ReadelfInfo {
+        let mut info = syn_info();
+        info.undefined_functions = undefined.iter().map(|s| s.to_string()).collect();
+        info
+    }
+
+    /// Feed synthetic files through `check_hardening` into a fresh
+    /// check's rollup, mirroring `run_elf_checks`' absorb step.
+    fn optflags_rollup_check(pkg: &Pkg, files: &[(&str, ReadelfInfo)]) -> BinariesCheck {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        for (name, info) in files {
+            let pkgfile = syn_file(name, "ELF 64-bit LSB pie executable");
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            let obs = check.check_hardening(pkg, &pkgfile, info, &mut out);
+            check.hardening_rollup.absorb(name, obs);
+        }
+        check
+    }
+
+    #[test]
+    fn optflags_not_applied_fires_for_a_flagless_package() {
+        // The dnsmasq shape: every file applicable, none carrying a
+        // symbol, and the tag asking for CET the property notes lack.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let files: Vec<(&str, ReadelfInfo)> =
+            ["/usr/bin/a", "/usr/bin/b", "/usr/bin/c", "/usr/bin/d"]
+                .iter()
+                .map(|n| (*n, flagless_info(FLAGLESS_IMPORTS)))
+                .collect();
+        let check = optflags_rollup_check(&pkg, &files);
+        let detail = check.optflags_not_applied_detail(
+            "-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=3 -fcf-protection",
+        );
+        assert_eq!(
+            detail.as_deref(),
+            Some(
+                "stack-protector,fortify,cf-protection absent from all 4 ELF files \
+                 (/usr/bin/a, /usr/bin/b, /usr/bin/c, \u{2026})"
+            )
+        );
+    }
+
+    #[test]
+    fn optflags_not_applied_detail_without_cet() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let files: Vec<(&str, ReadelfInfo)> = ["/usr/bin/a", "/usr/bin/b"]
+            .iter()
+            .map(|n| (*n, flagless_info(FLAGLESS_IMPORTS)))
+            .collect();
+        let check = optflags_rollup_check(&pkg, &files);
+        // No -fcf-protection in the tag: CET is not named. Two files
+        // fit the path list whole, so no ellipsis.
+        let detail =
+            check.optflags_not_applied_detail("-fstack-protector-strong -D_FORTIFY_SOURCE=2");
+        assert_eq!(
+            detail.as_deref(),
+            Some("stack-protector,fortify absent from all 2 ELF files (/usr/bin/a, /usr/bin/b)")
+        );
+    }
+
+    #[test]
+    fn optflags_not_applied_quiet_when_any_file_carries_a_symbol() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        const TAG: &str = "-fstack-protector-strong -D_FORTIFY_SOURCE=3";
+        // Partial presence (the grass 8.5.0 shape): one file with a
+        // defined canary reference quiets the package finding.
+        let mut with_ssp = flagless_info(FLAGLESS_IMPORTS);
+        with_ssp.functions = vec!["__stack_chk_fail".to_string()];
+        let files: Vec<(&str, ReadelfInfo)> = vec![
+            ("/usr/bin/a", flagless_info(FLAGLESS_IMPORTS)),
+            ("/usr/bin/b", with_ssp),
+        ];
+        let check = optflags_rollup_check(&pkg, &files);
+        assert_eq!(check.optflags_not_applied_detail(TAG), None);
+        // One file importing a fortified wrapper is presence too.
+        let mut imports: Vec<&str> = FLAGLESS_IMPORTS.to_vec();
+        imports.push("__memcpy_chk");
+        let files: Vec<(&str, ReadelfInfo)> = vec![
+            ("/usr/bin/a", flagless_info(FLAGLESS_IMPORTS)),
+            ("/usr/bin/b", flagless_info(&imports)),
+        ];
+        let check = optflags_rollup_check(&pkg, &files);
+        assert_eq!(check.optflags_not_applied_detail(TAG), None);
+    }
+
+    #[test]
+    fn optflags_not_applied_quiet_when_the_tag_does_not_expect_both() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let files: Vec<(&str, ReadelfInfo)> = vec![("/usr/bin/a", flagless_info(FLAGLESS_IMPORTS))];
+        let check = optflags_rollup_check(&pkg, &files);
+        for tag in [
+            "-O2 -g",
+            "-fstack-protector-strong",
+            "-D_FORTIFY_SOURCE=2",
+            "-fstack-protector-strong -D_FORTIFY_SOURCE=2 -U_FORTIFY_SOURCE",
+            "",
+        ] {
+            assert_eq!(check.optflags_not_applied_detail(tag), None, "tag: {tag}");
+        }
+    }
+
+    #[test]
+    fn optflags_not_applied_quiet_when_nothing_is_applicable() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        const TAG: &str = "-fstack-protector-strong -D_FORTIFY_SOURCE=3";
+        // Two distinct fortifiable imports: below the fortify
+        // predicate's threshold of three, so the absence of __*_chk
+        // symbols proves nothing (rpmcrab#529).
+        let files: Vec<(&str, ReadelfInfo)> =
+            vec![("/usr/bin/a", flagless_info(&["memcpy", "strcpy"]))];
+        let check = optflags_rollup_check(&pkg, &files);
+        assert_eq!(check.optflags_not_applied_detail(TAG), None);
+        // A language-gated file is judged but never applicable for
+        // the C arms: a Rust-only package stays quiet.
+        let mut rust_info = flagless_info(FLAGLESS_IMPORTS);
+        rust_info.is_rust = true;
+        let files: Vec<(&str, ReadelfInfo)> = vec![("/usr/bin/a", rust_info)];
+        let check = optflags_rollup_check(&pkg, &files);
+        assert_eq!(check.optflags_not_applied_detail(TAG), None);
+    }
+
+    #[test]
+    fn optflags_not_applied_cet_listing_follows_the_property_notes() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        const TAG: &str = "-fstack-protector-strong -D_FORTIFY_SOURCE=3 -fcf-protection";
+        // One file recording full IBT|SHSTK: CET was applied
+        // somewhere, so it leaves the named mitigations.
+        let mut with_cet = flagless_info(FLAGLESS_IMPORTS);
+        with_cet.x86_feature_1_and = X86Feature1And::Present(X86_FEATURE_1_IBT_SHSTK);
+        let files: Vec<(&str, ReadelfInfo)> = vec![
+            ("/usr/bin/a", flagless_info(FLAGLESS_IMPORTS)),
+            ("/usr/bin/b", with_cet),
+        ];
+        let check = optflags_rollup_check(&pkg, &files);
+        let detail = check
+            .optflags_not_applied_detail(TAG)
+            .expect("finding fires");
+        assert!(
+            detail.starts_with("stack-protector,fortify absent"),
+            "{detail}"
+        );
+        // An unreadable note proves nothing either way: it blocks
+        // the CET listing the same way.
+        let mut unreadable = flagless_info(FLAGLESS_IMPORTS);
+        unreadable.x86_feature_1_and = X86Feature1And::Unreadable;
+        let files: Vec<(&str, ReadelfInfo)> = vec![
+            ("/usr/bin/a", flagless_info(FLAGLESS_IMPORTS)),
+            ("/usr/bin/b", unreadable),
+        ];
+        let check = optflags_rollup_check(&pkg, &files);
+        let detail = check
+            .optflags_not_applied_detail(TAG)
+            .expect("finding fires");
+        assert!(
+            detail.starts_with("stack-protector,fortify absent"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn optflags_not_applied_emission_gates() {
+        // End to end through the emission: the rollup is in the
+        // firing state, and only the gates in
+        // `check_optflags_not_applied` stand between it and a line.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let files: Vec<(&str, ReadelfInfo)> = vec![("/usr/bin/a", flagless_info(FLAGLESS_IMPORTS))];
+        let check = optflags_rollup_check(&pkg, &files);
+        assert!(
+            check
+                .optflags_not_applied_detail("-fstack-protector-strong -D_FORTIFY_SOURCE=3")
+                .is_some()
+        );
+        let config = test_config();
+        // The fixture header's OPTFLAGS is "-O2 -g": the tag gate
+        // keeps the emission quiet.
+        assert_eq!(
+            pkg.tag_str(librpm::Tag::OPTFLAGS).as_deref(),
+            Some("-O2 -g")
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_optflags_not_applied(&pkg, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            lines_for(&results, "optflags-not-applied").is_empty(),
+            "tag gate must quiet the emission: {results:?}"
+        );
+        // A noarch package is never charged.
+        let pkg = synthetic_pkg("testpkg", "noarch", vec![]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_optflags_not_applied(&pkg, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            lines_for(&results, "optflags-not-applied").is_empty(),
+            "noarch gate must quiet the emission: {results:?}"
+        );
+    }
+
+    #[test]
+    fn optflags_not_applied_quiet_on_the_binaries_fixture() {
+        // The fixture's OPTFLAGS is "-O2 -g" (see the emission-gates
+        // test): a full check run emits no package finding.
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let (results, _dir) = run_binaries_check(&rpm_path);
+        assert!(
+            lines_for(&results, "optflags-not-applied").is_empty(),
+            "fixture must not fire optflags-not-applied: {results:?}"
+        );
     }
 
     #[test]

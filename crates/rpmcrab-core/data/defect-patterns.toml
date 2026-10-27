@@ -174,6 +174,17 @@ provenance = [
 ]
 
 [[member]]
+tag = "optflags-not-applied"
+class = "defect-pattern"
+family = "hardening"
+gate = "none"
+provenance = [
+    "grass 8.4.0 (Leap 16.0): the spec replaces CFLAGS with a literal before ./configure, so none of its 465 ELF files carries __stack_chk_fail or any __*_chk symbol while the OPTFLAGS tag requests both; the per-file findings total 927 warnings from the one package-wide cause.",
+    "dnsmasq 2.93 (Factory): %build compiles with the full flags, then %install rebuilds every object without CFLAGS; the shipped binaries carry no stack protector, no FORTIFY and no IBT/SHSTK note.",
+    "qpid-proton 0.37-0.38 (Leap 16.0): -DCMAKE_C_FLAGS=$CFLAGS expands to nothing in the build environment and overrides the %cmake default, leaving the three C library subpackages without either mitigation while the C++ subpackage carries __stack_chk_fail.",
+]
+
+[[member]]
 tag = "executable-stack"
 class = "defect-pattern"
 family = "hardening"
