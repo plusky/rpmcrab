@@ -1155,6 +1155,33 @@ mod tests {
     }
 
     #[test]
+    fn split_requires_keeps_sense_bits_and_version_on_moved_entries() {
+        // Combined flags, the shape the single-bit test above cannot
+        // see: a moved entry keeps exactly its non-prereq bits (the
+        // sense bits RPMSENSE_LESS=2 and RPMSENSE_EQUAL=8 ride
+        // along) and its parsed EVR; an entry with sense bits but
+        // no prereq bit stays in `requires` with its flags
+        // untouched.
+        let names: Vec<String> = ["moved", "stayed"].iter().map(|s| s.to_string()).collect();
+        let flags: Vec<i32> = vec![
+            (1 << 9) | 2 | 8, // SCRIPT_PRE | LESS | EQUAL
+            (1 << 13) | 4,    // SCRIPT_VERIFY | GREATER
+        ];
+        let versions: Vec<String> = vec!["1:2.0-3".to_string(), "4.5".to_string()];
+        let (requires, prereq) = split_requires(&names, &flags, &versions);
+        assert_eq!(prereq.len(), 1);
+        assert_eq!(prereq[0].name, "moved");
+        assert_eq!(prereq[0].flags, 2 | 8);
+        assert_eq!(prereq[0].epoch, Some(1));
+        assert_eq!(prereq[0].version.as_deref(), Some("2.0"));
+        assert_eq!(prereq[0].release.as_deref(), Some("3"));
+        assert_eq!(requires.len(), 1);
+        assert_eq!(requires[0].name, "stayed");
+        assert_eq!(requires[0].flags, (1 << 13) | 4);
+        assert_eq!(requires[0].version.as_deref(), Some("4.5"));
+    }
+
+    #[test]
     fn normalize_path_matches_os_path_normpath() {
         // Verified against python3 os.path.normpath.
         assert_eq!(normalize_path("/usr/lib64/x"), "/usr/lib64/x");
