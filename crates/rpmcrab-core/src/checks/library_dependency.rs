@@ -240,7 +240,7 @@ impl LibraryDependencyCheck {
     /// dependency guaranteeing the linked file: some package of the
     /// run that ships the file is depended on, in one of the shapes
     /// the check accepts. The shapes, each measured on the Factory
-    /// corpus (FP-trim campaign, 2026-10-26; 24 of the check's 75 E):
+    /// corpus (FP-trim campaign, 2026-10-26; 27 of the check's 75 E):
     ///
     /// * the devel package ships the resolved file itself
     ///   (`glib2-stage1-devel`'s combined build) — the dependency
@@ -256,12 +256,17 @@ impl LibraryDependencyCheck {
     ///   (`dapl-debug-devel` on `dapl-debug`);
     /// * a requirement names an owner through one of the owner's
     ///   own provides — the naming `chain_credits` already accepts
-    ///   for the library (10 findings: `wt-devel` on `wt-dbo`, the
+    ///   for the library (13 findings: `wt-devel` on `wt-dbo`, the
     ///   provide of `libwtdbo4_12_6`; the stem provides of the
-    ///   klatexformula/liblinebreak/liboping libraries). Owners
-    ///   only: a devel-classified shipper is not the library
-    ///   package of the verdict, so its provides name nothing here;
-    /// * the anchor chain (`chain_credits`) aimed at any owner.
+    ///   klatexformula/liblinebreak/liboping libraries; and, from
+    ///   the corpus re-check, `gsoap-devel`, `rocjpeg-devel` and
+    ///   `rocm-runtime-devel`, each requiring a name only the
+    ///   owner provides corpus-wide). Owners only: a
+    ///   devel-classified shipper is not the library package of
+    ///   the verdict, so its provides name nothing here;
+    /// * the anchor chain (`chain_credits`) aimed at any owner
+    ///   (no corpus finding is credited by this arm alone — every
+    ///   corpus chain also lands on a direct or provides arm).
     ///
     /// A requirement is a name in the devel package's own list, as
     /// in the reference: version relations play no part, and a rich
@@ -1467,6 +1472,29 @@ mod tests {
         );
         let devel = foo_devel(&["libfoo".to_string()]);
         assert!(run_pkgs(&[&lib, &devel]).is_empty());
+    }
+
+    #[test]
+    fn requirement_naming_second_owner_through_its_provide_credits() {
+        // The provides arm aimed at any owner: two packages ship
+        // the linked file, and the devel requires a name only the
+        // owner that is not the attributed (last) one provides.
+        // Both lint orders must stay quiet.
+        let renamed = bare_pkg(
+            "libfoo1",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &["libfoo".to_string()],
+        );
+        let plain = bare_pkg(
+            "libfoo-other",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &[],
+        );
+        let devel = foo_devel(&["libfoo".to_string()]);
+        assert!(run_pkgs(&[&renamed, &plain, &devel]).is_empty());
+        assert!(run_pkgs(&[&plain, &renamed, &devel]).is_empty());
     }
 
     #[test]
