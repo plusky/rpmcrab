@@ -309,8 +309,11 @@ impl Spellchecker {
                 continue;
             }
 
-            // Skip package name matches.
-            if upper_name.contains(&upper) || upper_parts.iter().any(|p| p == &upper) {
+            // Skip package name matches. The possessive of a name part
+            // is a match too ("django's" for the django package): the
+            // reference adds each part's possessive to its skip list.
+            let bare = upper.strip_suffix("'S").unwrap_or(&upper);
+            if upper_name.contains(&upper) || upper_parts.iter().any(|p| p == &upper || p == bare) {
                 continue;
             }
 
