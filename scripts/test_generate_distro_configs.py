@@ -891,7 +891,7 @@ def test_append_extra_atomic_allowed_dirs_lands_inside_the_list():
         assert d not in disallowed_part, disallowed_part
         # The entry is inside the list: it precedes the closing bracket.
         assert allowed_part.index(f'"{d}",') < allowed_part.index("]"), allowed_part
-    assert gen.EXTRA_ATOMIC_ALLOWED_DIRS[0][0] == "/srv/www/"
+    assert gen.EXTRA_ATOMIC_ALLOWED_DIRS[0][0] == "/srv/"
 
 
 def test_append_extra_atomic_allowed_dirs_without_the_list_raises():
@@ -901,7 +901,7 @@ def test_append_extra_atomic_allowed_dirs_without_the_list_raises():
     the whitelisted directory is missing again.
     """
     try:
-        gen.append_extra_atomic_allowed_dirs("Checks = [\n]\n", ["/srv/www/"])
+        gen.append_extra_atomic_allowed_dirs("Checks = [\n]\n", ["/srv/"])
     except AssertionError:
         return
     raise AssertionError(
@@ -910,13 +910,13 @@ def test_append_extra_atomic_allowed_dirs_without_the_list_raises():
 
 def test_extra_atomic_allowed_dirs_carry_their_provenance_reasons():
     """Each EXTRA_ATOMIC_ALLOWED_DIRS entry pairs its prefix with the
-    reason the generator logs for it in PROVENANCE: the /srv/www/
+    reason the generator logs for it in PROVENANCE: the /srv/
     entry keeps its known-regression marking."""
     reasons = dict(gen.EXTRA_ATOMIC_ALLOWED_DIRS)
     assert len(reasons) == len(gen.EXTRA_ATOMIC_ALLOWED_DIRS)
     for prefix, reason in gen.EXTRA_ATOMIC_ALLOWED_DIRS:
         assert prefix and reason, (prefix, reason)
-    assert "known regression" in reasons["/srv/www/"], reasons["/srv/www/"]
+    assert "known regression" in reasons["/srv/"], reasons["/srv/"]
 
 
 def test_remove_excluded_checks_drops_entry_and_explains():

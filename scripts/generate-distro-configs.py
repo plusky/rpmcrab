@@ -369,25 +369,29 @@ EXTRA_CHECKS = [
 # Extra AtomicAllowedDirs entries appended to the openSUSE config that
 # upstream rpmlint does not carry. Each entry pairs the directory prefix
 # with the reason the generator logs for it in data/distro/PROVENANCE.
-# "/srv/www/" is a whitelist with a known regression, ledgered as such
+# "/srv/" is a whitelist with a known regression, ledgered as such
 # (kind = "config" in crates/rpmcrab-core/data/divergences/
-# AtomicUpdateCheck.toml): the distro mandates /srv/www as the web
-# root (apache_serverroot) while its atomic packaging guideline
-# forbids applications living outside the root subvolume, and no
-# packaged web app complies with the guideline -- so genuine
-# atomic-rule violations under /srv/www go unflagged while the entry
-# stands. The entry is revisited and tightened when openSUSE settles
-# how web apps are packaged under the atomic rules.
+# AtomicUpdateCheck.toml): the distro places service payload under
+# /srv (apache_serverroot mandates /srv/www as the web root) while
+# its atomic packaging guideline forbids applications living outside
+# the root subvolume, and no packaged application complies with the
+# guideline -- so genuine atomic-rule violations under /srv go
+# unflagged while the entry stands. The entry began as "/srv/www/"
+# alone and was widened to "/srv/" wholesale on 2026-10-27, when the
+# remaining non-www /srv trees (viewvc, gitolite, salt) were ruled
+# the same class. The entry is revisited and tightened when openSUSE
+# settles how applications are packaged under the atomic rules.
 EXTRA_ATOMIC_ALLOWED_DIRS = [
     (
-        "/srv/www/",
-        "whitelist with a known regression: the distro mandates"
-        " /srv/www as the web root (apache_serverroot) while the"
-        " atomic packaging guideline forbids applications outside"
-        " the root subvolume, and no packaged web app complies --"
-        " genuine violations under /srv/www go unflagged while this"
-        " stands; tightened when openSUSE settles web-app packaging"
-        " under the atomic rules; ledgered in"
+        "/srv/",
+        "whitelist with a known regression: the distro places"
+        " service payload under /srv (apache_serverroot mandates"
+        " /srv/www as the web root) while the atomic packaging"
+        " guideline forbids applications outside the root"
+        " subvolume, and no packaged application complies --"
+        " genuine violations under /srv go unflagged while this"
+        " stands; tightened when openSUSE settles application"
+        " packaging under the atomic rules; ledgered in"
         " tests/parity/divergences.toml",
     ),
 ]

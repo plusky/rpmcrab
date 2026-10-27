@@ -55,7 +55,7 @@ AtomicAllowedDirs = [
     # Extra: added by rpmcrab (whitelist with a known regression);
     # see EXTRA_ATOMIC_ALLOWED_DIRS in
     # scripts/generate-distro-configs.py.
-    "/srv/www/",
+    "/srv/",
 ]
 
 # List of subdirectories which are disallowed for atomic updates
