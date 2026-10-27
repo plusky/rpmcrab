@@ -16473,8 +16473,18 @@ reason = "warning hook: executable and %config by design"
         // A `source` component in prefix or middle position is
         // not a source-tree carrier: source-highlight is a
         // regular tool package and my-source-tools a tool
-        // collection, so their scripts keep firing.
-        for name in ["source-highlight", "my-source-tools"] {
+        // collection, so their scripts keep firing. The same holds
+        // when the word is fused into a single component as a
+        // suffix (resource, mysrc, myresource): the name arm is
+        // exact last-component equality, so a fused name is not a
+        // source-tree carrier either.
+        for name in [
+            "source-highlight",
+            "my-source-tools",
+            "resource",
+            "mysrc",
+            "myresource",
+        ] {
             let dir5 = tempfile::TempDir::new().expect("tmpdir");
             let mut pkg = script_mode_pkg(
                 &dir5,
@@ -16493,7 +16503,7 @@ reason = "warning hook: executable and %config by design"
                     "env-script-interpreter",
                     "/usr/share/tools/data/tool.sh"
                 ),
-                "env-script-interpreter must fire for prefix/middle name {name}: {lines:?}"
+                "env-script-interpreter must fire for non-carrier name {name}: {lines:?}"
             );
         }
         let dir3 = tempfile::TempDir::new().expect("tmpdir");
