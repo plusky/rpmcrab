@@ -2871,6 +2871,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1029"
 
 [[divergence]]
 case = "global"
+check = "shlib-policy-truncated-soname-path"
+kind = "behaviour"
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1028"
+reason = "rpmlint has no equivalent: a <stem>.so.<v> entry shipped beside an ELF whose SONAME is <stem>.so.<w> with w extending v, in a package whose name encodes the whole of w, is not reported. The next SONAME generation ships the same short path and the two co-installable packages conflict on it. Factory corpus (4,566 scheme-named packages): 15 findings in 13 packages, all upstream-created (8 symlinks, 7 regular files installed under the short name), matching the issue census."
+
+[[divergence]]
+case = "global"
 check = "SignatureCheck"
 kind = "behaviour"
 reason = "Signature verification runs in-process through librpm (a verified `PackageHeader::from_file` read against the rpmdb keyring, with the verification flags masking the digest checks \u2014 a deliberate flag difference from `rpm -Kv`, whose default flag set verifies the digests as well) where the reference shells out to `rpm -Kv` and scrapes its output (SignatureCheck.py; pkg.py). Verdicts come from the structured result; the `unknown-key` key ID is read from the signature packet's issuer subpacket, falling back to the issuer-fingerprint subpacket when the packet carries no issuer subpacket (the key ID is that fingerprint's low 64 bits), and is formatted as the low 32 bits, as `rpm -Kv` prints it; a verification failure is reported as `invalid-signature` only when a signature packet is itself unparsable \u2014 a parseable signature that fails verification, and digest failures, stay silent, matching the reference's text patterns. The library and keyring configuration are the same ones `rpm -Kv` uses, so findings agree; parity is pinned by the fixture pin matrix (the unsigned, signed, corrupt-packet, bad-math, broken-payload and bad-digest fixture RPMs, each generation-checked against empty and key-holding rpmdb states, together with the v6 OPENPGP-container fixtures (container-only, classic-tag control, mixed classic+container and dual-signature forms, generation-checked the same way against an rpm 6 `rpm -Kv`) and a Factory-corpus before/after diff (plusky/rpmcrab#704))."
