@@ -4877,6 +4877,22 @@ impl BinariesCheck {
         if bin_name.ends_with(".debug") || bin_name.starts_with("/usr/lib/debug/") {
             return;
         }
+        // find-debuginfo selects the files it splits by execute
+        // permission, with shared-library names as the other
+        // selection arm -- the eligibility model
+        // `check_binary_without_debuginfo` states for its own gate.
+        // A file with neither was never going to be stripped by the
+        // build, so its kept symbol table states nothing about the
+        // package's debuginfo setup: data-loaded toolchain payload
+        // (Emacs .eln files, OCaml .cmxs plugins, AMDGPU code
+        // objects) lives in this shape, and corpus-wide no file in
+        // it carries a .gnu_debuglink.
+        if pkgfile.mode & 0o111 == 0 {
+            let base = basename(bin_name);
+            if !base.ends_with(".so") && !base.contains(".so.") {
+                return;
+            }
+        }
         if pkgfile.magic.contains("not stripped") {
             add_info(
                 out,
@@ -14046,10 +14062,11 @@ description = "explicit priority string bypasses the system crypto policy"
         let config = test_config();
         let check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
-        let pkgfile = syn_file(
+        let mut pkgfile = syn_file(
             "/usr/bin/foo",
             "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), not stripped",
         );
+        pkgfile.mode = 0o100755;
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_unstripped_binary("/usr/bin/foo", &pkg, &pkgfile, &mut out);
         let results = out.results().to_vec();
@@ -14139,13 +14156,65 @@ description = "explicit priority string bypasses the system crypto policy"
         // Near misses: a prefix lookalike is not the debug tree, and a
         // real unstripped binary outside it still fires.
         for name in ["/usr/lib/debugfoo/tool", "/usr/lib64/libfoo.so.1"] {
-            let pkgfile = syn_file(name, not_stripped);
+            let mut pkgfile = syn_file(name, not_stripped);
+            pkgfile.mode = 0o100755;
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_unstripped_binary(name, &pkg, &pkgfile, &mut out);
             let results = out.results().to_vec();
             let lines = lines_for(&results, "unstripped-binary-or-object");
             assert_eq!(lines.len(), 1, "{} must still fire: {:?}", name, results);
             assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        }
+    }
+
+    #[test]
+    fn unstripped_binary_quiet_for_extraction_ineligible() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let not_stripped = "ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), not stripped";
+        let run = |name: &str, mode: u32| {
+            let mut pkgfile = syn_file(name, not_stripped);
+            pkgfile.mode = mode;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_unstripped_binary(name, &pkg, &pkgfile, &mut out);
+            out.results().to_vec()
+        };
+
+        // Data-loaded toolchain payload: no execute permission and
+        // no shared-library name, so find-debuginfo never selects
+        // the file and its symbol table was never the extraction's
+        // to take.
+        for name in [
+            "/usr/lib64/emacs/native-lisp/preloaded/charprop.eln",
+            "/usr/lib64/ocaml/compiler-libs/ocamloptcomp.cmxs",
+            "/usr/lib64/rocm/lib/hsaco/kernels.hsaco",
+        ] {
+            let results = run(name, 0o100644);
+            assert!(
+                results.is_empty(),
+                "{name} at 0644 must be quiet: {results:?}"
+            );
+        }
+
+        // The same payload with an execute bit is extraction
+        // eligible and fires.
+        let results = run("/usr/lib64/ocaml/compiler-libs/ocamloptcomp.cmxs", 0o100755);
+        assert_eq!(
+            lines_for(&results, "unstripped-binary-or-object").len(),
+            1,
+            "executable payload must fire: {results:?}"
+        );
+
+        // A shared-library name is the other selection arm and
+        // fires at any mode.
+        for name in ["/usr/lib64/libfoo.so", "/usr/lib64/libfoo.so.1"] {
+            let results = run(name, 0o100644);
+            assert_eq!(
+                lines_for(&results, "unstripped-binary-or-object").len(),
+                1,
+                "{name} must fire: {results:?}"
+            );
         }
     }
 
