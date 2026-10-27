@@ -3275,6 +3275,49 @@ fn noarch_binary_is_foreign_target(pkgfile: &PkgFile) -> bool {
     }
 }
 
+/// Whether a binary-class file in /usr/share is foreign-target
+/// payload: an ar archive carrying no ELF members at all holds only
+/// foreign-format objects or data (the sdcc cross libraries are
+/// archives of ASxxxx text objects for 8-bit MCU targets), and an
+/// archive of foreign-machine ELFs or a bare foreign-machine ELF is
+/// code for another target stored as data (emulator guest firmware).
+/// Such a file's bytes are the same in every architecture build of
+/// the package, so the arch-independence /usr/share exists to
+/// provide is not broken by it. Unlike the noarch form
+/// (`noarch_binary_is_foreign_target`) there is no location
+/// condition: the package here is archful, so the only question is
+/// whether the file is code for the host family. A host-family ELF
+/// or archive member keeps firing, an archive that parses neither
+/// as GNU ar nor as a structurally valid gplib archive keeps
+/// firing, and a file whose machine cannot be determined keeps
+/// firing: the exemption takes positive evidence.
+fn usr_share_binary_is_foreign_target(pkgfile: &PkgFile) -> bool {
+    if pkgfile.magic.contains("current ar archive") {
+        match archive_elf_class(pkgfile) {
+            ArchiveElfClass::NoElfMembers | ArchiveElfClass::AllForeign => true,
+            ArchiveElfClass::HasHostOrUnknown => false,
+            ArchiveElfClass::Unreadable => {
+                // The MPLIB dialect (the gplib archives SDCC ships
+                // for its pic14/pic16 targets) has no GNU member
+                // index for the walk above to enumerate, so it
+                // classifies as unreadable even though it is a
+                // working library. The gplib structural validator
+                // is the positive evidence instead: a valid gplib
+                // archive's object members are all PIC COFF, so it
+                // carries no ELF members at all. An archive that
+                // parses neither way keeps firing.
+                std::fs::read(&pkgfile.path).is_ok_and(|data| is_gplib_archive(&data))
+            }
+        }
+    } else if elf_regex().is_match(&pkgfile.magic).unwrap_or(false) {
+        elf_machine_class(pkgfile) == ElfMachineClass::Foreign
+    } else {
+        // OCaml native code and Lua bytecode carry no ELF machine to
+        // classify; the finding keeps firing for them.
+        false
+    }
+}
+
 /// Collect the forbidden-function calls one file makes: for every
 /// `WarnOnFunction` config entry whose function pattern matches the
 /// file's symbols, the finding name, the function name and the
@@ -3689,9 +3732,11 @@ impl BinariesCheck {
         }
     }
 
-    fn check_binary_in_usr_share(&self, pkg: &Pkg, bin_name: &str, out: &mut Filter) {
+    fn check_binary_in_usr_share(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) {
+        let bin_name: &str = &pkgfile.name;
         if bin_name.starts_with("/usr/share/")
             && !usr_arch_share_regex().is_match(bin_name).unwrap_or(false)
+            && !usr_share_binary_is_foreign_target(pkgfile)
         {
             add_info(
                 out,
@@ -5352,7 +5397,7 @@ impl Check for BinariesCheck {
                 continue;
             }
 
-            self.check_binary_in_usr_share(pkg, fname, out);
+            self.check_binary_in_usr_share(pkg, pkgfile, out);
             self.check_binary_in_etc(pkg, fname, out);
 
             if is_ocaml_native
@@ -10793,8 +10838,12 @@ description = "explicit priority string bypasses the system crypto policy"
         let config = test_config();
         let check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let host = syn_file(
+            "/usr/share/main",
+            "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked",
+        );
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_binary_in_usr_share(&pkg, "/usr/share/main", &mut out);
+        check.check_binary_in_usr_share(&pkg, &host, &mut out);
         let results = out.results().to_vec();
         let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
@@ -10802,13 +10851,219 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(lines[0].contains("/usr/share/main"), "detail: {}", lines[0]);
 
         // An arch-qualified share path is exempt.
+        let qualified = syn_file(
+            "/usr/share/doc/x86_64/foo",
+            "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked",
+        );
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_binary_in_usr_share(&pkg, "/usr/share/doc/x86_64/foo", &mut out);
+        check.check_binary_in_usr_share(&pkg, &qualified, &mut out);
         assert!(
             out.results().is_empty(),
             "exempt path must be quiet: {:?}",
             out.results()
         );
+    }
+
+    #[test]
+    fn usr_share_foreign_elf_is_silent() {
+        // A foreign-machine ELF in /usr/share is target payload (guest
+        // firmware): its bytes do not depend on the package's arch.
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let file = real_file_pkgfile(
+            &dir,
+            "openbios-ppc",
+            "/usr/share/qemu/openbios-ppc",
+            "ELF 32-bit MSB executable, PowerPC or cisco 4500, version 1 (SYSV)",
+            &elf_with_machine(goblin::elf::header::EM_PPC),
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert!(lines.is_empty(), "foreign ELF must be quiet: {results:?}");
+    }
+
+    #[test]
+    fn usr_share_archive_without_elf_members_is_silent() {
+        // An archive whose members are all in another object format
+        // (the sdcc shape: ASxxxx text objects) carries no ELF code.
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let archive =
+            craft_ar_archive(&[("divunsigned.rel", b"XL4\nH 1 areas 5 global symbols\n")]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.lib",
+            "/usr/share/sdcc/lib/z80/libfoo.lib",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert!(
+            lines.is_empty(),
+            "memberless-ELF archive must be quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn usr_share_archive_of_foreign_elves_is_silent() {
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let riscv = elf_with_machine(goblin::elf::header::EM_RISCV);
+        let archive = craft_ar_archive(&[("a.o", &riscv)]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.a",
+            "/usr/share/testpkg/libfoo.a",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert!(
+            lines.is_empty(),
+            "all-foreign archive must be quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn usr_share_host_elf_still_fires() {
+        // The exemption takes positive evidence of foreign content: a
+        // host-machine ELF in /usr/share is the finding's core case.
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let file = real_file_pkgfile(
+            &dir,
+            "helper",
+            "/usr/share/testpkg/helper",
+            "ELF 64-bit LSB shared object, x86-64, version 1 (SYSV)",
+            &elf_with_machine(goblin::elf::header::EM_X86_64),
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert_eq!(lines.len(), 1, "host ELF fires: {results:?}");
+    }
+
+    #[test]
+    fn usr_share_archive_with_host_member_still_fires() {
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let host = elf_with_machine(goblin::elf::header::EM_X86_64);
+        let archive = craft_ar_archive(&[("a.o", &host)]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.a",
+            "/usr/share/testpkg/libfoo.a",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert_eq!(lines.len(), 1, "host-member archive fires: {results:?}");
+    }
+
+    #[test]
+    fn usr_share_unreadable_archive_still_fires() {
+        // No payload on disk: no evidence of foreign content.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/share/testpkg/libfoo.a",
+                "current ar archive",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert_eq!(lines.len(), 1, "unreadable archive fires: {results:?}");
+    }
+
+    #[test]
+    fn usr_share_unknown_machine_elf_still_fires() {
+        // A magic naming no machine (and no file to read) classifies
+        // as Unknown, not Foreign.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/share/testpkg/blob",
+                "ELF 64-bit LSB shared object, version 1 (SYSV), dynamically linked",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert_eq!(lines.len(), 1, "unclassified ELF fires: {results:?}");
+    }
+
+    #[test]
+    fn usr_share_lua_bytecode_still_fires() {
+        // Lua bytecode carries no ELF machine to classify, so the
+        // foreign-target exemption does not reach it.
+        let config = test_config();
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/share/testpkg/bytecode.bin",
+                "Lua bytecode, version 5.3",
+            )],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert_eq!(lines.len(), 1, "Lua bytecode fires: {results:?}");
+    }
+
+    #[test]
+    fn usr_share_gplib_archive_is_silent() {
+        // SDCC's pic14/pic16 libraries are gplib-dialect archives:
+        // the GNU member walk enumerates nothing for the dialect,
+        // but the structural validator proves every object member
+        // is a PIC COFF object, so the archive carries no ELF code.
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let coff = b"\x40\x12\x02\x00\x2a\xf3\x66\x6a";
+        let archive = gplib_archive(&[("/", b"\x01\x00\x00\x00"), ("foo.o/", coff)]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libsdcc.lib",
+            "/usr/share/sdcc/lib/pic16/libsdcc.lib",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert!(lines.is_empty(), "gplib archive must be quiet: {results:?}");
+    }
+
+    #[test]
+    fn usr_share_broken_gplib_archive_still_fires() {
+        // A gplib-shaped archive whose member chain does not land
+        // exactly on EOF fails the structural validator: without
+        // positive evidence the finding stands.
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let coff = b"\x40\x12\x02\x00\x2a\xf3\x66\x6a";
+        let mut archive = gplib_archive(&[("foo.o/", coff)]);
+        archive.push(b'\n');
+        let file = real_file_pkgfile(
+            &dir,
+            "libsdcc.lib",
+            "/usr/share/sdcc/lib/pic16/libsdcc.lib",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert_eq!(lines.len(), 1, "broken gplib archive fires: {results:?}");
     }
 
     #[test]
