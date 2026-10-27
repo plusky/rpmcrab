@@ -758,3 +758,10 @@ check = "no-manual-page-for-binary"
 kind = "behaviour"
 reason = "Deliberate: the port credits a bindir name whose man page it lacks when the name is the same binary as a documented one in the same package: a symlink whose resolved in-package target carries a man page under the target's name (OpenIPMI's ipmicmd -> openipmicmd, shntool's mode links), or a hardlink (same rdev+inode) to a file whose name carries one (gzip's uncompress == gunzip). The reference (FilesCheck.py:559-564) consults only its man_basenames set and fires on every such alias (verified against rpmlint 2.10.0 on the Factory corpus representatives). Resolution stops at the package boundary: a link whose target the package does not ship, and a target without a page, keep firing."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "no-manual-page-for-binary"
+kind = "behaviour"
+reason = "Deliberate: the port credits a bindir name documented under a version-affixed twin name: the package ships the man page for <exe>-<version> (the flavour-suffixed pages parallel-installable toolchains ship, e.g. the Python singlespec abimap-3.13.1 for the alternatives-managed abimap), or the binary itself is the version-suffixed name of a documented tool (luajit-2.1.1756211046 for luajit). A version tail is at least two dot-separated numeric components, so single-suffix names (ps2ps2, gio-querymodules-64, stunnel3) keep firing. The reference (FilesCheck.py:559-564) consults only its man_basenames set and fires on every such name (verified against rpmlint 2.10.0 on the Factory corpus representatives)."
+since = "0.4.1"
