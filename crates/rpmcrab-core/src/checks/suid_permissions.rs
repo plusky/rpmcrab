@@ -13,13 +13,30 @@
 //!
 //! The exact-verification findings (`permissions-incorrect`,
 //! `permissions-incorrect-owner`) judge the packaged mode and owner
-//! against the secure profile, as in the reference. The other shipped
-//! profiles (`permissions.easy`, `permissions.paranoid`, composed over
-//! the same `permissions` base) are read as well: when the packaged
-//! mode AND owner exactly match another profile's entry for the path,
-//! the finding reports at warning level and names the matched profile
-//! (Tom's ruling, 2026-10-27); a mismatch with every shipped profile
-//! stays an error.
+//! against the secure profile, as in the reference — more precisely
+//! against the secure composition (the `permissions` bases replaced
+//! per path by `permissions.secure`, over `/usr/share/permissions`
+//! and `/etc`) as extended and overridden by the package's own
+//! drop-ins: the drop-in-extended secure baseline. The other shipped
+//! profiles are read as well — `permissions.easy` and
+//! `permissions.paranoid`, each composed file-for-file the same way
+//! (both `permissions` bases replaced per path by the level file from
+//! both bases), but without the drop-ins, which are the package's own
+//! registration statement, not a shipped profile. The demotion has a
+//! secure-mismatch precondition: it is consulted only for a finding
+//! that fires against the secure baseline entry (packaged values
+//! matching the secure entry exactly fire nothing, at any level).
+//! When the packaged mode AND owner — the owner compared as the one
+//! `user:group` string — exactly match another profile's entry for
+//! the path, that finding, and only the two exact-verification
+//! findings, reports at warning level instead of error, its detail
+//! gaining the verbatim suffix ` (matches the {level} profile)`
+//! naming the matched profile (`easy` is consulted first and wins
+//! when both match) (Tom's ruling, 2026-10-27); a mismatch with
+//! every shipped profile stays an error. A malformed `easy` or
+//! `paranoid` file is skipped rather than aborting the run: the
+//! reference never reads those profiles, so their parse failures
+//! must not fail a run the secure data would have carried.
 //!
 //! The setuid/setgid verdicts (`permissions-file-setuid-bit`,
 //! `permissions-directory-setuid-bit`) are claims about that registration
@@ -112,6 +129,14 @@ impl VariablesHandler {
 
     /// Expand `%{VAR}` components in `path`, returning all expansions.
     fn expand_paths(&self, path: &str) -> Vec<String> {
+        self.expand_paths_checked(path)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `expand_paths` with the reference's raise on an undeclared
+    /// variable returned as an `Err` instead of a panic, for the
+    /// lenient non-secure profile load.
+    fn expand_paths_checked(&self, path: &str) -> Result<Vec<String>, String> {
         let mut ret = vec![String::new()];
         for part in path.split('/') {
             if part.starts_with("%{") && part.ends_with('}') {
@@ -119,9 +144,10 @@ impl VariablesHandler {
                 // The reference raises on undeclared variables
                 // (`permissions.py:94-95`); a silently dropped variable
                 // would produce a wrong path and wrong findings.
-                let expansions = self.variables.get(var).unwrap_or_else(|| {
-                    panic!("Undeclared variable '{var}' encountered in profile")
-                });
+                let expansions = self
+                    .variables
+                    .get(var)
+                    .ok_or_else(|| format!("Undeclared variable '{var}' encountered in profile"))?;
                 let mut new_ret = Vec::new();
                 for p in &ret {
                     for value in expansions {
@@ -151,14 +177,35 @@ impl VariablesHandler {
         if path.ends_with('/') {
             ret = ret.into_iter().map(|p| format!("{p}/")).collect();
         }
-        ret
+        Ok(ret)
     }
 }
 
-/// Parse a permissions profile file.
+/// Parse a permissions profile file. The reference's raises inside
+/// the parse (a bare `:package:` line, an undeclared variable) panic,
+/// as `parse_profile`'s callers expect.
 fn parse_profile(
     var_handler: &VariablesHandler,
     profile_path: &str,
+) -> Result<HashMap<String, Vec<PermissionsEntry>>, String> {
+    parse_profile_mode(var_handler, profile_path, false)
+}
+
+/// `parse_profile` with every failure — the raises included —
+/// returned as an `Err`, for the lenient non-secure profile load:
+/// the reference never reads the `easy`/`paranoid` profiles, so a
+/// malformed one is skipped, never fatal.
+fn parse_profile_lenient(
+    var_handler: &VariablesHandler,
+    profile_path: &str,
+) -> Result<HashMap<String, Vec<PermissionsEntry>>, String> {
+    parse_profile_mode(var_handler, profile_path, true)
+}
+
+fn parse_profile_mode(
+    var_handler: &VariablesHandler,
+    profile_path: &str,
+    lenient: bool,
 ) -> Result<HashMap<String, Vec<PermissionsEntry>>, String> {
     let mut entries: HashMap<String, Vec<PermissionsEntry>> = HashMap::new();
     let mut active_packages: Vec<String> = Vec::new();
@@ -204,7 +251,12 @@ fn parse_profile(
                 packages: active_packages.clone(),
             };
 
-            for expanded in var_handler.expand_paths(&path) {
+            let expansions = if lenient {
+                var_handler.expand_paths_checked(&path)?
+            } else {
+                var_handler.expand_paths(&path)
+            };
+            for expanded in expansions {
                 let mut e = entry.clone();
                 e.path = expanded.clone();
                 let key = expanded.trim_end_matches('/').to_string();
@@ -235,10 +287,13 @@ fn parse_profile(
             let line = line.split('#').next().unwrap_or("");
             // The reference does `line.split(None, 1)` then `parts[1]`,
             // raising `IndexError` on a bare `:package:` line.
-            let rest = line
-                .split_once(|c: char| c.is_whitespace())
-                .map(|x| x.1)
-                .unwrap_or_else(|| panic!("{profile_path}:{nr}: bare :package: line"));
+            let rest = match line.split_once(|c: char| c.is_whitespace()).map(|x| x.1) {
+                Some(rest) => rest,
+                None if lenient => {
+                    return Err(format!("{profile_path}:{nr}: bare :package: line"));
+                }
+                None => panic!("{profile_path}:{nr}: bare :package: line"),
+            };
             active_packages = rest.split(',').map(|s| s.trim().to_string()).collect();
         } else {
             return Err(format!("{profile_path}:{nr}: unexpected line"));
@@ -251,12 +306,17 @@ fn parse_profile(
 pub struct SUIDPermissionsCheck {
     perms: HashMap<String, Vec<PermissionsEntry>>,
     /// The other shipped central profiles (`easy`, `paranoid`), composed
-    /// exactly like the secure one (the `permissions` base replaced
-    /// per path by the level file, across the same bases) and keyed the
-    /// same way. Consulted only by `verify_entry`'s severity rule; the
-    /// registration set and every verdict stay secure-based. Per-package
-    /// drop-ins are not applied here — a drop-in is the package's own
-    /// registration statement, not a shipped profile.
+    /// exactly like the secure one, file for file: for level `L`, the
+    /// `permissions` files from `/usr/share/permissions` and `/etc`
+    /// replaced per path by the `permissions.L` files from both bases,
+    /// keyed the same way. Consulted only by `verify_entry`'s severity
+    /// rule; the registration set and every verdict stay based on the
+    /// secure composition as the package's drop-ins extend it.
+    /// Per-package drop-ins (`permissions.d/`, `packages.d/`) are not
+    /// applied here — a drop-in is the package's own registration
+    /// statement, not a shipped profile. A file that fails to parse is
+    /// skipped for these levels only: the reference never reads them,
+    /// so a malformed `permissions.easy` must not abort the run.
     other_profiles: Vec<(&'static str, HashMap<String, Vec<PermissionsEntry>>)>,
     var_handler: VariablesHandler,
     /// Whether any central permissions profile was read at construction.
@@ -273,10 +333,13 @@ impl SUIDPermissionsCheck {
     }
 
     /// Load the central profiles, split out so tests can point the
-    /// constructor at scratch profiles. A parse error aborts the run,
-    /// matching the reference: `SUIDPermissionsCheck.__init__` calls
-    /// `_parse_profile` with no exception handling, and nothing upstream
-    /// (`lint.py` `load_checks`) catches it.
+    /// constructor at scratch profiles. A parse error in the secure
+    /// composition aborts the run, matching the reference:
+    /// `SUIDPermissionsCheck.__init__` calls `_parse_profile` with no
+    /// exception handling, and nothing upstream (`lint.py`
+    /// `load_checks`) catches it. The non-secure compositions are the
+    /// exception: the reference never reads `easy`/`paranoid`, so a
+    /// file that fails to parse there is skipped (see `load_profile_lenient`).
     fn new_with(variables_conf: &str, profile_bases: &[&str]) -> Self {
         let var_handler = VariablesHandler::new(variables_conf);
         let (perms, profiles_read) = Self::load_profile(&var_handler, profile_bases, "secure");
@@ -288,7 +351,7 @@ impl SUIDPermissionsCheck {
             .map(|level| {
                 (
                     level,
-                    Self::load_profile(&var_handler, profile_bases, level).0,
+                    Self::load_profile_lenient(&var_handler, profile_bases, level),
                 )
             })
             .collect();
@@ -330,6 +393,36 @@ impl SUIDPermissionsCheck {
             }
         }
         (perms, profiles_read)
+    }
+
+    /// Compose one non-secure profile (`easy`, `paranoid`) like
+    /// `load_profile`, except a file that fails to parse is skipped
+    /// instead of panicking: the reference never reads these profiles,
+    /// so an admin-edited malformed `/etc/permissions.easy` must not
+    /// abort a run the secure data would have carried. The rest of
+    /// the composition (the `permissions` bases, the level files that
+    /// do parse) still applies.
+    fn load_profile_lenient(
+        var_handler: &VariablesHandler,
+        profile_bases: &[&str],
+        level: &str,
+    ) -> HashMap<String, Vec<PermissionsEntry>> {
+        let level_file = format!("permissions.{level}");
+        let mut perms: HashMap<String, Vec<PermissionsEntry>> = HashMap::new();
+        for name in ["permissions", level_file.as_str()] {
+            for base in profile_bases {
+                let path = format!("{base}/{name}");
+                if !Path::new(&path).exists() {
+                    continue;
+                }
+                if let Ok(entries) = parse_profile_lenient(var_handler, &path) {
+                    for (k, v) in entries {
+                        perms.insert(k, v);
+                    }
+                }
+            }
+        }
+        perms
     }
 
     fn is_suid(mode: u32) -> bool {
@@ -377,10 +470,11 @@ impl SUIDPermissionsCheck {
 
     /// The shipped non-secure profile whose entry for `path` the
     /// packaged mode AND owner match exactly (the mode compared the way
-    /// `permissions-incorrect` compares, the owner string the way
-    /// `permissions-incorrect-owner` compares), honouring the entry's
-    /// `:package:` scoping — `Some("easy")` or `Some("paranoid")`, in
-    /// that order, when one matches.
+    /// `permissions-incorrect` compares, the owner as the single
+    /// `user:group` string `permissions-incorrect-owner` compares),
+    /// honouring the entry's `:package:` scoping — `Some("easy")` or
+    /// `Some("paranoid")` when one matches. `easy` is consulted first
+    /// and wins when both profiles match.
     fn other_profile_match(
         &self,
         pkg: &Pkg,
@@ -435,11 +529,15 @@ impl SUIDPermissionsCheck {
         }
 
         // Severity rule (Tom, 2026-10-27): the verdicts below judge the
-        // packaged values against the secure profile, but when mode AND
-        // owner exactly match another shipped profile's entry for this
-        // path the packaging follows a distro-shipped configuration, so
-        // the findings report at warning level and name that profile.
-        // A mismatch with every shipped profile stays an error.
+        // packaged values against the secure baseline entry (the secure
+        // composition as this package's drop-ins extend it), but when
+        // mode AND owner exactly match another shipped profile's entry
+        // for this path the packaging follows a distro-shipped
+        // configuration, so a finding that fires here reports at
+        // warning level and its detail gains the verbatim suffix
+        // ` (matches the {level} profile)`. A mismatch with every
+        // shipped profile stays an error; values matching the secure
+        // entry never reach a finding at all.
         let matched_profile = self.other_profile_match(pkg, path, pkgfile);
         let (level, profile_note) = match matched_profile {
             Some(level) => (Level::Warning, format!(" (matches the {level} profile)")),
@@ -993,11 +1091,11 @@ mod tests {
         let results = run_check_levels(&pkg, &mut check);
         let (level, line) = finding(&results, "permissions-incorrect").expect("mode finding");
         assert_eq!(level, Level::Warning, "{results:?}");
-        assert!(line.contains("matches the easy profile"), "{line}");
+        assert!(line.ends_with(" (matches the easy profile)"), "{line}");
         let (level, line) =
             finding(&results, "permissions-incorrect-owner").expect("owner finding");
         assert_eq!(level, Level::Warning, "{results:?}");
-        assert!(line.contains("matches the easy profile"), "{line}");
+        assert!(line.ends_with(" (matches the easy profile)"), "{line}");
     }
 
     #[test]
@@ -1040,11 +1138,11 @@ mod tests {
         let results = run_check_levels(&pkg, &mut check);
         let (level, line) = finding(&results, "permissions-incorrect").expect("mode finding");
         assert_eq!(level, Level::Warning, "{results:?}");
-        assert!(line.contains("matches the paranoid profile"), "{line}");
+        assert!(line.ends_with(" (matches the paranoid profile)"), "{line}");
         let (level, line) =
             finding(&results, "permissions-incorrect-owner").expect("owner finding");
         assert_eq!(level, Level::Warning, "{results:?}");
-        assert!(line.contains("matches the paranoid profile"), "{line}");
+        assert!(line.ends_with(" (matches the paranoid profile)"), "{line}");
     }
 
     #[test]
@@ -1076,11 +1174,132 @@ mod tests {
         let results = run_check_levels(&pkg, &mut check);
         let (level, line) = finding(&results, "permissions-incorrect").expect("mode finding");
         assert_eq!(level, Level::Warning, "{results:?}");
-        assert!(line.contains("matches the easy profile"), "{line}");
+        assert!(line.ends_with(" (matches the easy profile)"), "{line}");
         assert!(
             finding(&results, "permissions-incorrect-owner").is_none(),
             "{results:?}"
         );
+    }
+
+    #[test]
+    fn owner_only_demotion_when_mode_matches_secure() {
+        // Mirror of the newrole shape with the tags swapped: the mode
+        // already matches secure, the owner matches the easy entry
+        // exactly (with that mode) — the owner finding fires alone
+        // and demotes.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned(
+            "/usr/bin/ownerbin",
+            0o1004750,
+            "root",
+            "trusted",
+        )];
+        let mut check = check_with_profiles(
+            vec![entry_owned(
+                "/usr/bin/ownerbin",
+                0o4750,
+                "root",
+                "root",
+                "/usr/share/permissions/permissions.secure",
+            )],
+            vec![(
+                "easy",
+                vec![entry_owned(
+                    "/usr/bin/ownerbin",
+                    0o4750,
+                    "root",
+                    "trusted",
+                    "/usr/share/permissions/permissions.easy",
+                )],
+            )],
+        );
+        let results = run_check_levels(&pkg, &mut check);
+        assert!(
+            finding(&results, "permissions-incorrect").is_none(),
+            "{results:?}"
+        );
+        let (level, line) =
+            finding(&results, "permissions-incorrect-owner").expect("owner finding");
+        assert_eq!(level, Level::Warning, "{results:?}");
+        assert!(line.ends_with(" (matches the easy profile)"), "{line}");
+    }
+
+    #[test]
+    fn easy_wins_when_both_other_profiles_match() {
+        // Both non-secure profiles carry the packaged pair exactly:
+        // easy is consulted first and the suffix names it.
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned(
+            "/usr/bin/bothbin",
+            0o1004750,
+            "root",
+            "trusted",
+        )];
+        let matched =
+            |profile: &str| entry_owned("/usr/bin/bothbin", 0o4750, "root", "trusted", profile);
+        let mut check = check_with_profiles(
+            vec![entry_owned(
+                "/usr/bin/bothbin",
+                0o0755,
+                "root",
+                "root",
+                "/usr/share/permissions/permissions.secure",
+            )],
+            vec![
+                (
+                    "easy",
+                    vec![matched("/usr/share/permissions/permissions.easy")],
+                ),
+                (
+                    "paranoid",
+                    vec![matched("/usr/share/permissions/permissions.paranoid")],
+                ),
+            ],
+        );
+        let results = run_check_levels(&pkg, &mut check);
+        let (level, line) = finding(&results, "permissions-incorrect").expect("mode finding");
+        assert_eq!(level, Level::Warning, "{results:?}");
+        assert!(line.ends_with(" (matches the easy profile)"), "{line}");
+        let (level, line) =
+            finding(&results, "permissions-incorrect-owner").expect("owner finding");
+        assert_eq!(level, Level::Warning, "{results:?}");
+        assert!(line.ends_with(" (matches the easy profile)"), "{line}");
+    }
+
+    #[test]
+    fn malformed_non_secure_profiles_are_skipped() {
+        // The reference never reads easy/paranoid: a malformed file at
+        // either level (a plain bad line in easy; an undeclared
+        // variable — one of the reference's raises — in paranoid) is
+        // skipped instead of aborting construction, the secure
+        // composition still loads, and a packaged pair the malformed
+        // easy file would have carried stays an error.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
+        std::fs::write(dir.join("permissions"), "/usr/bin/x root:root 0755\n").expect("write");
+        std::fs::write(
+            dir.join("permissions.easy"),
+            "/usr/bin/x root:trusted 4750\nthis is not a valid profile line\n",
+        )
+        .expect("write");
+        std::fs::write(
+            dir.join("permissions.paranoid"),
+            "/usr/%{NOPE}/x root:root 0755\n",
+        )
+        .expect("write");
+        let base = dir.to_str().unwrap().to_string();
+        let mut check =
+            SUIDPermissionsCheck::new_with("/nonexistent/rpmcrab-variables.conf", &[base.as_str()]);
+        assert!(check.profiles_read, "the secure composition was read");
+        assert_eq!(check.perms["/usr/bin/x"][0].mode, 0o0755);
+
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned("/usr/bin/x", 0o1004750, "root", "trusted")];
+        let results = run_check_levels(&pkg, &mut check);
+        let (level, _) = finding(&results, "permissions-incorrect").expect("mode finding");
+        assert_eq!(level, Level::Error, "{results:?}");
+        let (level, _) = finding(&results, "permissions-incorrect-owner").expect("owner finding");
+        assert_eq!(level, Level::Error, "{results:?}");
     }
 
     #[test]
