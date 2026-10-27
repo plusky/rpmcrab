@@ -22,3 +22,10 @@ check = "KMPPolicyCheck"
 kind = "detail"
 reason = "Staged `--explain` text for `kmp-missing-supplements` prescribed the `packageand(kernel-%1:%name)` form. The check accepts both spellings (verified in `checks/kmp_policy.rs`), and `packageand()` is the obsolete zypp syntax the `suse-zypp-packageand` finding flags everywhere else, so the text now prescribes the rich boolean form: `Supplements: (kernel-%1 and %name)`."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "KMPPolicyCheck"
+kind = "behaviour"
+reason = "The reference fires `kmp-missing-requires` whenever no Require is named exactly `kernel-<flavor>`. A KMP whose modules link flavor-pinned symbols instead carries `ksym(<flavor>:...)` requires, which only a kernel package exporting those symbols satisfies -- the SLE 16 KMP Manual (section 7, RPM Provides and Requires) defines installation success exactly that way, and both `kernel-<flavor>` and `kernel-<flavor>-base` provide the symbols, so the plain name require would force the full kernel package where the `-base` subset suffices. rpmcrab credits own-flavor ksym requires; a KMP with neither form, or only another flavor's ksym, still fires. Corpus: all 13 live findings carry 33-831 own-flavor ksym requires alongside the proper Enhances and Supplements, and no corpus KMP lacks both dependency forms."
+since = "0.4.1"
