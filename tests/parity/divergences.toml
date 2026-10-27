@@ -3972,6 +3972,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/830"
 
 [[divergence]]
 case = "global"
+check = "rpmlintrc-uses-setbadness"
+kind = "behaviour"
+reason = "A new `rpmlintrc-uses-setbadness` warning fires once per rpmlintrc line matching `^\\s*setBadness`, the openSUSE source-review bot's predicate (check_source.py in openSUSE-release-tools), whether or not the line parses as a complete setBadness call. The reference parses setBadness into [Scoring] and emits no such finding. Occurrences are recorded when an rpmlintrc is loaded and reported on the last checked package, outside the --ignore-unused-rpmlintrc gate, which suppresses only the unused-filter audit. SourceCheck also reports the occurrences in an rpmlintrc file carried as a source package payload, deduplicated by file name against the rpmlintrc files loaded for the run and within the package. Comment lines mentioning setBadness and addFilter lines do not fire. Measured over the Factory corpus: the 1,027 rpmlintrc files in the corpus tree (5,165 lines) carry zero lines matching the predicate -- the only two lines mentioning setBadness are comments in thrift's rpmlintrc -- a load of every one of those files reports zero findings, and a run over the 51,589 binary RPMs reports zero findings. The corpus carries no source RPMs, so the payload path is covered by unit tests, not by the corpus run."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1020"
+
+[[divergence]]
+case = "global"
 check = "session-header"
 kind = "behaviour"
 reason = "The header's 'configuration:' block names the bundled defaults as <builtin>; the reference names the installed file it read (site-packages/rpmlint/configdefaults.toml). rpmcrab embeds its defaults at build time with include_str!, so there is no installed file to name, and reproducing an installation path would be false provenance."

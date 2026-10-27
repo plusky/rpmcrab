@@ -329,7 +329,13 @@ completion, so the unreadable input is the load-bearing fact.
 Two directives only, recognised by regex: `addFilter(r"…")` and
 `setBadness('name', N)`. Since #699 `setBadness` is parsed and ignored —
 each occurrence draws a stderr warning — because badness no longer adjusts
-finding levels; it never reaches `Scoring`.
+finding levels; it never reaches `Scoring`. Each occurrence is also
+recorded at load and reported after the run as a
+`rpmlintrc-uses-setbadness` warning (one per line matching
+`^\s*setBadness`), outside the `--ignore-unused-rpmlintrc` gate;
+`SourceCheck` reports the same tag for a `setBadness` line in an
+rpmlintrc file carried in a source package, deduplicated by file name
+against the loaded files.
 
 **Auto-discovery is an openSUSE rewrite of upstream** (`lint.py`, `+-` diff).
 When no `-r/--rpmlintrc` is given, and unless `PYTEST_XDIST_TESTRUNUID` is set:

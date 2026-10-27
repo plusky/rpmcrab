@@ -47,6 +47,13 @@ pub struct Config {
     pub conf_files: Vec<String>,
     /// rpmlintrc filter patterns (only these are audited for unused filters).
     pub rpmlintrc_filters: Vec<String>,
+    /// One entry per `setBadness` occurrence in a loaded rpmlintrc, in
+    /// load order, each formatted as the finding detail
+    /// (`<file> line <n>: <line>`). Recorded at load; reported as
+    /// `rpmlintrc-uses-setbadness` warnings by
+    /// `Lint::report_rpmlintrc_setbadness`, outside the unused-filter
+    /// audit's `--ignore-unused-rpmlintrc` gate.
+    pub rpmlintrc_setbadness: Vec<String>,
     /// The rpmlintrc files loaded (for the header's `rpmlintrc:` block).
     pub rpmlintrc_display: Vec<String>,
     /// `-s/--strict`.
@@ -744,6 +751,23 @@ fn attempted_directive(line: &str) -> Option<&'static str> {
     None
 }
 
+/// The `setBadness` occurrences in an rpmlintrc text: one
+/// `(line_number, line)` pair per line matching `^\s*setBadness`, the
+/// openSUSE source-review bot's predicate (`check_source.py`). The
+/// line is returned trimmed. Comment lines mentioning `setBadness`
+/// do not match (the `#` is the first non-blank character, not the
+/// directive), and neither do `addFilter` lines.
+pub fn setbadness_occurrences(text: &str) -> Vec<(usize, String)> {
+    static RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"^\s*setBadness").expect("static regex"));
+    splitlines(text)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, line)| RE.find(line).is_ok_and(|m| m.is_some()))
+        .map(|(index, line)| (index + 1, line.trim().to_string()))
+        .collect()
+}
+
 /// The two `rpmlintrc` directives rpmlint recognises (`config.py`).
 /// `addFilter` appends to `Filters` and is recorded for the unused-filter
 /// audit. `setBadness` is parsed and ignored with a warning: badness no
@@ -759,12 +783,22 @@ fn attempted_directive(line: &str) -> Option<&'static str> {
 /// character, optional `r` prefix) in parentheses for `addFilter`,
 /// and a quoted name plus a number for `setBadness`, with arbitrary
 /// whitespace and trailing content such as a comment.
+///
+/// Every line matching `^\s*setBadness` -- well-formed or not -- is
+/// also recorded in `Config::rpmlintrc_setbadness`, one entry per
+/// occurrence, for the `rpmlintrc-uses-setbadness` report.
 pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
     let re_filter =
         Regex::new(r#"^\s*addFilter\s*\(\s*r?["\'](.*)["\']\s*\)"#).expect("static regex");
     let re_badness = Regex::new(r#"\s*setBadness\s*\([\'"](.*)[\'"],\s*[\'"]?(\d+)[\'"]?\)"#)
         .expect("static regex");
     let text = std::fs::read_to_string(path)?;
+
+    for (line_no, line) in setbadness_occurrences(&text) {
+        config
+            .rpmlintrc_setbadness
+            .push(format!("{} line {line_no}: {line}", path.display()));
+    }
 
     let mut filters = Vec::new();
     for (index, line) in splitlines(&text).into_iter().enumerate() {
@@ -1361,6 +1395,65 @@ mod tests {
             cfg.rpmlintrc_filters,
             vec!["no-return-in-nonvoid-function".to_string()]
         );
+    }
+
+    #[test]
+    fn setbadness_occurrences_match_the_bot_predicate() {
+        // `^\s*setBadness`: leading whitespace is fine, a `#` first is
+        // a comment, and the directive name must start the line.
+        let text = "setBadness('a', 0)\n  setBadness('b', 1)\n# setBadness('c', 2)\n  # setBadness('d', 3)\naddFilter('setBadness')\nx setBadness('e', 4)\nsetBadness\n";
+        assert_eq!(
+            setbadness_occurrences(text),
+            vec![
+                (1, "setBadness('a', 0)".to_string()),
+                (2, "setBadness('b', 1)".to_string()),
+                (7, "setBadness".to_string()),
+            ]
+        );
+        assert!(setbadness_occurrences("").is_empty());
+        assert!(setbadness_occurrences("# only a comment\n").is_empty());
+    }
+
+    #[test]
+    fn rpmlintrc_load_records_every_setbadness_occurrence() {
+        // One entry per matching line, well-formed or not, in load
+        // order; comment lines and `addFilter` lines record nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join("pkg-rpmlintrc");
+        std::fs::write(
+            &rc,
+            "# setBadness in a comment stays quiet\naddFilter('good-one')\nsetBadness('first-check', 0)\n  setBadness('second-check', 10)\nsetBadness('unterminated)\n",
+        )
+        .unwrap();
+        let mut cfg = load_inner(&[], &[], false).unwrap();
+        load_rpmlintrc(&mut cfg, &rc).unwrap();
+        assert_eq!(
+            cfg.rpmlintrc_setbadness,
+            vec![
+                format!("{} line 3: setBadness('first-check', 0)", rc.display()),
+                format!("{} line 4: setBadness('second-check', 10)", rc.display()),
+                format!("{} line 5: setBadness('unterminated)", rc.display()),
+            ]
+        );
+        // The import side is unchanged: the filter lands, `Scoring`
+        // does not.
+        assert_eq!(cfg.rpmlintrc_filters, vec!["good-one".to_string()]);
+        assert!(cfg.scoring.is_empty());
+    }
+
+    #[test]
+    fn rpmlintrc_load_without_setbadness_records_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join("pkg-rpmlintrc");
+        std::fs::write(
+            &rc,
+            "# mentions setBadness only in prose\naddFilter('setBadness')\naddFilter('other')\n",
+        )
+        .unwrap();
+        let mut cfg = load_inner(&[], &[], false).unwrap();
+        load_rpmlintrc(&mut cfg, &rc).unwrap();
+        assert!(cfg.rpmlintrc_setbadness.is_empty());
+        assert_eq!(cfg.rpmlintrc_filters.len(), 2);
     }
 
     #[test]

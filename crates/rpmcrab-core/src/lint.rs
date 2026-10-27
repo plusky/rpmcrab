@@ -8,7 +8,8 @@
 //! Packages are checked in batches (`_check_packages`, `rpmlint#1595`):
 //! worker threads check one package each and the main thread replays the
 //! results in task order. `after_checks` runs once per batch; the
-//! unused-rpmlintrc-filter audit runs once after all batches.
+//! unused-rpmlintrc-filter audit and the rpmlintrc `setBadness` report
+//! run once after all batches.
 
 use std::collections::BTreeMap;
 
@@ -221,6 +222,37 @@ impl Lint {
                 level: Level::Warning,
                 check: "unused-rpmlintrc-filter".to_string(),
                 details: vec![detail],
+                // `Path(package.name).name`, as for binary findings; specs
+                // carry no arch, like the reference's `FakePkg`.
+                pkg_name: basename(&pkg_name).to_string(),
+                arch: if is_spec {
+                    None
+                } else {
+                    arch.clone().filter(|a| !a.is_empty())
+                },
+                line: None,
+                filter_alias: None,
+                class: None,
+            });
+        }
+    }
+
+    /// Every `setBadness` occurrence recorded while loading the
+    /// rpmlintrc files (`Config::rpmlintrc_setbadness`) becomes an
+    /// `rpmlintrc-uses-setbadness` warning, once per occurrence, on the
+    /// last processed package. This report is not the unused-filter
+    /// audit: it runs even under `--ignore-unused-rpmlintrc`, which
+    /// suppresses only that audit.
+    pub fn report_rpmlintrc_setbadness(&mut self) {
+        let Some((pkg_name, arch, is_spec)) = self.last_pkg.clone() else {
+            return;
+        };
+        let occurrences = self.config.rpmlintrc_setbadness.clone();
+        for occurrence in occurrences {
+            self.filter.add_info(Finding {
+                level: Level::Warning,
+                check: "rpmlintrc-uses-setbadness".to_string(),
+                details: vec![occurrence],
                 // `Path(package.name).name`, as for binary findings; specs
                 // carry no arch, like the reference's `FakePkg`.
                 pkg_name: basename(&pkg_name).to_string(),

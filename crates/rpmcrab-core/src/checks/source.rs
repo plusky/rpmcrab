@@ -6,6 +6,10 @@
 //!
 //! `prebuilt-binary-in-sources` is rpmcrab-new (upstream rpmlint#4, still
 //! open): the reference never unpacks source archives.
+//!
+//! `rpmlintrc-uses-setbadness` is rpmcrab-new as well: an rpmlintrc file
+//! carried in the source package is scanned for `setBadness` lines, the
+//! same predicate the rpmlintrc load path records.
 
 use fancy_regex::Regex;
 
@@ -155,6 +159,46 @@ impl SourceCheck {
             ));
         }
         out
+    }
+
+    /// `rpmlintrc-uses-setbadness`: scan every rpmlintrc file in the
+    /// source package (a file whose name ends in `rpmlintrc`, the
+    /// source-review bot's `*rpmlintrc` glob) for lines matching
+    /// `^\s*setBadness`, one warning per occurrence. A file whose name
+    /// matches an rpmlintrc already loaded for this run is skipped --
+    /// the load path reports its occurrences -- and a name is scanned
+    /// only once per package, so the same directive file is never
+    /// reported twice under one name.
+    fn check_rpmlintrc_setbadness(&self, pkg: &Pkg, config: &Config, out: &mut Filter) {
+        let loaded: std::collections::HashSet<String> = config
+            .rpmlintrc_display
+            .iter()
+            .map(|path| path.rsplit('/').next().unwrap_or(path.as_str()).to_string())
+            .collect();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for f in &pkg.files {
+            let name = f.name.rsplit('/').next().unwrap_or(f.name.as_str());
+            if !name.ends_with("rpmlintrc")
+                || loaded.contains(name)
+                || !seen.insert(name.to_string())
+            {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&f.path) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            for (line_no, line) in crate::config::setbadness_occurrences(&text) {
+                let detail = format!("{name} line {line_no}: {line}");
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "rpmlintrc-uses-setbadness",
+                    &[&detail],
+                );
+            }
+        }
     }
 
     /// `prebuilt-binary-in-sources` (issue #150, upstream rpmlint#4): scan
@@ -714,6 +758,7 @@ impl Check for SourceCheck {
                 add_info(out, level, pkg, check, &refs);
             }
         }
+        self.check_rpmlintrc_setbadness(pkg, config, out);
         self.check_prebuilt_binaries(pkg, out);
     }
 }
@@ -1204,16 +1249,29 @@ mod prebuilt_tests {
     /// Real emission path: `Check::check` dispatch on a source package with
     /// a tarball → findings in the filter.
     fn run_source(pkg: &Pkg) -> Vec<(String, String, Level)> {
+        run_source_with_config(pkg, &test_config())
+    }
+
+    fn run_source_with_config(pkg: &Pkg, config: &Config) -> Vec<(String, String, Level)> {
         use crate::color::Color;
-        let config = test_config();
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let mut check = SourceCheck::new(&config);
-        Check::check(&mut check, pkg, &config, &mut out);
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(config);
+        Check::check(&mut check, pkg, config, &mut out);
         out.results()
             .iter()
             .zip(out.result_levels().iter())
             .map(|((n, line), l)| (n.clone(), line.clone(), *l))
             .collect()
+    }
+
+    fn setbadness_lines(findings: &[(String, String, Level)]) -> Vec<String> {
+        let mut lines: Vec<String> = findings
+            .iter()
+            .filter(|(n, _, l)| n == "rpmlintrc-uses-setbadness" && *l == Level::Warning)
+            .map(|(_, line, _)| line.clone())
+            .collect();
+        lines.sort();
+        lines
     }
 
     fn prebuilt_lines(findings: &[(String, String, Level)]) -> Vec<String> {
@@ -1259,6 +1317,71 @@ mod prebuilt_tests {
                 "prebuilt-test.src: W: prebuilt-binary-in-sources \
                  prebuilt-test-1.0.tar.gz: src/prebuilt.o ELF binary",
             ]
+        );
+    }
+
+    #[test]
+    fn setbadness_in_a_payload_rpmlintrc_fires_per_occurrence() {
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            (
+                "prebuilt-test-rpmlintrc",
+                b"# setBadness in a comment stays quiet\naddFilter('some-check')\nsetBadness('first-check', 0)\n  setBadness('second-check', 10)\n"
+                    .to_vec(),
+            ),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            setbadness_lines(&findings),
+            [
+                "prebuilt-test.src: W: rpmlintrc-uses-setbadness \
+                 prebuilt-test-rpmlintrc line 3: setBadness('first-check', 0)",
+                "prebuilt-test.src: W: rpmlintrc-uses-setbadness \
+                 prebuilt-test-rpmlintrc line 4: setBadness('second-check', 10)",
+            ]
+        );
+    }
+
+    #[test]
+    fn setbadness_payload_scan_is_quiet_without_the_directive() {
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            (
+                "prebuilt-test.rpmlintrc",
+                b"# mentions setBadness only in prose\naddFilter('setBadness')\n".to_vec(),
+            ),
+            (
+                "notes.txt",
+                b"setBadness('not-in-an-rpmlintrc', 0)\n".to_vec(),
+            ),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(setbadness_lines(&findings).is_empty(), "all: {findings:?}");
+    }
+
+    #[test]
+    fn setbadness_payload_scan_skips_a_name_already_loaded() {
+        // The load path reports a loaded rpmlintrc's occurrences, so a
+        // payload file of the same name is not reported a second time;
+        // a differently named payload file still fires.
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            (
+                "loaded-rpmlintrc",
+                b"setBadness('loaded-check', 0)\n".to_vec(),
+            ),
+            (
+                "payload-rpmlintrc",
+                b"setBadness('payload-check', 0)\n".to_vec(),
+            ),
+        ]);
+        let mut config = test_config();
+        config.rpmlintrc_display = vec!["/some/dir/loaded-rpmlintrc".to_string()];
+        let findings = run_source_with_config(&pkg, &config);
+        assert_eq!(
+            setbadness_lines(&findings),
+            ["prebuilt-test.src: W: rpmlintrc-uses-setbadness \
+              payload-rpmlintrc line 1: setBadness('payload-check', 0)"]
         );
     }
 
