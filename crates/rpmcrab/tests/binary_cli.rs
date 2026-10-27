@@ -2773,7 +2773,7 @@ fn explain_staged_selinux_independent_module_check() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "selinux-incorrect-if-file-location:\nSELinux interface (.if) files must be installed in\n/usr/share/selinux/devel/include/distributed/ as per Fedora and openSUSE\nindependent module packaging guidelines. Files found elsewhere are packaging\nerrors.\n\n\n",
+        "selinux-incorrect-if-file-location:\nSELinux interface (.if) files must be installed in the policy devel include\ntree, /usr/share/selinux/devel/include/ — in distributed/ for independent\nmodules, or directly in one of its layer directories, which the policy devel\nMakefile collects when building consuming modules, as per Fedora and openSUSE\nindependent module packaging guidelines. Files found elsewhere are packaging\nerrors.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());

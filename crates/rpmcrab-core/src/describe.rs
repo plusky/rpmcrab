@@ -421,7 +421,7 @@ mod tests {
             ),
             (
                 "SELinuxIndependentModuleCheck.toml",
-                "e528a746c24b29b9342dcceff47bb2589d9f9b51dbe49d99c62c33410cc8e652",
+                "912dad232b078c719d1f47e0d2f949d7c38b68e56fdc2a2f90debfb807f9cd87",
             ),
             (
                 "SUIDPermissionsCheck.toml",
