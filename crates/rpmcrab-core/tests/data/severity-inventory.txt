@@ -99,6 +99,7 @@ files-duplicate = W
 files-duplicated-waste = W
 forbidden-controlchar-found = E,W
 forbidden-optflags = E
+ghost-file-with-buildroot-content = W
 ghost-files-without-postin = W
 ghost-outside-snapshot = W
 go-toolchain-outdated = W

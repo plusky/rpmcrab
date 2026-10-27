@@ -2362,6 +2362,7 @@ impl Check for FilesCheck {
         self.check_debuginfo_without_sources(pkg, &st, out);
         self.check_bindir_exes(pkg, &st, out);
         self.check_sysconfig_fillup_usage(pkg, out);
+        self.check_ghost_buildroot_content(pkg, out);
         self.nodep_candidates.append(&mut st.nodep_candidates);
     }
 
@@ -2655,6 +2656,80 @@ fn source_pkg_name(sourcerpm: &str) -> &str {
     }
 }
 
+/// The concatenated scriptlet bodies of `pkg` for the
+/// `ghost-file-with-buildroot-content` credit: every `SCRIPT_TAGS`
+/// slot except `%verifyscript`, which runs at verify time and creates
+/// nothing. `tag_str_array` accepts both the scalar and the trigger
+/// (parallel-array) shapes.
+fn ghost_scriptlet_text(pkg: &Pkg) -> String {
+    let mut text = String::new();
+    for (tag, _prog, label) in crate::pkg::SCRIPT_TAGS {
+        if *label == "%verifyscript" {
+            continue;
+        }
+        for body in pkg.tag_str_array(*tag) {
+            text.push_str(&body);
+            text.push('\n');
+        }
+    }
+    text
+}
+
+/// The firing predicate of `ghost-file-with-buildroot-content`
+/// (issue #1017): a `%ghost` regular file whose header size is
+/// positive, charged only when it carries the `%config` flag or sits
+/// under /etc or /usr/etc, and silent when a scriptlet names the path
+/// literally (the full path; macros are expanded in the header), or
+/// appends the path tail to a variable expansion (`${dir}/ls-R`: the
+/// directory is computed, the file is written for every value). A
+/// scriptlet that embeds the path behind a variable prefix
+/// (`$sysconfdir/xrdp/rsakeys.ini`) does not name the installed path
+/// and does not credit: the package discards bytes it cannot prove
+/// are recreated.
+fn ghost_buildroot_content_fires(pkgfile: &PkgFile, scriptlet_text: &str) -> bool {
+    if !pkgfile.is_ghost() || !is_reg(pkgfile.mode) {
+        return false;
+    }
+    if pkgfile.size.unwrap_or(0) == 0 {
+        return false;
+    }
+    let charged = pkgfile.is_config()
+        || pkgfile.name.starts_with("/etc/")
+        || pkgfile.name.starts_with("/usr/etc/");
+    if !charged {
+        return false;
+    }
+    if scriptlet_text.contains(pkgfile.name.as_str()) {
+        return false;
+    }
+    // A scriptlet that builds the path from a variable expansion --
+    // `${dir}/ls-R` in texlive's %post, which regenerates the file for
+    // every texmf tree -- names the path tail directly after the
+    // expansion's closing brace. A literal directory ending in the
+    // same basename (another file's path) does not credit.
+    let base = pkgfile.name.rsplit('/').next().unwrap_or(&pkgfile.name);
+    !scriptlet_text.contains(&format!("}}/{}", base))
+}
+
+/// A compiled cache whose source ships next to it: a `%ghost` named
+/// `<path>.bin` where `<path>` itself is a non-ghost regular file in
+/// the same package. The build compiled the cache from the shipped
+/// source and install tooling rebuilds it from that source (the
+/// SELinux `file_contexts.bin` next to `file_contexts`, rebuilt by
+/// `semodule -B`), so the discarded bytes are a derived form of
+/// content the package does ship.
+fn compiled_cache_of_shipped_source(pkg: &Pkg, pkgfile: &PkgFile) -> bool {
+    if !pkgfile.is_ghost() {
+        return false;
+    }
+    let Some(stem) = pkgfile.name.strip_suffix(".bin") else {
+        return false;
+    };
+    pkg.files
+        .iter()
+        .any(|f| f.name == stem && !f.is_ghost() && is_reg(f.mode))
+}
+
 /// Whether the package belongs to the sysconfig/fillup mechanism itself:
 /// a binary named `sysconfig` or `fillup`, or one built from that source
 /// package (the shape of `sysconfig-netconfig`, whose source package is
@@ -2933,6 +3008,33 @@ impl FilesCheck {
                 pkg,
                 "sysconfig-fillup-usage",
                 &[&uses.join("; ")],
+            );
+        }
+    }
+
+    /// `ghost-file-with-buildroot-content` (issue #1017): a `%ghost`
+    /// regular file with a positive header size had real bytes in the
+    /// buildroot that the package silently discards. Only config-shaped
+    /// ghosts are charged (the `%config` flag, or a path under /etc or
+    /// /usr/etc), and a scriptlet that names the path literally is
+    /// credited with creating the file at install time, so the charge
+    /// is skipped then.
+    fn check_ghost_buildroot_content(&self, pkg: &Pkg, out: &mut Filter) {
+        let scriptlet_text = ghost_scriptlet_text(pkg);
+        for pkgfile in &pkg.files {
+            if compiled_cache_of_shipped_source(pkg, pkgfile) {
+                continue;
+            }
+            if !ghost_buildroot_content_fires(pkgfile, &scriptlet_text) {
+                continue;
+            }
+            let size = pkgfile.size.unwrap_or(0);
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "ghost-file-with-buildroot-content",
+                &[&pkgfile.name, &size.to_string()],
             );
         }
     }
@@ -13770,6 +13872,189 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
         assert_eq!(hits.len(), 2, "expected 2 findings, got: {hits:?}");
         assert!(hits.iter().any(|d| d.contains("/bar/foo,v")));
         assert!(hits.iter().any(|d| d.contains("/usr/src/foo/.git/HEAD")));
+    }
+
+    fn ghost_sized_file(name: &str, flags: u32, mode: u32, size: u64) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            flags,
+            mode,
+            size: Some(size),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ghost_buildroot_content_predicate_fires() {
+        // Probe shapes that must fire (issue #1017): a plain %ghost over
+        // real content under /etc, the %config(noreplace) %ghost flag
+        // merge, the forgejo shape, a %ghost %attr(0600) file, and a
+        // %config ghost outside /etc (the Regina-REXX shape).
+        let cases = [
+            ghost_sized_file("/etc/foo.conf", RPMFILE_GHOST, 0o100644, 29),
+            ghost_sized_file(
+                "/etc/foo.conf",
+                RPMFILE_GHOST | RPMFILE_CONFIG | RPMFILE_NOREPLACE,
+                0o100644,
+                11,
+            ),
+            ghost_sized_file(
+                "/etc/forgejo-runner/config.yaml",
+                RPMFILE_GHOST | RPMFILE_CONFIG | RPMFILE_NOREPLACE,
+                0o100640,
+                22,
+            ),
+            ghost_sized_file("/etc/foo.key", RPMFILE_GHOST, 0o100600, 9),
+            ghost_sized_file(
+                "/etc/rxstack.conf",
+                RPMFILE_GHOST | RPMFILE_CONFIG,
+                0o100644,
+                402,
+            ),
+        ];
+        for f in &cases {
+            assert!(
+                ghost_buildroot_content_fires(f, ""),
+                "must fire: {}",
+                f.name
+            );
+        }
+        // A key whose %post builds its path from a variable: the literal
+        // path never appears, so nothing credits the scriptlet and the
+        // dropped bytes still fire (the secret-first remedy applies).
+        let key = ghost_sized_file("/etc/xrdp/rsakeys.ini", RPMFILE_GHOST, 0o100600, 2939);
+        let post = "keyfile=\"$sysconfdir/xrdp/rsakeys.ini\"; openssl genrsa -out \"$keyfile\"";
+        assert!(
+            ghost_buildroot_content_fires(&key, post),
+            "a %post that computes the path does not name it literally"
+        );
+        // haproxy near-miss: the %post names the profile at a literal
+        // path sharing the basename; the local stub at the longer path
+        // is not named and keeps firing.
+        let stub = ghost_sized_file(
+            "/etc/apparmor.d/local/usr.sbin.haproxy",
+            RPMFILE_GHOST | RPMFILE_CONFIG,
+            0o100644,
+            70,
+        );
+        let apparmor_post = "apparmor_parser -r /etc/apparmor.d/usr.sbin.haproxy";
+        assert!(
+            ghost_buildroot_content_fires(&stub, apparmor_post),
+            "a literal path sharing the basename does not credit"
+        );
+    }
+
+    #[test]
+    fn ghost_buildroot_content_predicate_quiet() {
+        // Probe shapes that must stay quiet: the `touch` idiom and
+        // absent files (size 0, with or without %attr), a ghost symlink
+        // and a ghost directory, a real (non-ghost) file, and a sized
+        // ghost outside the charged shapes.
+        let quiet = [
+            ghost_sized_file("/etc/foo.conf", RPMFILE_GHOST, 0o100644, 0),
+            ghost_sized_file("/etc/foo.conf", RPMFILE_GHOST, 0o100000, 0),
+            ghost_sized_file("/etc/foo.conf", RPMFILE_GHOST, 0o100640, 0),
+            ghost_sized_file("/etc/foo.link", RPMFILE_GHOST, 0o120777, 16),
+            ghost_sized_file("/etc/food", RPMFILE_GHOST, 0o40755, 0),
+            ghost_sized_file("/etc/foo.conf", RPMFILE_CONFIG, 0o100644, 29),
+            ghost_sized_file("/var/lib/foo/state", RPMFILE_GHOST, 0o100644, 128),
+        ];
+        for f in &quiet {
+            assert!(
+                !ghost_buildroot_content_fires(f, ""),
+                "must stay quiet: {}",
+                f.name
+            );
+        }
+        // A %config ghost whose %post writes the path literally is
+        // credited (xrdp's regenerated key, audit-rules,
+        // crypto-policies): the content is recreated at install time.
+        let named = ghost_sized_file(
+            "/etc/xrdp/rsakeys.ini",
+            RPMFILE_GHOST | RPMFILE_CONFIG,
+            0o100600,
+            2939,
+        );
+        let post = "[ -f /etc/xrdp/rsakeys.ini ] || openssl genrsa -out /etc/xrdp/rsakeys.ini";
+        assert!(
+            !ghost_buildroot_content_fires(&named, post),
+            "a scriptlet naming the path literally credits it"
+        );
+        // texlive's ls-R: the %post regenerates the file for every
+        // texmf tree through a computed directory, appending the path
+        // tail to the expansion.
+        let tex = ghost_sized_file(
+            "/etc/texmf/ls-R",
+            RPMFILE_GHOST | RPMFILE_CONFIG,
+            0o100664,
+            67,
+        );
+        let tex_post = "for dir in /etc/texmf /var/lib/texmf; do \
+            echo x > ${dir}/ls-R; done";
+        assert!(
+            !ghost_buildroot_content_fires(&tex, tex_post),
+            "a path tail appended to a variable expansion credits it"
+        );
+    }
+
+    #[test]
+    fn ghost_buildroot_content_compiled_cache() {
+        // The SELinux shape: the .bin ghost's source ships next to it,
+        // so the cache is a derived form of shipped content.
+        let cache = ghost_sized_file(
+            "/etc/selinux/targeted/contexts/files/file_contexts.bin",
+            RPMFILE_GHOST,
+            0o100644,
+            5_335_108,
+        );
+        let source = ghost_sized_file(
+            "/etc/selinux/targeted/contexts/files/file_contexts",
+            0,
+            0o100644,
+            5_000_000,
+        );
+        let (pkg, _dir) = pkg_with_files(vec![source, cache.clone()]);
+        assert!(compiled_cache_of_shipped_source(&pkg, &cache));
+        let hits: Vec<_> = run_check_binary(&pkg)
+            .into_iter()
+            .filter(|(n, _)| n == "ghost-file-with-buildroot-content")
+            .collect();
+        assert!(hits.is_empty(), "compiled cache must stay quiet: {hits:?}");
+        // Without the shipped source the same ghost fires.
+        let (pkg2, _dir2) = pkg_with_files(vec![cache]);
+        let hits2: Vec<_> = run_check_binary(&pkg2)
+            .into_iter()
+            .filter(|(n, _)| n == "ghost-file-with-buildroot-content")
+            .collect();
+        assert_eq!(hits2.len(), 1, "orphan cache must fire: {hits2:?}");
+    }
+
+    #[test]
+    fn ghost_buildroot_content_emission() {
+        // The forgejo shape end to end: the merged %config(noreplace)
+        // %ghost over a filled file fires once, with path and byte
+        // count; the touched ghost next to it stays quiet.
+        let (pkg, _dir) = pkg_with_files(vec![
+            ghost_sized_file(
+                "/etc/forgejo-runner/config.yaml",
+                RPMFILE_GHOST | RPMFILE_CONFIG | RPMFILE_NOREPLACE,
+                0o100640,
+                22,
+            ),
+            ghost_sized_file("/etc/forgejo-runner/cache", RPMFILE_GHOST, 0o100644, 0),
+        ]);
+        let hits: Vec<_> = run_check_binary(&pkg)
+            .into_iter()
+            .filter(|(n, _)| n == "ghost-file-with-buildroot-content")
+            .collect();
+        assert_eq!(hits.len(), 1, "expected 1 finding, got: {hits:?}");
+        let (_, line) = &hits[0];
+        assert!(line.contains(": W: "), "must be Warning level: {line}");
+        assert!(
+            line.contains("/etc/forgejo-runner/config.yaml") && line.contains("22"),
+            "detail must carry path and byte count: {line}"
+        );
     }
 
     #[test]
