@@ -41,8 +41,9 @@
 //! a whitelisted pair are exacted by different tooling, so neither copy
 //! can be dropped and the duplication is not actionable. The bundled
 //! defaults pair the `*.dist-info/licenses` embed the Python stack
-//! requires (PEP 639) with the `%license` copy SUSE policy requires in
-//! `/usr/share/licenses`, or the `%docdir` copy under
+//! requires (PEP 639) -- or the licence file at the `*.dist-info` root
+//! in the pre-PEP 639 layout -- with the `%license` copy SUSE policy
+//! requires in `/usr/share/licenses`, or the `%docdir` copy under
 //! `/usr/share/doc/packages`. The pair likewise stays out of the
 //! `files-duplicated-waste` total, which accumulates the same `diff`.
 //!
@@ -755,6 +756,35 @@ mod tests {
                 "size {size}"
             );
         }
+        // The pre-PEP 639 layout -- the licence file at the dist-info
+        // root, with no licenses/ subdirectory -- is the same embed in
+        // an older spelling and pairs the same way.
+        for counterpart in [
+            "/usr/share/licenses/foo/LICENSE",
+            "/usr/share/doc/packages/foo/LICENSE",
+        ] {
+            let files = [
+                pkgfile(
+                    "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/LICENSE",
+                    "aaa",
+                    100,
+                    1,
+                ),
+                pkgfile(counterpart, "aaa", 100, 2),
+            ];
+            let refs: Vec<&PkgFile> = files.iter().collect();
+            assert!(
+                DuplicatesCheck::find_duplicates(
+                    &refs,
+                    0,
+                    no_config,
+                    no_ghost,
+                    is_whitelisted(&pairs)
+                )
+                .is_empty(),
+                "counterpart {counterpart}"
+            );
+        }
         // The %docdir variant of the pair is whitelisted too.
         let files = [
             pkgfile(
@@ -786,6 +816,10 @@ mod tests {
             ),
             (
                 "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/licenses/LICENSE",
+                "/usr/share/foo/LICENSE",
+            ),
+            (
+                "/usr/lib/python3.13/site-packages/foo-1.0.dist-info/LICENSE",
                 "/usr/share/foo/LICENSE",
             ),
             (

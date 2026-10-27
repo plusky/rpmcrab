@@ -402,6 +402,8 @@ DuplicatesMinSize = 2
 DuplicatesWhitelistPairs = [
     ["*.dist-info/licenses", "/usr/share/licenses"],
     ["*.dist-info/licenses", "/usr/share/doc/packages"],
+    ["*.dist-info", "/usr/share/licenses"],
+    ["*.dist-info", "/usr/share/doc/packages"],
 ]
 
 # Additional warnings on specific function calls

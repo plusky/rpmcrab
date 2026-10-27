@@ -956,7 +956,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/522"
 case = "global"
 check = "files-duplicate"
 kind = "behaviour"
-reason = "Duplicates forming a DuplicatesWhitelistPairs pair do not count (issue #510): the bundled defaults pair the *.dist-info/licenses embed the Python stack requires (PEP 639) with the %license copy SUSE policy requires in /usr/share/licenses, or the %docdir copy under /usr/share/doc/packages. Both copies are toolchain-mandated and no tooling hardlinks them, so the duplication is not actionable. The frozen 2.10.0 reference reaches silence on this family through its two-level prefix suppression; the rest of the #771 narrowing above is unchanged."
+reason = "Duplicates forming a DuplicatesWhitelistPairs pair do not count (issue #510): the bundled defaults pair the *.dist-info licence embed the Python stack requires -- under *.dist-info/licenses (PEP 639), or as a licence file at the *.dist-info root in the pre-PEP 639 layout, which alone carried 30 residual groups on the 2026-10-26 Factory sweep -- with the %license copy SUSE policy requires in /usr/share/licenses, or the %docdir copy under /usr/share/doc/packages. Both copies are toolchain-mandated and no tooling hardlinks them, so the duplication is not actionable. The frozen 2.10.0 reference reaches silence on this family through its two-level prefix suppression; the rest of the #771 narrowing above is unchanged."
 since = "0.3.0"
 
 [[divergence]]
