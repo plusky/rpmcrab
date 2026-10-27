@@ -52,7 +52,7 @@ GoodPrefixes = [
 
 [[Check]]
     Message = "filelist-forbidden"
-    # Crab-only (Tom's ruling, 2026-10-27): `Cargo.toml.orig` is
+    # Crab-only: `Cargo.toml.orig` is
     # cargo's own pre-normalization manifest, shipped verbatim in
     # vendored crate sources -- not patch litter. Exempt here and in
     # FilesCheck's backup-file-in-package via the shared

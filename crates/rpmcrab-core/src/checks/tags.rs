@@ -1575,8 +1575,8 @@ impl TagsCheck {
         // (name, EVR): a pair is the generator's doing only when every
         // EVR the package carries for the name is file-covered, so a
         // hand-written `perl(Foo) = 2.0` alongside a generated
-        // `perl(Foo) = 1.0` stays an error. Per Tom's ruling
-        // (2026-10-27) generator pairs are warnings; a duplicate
+        // `perl(Foo) = 1.0` stays an error. Generator
+        // pairs are warnings; a duplicate
         // involving a manual provide stays an error.
         let mut gen_evrs: std::collections::BTreeMap<&str, std::collections::BTreeSet<Evr>> =
             Default::default();
@@ -3462,7 +3462,7 @@ mod rich_dep_emission_tests {
         // same-family pair must not trip devel-dependency. The pairs
         // are the measured Factory population (sweep
         // run-20261022-857d5ece), plus the multi-component tool
-        // spelling (gcc13-bootstrap) from plusky's review probes.
+        // spelling (gcc13-bootstrap) from review probes.
         // The winpthreads pairs are pinned without a measured
         // instance: no winpthreads pair occurs in the sweep
         // population (its MinGW packages require headers only); the
@@ -3806,7 +3806,7 @@ mod rich_dep_emission_tests {
     fn useless_provides_generator_pair_is_warning() {
         // Both forms of the duplicated name are attributed to shipped
         // files (FILEPROVIDE): the pair is the dependency generator's
-        // doing, so it is a warning (Tom, 2026-10-27). The detail stays
+        // doing, so it is a warning. The detail stays
         // the name only, so severity pairing against the reference
         // (same detail at E) works.
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");

@@ -3,7 +3,7 @@
 //! `obsolete-xinetd-requirement` is ported from
 //! `rpmlint/checks/XinetdDepCheck.py`. `deprecated-xinetd-config` has no
 //! reference counterpart: shipping an xinetd config is an error (the
-//! `xinetd` package itself is exempt -- Tom's ruling, 2026-10-27), and
+//! `xinetd` package itself is exempt), and
 //! the replacement is a systemd timer unit, or a socket unit where the
 //! service was socket-activated (deliberate, ledgered).
 
@@ -40,8 +40,8 @@ impl Check for XinetdDepCheck {
         if Self::requires_xinetd(reqs) {
             add_info(out, Level::Error, pkg, "obsolete-xinetd-requirement", &[]);
         }
-        // The xinetd package itself is exempt (Tom's ruling,
-        // 2026-10-27): the deprecation tells every other package not
+        // The xinetd package itself is exempt: the deprecation
+        // tells every other package not
         // to ship xinetd configuration; xinetd's own bundled configs
         // are its to retire. The exemption keys on the package name,
         // not on the config state -- an enabled definition shipped by
@@ -156,8 +156,8 @@ mod tests {
 
     #[test]
     fn xinetd_package_itself_is_exempt() {
-        // Tom's ruling (2026-10-27), reversing this test's previous
-        // pin: the deprecation tells every OTHER package not to ship
+        // The exemption reverses this test's previous pin: the
+        // deprecation tells every OTHER package not to ship
         // xinetd configuration; the xinetd package's own bundled
         // configs are exempt. The exemption keys on the package name,
         // not on the config state, so it holds whatever the bundled

@@ -218,7 +218,7 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
         }
     }
     if !send_policy_seen {
-        // Tom's ruling (2026-10-27): a file carrying a concrete
+        // A file carrying a concrete
         // <allow> own/own_prefix but no send rule is a name-ownership
         // fragment. Within the XML that shape is indistinguishable
         // from a forgotten send allow, so it stays visible -- at W,

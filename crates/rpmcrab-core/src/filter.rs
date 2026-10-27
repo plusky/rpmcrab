@@ -296,7 +296,7 @@ impl Filter {
             finding.level = *level;
         }
 
-        // The build-env severity cap (Tom's ruling, 2026-10-27): a
+        // The build-env severity cap: a
         // build-env-only package can never emit at Error. Applied last
         // -- after Scoring, strict promotion and [SeverityOverrides] --
         // so no promotion can raise a marked package's finding back to

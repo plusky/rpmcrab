@@ -377,9 +377,9 @@ EXTRA_CHECKS = [
 # the root subvolume, and no packaged application complies with the
 # guideline -- so genuine atomic-rule violations under /srv go
 # unflagged while the entry stands. The entry began as "/srv/www/"
-# alone and was widened to "/srv/" wholesale on 2026-10-27, when the
-# remaining non-www /srv trees (viewvc, gitolite, salt) were ruled
-# the same class. The entry is revisited and tightened when openSUSE
+# alone and stands widened to "/srv/" wholesale: the remaining
+# non-www /srv trees (viewvc, gitolite, salt) are the same
+# class. The entry is revisited and tightened when openSUSE
 # settles how applications are packaged under the atomic rules.
 EXTRA_ATOMIC_ALLOWED_DIRS = [
     (

@@ -1543,7 +1543,7 @@ fn explain_known_id() {
 /// --explain for useless-provides: the staged description carries the
 /// upstream rpmlint#427 reword ahead of the reference (the reference
 /// versioned-and-unversioned claim is not always accurate), extended by
-/// the 2026-10-27 reword: no claim that the redundant provide is manual
+/// the reword: no claim that the redundant provide is manual
 /// (dependency-generator pairs have no manual provide), and the warning
 /// split for generator pairs is documented.
 #[test]

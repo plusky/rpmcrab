@@ -507,7 +507,7 @@ mod tests {
     /// Upstream rpmlint#427: the staged text is reworded ahead of the
     /// reference, per the fix-in-port rule, and scoped to what the check
     /// actually fires on — a name in both unversioned and versioned form.
-    /// The 2026-10-27 reword (Tom's ruling) drops the earlier text's
+    /// The reword drops the earlier text's
     /// claim that the redundant provide is manual: when both forms are
     /// produced by a dependency generator no manual provide exists, and
     /// the text now documents the warning split for those generator
