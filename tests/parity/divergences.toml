@@ -1178,6 +1178,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "filelist-forbidden-bashcomp-userdirs"
+kind = "severity"
+reason = "Deliberate severity divergence (Tom's ruling, 2026-10-27): the reference reports every entry under /etc/bash_completion.d/ at Error. The port reports a compatibility symlink at Warning when its chain resolves, using only the same package's file list, to a shipped regular file at one of the bundled GoodPrefixes outside /etc/bash_completion.d/ itself; the Warning's detail adds 'drop the compatibility symlink'. Regular files remain Errors, as do symlinks whose target is missing from the package, non-regular, outside the good prefixes, or itself in the forbidden directory. Measured on the Factory corpus firing set (19 binary packages): 24 findings before and after, 24 Errors before and 21 Errors + 3 Warnings after, with no finding silenced or newly created and no other FilelistCheck finding moving; the Warnings are drush's drush.complete.sh, erlang-rebar's rebar.sh and platformsh-cli's platform.sh.complete.sh. Pinned by bashcomp_compat_symlinks_warn_to_drop_the_link and bashcomp_symlink_near_misses_stay_errors in filelist.rs, with regular files pinned by sibling_forbidden_path_still_fires."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "postin-without-ldconfig"
 kind = "behaviour"
 reason = "The reference only searches the scriptlet body for ldconfig, ignoring the -p interpreter. rpmcrab honors -p ldconfig: %post -p /sbin/ldconfig satisfies the check. See rpmlint#1602 which fixes rpmlint#550."

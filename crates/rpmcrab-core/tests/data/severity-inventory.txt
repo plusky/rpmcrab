@@ -384,7 +384,7 @@ zero-perms = W
 zero-perms-ghost = W
 
 [unresolved-sites]
-# count = 39
+# count = 40
 alternatives.rs: add_info( out, level, pkg, "li
 binaries.rs: add_info( out, info_type, pkg, "unused-direct-
 binaries.rs: add_info(out, Level::Warning, pkg, r_name, &[&pkgfile.name, f_name])
@@ -401,6 +401,7 @@ device_files.rs: add_info(out, level, pkg, check, &refs)
 fhs.rs: add_info(out, Level::Warning, pkg, &check, &[&subdir])
 file_digest.rs: add_info( out, Level::Error, pkg,
 file_digest.rs: add_info( out, Level::Error, pkg, &format!("{c
+filelist.rs: add_info( out, Level::Warning,
 filelist.rs: add_info(out, Level::Error, pkg, &rule.message, &[f])
 files.rs: add_info( out, level, pkg, "ex
 files.rs: add_info(finding)

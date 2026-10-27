@@ -246,6 +246,28 @@ impl FilelistCheck {
         found.into_iter().collect()
     }
 
+    /// Whether a bash-completion user-dir entry is a compatibility
+    /// symlink whose payload already lives at a good FHS prefix in the
+    /// same package. `Pkg::readlink` follows the chain using only this
+    /// package's file list; a missing target, a cycle, a non-regular
+    /// final target, a target outside the bundled good prefixes, or a
+    /// target in the forbidden directory itself earns no demotion.
+    fn bashcomp_compat_symlink(&self, pkg: &Pkg, pkgfile: &crate::pkg::pkgfile::PkgFile) -> bool {
+        if !crate::pkg::pkgfile::is_symlink(pkgfile.mode) {
+            return false;
+        }
+        let Some(target) = pkg.readlink(pkgfile) else {
+            return false;
+        };
+        target.name != pkgfile.name
+            && crate::pkg::pkgfile::is_reg(target.mode)
+            && !target.name.starts_with("/etc/bash_completion.d/")
+            && self
+                .good_prefixes
+                .iter()
+                .any(|prefix| target.name.starts_with(prefix.as_str()))
+    }
+
     /// Whether `path` sits under a prefix the FHS walk treats as
     /// good: a bundled GoodPrefix, a cross-toolchain target sysroot
     /// (the measured set FHSCheck sanctions, shared through
@@ -404,7 +426,19 @@ impl Check for FilelistCheck {
                     }
                     // The reference emits once per matching pattern; no break.
                     if b.matches(f) {
-                        add_info(out, Level::Error, pkg, &rule.message, &[f]);
+                        if rule.message == "filelist-forbidden-bashcomp-userdirs"
+                            && self.bashcomp_compat_symlink(pkg, pkgfile)
+                        {
+                            add_info(
+                                out,
+                                Level::Warning,
+                                pkg,
+                                &rule.message,
+                                &[f, "drop the compatibility symlink"],
+                            );
+                        } else {
+                            add_info(out, Level::Error, pkg, &rule.message, &[f]);
+                        }
                     }
                 }
             }
@@ -1353,6 +1387,114 @@ mod tests {
                 "/opt/suse".to_string()
             ]
         );
+    }
+
+    fn pkg_with_links(entries: &[(&str, u32, &str)]) -> Pkg {
+        let files: Vec<(&str, u32)> = entries.iter().map(|(f, mode, _)| (*f, *mode)).collect();
+        let mut pkg = pkg_with_modes(&files);
+        for ((_, _, linkto), pkgfile) in entries.iter().zip(pkg.files.iter_mut()) {
+            pkgfile.linkto = (*linkto).to_string();
+        }
+        pkg
+    }
+
+    #[test]
+    fn bashcomp_compat_symlinks_warn_to_drop_the_link() {
+        // The three live shapes: drush and platformsh-cli link into
+        // /usr/share app trees (one relatively, one absolutely), and
+        // erlang-rebar links into its /usr/lib64 app tree.
+        let pkg = pkg_with_links(&[
+            (
+                "/etc/bash_completion.d/drush.complete.sh",
+                0o120777,
+                "../../usr/share/drush/drush.complete.sh",
+            ),
+            ("/usr/share/drush/drush.complete.sh", 0o100644, ""),
+            (
+                "/etc/bash_completion.d/rebar.sh",
+                0o120777,
+                "../../usr/lib64/erlang/lib/rebar-2.6.4/priv/shell-completion/bash/rebar",
+            ),
+            (
+                "/usr/lib64/erlang/lib/rebar-2.6.4/priv/shell-completion/bash/rebar",
+                0o100644,
+                "",
+            ),
+            (
+                "/etc/bash_completion.d/platform.sh.complete.sh",
+                0o120777,
+                "/usr/share/platformsh-cli/shell-config.rc",
+            ),
+            ("/usr/share/platformsh-cli/shell-config.rc", 0o100644, ""),
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-bashcomp-userdirs");
+        assert_eq!(lines.len(), 3, "lines: {lines:?}");
+        for charged in [
+            "/etc/bash_completion.d/drush.complete.sh",
+            "/etc/bash_completion.d/rebar.sh",
+            "/etc/bash_completion.d/platform.sh.complete.sh",
+        ] {
+            assert!(
+                lines.iter().any(|l| l.contains(&format!(
+                    "W: filelist-forbidden-bashcomp-userdirs {charged} drop the compatibility symlink"
+                ))),
+                "missing W for {charged}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bashcomp_symlink_near_misses_stay_errors() {
+        let pkg = pkg_with_links(&[
+            // The target is not shipped by this package.
+            (
+                "/etc/bash_completion.d/missing.sh",
+                0o120777,
+                "../../usr/share/missing/completion.sh",
+            ),
+            // The shipped target is outside the good FHS prefixes.
+            (
+                "/etc/bash_completion.d/outside.sh",
+                0o120777,
+                "../../home/user/completion.sh",
+            ),
+            ("/home/user/completion.sh", 0o100644, ""),
+            // The target is itself a regular file in the forbidden dir:
+            // both the link and its target stay Errors.
+            ("/etc/bash_completion.d/indirect.sh", 0o120777, "other.sh"),
+            ("/etc/bash_completion.d/other.sh", 0o100644, ""),
+            // The shipped target is a directory, not a completion file.
+            (
+                "/etc/bash_completion.d/dir-target.sh",
+                0o120777,
+                "../../usr/share/completions",
+            ),
+            ("/usr/share/completions", 0o040755, ""),
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-bashcomp-userdirs");
+        assert_eq!(lines.len(), 5, "lines: {lines:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.contains("E: filelist-forbidden-bashcomp-userdirs")),
+            "every near miss must stay an Error: {lines:?}"
+        );
+        for charged in [
+            "/etc/bash_completion.d/missing.sh",
+            "/etc/bash_completion.d/outside.sh",
+            "/etc/bash_completion.d/indirect.sh",
+            "/etc/bash_completion.d/other.sh",
+            "/etc/bash_completion.d/dir-target.sh",
+        ] {
+            assert!(
+                lines.iter().any(|l| l.contains(charged)),
+                "missing E for {charged}: {lines:?}"
+            );
+        }
     }
 
     #[test]
