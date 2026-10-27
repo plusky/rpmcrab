@@ -134,13 +134,20 @@ usually not intended and may be caused by missing whitespace between the
 token's name, the comparison operator and the version string.
 """
 macro-in-comment="""
-There is an effectful macro expansion after a shell style comment in the
-specfile. Shell (%(...)), Lua (%{lua:...}), macro file (%{load:...}) and
-macro directives (%define, %global, %undefine, %lua, %load and the braced
-%{define:...}, %{global:...}, %{undefine:...} and %{error:...} forms) are
-performed by rpm while the specfile is parsed, even inside comments, so
-check if it can cause a problem in this case and escape the macro with
-another leading % if appropriate.
+There is an unescaped macro mention after a shell style comment in the
+specfile. rpm expands macros on a comment line before treating the line
+as a comment, so the mention is expanded even though it looks inert:
+when the expansion runs to several lines, only the first line stays
+commented and the rest becomes live spec text or shell — a commented
+%python_subpackages can move following tags into a phantom package,
+and a commented-out build macro such as %configure or %pytest actually
+runs. The effectful forms — shell (%(...)), Lua (%{lua:...}), macro
+file (%{load:...}) and the executing directives (%define, %global,
+%undefine, %lua, %load and the braced %{define:...}, %{global:...},
+%{undefine:...} and %{error:...} forms) — are performed by rpm while
+the specfile is parsed, even inside comments. Escape the macro with
+another leading % (%%) if the mention is only prose, or reword the
+comment so it does not name the macro.
 """
 patch-fuzz-is-changed="""
 The internal patch fuzz value was changed, and could hide patch's issues, or
