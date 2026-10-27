@@ -284,7 +284,7 @@ impl Spellchecker {
             }
 
             // Skip words with digits adjacent (reference digit tokenizing workaround).
-            if has_digit_adjacent(&normalized, word) {
+            if has_digit_adjacent(&normalized, *byte_offset, word_end) {
                 continue;
             }
 
@@ -444,9 +444,15 @@ fn at_sentence_start(text: &str, byte_offset: usize) -> bool {
     SENTENCE_BREAK_RE.is_match(context).unwrap_or(false)
 }
 
-fn has_digit_adjacent(_text: &str, word: &str) -> bool {
-    // Simplified: skip words containing digits.
-    word.chars().any(|c| c.is_ascii_digit())
+/// Whether the character immediately before or after a token's span
+/// is a digit. The tokenizer splits on digits, so `utf8` yields the
+/// token `utf` and `20th` the token `th`; neither fragment is a word
+/// anyone wrote, and the reference skips an error whose leading or
+/// trailing context is a digit for exactly this reason.
+fn has_digit_adjacent(text: &str, start: usize, end: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let after = text[end..].chars().next();
+    before.is_some_and(|c| c.is_ascii_digit()) || after.is_some_and(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]
