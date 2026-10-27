@@ -2380,6 +2380,7 @@ impl Check for FilesCheck {
         self.check_sysconfig_fillup_usage(pkg, out);
         self.check_ghost_buildroot_content(pkg, out);
         self.check_fillup_template_without_call(pkg, out);
+        self.check_fillup_usage_discouraged(pkg, out);
         self.check_license_coverage(pkg, &st, out);
         self.nodep_candidates.append(&mut st.nodep_candidates);
     }
@@ -2775,6 +2776,61 @@ fn fillup_invocation_re() -> &'static Regex {
     })
 }
 
+/// A literal `%fillup_only` / `%fillup_and_insserv` macro at command
+/// position in a scriptlet. Built packages carry the expansion (the
+/// invocation shape above), but a scriptlet that still spells the
+/// macro -- an unexpanded build, or a build whose macro file did not
+/// define it -- invokes fillup just the same.
+fn fillup_macro_re() -> &'static Regex {
+    static FILLUP_MACRO_RE: OnceLock<Regex> = OnceLock::new();
+    FILLUP_MACRO_RE.get_or_init(|| {
+        Regex::new(r"(?m)(^|[;`|]|&&|\$\()\s*%\{?fillup_(?:only|and_insserv)\}?(?:\s|$|[;|&])")
+            .expect("static regex")
+    })
+}
+
+/// Whether a scriptlet body invokes fillup: the expanded invocation
+/// at command position, or the literal macro.
+fn scriptlet_invokes_fillup(body: &str) -> bool {
+    is_match(fillup_invocation_re(), body) || is_match(fillup_macro_re(), body)
+}
+
+/// The labels of the package's scriptlets that invoke fillup, in
+/// `SCRIPT_TAGS` order, each label once.
+fn fillup_call_labels(pkg: &Pkg) -> Vec<&str> {
+    let mut labels: Vec<&str> = Vec::new();
+    for (tag, _prog, label) in crate::pkg::SCRIPT_TAGS {
+        let label = *label;
+        if labels.contains(&label) {
+            continue;
+        }
+        if pkg
+            .tag_str_array(*tag)
+            .iter()
+            .any(|body| scriptlet_invokes_fillup(body))
+        {
+            labels.push(label);
+        }
+    }
+    labels
+}
+
+/// The fillup templates a package ships: regular, non-`%ghost` files
+/// below a `fillup-templates` directory. The bare directory itself is
+/// not a template, and a `%ghost` entry ships no content to migrate.
+fn fillup_template_paths(pkg: &Pkg) -> Vec<&str> {
+    pkg.files
+        .iter()
+        .filter(|f| is_reg(f.mode) && !f.is_ghost())
+        .map(|f| f.name.as_str())
+        .filter(|path| {
+            path.rsplit_once('/').is_some_and(|(parent, base)| {
+                !base.is_empty() && parent.split('/').any(|c| c == "fillup-templates")
+            })
+        })
+        .collect()
+}
+
 /// The first `EnvironmentFile` target in a systemd unit that points into
 /// `/etc/sysconfig/`, spelled as written (including the optional-file
 /// `-` prefix), or `None`.
@@ -2903,6 +2959,115 @@ fn tmpfiles_created_paths(contents: &str) -> HashSet<&str> {
         }
     }
     paths
+}
+
+/// One `fillup-template-without-fillup-call` report: the shipped
+/// template the finding names, its rendered detail and its level.
+struct FillupTemplateReport {
+    template_path: String,
+    detail: String,
+    level: Level,
+}
+
+/// The templates `fillup-template-without-fillup-call` reports for
+/// `pkg`, computed once for both the emitting check and the
+/// `fillup-usage-discouraged` yield rule. The decision is per binary
+/// package, from the package alone: every non-`%ghost` regular file
+/// below a `fillup-templates` directory is a template; any `fillup`
+/// invocation in any scriptlet (triggers included) credits the whole
+/// package, because mapping a call to its own template is unreliable
+/// (the macros' `PNAME=$1` expansions defeat it). A read gates the
+/// template when an `EnvironmentFile` line of a unit below
+/// `/systemd/system/` or `/systemd/user/` names the target
+/// (`/etc/sysconfig/<name>`, or one directory below it for the
+/// `%fillup_only -d` form), unless the package ships the target as a
+/// non-`%ghost` payload file or a tmpfiles.d snippet creates it (`f`,
+/// `C` or `L` line). The level hangs on the read's form: an optional
+/// `-` read is a Warning (the file is absent, runtime unchanged), a
+/// mandatory read is an Error (the unit cannot start on a fresh
+/// install -- the xsp shape).
+fn fillup_template_without_call_reports(pkg: &Pkg) -> Vec<FillupTemplateReport> {
+    let templates: Vec<(&str, &str)> = pkg
+        .files
+        .iter()
+        .filter(|f| is_reg(f.mode) && !f.is_ghost())
+        .filter_map(|f| fillup_template_name(&f.name).map(|name| (f.name.as_str(), name)))
+        .collect();
+    if templates.is_empty() {
+        return Vec::new();
+    }
+    let calls_fillup = crate::pkg::SCRIPT_TAGS.iter().any(|(tag, _, _)| {
+        pkg.tag_str_array(*tag)
+            .iter()
+            .any(|body| is_match(fillup_invocation_re(), body))
+    });
+    if calls_fillup {
+        return Vec::new();
+    }
+    let mut gates: Vec<(&str, SysconfigEnvTarget)> = Vec::new();
+    let mut created: HashSet<String> = HashSet::new();
+    for f in &pkg.files {
+        if f.name.contains("/systemd/system/") || f.name.contains("/systemd/user/") {
+            let content = pkg.read_file(&f.name);
+            gates.extend(
+                sysconfig_environment_targets(&content)
+                    .into_iter()
+                    .map(|target| (f.name.as_str(), target)),
+            );
+        }
+        if f.name.contains("/tmpfiles.d/") && f.name.ends_with(".conf") {
+            let content = pkg.read_file(&f.name);
+            created.extend(
+                tmpfiles_created_paths(&content)
+                    .into_iter()
+                    .map(str::to_string),
+            );
+        }
+    }
+    if gates.is_empty() {
+        return Vec::new();
+    }
+    let mut reports = Vec::new();
+    for (template_path, name) in &templates {
+        let mut live: Vec<&(&str, SysconfigEnvTarget)> = gates
+            .iter()
+            .filter(|(_, target)| env_target_names_template(&target.path, name))
+            .filter(|(_, target)| {
+                !created.contains(&target.path)
+                    && !pkg
+                        .files
+                        .iter()
+                        .any(|f| f.name == target.path && !f.is_ghost())
+            })
+            .collect();
+        if live.is_empty() {
+            continue;
+        }
+        // The representative read is a mandatory one when any
+        // remains: that is the harm the level hangs on.
+        live.sort_by_key(|(_, target)| !target.mandatory);
+        let (unit, target) = live[0];
+        let spelled = if target.mandatory {
+            target.path.clone()
+        } else {
+            format!("-{}", target.path)
+        };
+        let detail = format!(
+            "template {template_path} is never filled: unit {unit} sets \
+             EnvironmentFile={spelled}, but no scriptlet calls fillup"
+        );
+        let level = if target.mandatory {
+            Level::Error
+        } else {
+            Level::Warning
+        };
+        reports.push(FillupTemplateReport {
+            template_path: template_path.to_string(),
+            detail,
+            level,
+        });
+    }
+    reports
 }
 
 /// The sysconfig/fillup uses of one package, as one evidence phrase per
@@ -3187,81 +3352,17 @@ impl FilesCheck {
     /// unchanged), a mandatory read is an Error (the unit cannot
     /// start on a fresh install -- the xsp shape).
     fn check_fillup_template_without_call(&self, pkg: &Pkg, out: &mut Filter) {
-        let templates: Vec<(&str, &str)> = pkg
-            .files
-            .iter()
-            .filter(|f| is_reg(f.mode) && !f.is_ghost())
-            .filter_map(|f| fillup_template_name(&f.name).map(|name| (f.name.as_str(), name)))
-            .collect();
-        if templates.is_empty() {
-            return;
-        }
-        let calls_fillup = crate::pkg::SCRIPT_TAGS.iter().any(|(tag, _, _)| {
-            pkg.tag_str_array(*tag)
-                .iter()
-                .any(|body| is_match(fillup_invocation_re(), body))
-        });
-        if calls_fillup {
-            return;
-        }
-        let mut gates: Vec<(&str, SysconfigEnvTarget)> = Vec::new();
-        let mut created: HashSet<String> = HashSet::new();
-        for f in &pkg.files {
-            if f.name.contains("/systemd/system/") || f.name.contains("/systemd/user/") {
-                let content = pkg.read_file(&f.name);
-                gates.extend(
-                    sysconfig_environment_targets(&content)
-                        .into_iter()
-                        .map(|target| (f.name.as_str(), target)),
-                );
-            }
-            if f.name.contains("/tmpfiles.d/") && f.name.ends_with(".conf") {
-                let content = pkg.read_file(&f.name);
-                created.extend(
-                    tmpfiles_created_paths(&content)
-                        .into_iter()
-                        .map(str::to_string),
-                );
-            }
-        }
-        if gates.is_empty() {
-            return;
-        }
-        for (template_path, name) in &templates {
-            let mut live: Vec<&(&str, SysconfigEnvTarget)> = gates
-                .iter()
-                .filter(|(_, target)| env_target_names_template(&target.path, name))
-                .filter(|(_, target)| {
-                    !created.contains(&target.path)
-                        && !pkg
-                            .files
-                            .iter()
-                            .any(|f| f.name == target.path && !f.is_ghost())
-                })
-                .collect();
-            if live.is_empty() {
-                continue;
-            }
-            // The representative read is a mandatory one when any
-            // remains: that is the harm the level hangs on.
-            live.sort_by_key(|(_, target)| !target.mandatory);
-            let (unit, target) = live[0];
-            let spelled = if target.mandatory {
-                target.path.clone()
-            } else {
-                format!("-{}", target.path)
-            };
-            let detail = format!(
-                "template {template_path} is never filled: unit {unit} sets \
-                 EnvironmentFile={spelled}, but no scriptlet calls fillup"
-            );
-            if target.mandatory {
+        // The emission keeps both level literals next to the tag:
+        // the severity inventory derives a tag's levels from the
+        // literals at its emission sites.
+        for report in fillup_template_without_call_reports(pkg) {
+            if report.level == Level::Error {
                 add_info(
                     out,
                     Level::Error,
                     pkg,
                     "fillup-template-without-fillup-call",
-                    &[&detail],
+                    &[&report.detail],
                 );
             } else {
                 add_info(
@@ -3269,10 +3370,66 @@ impl FilesCheck {
                     Level::Warning,
                     pkg,
                     "fillup-template-without-fillup-call",
-                    &[&detail],
+                    &[&report.detail],
                 );
             }
         }
+    }
+
+    /// One Warning per package that uses fillup at all: it ships a
+    /// fillup template, or a scriptlet invokes fillup (the expanded
+    /// invocation at command position, or a literal `%fillup_only` /
+    /// `%fillup_and_insserv` macro). Either fix direction clears it:
+    /// finish the migration the staged description prescribes. The
+    /// mechanism's own packages are exempt (see
+    /// `sysconfig_fillup_exempt`): they provide fillup rather than
+    /// consume it. A unit consuming the generated file through
+    /// `EnvironmentFile` earns no exemption -- the two-layer
+    /// `EnvironmentFile` pattern in the description is the migration
+    /// answer there too.
+    ///
+    /// Yield rule: when the package's only fillup involvement is
+    /// template(s) that `fillup-template-without-fillup-call`
+    /// already reports, this tag stays silent for the package -- the
+    /// defect report covers that involvement. Any further use (a
+    /// template the defect check does not report, or any fillup
+    /// call) fires this tag once.
+    fn check_fillup_usage_discouraged(&self, pkg: &Pkg, out: &mut Filter) {
+        if sysconfig_fillup_exempt(&pkg.name, pkg.tag_str(librpm::Tag::SOURCERPM).as_deref()) {
+            return;
+        }
+        let templates = fillup_template_paths(pkg);
+        let call_labels = fillup_call_labels(pkg);
+        if templates.is_empty() && call_labels.is_empty() {
+            return;
+        }
+        let mut evidence: Vec<String> = Vec::new();
+        if call_labels.is_empty() {
+            let reports = fillup_template_without_call_reports(pkg);
+            let reported: HashSet<&str> = reports
+                .iter()
+                .map(|report| report.template_path.as_str())
+                .collect();
+            let Some(unreported) = templates.iter().find(|path| !reported.contains(**path)) else {
+                return;
+            };
+            evidence.push(format!("ships fillup template {unreported}"));
+        } else {
+            if let Some(first) = templates.first() {
+                evidence.push(format!("ships fillup template {first}"));
+            }
+            evidence.push(format!(
+                "calls fillup from the {} scriptlet",
+                call_labels[0]
+            ));
+        }
+        add_info(
+            out,
+            Level::Warning,
+            pkg,
+            "fillup-usage-discouraged",
+            &[&evidence.join("; ")],
+        );
     }
 
     fn check_utf8(&self, pkg: &Pkg, out: &mut Filter) {
@@ -16904,6 +17061,206 @@ reason = "warning hook: executable and %config by design"
             .filter(|((n, _), _)| n == "fillup-template-without-fillup-call")
             .map(|((n, line), l)| (n.clone(), line.clone(), *l))
             .collect()
+    }
+
+    /// The `fillup-usage-discouraged` findings (name, rendered
+    /// line, level) `FilesCheck` emits for `pkg`.
+    fn discouraged_findings(pkg: &Pkg) -> Vec<(String, String, Level)> {
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .filter(|((n, _), _)| n == "fillup-usage-discouraged")
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect()
+    }
+
+    #[test]
+    fn fillup_discouraged_template_and_call_fire_once() {
+        // A consumed template plus a call: the defect check is quiet
+        // (the call credits the package), the discouragement tag
+        // fires once, and the unit's EnvironmentFile consumption
+        // earns no exemption.
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\nExecStart=/usr/bin/demo\n";
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[
+                ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                ("/usr/lib/systemd/system/demo.service", unit),
+            ],
+            &[],
+            &|b| {
+                b.post_install_script(
+                    "/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo\n",
+                );
+            },
+        );
+        assert!(fillup_findings(&pkg).is_empty());
+        let found = discouraged_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        assert!(
+            found[0]
+                .1
+                .contains("/usr/share/fillup-templates/sysconfig.demo"),
+            "detail names the template: {}",
+            found[0].1
+        );
+        assert!(
+            found[0].1.contains("%post"),
+            "detail names the scriptlet: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn fillup_discouraged_unconsumed_template_fires() {
+        // A template nothing reads: the defect check needs a gated
+        // read and stays quiet; the discouragement tag fires on the
+        // template arm alone.
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[("/usr/share/fillup-templates/sysconfig.demo", "# template\n")],
+            &[],
+            &|_| {},
+        );
+        assert!(fillup_findings(&pkg).is_empty());
+        let found = discouraged_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+    }
+
+    #[test]
+    fn fillup_discouraged_yields_to_defect_report() {
+        // The package's only fillup involvement is the template the
+        // defect check already reports: the discouragement tag
+        // yields for the package.
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\nExecStart=/usr/bin/demo\n";
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[
+                ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                ("/usr/lib/systemd/system/demo.service", unit),
+            ],
+            &[],
+            &|_| {},
+        );
+        assert_eq!(fillup_findings(&pkg).len(), 1);
+        assert!(
+            discouraged_findings(&pkg).is_empty(),
+            "the defect report covers the package's only fillup involvement"
+        );
+    }
+
+    #[test]
+    fn fillup_discouraged_second_template_breaks_the_yield() {
+        // One defect-reported template plus a second, unconsumed
+        // one: the second is fillup involvement beyond the defect
+        // report, so the tag fires once and names it.
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\nExecStart=/usr/bin/demo\n";
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[
+                ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                (
+                    "/usr/share/fillup-templates/sysconfig.other",
+                    "# template\n",
+                ),
+                ("/usr/lib/systemd/system/demo.service", unit),
+            ],
+            &[],
+            &|_| {},
+        );
+        assert_eq!(fillup_findings(&pkg).len(), 1);
+        let found = discouraged_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert!(
+            found[0].1.contains("sysconfig.other"),
+            "detail names the unreported template: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn fillup_discouraged_call_only_fires() {
+        // A bare invocation with no shipped template (the
+        // %fillup_only -s merge shape) fires on the call arm alone.
+        let (pkg, _src, _extract) = fillup_test_pkg("demo", &[], &[], &|b| {
+            b.post_install_script(
+                "/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo\n",
+            );
+        });
+        let found = discouraged_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert!(
+            found[0].1.contains("%post"),
+            "detail names the scriptlet: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn fillup_discouraged_macro_only_fires() {
+        // A scriptlet spelling the macro literally (the unexpanded
+        // shape) invokes fillup just the same.
+        let (pkg, _src, _extract) = fillup_test_pkg("demo", &[], &[], &|b| {
+            b.post_install_script(
+                    "%fillup_only -n demo /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo\n",
+                );
+        });
+        let found = discouraged_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert!(
+            found[0].1.contains("%post"),
+            "detail names the scriptlet: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn fillup_discouraged_mention_is_quiet() {
+        // A guard testing for the binary and a prose mention are not
+        // invocations, in either shape.
+        let post = "if [ -x /bin/fillup ]; then\n\
+                    \techo fillup is available\n\
+                    fi\n\
+                    # fillup would merge the template here\necho done\n";
+        let (pkg, _src, _extract) = fillup_test_pkg("demo", &[], &[], &|b| {
+            b.post_install_script(post);
+        });
+        assert!(discouraged_findings(&pkg).is_empty());
+    }
+
+    #[test]
+    fn fillup_discouraged_ghost_template_is_quiet() {
+        // A %ghost entry ships no template content to migrate.
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[],
+            &["/usr/share/fillup-templates/sysconfig.demo"],
+            &|_| {},
+        );
+        assert!(discouraged_findings(&pkg).is_empty());
+    }
+
+    #[test]
+    fn fillup_discouraged_mechanism_package_is_quiet() {
+        // The fillup package provides the mechanism; it does not
+        // consume it.
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "fillup",
+            &[("/usr/share/fillup-templates/sysconfig.demo", "# template\n")],
+            &[],
+            &|b| {
+                b.post_install_script(
+                    "/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo\n",
+                );
+            },
+        );
+        assert!(discouraged_findings(&pkg).is_empty());
     }
 
     #[test]

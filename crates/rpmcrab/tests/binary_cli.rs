@@ -2740,6 +2740,20 @@ fn explain_staged_sysconfig_fillup_usage() {
     assert!(out.stderr.is_empty());
 }
 
+/// `--explain`: staged `FilesCheck.toml` resolves the port-only `fillup-usage-discouraged` instead of "Unknown message".
+#[test]
+fn explain_staged_fillup_usage_discouraged() {
+    let out = rpmcrab(&["-e", "fillup-usage-discouraged"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "fillup-usage-discouraged:\nThe package uses fillup: it ships a fillup template or calls fillup from a\nscriptlet to create or merge its configuration. Migrate away from the fillup\nmodel: ship vendor defaults with the package, under /usr/etc or the\napplication's native default location under /usr, and reserve /etc for\nadministrator overrides and drop-in snippets. For a KEY=value file read\nthrough a systemd EnvironmentFile, ship the vendor file under /usr and add an\noptional administrator file under /etc -- the two-layer pattern irqbalance\nadopted in March 2025. Use tmpfiles.d for file and directory creation and\nsysusers.d for users and groups instead of install-time generation, and prefer\nthe application's native configuration with built-in defaults over a\nshell-sourced /etc/sysconfig file. This is migration guidance; fillup is not\nformally deprecated.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
 /// `--explain`: staged `FilesCheck.toml` resolves `non-ghost-file` instead of "Unknown message".
 #[test]
 fn explain_staged_files_check() {
