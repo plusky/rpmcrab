@@ -384,7 +384,7 @@ zero-perms = W
 zero-perms-ghost = W
 
 [unresolved-sites]
-# count = 44
+# count = 46
 alternatives.rs: add_info( out, level, pkg, "li
 atomic_update.rs: add_info( out, level, pkg, "dir-or-file-outsid
 binaries.rs: add_info( out, info_type, pkg, "unused-direct-
@@ -421,6 +421,8 @@ post.rs: add_info(out, level, pkg, finding, details)
 python.rs: add_info(out, Level::Error, pkg, finding, &[filename])
 source.rs: add_info(out, level, pkg, check, &refs)
 spec.rs: .info( out, pkg, Level::Warning,
+spec.rs: .info( out, pkg, WITH_MACRO_LEVEL, "with-macro
+spec.rs: .info(out, pkg, hit.level, tag, &[&hit.detail])
 spec.rs: .info(out, pkg, level, &check, &[])
 spec.rs: spec_add_info(out, level, pkg, pkg.current_linenum.get(), check, details)
 suid_permissions.rs: add_info( out, Level::Error, pkg, diag, &[&format!

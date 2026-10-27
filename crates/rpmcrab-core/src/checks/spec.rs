@@ -131,6 +131,24 @@ fn make_check_re() -> &'static Regex {
         .get_or_init(|| Regex::new(r"(^|\s|%{?__)make}?\s+(check|test)").expect("static regex"))
 }
 
+static WITH_MACRO_EMPTY_RE: OnceLock<Regex> = OnceLock::new();
+fn with_macro_empty_re() -> &'static Regex {
+    WITH_MACRO_EMPTY_RE
+        .get_or_init(|| Regex::new(r"%\{!?\?(?:with|without)[\s:}]").expect("static regex"))
+}
+
+static CMAKE_KF_RE: OnceLock<Regex> = OnceLock::new();
+fn cmake_kf_re() -> &'static Regex {
+    CMAKE_KF_RE.get_or_init(|| Regex::new(r"^\s*%cmake_kf[56]\b").expect("static regex"))
+}
+
+static BUILD_TESTING_RE: OnceLock<Regex> = OnceLock::new();
+fn build_testing_re() -> &'static Regex {
+    BUILD_TESTING_RE.get_or_init(|| {
+        Regex::new(r#"-DBUILD_TESTING(?::[A-Za-z]+)?\s*=\s*([^\s"']+)"#).expect("static regex")
+    })
+}
+
 static RPM_BUILDROOT_RE: OnceLock<Regex> = OnceLock::new();
 fn rpm_buildroot_re() -> &'static Regex {
     RPM_BUILDROOT_RE.get_or_init(|| {
@@ -1415,6 +1433,16 @@ fn source_line_is_packaged(line: &str) -> bool {
 }
 
 /// `SpecCheck`, ported from rpmlint's `SpecCheck.py`.
+/// One physical line of a shell build section (`%prep`, `%build`,
+/// `%install`, `%check`), recorded during the line walk for the
+/// deferred exit-status analysis in `flush_check_soundness` (#1019).
+struct BodyLine {
+    section: String,
+    instance: u32,
+    lineno: u32,
+    text: String,
+}
+
 pub struct SpecCheck {
     mini_mode: bool,
     macro_re: Regex,
@@ -1464,6 +1492,9 @@ pub struct SpecCheck {
     suse_update_desktop_file_re: Regex,
     license_token_re: Regex,
     file_qualifier_re: Regex,
+    with_macro_empty_re: Regex,
+    cmake_kf_re: Regex,
+    build_testing_re: Regex,
     // Per-package state (`_default_state`).
     spec_file: Option<String>,
     spec_name: Option<String>,
@@ -1494,6 +1525,14 @@ pub struct SpecCheck {
     license_install_join: String,
     archive_source_seen: bool,
     packaged_source_seen: bool,
+    /// #1019: shell-section lines and whole-spec facts for the
+    /// deferred exit-status analysis (`flush_check_soundness`).
+    body_lines: Vec<BodyLine>,
+    prev_section: String,
+    section_instance: u32,
+    saw_cmake_kf: bool,
+    build_testing_on: bool,
+    install_post_nil: bool,
 }
 
 impl SpecCheck {
@@ -1564,6 +1603,9 @@ impl SpecCheck {
             suse_update_desktop_file_re: suse_update_desktop_file_re().clone(),
             license_token_re: license_token_re().clone(),
             file_qualifier_re: file_qualifier_re().clone(),
+            with_macro_empty_re: with_macro_empty_re().clone(),
+            cmake_kf_re: cmake_kf_re().clone(),
+            build_testing_re: build_testing_re().clone(),
             spec_file: None,
             spec_name: None,
             patches: BTreeMap::new(),
@@ -1588,6 +1630,12 @@ impl SpecCheck {
             license_install_join: String::new(),
             archive_source_seen: false,
             packaged_source_seen: false,
+            body_lines: Vec::new(),
+            prev_section: "package".to_string(),
+            section_instance: 0,
+            saw_cmake_kf: false,
+            build_testing_on: false,
+            install_post_nil: false,
             rpm: Self::probe_rpm(&source),
         }
     }
@@ -1753,6 +1801,7 @@ impl Check for SpecCheck {
         }
         pkg.current_linenum.set(None);
         self.flush_license_marking(pkg, out);
+        self.flush_check_soundness(pkg, out);
         if !self.declarative {
             for sec in ["prep", "build", "install", "check"] {
                 if self.section.get(sec).copied().unwrap_or(0) == 0 {
@@ -1844,6 +1893,12 @@ impl Check for SpecCheck {
         self.license_install_join.clear();
         self.archive_source_seen = false;
         self.packaged_source_seen = false;
+        self.body_lines.clear();
+        self.prev_section = "package".to_string();
+        self.section_instance = 0;
+        self.saw_cmake_kf = false;
+        self.build_testing_on = false;
+        self.install_post_nil = false;
     }
 }
 
@@ -1987,6 +2042,7 @@ impl SpecCheck {
         if self.checkline_section(pkg, out, line) {
             return;
         }
+        self.note_body_line(pkg, line);
         self.checkline_buildroot_usage(pkg, out, line);
         self.checkline_make_check(pkg, out, line);
         self.checkline_setup(pkg, out, line);
@@ -2004,6 +2060,7 @@ impl SpecCheck {
         self.checkline_python_module_def(pkg, out, line);
         self.checkline_python_sitelib_glob(pkg, out, line);
         self.checkline_shared_dir_glob(pkg, out, line);
+        self.checkline_with_macro_empty(pkg, out, line);
     }
 
     fn checkline_declarative(&mut self, line: &str) {
@@ -3057,6 +3114,955 @@ impl SpecCheck {
              at install time. Remove the macro call from the scriptlet."
                 .to_string(),
         );
+    }
+}
+
+// ---------------------------------------------------------------------
+// #1019: a `%check` that cannot fail. rpm runs build sections under
+// `bash -e` and a section's status is its last command's, so three
+// shapes cannot stop the build: a runner whose failure a `||` fallback
+// absorbs, a runner piped into a pass-through (the pipeline reports
+// the last element's status), and a `!`-negated command that is not
+// the section's last command (the negation is discarded). Two more
+// shapes are dead by construction: `%{?with N}` always expands to
+// nothing, and `ctest` under the KDE cmake macros finds no tests
+// because they pass `-DBUILD_TESTING=FALSE`. The four masking tags
+// are warnings; `with-macro-expands-empty` has no safe use and
+// ships as an error: the Factory corpus measurement recorded in
+// the ledger found every occurrence to be a condition or value
+// that never depends on the named bcond, and `rpmspec` confirms
+// all eight forms expand to nothing with the bcond on and off.
+const WITH_MACRO_LEVEL: Level = Level::Error;
+
+impl SpecCheck {
+    /// Record whole-spec facts and shell-section lines for the #1019
+    /// analysis. Runs on every non-header line of the walk.
+    fn note_body_line(&mut self, pkg: &SpecPkg, line: &str) {
+        let text = without_newline(line);
+        if self.cmake_kf_re.is_match(text).unwrap_or(false) {
+            self.saw_cmake_kf = true;
+        }
+        if let Ok(Some(caps)) = self.build_testing_re.captures(text) {
+            let value = caps
+                .get(1)
+                .map(|m| m.as_str().trim_end_matches(')'))
+                .unwrap_or("");
+            if cmake_true_value(value) {
+                self.build_testing_on = true;
+            }
+        }
+        let trimmed = text.trim_start();
+        if (trimmed.starts_with("%define") || trimmed.starts_with("%global"))
+            && text.contains("__spec_install_post")
+            && text.contains("%{nil}")
+        {
+            self.install_post_nil = true;
+        }
+        let section = self.current_section.as_str();
+        let shell = matches!(section, "prep" | "build" | "install" | "check");
+        if section != self.prev_section {
+            self.prev_section = section.to_string();
+            if shell {
+                self.section_instance += 1;
+            }
+        }
+        if shell {
+            self.body_lines.push(BodyLine {
+                section: section.to_string(),
+                instance: self.section_instance,
+                lineno: pkg.current_linenum.get().unwrap_or(0),
+                text: text.to_string(),
+            });
+        }
+    }
+
+    /// `%{?with N}`, `%{!?without N}` and the other `?`/`!?` forms:
+    /// rpm drops the argument of the `?` form, so the expansion is
+    /// empty whatever N names (#1019). `%%`-escaped text is literal
+    /// prose and stays quiet, as does `%{with N}` (no `?`) and
+    /// `0%{?with_N}` (a different macro name).
+    fn checkline_with_macro_empty(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
+        let text = without_newline(line);
+        for m in self.with_macro_empty_re.find_iter(text) {
+            let Ok(m) = m else { break };
+            if m.start() > 0 && text.as_bytes()[m.start() - 1] == b'%' {
+                continue;
+            }
+            self.info(
+                out,
+                pkg,
+                WITH_MACRO_LEVEL,
+                "with-macro-expands-empty",
+                &[text.trim()],
+            );
+            return;
+        }
+    }
+
+    /// The deferred #1019 analysis: findings that need the whole
+    /// section (or the whole spec), emitted at the recorded lines.
+    fn flush_check_soundness(&mut self, pkg: &SpecPkg, out: &mut Filter) {
+        let hits = soundness_hits(
+            &self.body_lines,
+            self.saw_cmake_kf,
+            self.build_testing_on,
+            self.install_post_nil,
+        );
+        for hit in hits {
+            pkg.current_linenum.set(Some(hit.lineno));
+            let tag = match hit.kind {
+                SoundnessKind::NegatedCommandNotLast => "negated-command-not-last",
+                SoundnessKind::CheckExitStatusMasked => "check-exit-status-masked",
+                SoundnessKind::CheckPipelineStatusMasked => "check-pipeline-status-masked",
+                SoundnessKind::CtestWithTestingDisabled => "ctest-with-testing-disabled",
+            };
+            self.info(out, pkg, hit.level, tag, &[&hit.detail]);
+        }
+        pkg.current_linenum.set(None);
+    }
+}
+
+/// A CMake truthy value for `-DBUILD_TESTING`: `1`, `ON`, `YES`,
+/// `TRUE`, `Y` or a non-zero number, case-insensitive.
+fn cmake_true_value(value: &str) -> bool {
+    if ["on", "yes", "true", "y"]
+        .iter()
+        .any(|w| value.eq_ignore_ascii_case(w))
+    {
+        return true;
+    }
+    value.parse::<i64>().map(|n| n != 0).unwrap_or(false)
+}
+
+/// Which of the deferred soundness findings a [`SoundnessHit`]
+/// carries; the emitted tag is fixed per kind (see
+/// `flush_check_soundness`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SoundnessKind {
+    NegatedCommandNotLast,
+    CheckExitStatusMasked,
+    CheckPipelineStatusMasked,
+    CtestWithTestingDisabled,
+}
+
+struct SoundnessHit {
+    lineno: u32,
+    level: Level,
+    kind: SoundnessKind,
+    detail: String,
+}
+
+/// A test runner from the closed list in #1019 §3: make/ninja
+/// `check`/`test`, ctest, pytest, pyunittest, meson test, cargo test,
+/// go test, prove, runtest.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Runner {
+    Make,
+    Ninja,
+    Ctest,
+    Pytest,
+    Pyunittest,
+    Meson,
+    Cargo,
+    Go,
+    Prove,
+    Runtest,
+}
+
+/// `VAR=value` (or `VAR+=value`) as a shell word.
+fn is_assignment(word: &str) -> bool {
+    let Some(eq) = word.find('=') else {
+        return false;
+    };
+    let name = word[..eq].trim_end_matches('+');
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false)
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The command word of a statement: the first word that is not an
+/// assignment, `env` or a negation, reduced to its basename.
+fn command_word(stmt: &str) -> Option<String> {
+    for word in stmt.split_whitespace() {
+        let word = if word.starts_with('%') {
+            word
+        } else {
+            word.trim_matches(|c| matches!(c, '(' | ')' | '{' | '}' | ';'))
+        };
+        if word == "!" || word == "env" || is_assignment(word) {
+            continue;
+        }
+        return Some(word.rsplit('/').next().unwrap_or(word).to_string());
+    }
+    None
+}
+
+/// The runner a statement invokes, if any. Only the statement's
+/// command position counts: prose mentioning a runner is not a run.
+fn runner_of(stmt: &str) -> Option<Runner> {
+    let toks: Vec<&str> = stmt
+        .split_whitespace()
+        .map(|t| {
+            if t.starts_with('%') {
+                t
+            } else {
+                t.trim_matches(|c| matches!(c, '(' | ')' | '{' | '}' | ';'))
+            }
+        })
+        .collect();
+    let mut i = 0;
+    while i < toks.len() && (toks[i] == "!" || toks[i] == "env" || is_assignment(toks[i])) {
+        i += 1;
+    }
+    let word = *toks.get(i)?;
+    let base = word.rsplit('/').next().unwrap_or(word);
+    let later = &toks[i + 1..];
+    let has_later = |w: &str| later.contains(&w);
+    match base {
+        "make" | "gmake" | "%{__make}" | "%__make" => {
+            if has_later("check") || has_later("test") {
+                return Some(Runner::Make);
+            }
+        }
+        "ninja" | "%{__ninja}" => {
+            if has_later("test") || has_later("check") {
+                return Some(Runner::Ninja);
+            }
+        }
+        "ctest" => return Some(Runner::Ctest),
+        "meson" => {
+            if has_later("test") {
+                return Some(Runner::Meson);
+            }
+        }
+        "%meson_test" => return Some(Runner::Meson),
+        "cargo" => {
+            if has_later("test") {
+                return Some(Runner::Cargo);
+            }
+        }
+        "%cargo_test" => return Some(Runner::Cargo),
+        "go" => {
+            if has_later("test") {
+                return Some(Runner::Go);
+            }
+        }
+        "prove" => return Some(Runner::Prove),
+        "runtest" => return Some(Runner::Runtest),
+        _ => {}
+    }
+    if word.starts_with("%ctest") {
+        return Some(Runner::Ctest);
+    }
+    if base == "pytest" || base.starts_with("pytest") || word == "%pytest" {
+        return Some(Runner::Pytest);
+    }
+    if base.contains("pyunittest") {
+        return Some(Runner::Pyunittest);
+    }
+    if later.windows(2).any(|w| w[0] == "-m" && w[1] == "unittest") {
+        return Some(Runner::Pyunittest);
+    }
+    None
+}
+
+/// The operator preceding a statement in its logical line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Op {
+    Start,
+    And,
+    Or,
+    Semi,
+    Pipe,
+}
+
+struct Stmt {
+    op: Op,
+    text: String,
+}
+
+/// Split a logical line into statements at top-level `&&`, `||`,
+/// `;`, `|` and background `&`, honouring quotes, backslash escapes
+/// and parenthesis depth (operators inside `$(...)` or a subshell do
+/// not split). The recorded operator is the one *preceding* each
+/// statement.
+#[allow(unused_assignments)] // the final cut! assigns an operator nothing reads
+fn split_statements(text: &str) -> Vec<Stmt> {
+    let bytes = text.as_bytes();
+    let mut stmts = Vec::new();
+    let mut op = Op::Start;
+    let mut seg_start = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut depth: i32 = 0;
+    let mut i = 0usize;
+    macro_rules! cut {
+        ($end:expr, $next_op:expr) => {
+            let seg = text[seg_start..$end].trim();
+            if !seg.is_empty() {
+                stmts.push(Stmt {
+                    op,
+                    text: seg.to_string(),
+                });
+            }
+            op = $next_op;
+        };
+    }
+    while i < bytes.len() {
+        let c = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if c == b'\\' && !in_single {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if c == b'\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if c == b'"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if !in_single && !in_double {
+            match c {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                if c == b'&' && bytes.get(i + 1) == Some(&b'&') {
+                    cut!(i, Op::And);
+                    i += 2;
+                    seg_start = i;
+                    continue;
+                }
+                if c == b'|' && bytes.get(i + 1) == Some(&b'|') {
+                    cut!(i, Op::Or);
+                    i += 2;
+                    seg_start = i;
+                    continue;
+                }
+                if c == b'|' {
+                    cut!(i, Op::Pipe);
+                    i += if bytes.get(i + 1) == Some(&b'&') {
+                        2
+                    } else {
+                        1
+                    };
+                    seg_start = i;
+                    continue;
+                }
+                if c == b';' {
+                    cut!(i, Op::Semi);
+                    i += 1;
+                    seg_start = i;
+                    continue;
+                }
+                if c == b'&' && (i == 0 || bytes[i - 1] != b'>') {
+                    cut!(i, Op::Semi);
+                    i += 1;
+                    seg_start = i;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    cut!(bytes.len(), Op::Start);
+    stmts
+}
+
+/// A statement with brace-group decoration removed, for the
+/// fallback-shape tests in `fallback_masks`.
+fn clean_stmt(text: &str) -> &str {
+    text.trim()
+        .trim_start_matches(['{', ' '])
+        .trim_end_matches(['}', ')', ' '])
+}
+
+/// An `exit` statement that propagates a failure: a bare `exit`
+/// (the runner's own status) or an exit with a non-zero argument.
+fn exit_fails(text: &str) -> bool {
+    let mut words = text.split_whitespace();
+    if words.next() != Some("exit") {
+        return false;
+    }
+    match words.next() {
+        None => true,
+        Some(arg) => arg != "0",
+    }
+}
+
+/// Adjust `depth` by the group brackets `(`, `{`, `)`, `}` in
+/// `text` that sit outside quotes.
+fn group_depth(text: &str, depth: &mut i32) {
+    let b = text.as_bytes();
+    let (mut sq, mut dq) = (false, false);
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' if !sq => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !dq => sq = !sq,
+            b'"' if !sq => dq = !dq,
+            b'(' | b'{' if !sq && !dq => *depth += 1,
+            b')' | b'}' if !sq && !dq => *depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// Whether `text` ends inside an open single or double quote.
+fn quote_open(text: &str) -> bool {
+    let b = text.as_bytes();
+    let (mut sq, mut dq) = (false, false);
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' if !sq => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !dq => sq = !sq,
+            b'"' if !sq => dq = !dq,
+            _ => {}
+        }
+        i += 1;
+    }
+    sq || dq
+}
+
+/// The delimiter of a here-document opened on `text`, if any: an
+/// unquoted `<<` (not `<<<`) followed by an optional `-`, optional
+/// quoting and a delimiter word.
+fn heredoc_delimiter(text: &str) -> Option<String> {
+    let b = text.as_bytes();
+    let (mut sq, mut dq) = (false, false);
+    let mut i = 0;
+    while i + 1 < b.len() {
+        match b[i] {
+            b'\\' if !sq => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !dq => sq = !sq,
+            b'"' if !sq => dq = !dq,
+            b'<' if !sq && !dq && b[i + 1] == b'<' && b.get(i + 2) != Some(&b'<') => {
+                let mut j = i + 2;
+                if b.get(j) == Some(&b'-') {
+                    j += 1;
+                }
+                while b.get(j).map(|c| *c == b' ' || *c == b'\t').unwrap_or(false) {
+                    j += 1;
+                }
+                if matches!(b.get(j), Some(b'\'') | Some(b'"')) {
+                    j += 1;
+                }
+                let start = j;
+                while b
+                    .get(j)
+                    .map(|c| c.is_ascii_alphanumeric() || *c == b'_')
+                    .unwrap_or(false)
+                {
+                    j += 1;
+                }
+                if j > start {
+                    return Some(text[start..j].to_string());
+                }
+                return None;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether the `||` fallback (the statements after the runner)
+/// absorbs the runner's failure: it masks when it neither re-runs a
+/// runner, nor defers the verdict to a variable it assigns, nor can
+/// itself fail - except that an explicit `exit 0` in the fallback
+/// masks outright. A group fallback may span following commands;
+/// its statements join the analysis until the group closes. The
+/// verdict reads leaf statements (group interiors split on `;`,
+/// `&&` and `||`): an `exit` leaf with a non-zero or bare argument
+/// fails, an `exit 0` leaf masks, and a trailing `false` fails.
+fn fallback_masks(fallback: &[Stmt], following: &[CmdLine]) -> bool {
+    if fallback.iter().any(|s| runner_of(&s.text).is_some()) {
+        return false;
+    }
+    let defers = fallback
+        .first()
+        .map(|f| {
+            let t = clean_stmt(&f.text);
+            let t = ["export ", "local ", "readonly ", "declare "]
+                .iter()
+                .find_map(|p| t.strip_prefix(p))
+                .unwrap_or(t);
+            is_assignment(t.split_whitespace().next().unwrap_or(""))
+        })
+        .unwrap_or(false);
+    if defers {
+        return false;
+    }
+    if fallback.iter().any(|s| {
+        let t = clean_stmt(&s.text);
+        t == "false" || t.starts_with("false ")
+    }) {
+        return false;
+    }
+    let mut stmts: Vec<&Stmt> = fallback.iter().collect();
+    let mut depth = 0i32;
+    for s in fallback {
+        group_depth(&s.text, &mut depth);
+    }
+    let mut fi = 0;
+    while depth > 0 && fi < following.len() {
+        for s in &following[fi].stmts {
+            group_depth(&s.text, &mut depth);
+            stmts.push(s);
+            if depth <= 0 {
+                break;
+            }
+        }
+        fi += 1;
+    }
+    let mut leaves: Vec<String> = Vec::new();
+    for s in &stmts {
+        for part in clean_stmt(&s.text).split(';') {
+            for leaf in part.split("&&").flat_map(|x| x.split("||")) {
+                leaves.push(
+                    leaf.trim()
+                        .trim_start_matches(['(', '{', ' '])
+                        .trim_end_matches([')', '}', ' '])
+                        .to_string(),
+                );
+            }
+        }
+    }
+    if leaves.iter().any(|l| exit_fails(l)) {
+        return false;
+    }
+    if leaves
+        .iter()
+        .any(|l| l == "exit 0" || l.starts_with("exit 0 "))
+    {
+        return true;
+    }
+    let last_false = leaves
+        .last()
+        .map(|l| l == "false" || l.starts_with("false "))
+        .unwrap_or(false);
+    !last_false
+}
+
+/// The `&&`-arm mask forms: `&& exit 0`, `&& echo`, `&& :`,
+/// `&& true` after a runner.
+fn and_mask_form(text: &str) -> bool {
+    let t = clean_stmt(text);
+    t == "exit 0"
+        || t.starts_with("exit 0 ")
+        || matches!(command_word(t).as_deref(), Some("echo" | ":" | "true"))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineKind {
+    If,
+    ElseLike,
+    Endif,
+    Blank,
+    Closing,
+    Command,
+}
+
+/// `text` opens with the directive `kw` at a word boundary.
+fn directive(text: &str, kw: &str) -> bool {
+    text == kw
+        || text
+            .strip_prefix(kw)
+            .map(|rest| rest.starts_with([' ', '\t']))
+            .unwrap_or(false)
+}
+
+/// One command logical line of a shell section, with its conditional
+/// arm path (the `(if, arm)` stack enclosing it).
+struct CmdLine {
+    lineno: u32,
+    text: String,
+    stmts: Vec<Stmt>,
+    arm_path: Vec<(u32, u32)>,
+}
+
+/// Whether a command after `s` in the same section can run in a
+/// configuration where `s` runs: every conditional enclosing `s`
+/// either does not enclose the later command, or encloses it in the
+/// same arm.
+fn arm_compatible(s: &[(u32, u32)], later: &[(u32, u32)]) -> bool {
+    s.iter()
+        .all(|(id, arm)| match later.iter().find(|(oid, _)| oid == id) {
+            None => true,
+            Some((_, other)) => other == arm,
+        })
+}
+
+fn soundness_hits(
+    lines: &[BodyLine],
+    cmake_kf: bool,
+    build_testing_on: bool,
+    install_post_nil: bool,
+) -> Vec<SoundnessHit> {
+    let mut hits = Vec::new();
+    let mut ctest_fired = false;
+    let mut start = 0;
+    while start < lines.len() {
+        let instance = lines[start].instance;
+        let mut end = start;
+        while end < lines.len() && lines[end].instance == instance {
+            end += 1;
+        }
+        soundness_block(
+            &lines[start].section,
+            &lines[start..end],
+            cmake_kf,
+            build_testing_on,
+            install_post_nil,
+            &mut ctest_fired,
+            &mut hits,
+        );
+        start = end;
+    }
+    hits.sort_by_key(|h| h.lineno);
+    hits
+}
+
+fn soundness_block(
+    section: &str,
+    phys: &[BodyLine],
+    cmake_kf: bool,
+    build_testing_on: bool,
+    install_post_nil: bool,
+    ctest_fired: &mut bool,
+    hits: &mut Vec<SoundnessHit>,
+) {
+    // Build logical lines from the physical ones. A conditional
+    // directive stands alone and never joins a continuation. A
+    // logical line continues while it ends in a backslash, in a
+    // binary operator (`||`, `&&`, `|`) or inside an open quote.
+    // Lines inside a here-document are content, not commands, and
+    // are recorded as blank lines.
+    let mut logicals: Vec<(u32, String)> = Vec::new();
+    let mut cur: Option<(u32, String)> = None;
+    let mut heredoc: Option<String> = None;
+    for p in phys {
+        let t = p.text.trim();
+        if let Some(delim) = &heredoc {
+            logicals.push((p.lineno, String::new()));
+            if t == delim.as_str() {
+                heredoc = None;
+            }
+            continue;
+        }
+        if directive(t, "%endif")
+            || directive(t, "%else")
+            || directive(t, "%elif")
+            || t.starts_with("%if")
+        {
+            logicals.push((p.lineno, t.to_string()));
+            continue;
+        }
+        let (ln, mut acc) = cur.take().unwrap_or((p.lineno, String::new()));
+        acc.push_str(&p.text);
+        let stripped = match comment_start_pos(&acc) {
+            Some(i) => acc[..i].to_string(),
+            None => acc,
+        };
+        let st = stripped.trim_end().to_string();
+        let trailing = st.chars().rev().take_while(|c| *c == '\\').count();
+        if trailing % 2 == 1 {
+            let mut a = st;
+            a.pop();
+            cur = Some((ln, a));
+        } else if st.ends_with('|') || st.ends_with("&&") || quote_open(&st) {
+            cur = Some((ln, st));
+        } else {
+            if heredoc.is_none() {
+                heredoc = heredoc_delimiter(&st);
+            }
+            logicals.push((ln, st.trim().to_string()));
+        }
+    }
+    if let Some((ln, acc)) = cur {
+        logicals.push((ln, acc.trim().to_string()));
+    }
+
+    // Classify the lines and record each command's arm path.
+    let mut kinds: Vec<LineKind> = Vec::with_capacity(logicals.len());
+    let mut cmds: Vec<CmdLine> = Vec::new();
+    let mut stack: Vec<(u32, u32)> = Vec::new();
+    let mut next_if = 0u32;
+    for (ln, text) in &logicals {
+        let kind = if text.is_empty() {
+            LineKind::Blank
+        } else if directive(text, "%endif") {
+            LineKind::Endif
+        } else if directive(text, "%else") || directive(text, "%elif") {
+            LineKind::ElseLike
+        } else if text.starts_with("%if") {
+            LineKind::If
+        } else if text.starts_with(['}', ')']) || matches!(text.as_str(), "fi" | "done" | "esac") {
+            LineKind::Closing
+        } else {
+            LineKind::Command
+        };
+        match kind {
+            LineKind::If => {
+                stack.push((next_if, 0));
+                next_if += 1;
+            }
+            LineKind::ElseLike => {
+                if let Some(top) = stack.last_mut() {
+                    top.1 += 1;
+                }
+            }
+            LineKind::Endif => {
+                stack.pop();
+            }
+            LineKind::Command => cmds.push(CmdLine {
+                lineno: *ln,
+                text: text.clone(),
+                stmts: split_statements(text),
+                arm_path: stack.clone(),
+            }),
+            _ => {}
+        }
+        kinds.push(kind);
+    }
+
+    // `negated-command-not-last`, in every shell section.
+    for (ci, c) in cmds.iter().enumerate() {
+        if !c.text.starts_with("! ") {
+            continue;
+        }
+        // (a) no `||`, `&&` or `;` follows the negation on the line.
+        if c.stmts
+            .iter()
+            .any(|s| matches!(s.op, Op::And | Op::Or | Op::Semi))
+        {
+            continue;
+        }
+        // (b) the next command does not read `$?`.
+        let reads_status = cmds
+            .get(ci + 1)
+            .map(|n| n.text.contains("$?") || n.text.contains("${?}"))
+            .unwrap_or(false);
+        if reads_status {
+            continue;
+        }
+        // (c) it is not the last command of a function body or a
+        // subshell: the next content line closes the body.
+        let span_tail = {
+            let pos = logicals.iter().position(|(ln, _)| *ln == c.lineno);
+            let mut tail = false;
+            if let Some(pos) = pos {
+                for kind in &kinds[pos + 1..] {
+                    match kind {
+                        LineKind::Blank | LineKind::If | LineKind::ElseLike | LineKind::Endif => {
+                            continue;
+                        }
+                        LineKind::Closing => {
+                            tail = true;
+                            break;
+                        }
+                        LineKind::Command => break,
+                    }
+                }
+            }
+            tail
+        };
+        if span_tail {
+            continue;
+        }
+        // (d) a later command may run.
+        let later = (section == "install" && !install_post_nil)
+            || cmds[ci + 1..]
+                .iter()
+                .any(|o| arm_compatible(&c.arm_path, &o.arm_path));
+        if !later {
+            continue;
+        }
+        hits.push(SoundnessHit {
+            lineno: c.lineno,
+            level: Level::Warning,
+            kind: SoundnessKind::NegatedCommandNotLast,
+            detail: c.text.clone(),
+        });
+    }
+
+    if section != "check" {
+        return;
+    }
+
+    // Runner kinds that also run unmasked in this section: a mask
+    // on them is informational (the plain run still gates).
+    let mut unmasked: Vec<Runner> = Vec::new();
+    for c in &cmds {
+        for (i, s) in c.stmts.iter().enumerate() {
+            if let Some(kind) = runner_of(&s.text) {
+                let last = i + 1 == c.stmts.len();
+                let clean_line = c.stmts.iter().all(|x| !matches!(x.op, Op::Or | Op::Pipe));
+                if last && clean_line && !unmasked.contains(&kind) {
+                    unmasked.push(kind);
+                }
+            }
+        }
+    }
+
+    let last_cmd = cmds.last().map(|c| c.lineno);
+    let mut flat = 0usize;
+    let mut pipefail_before: Option<usize> = None;
+    // Flat statement positions, for the pipefail/PIPESTATUS tests.
+    let mut positions: Vec<Vec<usize>> = Vec::with_capacity(cmds.len());
+    for c in &cmds {
+        let mut row = Vec::with_capacity(c.stmts.len());
+        for s in &c.stmts {
+            if pipefail_before.is_none()
+                && command_word(&s.text).as_deref() == Some("set")
+                && s.text.contains("pipefail")
+            {
+                pipefail_before = Some(flat);
+            }
+            row.push(flat);
+            flat += 1;
+        }
+        positions.push(row);
+    }
+    let pipestatus_after = |pos: usize, cmds: &[CmdLine]| {
+        let mut seen = 0usize;
+        for c in cmds {
+            for s in &c.stmts {
+                if seen > pos && s.text.contains("PIPESTATUS") {
+                    return true;
+                }
+                seen += 1;
+            }
+        }
+        false
+    };
+
+    for (ci, c) in cmds.iter().enumerate() {
+        // `check-exit-status-masked`.
+        let mut fired = false;
+        // A `||` chain is analysed once, at its first runner: later
+        // runner segments are retries of the same chain, and their
+        // own fallback slice is not a separate mask.
+        let mut or_subject = false;
+        for (i, s) in c.stmts.iter().enumerate() {
+            if matches!(s.op, Op::Start | Op::Semi) {
+                or_subject = false;
+            }
+            let Some(kind) = runner_of(&s.text) else {
+                continue;
+            };
+            if s.op == Op::Or && or_subject {
+                continue;
+            }
+            if unmasked.contains(&kind) {
+                continue;
+            }
+            let Some(next) = c.stmts.get(i + 1) else {
+                continue;
+            };
+            match next.op {
+                Op::Or => {
+                    or_subject = true;
+                    if fallback_masks(&c.stmts[i + 1..], &cmds[ci + 1..]) {
+                        fired = true;
+                    }
+                }
+                Op::And => {
+                    // A `%ctest` line is never the section's last
+                    // command: the macro appends `; cd ..`.
+                    let is_ctest = s.text.trim_start().starts_with("%ctest");
+                    if and_mask_form(&next.text) && (is_ctest || Some(c.lineno) != last_cmd) {
+                        fired = true;
+                    }
+                }
+                _ => {}
+            }
+            if fired {
+                break;
+            }
+        }
+        if fired {
+            hits.push(SoundnessHit {
+                lineno: c.lineno,
+                level: Level::Warning,
+                kind: SoundnessKind::CheckExitStatusMasked,
+                detail: c.text.clone(),
+            });
+        }
+
+        // `check-pipeline-status-masked`.
+        for (i, s) in c.stmts.iter().enumerate() {
+            if s.op != Op::Pipe {
+                continue;
+            }
+            let word = command_word(&s.text);
+            let passthrough = matches!(
+                word.as_deref(),
+                Some("tee" | "cat" | "head" | "tail" | "sed" | "sort")
+            );
+            if !passthrough {
+                continue;
+            }
+            if !c.stmts[..i].iter().any(|x| runner_of(&x.text).is_some()) {
+                continue;
+            }
+            let pos = positions[ci][i];
+            let suppressed =
+                pipefail_before.map(|p| p < pos).unwrap_or(false) || pipestatus_after(pos, &cmds);
+            if !suppressed {
+                hits.push(SoundnessHit {
+                    lineno: c.lineno,
+                    level: Level::Warning,
+                    kind: SoundnessKind::CheckPipelineStatusMasked,
+                    detail: c.text.clone(),
+                });
+            }
+            break;
+        }
+
+        // `ctest-with-testing-disabled` (once per spec).
+        if cmake_kf
+            && !build_testing_on
+            && !*ctest_fired
+            && c.stmts
+                .iter()
+                .any(|s| runner_of(&s.text) == Some(Runner::Ctest))
+        {
+            hits.push(SoundnessHit {
+                lineno: c.lineno,
+                level: Level::Warning,
+                kind: SoundnessKind::CtestWithTestingDisabled,
+                detail: c.text.clone(),
+            });
+            *ctest_fired = true;
+        }
     }
 }
 
@@ -6809,6 +7815,357 @@ Patch0: foo.patch
             lines[0].contains("W: patch-not-applied Patch0:"),
             "line: {}",
             lines[0]
+        );
+    }
+    // ---- #1019: a %check that cannot fail ----
+
+    #[test]
+    fn exit_status_masked_or_fallbacks_fire() {
+        // PDAL r17-r18 / shapelib r6 / redis r18 shapes.
+        for body in [
+            "make check || :",
+            "make check ||:",
+            "make check || true",
+            "%{__make} check || :",
+            "ninja test || :",
+            "pytest || :",
+            "%meson_test || :",
+            "cargo test || :",
+            "go test ./... || :",
+            "prove -r t || :",
+            "ctest || :",
+        ] {
+            let text = format!("Name: foo\n%check\n{body}\n");
+            let results = run_mini(&text);
+            assert!(
+                has(&results, "check-exit-status-masked"),
+                "no fire for {body:?}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_status_failing_or_deferring_fallbacks_stay_quiet() {
+        for body in [
+            "make check || { cat test/test-suite.log; exit 1; }",
+            "make check || exit 1",
+            "make check || exit",
+            "make check || false",
+            "make check || make check -j1",
+            "ulimit -c unlimited || :",
+        ] {
+            let text = format!("Name: foo\n%check\n{body}\n");
+            let results = run_mini(&text);
+            assert!(
+                !has(&results, "check-exit-status-masked"),
+                "unexpected fire for {body:?}: {results:?}"
+            );
+        }
+        // python-PyMySQL: the fallback records the status in a
+        // variable the section exits with afterwards.
+        let results = run_mini("Name: foo\n%check\nmake check || exit_code=1\nexit $exit_code\n");
+        assert!(
+            !has(&results, "check-exit-status-masked"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn exit_status_masked_and_arm() {
+        // libsmi: the fallback prints the log and exits 0.
+        let results =
+            run_mini("Name: foo\n%check\nmake check || cat test/test-suite.log && exit 0\n");
+        assert!(
+            has(&results, "check-exit-status-masked"),
+            "missing: {results:?}"
+        );
+        // `cmd && exit 0` as the section's last command still fails
+        // the build when cmd fails.
+        let results = run_mini("Name: foo\n%check\nmake check && exit 0\n");
+        assert!(
+            !has(&results, "check-exit-status-masked"),
+            "unexpected: {results:?}"
+        );
+        // ... but not when more commands follow.
+        let results = run_mini("Name: foo\n%check\nmake check && exit 0\necho done\n");
+        assert!(
+            has(&results, "check-exit-status-masked"),
+            "missing: {results:?}"
+        );
+        // A %ctest line is never the last command (the macro appends
+        // `; cd ..`), so the reproducer shape fires as the last line.
+        let results = run_mini("Name: foo\n%check\n%ctest && exit 0\n");
+        assert!(
+            has(&results, "check-exit-status-masked"),
+            "missing: {results:?}"
+        );
+    }
+
+    #[test]
+    fn exit_status_masked_informational_rerun_stays_quiet() {
+        // The same runner also runs unmasked (apache-arrow shape).
+        let results = run_mini("Name: foo\n%check\npytest || :\npytest\n");
+        assert!(
+            !has(&results, "check-exit-status-masked"),
+            "unexpected: {results:?}"
+        );
+        // gdal: a masked pytest beside a gating %ctest still fires.
+        let results = run_mini("Name: foo\n%check\n%ctest\npytest || :\n");
+        assert!(
+            has(&results, "check-exit-status-masked"),
+            "missing: {results:?}"
+        );
+    }
+
+    #[test]
+    fn pipeline_status_masked_shapes() {
+        // tcl r74.
+        let results = run_mini(
+            "Name: foo\n%check\nmake test 2>&1 | tee testresults\ngrep FAILED testresults && exit 1\n",
+        );
+        assert!(
+            has(&results, "check-pipeline-status-masked"),
+            "missing: {results:?}"
+        );
+        // pipefail before the pipe.
+        let results = run_mini("Name: foo\n%check\nset -o pipefail\nmake test | tee log\n");
+        assert!(
+            !has(&results, "check-pipeline-status-masked"),
+            "unexpected: {results:?}"
+        );
+        // PIPESTATUS read after the pipe.
+        let results = run_mini("Name: foo\n%check\nmake test | tee log\nexit ${PIPESTATUS[0]}\n");
+        assert!(
+            !has(&results, "check-pipeline-status-masked"),
+            "unexpected: {results:?}"
+        );
+        // A pipe into a checker is not a pass-through (piglit).
+        let results = run_mini("Name: foo\n%check\nmake test | grep -q FAILED\n");
+        assert!(
+            !has(&results, "check-pipeline-status-masked"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn negated_command_not_last_shapes() {
+        // Mid-section in %prep (%build and %check behave the same).
+        let results = run_mini("Name: foo\n%prep\n! grep -q foo bar\necho ok\n");
+        assert!(
+            has(&results, "negated-command-not-last"),
+            "missing: {results:?}"
+        );
+        // Dead because of a following operator.
+        let results = run_mini("Name: foo\n%prep\n! grep -q foo bar || exit 1\necho ok\n");
+        assert!(
+            !has(&results, "negated-command-not-last"),
+            "unexpected: {results:?}"
+        );
+        // The next command reads the status.
+        let results = run_mini("Name: foo\n%prep\n! grep -q foo bar\nrc=$?\necho $rc\n");
+        assert!(
+            !has(&results, "negated-command-not-last"),
+            "unexpected: {results:?}"
+        );
+        // Last in a function body.
+        let results = run_mini(
+            "Name: foo\n%build\ncheck_it() {\n  make thing\n  ! grep -q a b\n}\ncheck_it\n",
+        );
+        assert!(
+            !has(&results, "negated-command-not-last"),
+            "unexpected: {results:?}"
+        );
+        // mupdf: the `!` is a find argument on a continued line.
+        let results =
+            run_mini("Name: foo\n%build\nfind . \\\n  ! -name '*.o' \\\n  -delete\necho done\n");
+        assert!(
+            !has(&results, "negated-command-not-last"),
+            "unexpected: {results:?}"
+        );
+        // Last command of %build: the negation is the section status.
+        let results = run_mini("Name: foo\n%build\nmake\n! grep -q a b\n");
+        assert!(
+            !has(&results, "negated-command-not-last"),
+            "unexpected: {results:?}"
+        );
+        // Last line of %install still fires: %__spec_install_post
+        // runs after the body.
+        let results =
+            run_mini("Name: foo\n%install\nmake install\n! test -f %{buildroot}/usr/bin/x\n");
+        assert!(
+            has(&results, "negated-command-not-last"),
+            "missing: {results:?}"
+        );
+        // ... unless the spec disables the install post step.
+        let results = run_mini(
+            "Name: foo\n%define __spec_install_post %{nil}\n%install\nmake install\n! test -f x\n",
+        );
+        assert!(
+            !has(&results, "negated-command-not-last"),
+            "unexpected: {results:?}"
+        );
+        // Before an %endif that more commands follow.
+        let results = run_mini("Name: foo\n%prep\n%if 1\n! grep -q a b\n%endif\necho ok\n");
+        assert!(
+            has(&results, "negated-command-not-last"),
+            "missing: {results:?}"
+        );
+        // A sibling %else arm does not count as a later command.
+        let results =
+            run_mini("Name: foo\n%prep\n%if 1\n! grep -q a b\n%else\necho other\n%endif\n");
+        assert!(
+            !has(&results, "negated-command-not-last"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn with_macro_expands_empty_shapes() {
+        // zig0.15/zig0.16: the guard around %check.
+        let results = run_mini(
+            "Name: foo\n%bcond_without test\n%if 0%{?with test}\n%check\nmake check\n%endif\n",
+        );
+        assert!(
+            has(&results, "with-macro-expands-empty"),
+            "missing: {results:?}"
+        );
+        for line in ["%{!?without foo}", "%{?without:foo}", "%{?with foo}"] {
+            let results = run_mini(&format!("Name: foo\n{line}\n"));
+            assert!(
+                has(&results, "with-macro-expands-empty"),
+                "no fire for {line:?}: {results:?}"
+            );
+        }
+        for line in [
+            "%{with foo}",
+            "0%{?with_foo}",
+            "%%{?with foo}",
+            "%{?with_foo}",
+        ] {
+            let results = run_mini(&format!("Name: foo\n{line}\n"));
+            assert!(
+                !has(&results, "with-macro-expands-empty"),
+                "unexpected fire for {line:?}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctest_with_testing_disabled_shapes() {
+        // rkward.
+        let results = run_mini("Name: foo\n%build\n%cmake_kf6\n%cmake_build\n%check\n%ctest\n");
+        assert!(
+            has(&results, "ctest-with-testing-disabled"),
+            "missing: {results:?}"
+        );
+        // kaidan turns testing on.
+        let results =
+            run_mini("Name: foo\n%build\n%cmake_kf6 -DBUILD_TESTING:BOOL=ON\n%check\n%ctest\n");
+        assert!(
+            !has(&results, "ctest-with-testing-disabled"),
+            "unexpected: {results:?}"
+        );
+        // No KDE cmake macro, no finding.
+        let results = run_mini("Name: foo\n%build\n%cmake\n%check\nctest\n");
+        assert!(
+            !has(&results, "ctest-with-testing-disabled"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn failing_group_fallbacks_stay_quiet() {
+        // `(cat log; false)`: the subshell's last command fails, so
+        // the chain gates (acl, nss-mdns).
+        let results = run_mini("Name: foo\n%check\nmake check || (cat test-suite.log; false)\n");
+        assert!(
+            !has(&results, "check-exit-status-masked"),
+            "unexpected: {results:?}"
+        );
+        // A subshell ending in `exit 1` gates; one ending in
+        // `exit 0` masks (gsl's two arms).
+        let results = run_mini(
+            "Name: foo\n%check\nmake check || (find . -name x.log -exec cat {} \\; ; exit 1)\n",
+        );
+        assert!(
+            !has(&results, "check-exit-status-masked"),
+            "unexpected: {results:?}"
+        );
+        let results = run_mini(
+            "Name: foo\n%check\nmake check || (find . -name x.log -exec cat {} \\; ; exit 0)\n",
+        );
+        assert!(
+            has(&results, "check-exit-status-masked"),
+            "missing: {results:?}"
+        );
+        // A brace group spanning lines, with an `exit 1` inside
+        // (gnutls, postgresql), gates.
+        let results =
+            run_mini("Name: foo\n%check\nmake check || {\n    cat test-suite.log\n    exit 1\n}\n");
+        assert!(
+            !has(&results, "check-exit-status-masked"),
+            "unexpected: {results:?}"
+        );
+        // The same group with only a log dump masks.
+        let results = run_mini("Name: foo\n%check\nmake check || {\n    cat test-suite.log\n}\n");
+        assert!(
+            has(&results, "check-exit-status-masked"),
+            "missing: {results:?}"
+        );
+        // `export VAR=...` defers to the re-run consuming it (meep).
+        let results = run_mini(
+            "Name: foo\n%check\nmake check TESTS=x || export xfail=x\n%make_build check XFAIL_TESTS=${xfail}\n",
+        );
+        assert!(
+            !has(&results, "check-exit-status-masked"),
+            "unexpected: {results:?}"
+        );
+        // A retry chain whose final fallback fails gates (zeromq).
+        let results = run_mini(
+            "Name: foo\n%check\nmake check || make check || make check || (cat ./test-suite.log && false)\n",
+        );
+        assert!(
+            !has(&results, "check-exit-status-masked"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn negated_text_lookalikes_stay_quiet() {
+        // A conditional directive inside a backslash-continued
+        // `find` command: the `!` tokens are find primaries
+        // (kernel-source).
+        let results = run_mini(
+            "Name: foo\n%install\nfind %{buildroot} \\\n    -type f \\\n%if 1\n    ! -path '*/symtypes*' \\\n%endif\n    -printf '%%p\\n'\necho done\n",
+        );
+        assert!(
+            !has(&results, "negated-command-not-last"),
+            "unexpected: {results:?}"
+        );
+        // Here-document content is not a command (frr).
+        let results = run_mini(
+            "Name: foo\n%build\ncat > vtysh.conf << __EOF__\n! vtysh is using PAM authentication.\n__EOF__\necho done\n",
+        );
+        assert!(
+            !has(&results, "negated-command-not-last"),
+            "unexpected: {results:?}"
+        );
+        // A multi-line quoted awk program: the `!` is awk
+        // negation (inn).
+        let results = run_mini(
+            "Name: foo\n%install\nfind %{buildroot} | awk '\n! /^\\/etc/ { next }\n{ print }\n' > list\necho done\n",
+        );
+        assert!(
+            !has(&results, "negated-command-not-last"),
+            "unexpected: {results:?}"
+        );
+        // A `||` chain continued over plain newlines: the negated
+        // segment is followed by `||`, which condition (a)
+        // excludes (rpmlint-mini).
+        let results = run_mini("Name: foo\n%install\ncp a b ||\n ! <\"b\" ||\n false\necho done\n");
+        assert!(
+            !has(&results, "negated-command-not-last"),
+            "unexpected: {results:?}"
         );
     }
 }

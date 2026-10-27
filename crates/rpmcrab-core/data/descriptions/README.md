@@ -75,9 +75,12 @@ Provenance, verified against the pinned reference (`84848c0`):
   The two date entries are reworded (the reference phrasing is garbled;
   the harm is non-reproducible builds). Ledgered in
   `tests/parity/divergences.toml`.
-- `SpecCheck.toml` — the reference file, plus three port-only entries:
+- `SpecCheck.toml` — the reference file, plus eight port-only entries:
   `translated-description` (upstream rpmlint#2), `license-file-as-doc`
-  and `no-license-file-in-spec` (#821). The reference has no such
+  and `no-license-file-in-spec` (#821), and the five %check-soundness
+  entries `check-exit-status-masked`, `check-pipeline-status-masked`,
+  `negated-command-not-last`, `with-macro-expands-empty` and
+  `ctest-with-testing-disabled` (#1019). The reference has no such
   findings, so `--explain` would print `Unknown message` for them;
   minus the eleven entries dropped with their deliberately-removed findings
   (`no-buildroot-tag`, `hardcoded-path-in-buildroot-tag`,
