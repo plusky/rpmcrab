@@ -2028,8 +2028,12 @@ fn errors_only_unused_rpmlintrc_filter_names_skipped_check_finding() {
 /// An rpmlintrc `setBadness` line is reported as
 /// `rpmlintrc-uses-setbadness` at W, once per occurrence, with and
 /// without `--ignore-unused-rpmlintrc` (that flag gates only the
-/// unused-filter audit). Comment mentions and `addFilter` lines in
-/// the same file stay quiet. The warning alone does not fail the run.
+/// unused-filter audit): the rc's `addFilter("some-check")` matches
+/// nothing, so the audit reports it as unused without the flag and
+/// stays silent with it. Comment mentions stay quiet. The warnings
+/// alone do not fail the run: the loop below exits 64 on the
+/// fixture package's own errors, and with those errors filtered
+/// the same warnings exit 0.
 #[test]
 fn rpmlintrc_setbadness_is_reported_with_and_without_ignore_unused() {
     let dir = std::env::temp_dir().join("rpmcrab-setbadness-report");
@@ -2060,7 +2064,44 @@ fn rpmlintrc_setbadness_is_reported_with_and_without_ignore_unused() {
             stdout.contains("line 4: setBadness('second-check', 10)"),
             "the detail names the occurrence: {stdout}"
         );
+        if extra.is_empty() {
+            assert!(
+                stdout.contains("W: unused-rpmlintrc-filter \"some-check\""),
+                "the unmatched filter audits as unused: {stdout}"
+            );
+        } else {
+            assert!(
+                !stdout.contains("unused-rpmlintrc-filter"),
+                "the flag silences the unused-filter audit: {stdout}"
+            );
+        }
+        assert_eq!(
+            out.status.code(),
+            Some(64),
+            "the fixture's own errors fail the run (extra args {extra:?})"
+        );
     }
+
+    // With the fixture's own errors filtered, the same two warnings
+    // are the run's only findings and it exits 0.
+    let rc2 = dir.join("filtering.rc");
+    std::fs::write(
+        &rc2,
+        "addFilter(\"deprecated-init-script\")\naddFilter(\"daemon-activation-in-%post\")\naddFilter(\"invalid-license\")\naddFilter(\"spelling-error\")\nsetBadness('first-check', 0)\n  setBadness('second-check', 10)\n",
+    )
+    .unwrap();
+    let out = rpmcrab(&["-r", rc2.to_str().unwrap(), rpm]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "warnings alone must not fail the run"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.matches("W: rpmlintrc-uses-setbadness").count(),
+        2,
+        "both occurrences still reported: {stdout}"
+    );
 }
 
 /// The apparmor shape (#816): an rpmlintrc whose only unmatched pattern is
