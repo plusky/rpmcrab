@@ -424,7 +424,7 @@ fn subdir_in_bin_is_companion_dir(pkg: &Pkg, bindir: &str, fname: &str) -> bool 
     let sibling = format!("{bindir}{tool}");
     pkg.files
         .iter()
-        .any(|f| f.name == sibling && f.mode & 0o170000 == 0o100000 && f.mode & 0o111 != 0)
+        .any(|f| f.name == sibling && is_reg(f.mode) && f.mode & 0o111 != 0)
 }
 
 /// Whether a non-executable file carrying an interpreter line is
