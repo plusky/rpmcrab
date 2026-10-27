@@ -796,9 +796,25 @@ fn is_generator_account_stamp(flag: u32, dep: &DepInfo) -> bool {
 /// package's file ownership, so as declarations of the account they
 /// restate the ownership itself.
 fn gather_requires(header: &PackageHeader) -> (Vec<DepInfo>, Vec<DepInfo>) {
-    let names = tags::str_array(header, Tag::REQUIRENAME);
-    let flags = tags::int32_array(header, Tag::REQUIREFLAGS);
-    let versions = tags::str_array(header, Tag::REQUIREVERSION);
+    split_requires(
+        &tags::str_array(header, Tag::REQUIRENAME),
+        &tags::int32_array(header, Tag::REQUIREFLAGS),
+        &tags::str_array(header, Tag::REQUIREVERSION),
+    )
+}
+
+/// The split at the heart of `gather_requires`, over the raw header
+/// arrays so the phase semantics are pinnable without a fixture RPM:
+/// only entries carrying a `PREREQ_FLAG` bit (the legacy prereq bit
+/// or `SCRIPT_{PRE,POST,PREUN,POSTUN}`) move to `prereq`, with those
+/// bits stripped; `Requires(verify)`, the transaction phases
+/// (pretrans/posttrans) and trigger dependencies carry no such bit
+/// and stay in `requires`.
+fn split_requires(
+    names: &[String],
+    flags: &[i32],
+    versions: &[String],
+) -> (Vec<DepInfo>, Vec<DepInfo>) {
     let mut requires = Vec::new();
     let mut prereq = Vec::new();
     // rpmlint zips (versions, names, flags): stop at the shortest array.
@@ -1076,6 +1092,48 @@ mod tests {
         let deps = parse_dep_line("libfoo.so.1()(64bit) >= 1.2");
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].name, "libfoo.so.1()(64bit)");
+    }
+
+    #[test]
+    fn split_requires_moves_only_prereq_flagged_entries() {
+        // Sense bits (rpmds.h): SCRIPT_PRE 1 << 9, SCRIPT_POST
+        // 1 << 10, SCRIPT_PREUN 1 << 11, SCRIPT_POSTUN 1 << 12 and
+        // the legacy prereq bit 1 << 6 are PREREQ_FLAG; SCRIPT_VERIFY
+        // (1 << 13), the trigger bits (1 << 16) and the transaction
+        // phases carry no PREREQ_FLAG bit and stay in `requires`.
+        let names: Vec<String> = [
+            "plain",
+            "pre",
+            "post",
+            "preun",
+            "postun",
+            "legacy",
+            "verify",
+            "trigger",
+            "other-phase",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let flags: Vec<i32> = vec![
+            0,
+            1 << 9,
+            1 << 10,
+            1 << 11,
+            1 << 12,
+            1 << 6,
+            1 << 13,
+            1 << 16,
+            1 << 20,
+        ];
+        let versions: Vec<String> = vec![String::new(); 9];
+        let (requires, prereq) = split_requires(&names, &flags, &versions);
+        let req_names: Vec<&str> = requires.iter().map(|d| d.name.as_str()).collect();
+        let pre_names: Vec<&str> = prereq.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(req_names, ["plain", "verify", "trigger", "other-phase"]);
+        assert_eq!(pre_names, ["pre", "post", "preun", "postun", "legacy"]);
+        // The prereq bits are stripped from the moved entries.
+        assert!(prereq.iter().all(|d| d.flags & PREREQ_FLAG == 0));
     }
 
     #[test]
