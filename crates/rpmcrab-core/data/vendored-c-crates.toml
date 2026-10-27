@@ -16,16 +16,19 @@
 #
 # The detail's remedies follow the fields below: it prescribes
 # linking the system library only where a system_soname_prefix is
-# recorded (the library has a system shared form to link), and a
-# version only where a c_version_source is recorded.
+# recorded (the library has a system shared form to link) and the
+# binary does not already link it, and a version only where a
+# c_version_source is recorded.
 #
 # Fields:
 #   name                  the -sys crate name in .dep-v0
 #   srpm                  the source RPM name the detail prescribes
 #   accepted_names        bundled() names that satisfy the finding
-#   system_soname_prefix  DT_NEEDED prefix proving the system library
-#                         is linked instead (absent: the library has
-#                         no system shared form to link)
+#   system_soname_prefix  DT_NEEDED prefix of the system library: a
+#                         binary carrying it still fires while the
+#                         witness is present; the prefix only drops
+#                         the link remedy from the detail (absent: the
+#                         library has no system shared form to link)
 #   link_soname           the soname the detail names for that remedy
 #   witness               byte string proving the C code is linked
 #   c_version_source      where the C version comes from:
