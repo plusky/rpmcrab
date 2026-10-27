@@ -417,14 +417,19 @@ struct ReadelfInfo {
     /// True when the binary was produced by the Zig toolchain.
     /// Computed during parse; see `detect_zig_binary`.
     is_zig: bool,
-    /// The Go toolchain release that built this binary, parsed from
-    /// the `.go.buildinfo` section's version string. Computed during
-    /// parse; see `detect_go_toolchain`. `None` when the section is
-    /// absent (a stripped binary, or not a Go binary) and when the
-    /// recorded string is not a clean release version (devel and
-    /// release-candidate strings): the toolchain finder stays silent
-    /// in both cases.
-    go_toolchain: Option<GoVersion>,
+    /// The Go toolchain releases that built this file, parsed from
+    /// the `.go.buildinfo` section version strings of the file
+    /// itself and, for an archive, of each member. Computed during
+    /// parse; see `detect_go_toolchain`. Empty when no member
+    /// records a version (a stripped binary, or not a Go binary) and
+    /// when the recorded strings are not clean release versions
+    /// (devel and release-candidate strings): the toolchain finder
+    /// stays silent in both cases. Every distinct version is kept,
+    /// because the floor judges each member against its own release
+    /// line -- collapsing to one minimum across members would let a
+    /// member on an older, fixed line hide a member below its own
+    /// line's floor.
+    go_toolchains: Vec<GoVersion>,
     /// True when the file bytes carry the Go buildinfo magic. The Go
     /// sections `is_go_binary` reads are the primary marker, but a
     /// build stripped of its section headers keeps the buildinfo
@@ -513,7 +518,7 @@ impl ReadelfInfo {
             is_debug: name.ends_with(".debug"),
             is_rust: false,
             is_zig: false,
-            go_toolchain: None,
+            go_toolchains: Vec::new(),
             go_buildinfo: false,
             soname: None,
             needed: Vec::new(),
@@ -825,16 +830,20 @@ impl ReadelfInfo {
         // OR across archive members: any Rust member marks the whole file.
         self.is_rust = self.is_rust || detect_rust_binary(elf, data, &self.functions);
         self.is_zig = self.is_zig || detect_zig_binary(elf, data);
-        // Minimum across members: an archive's members are normally
-        // one build's objects, but the floor judges the oldest
-        // toolchain in the file -- a member built by an outdated
-        // toolchain carries its standard library with it, so the
-        // minimum, not the first member seen, stands for the file.
+        // Accumulate across members: an archive's members are
+        // normally one build's objects, but a member built by an
+        // outdated toolchain carries its standard library with it,
+        // and members built by different toolchains each stand for
+        // themselves -- every distinct version is kept so the floor
+        // can judge each against its own release line. A single
+        // minimum across members would stand for the file instead,
+        // and the oldest member is not necessarily the vulnerable
+        // one: a fixed member on an older line sorts below a
+        // below-floor member on a newer line.
         if let Some(found) = detect_go_toolchain(elf, data) {
-            self.go_toolchain = Some(match self.go_toolchain {
-                Some(current) => current.min(found),
-                None => found,
-            });
+            if !self.go_toolchains.contains(&found) {
+                self.go_toolchains.push(found);
+            }
         }
         self.go_buildinfo = self.go_buildinfo || has_go_buildinfo_magic(data);
     }
@@ -5072,8 +5081,9 @@ impl BinariesCheck {
         }
     }
 
-    /// `go-toolchain-outdated`: the file's `.go.buildinfo` records
-    /// a Go toolchain below the embedded floor (see
+    /// `go-toolchain-outdated`: the `.go.buildinfo` of the file (or
+    /// of an archive member) records a Go toolchain below the
+    /// embedded floor for its release line (see
     /// `go_toolchain_below_floor`). A Go binary keeps the standard
     /// library it was built with, so defects fixed upstream stay in
     /// the shipped binary until the package is rebuilt; the remedy
@@ -5087,19 +5097,24 @@ impl BinariesCheck {
         info: &ReadelfInfo,
         out: &mut Filter,
     ) {
-        let Some(version) = info.go_toolchain else {
+        let floor = go_toolchain_floor();
+        let Some(version) = info
+            .go_toolchains
+            .iter()
+            .copied()
+            .filter(|version| go_toolchain_below_floor(*version, floor))
+            .min()
+        else {
             return;
         };
-        if go_toolchain_below_floor(version, go_toolchain_floor()) {
-            let version_text = version.to_string();
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "go-toolchain-outdated",
-                &[&pkgfile.name, &version_text],
-            );
-        }
+        let version_text = version.to_string();
+        add_info(
+            out,
+            Level::Warning,
+            pkg,
+            "go-toolchain-outdated",
+            &[&pkgfile.name, &version_text],
+        );
     }
 
     fn check_rpath(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
@@ -6886,7 +6901,7 @@ mod tests {
                 is_debug: false,
                 is_rust: false,
                 is_zig: false,
-                go_toolchain: None,
+                go_toolchains: Vec::new(),
                 go_buildinfo: false,
                 soname: None,
                 needed: Vec::new(),
@@ -9255,7 +9270,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 no_members: false,
                 is_rust: false,
                 is_zig: false,
-                go_toolchain: None,
+                go_toolchains: Vec::new(),
                 go_buildinfo: false,
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -9399,7 +9414,7 @@ description = "explicit priority string bypasses the system crypto policy"
             no_members: false,
             is_rust: false,
             is_zig: false,
-            go_toolchain: None,
+            go_toolchains: Vec::new(),
             go_buildinfo: false,
         }
     }
@@ -16724,12 +16739,12 @@ description = "explicit priority string bypasses the system crypto policy"
             &[(".go.buildinfo", &go_buildinfo_inline("go1.23.5"))],
         );
         assert_eq!(
-            info.go_toolchain,
-            Some(GoVersion {
+            info.go_toolchains,
+            vec![GoVersion {
                 major: 1,
                 minor: 23,
                 patch: 5
-            })
+            }]
         );
     }
 
@@ -16737,19 +16752,19 @@ description = "explicit priority string bypasses the system crypto policy"
     fn go_toolchain_detected_from_legacy_buildinfo() {
         let info = parse_elf_bytes("go-legacy", &go_buildinfo_legacy_elf("go1.16.3"));
         assert_eq!(
-            info.go_toolchain,
-            Some(GoVersion {
+            info.go_toolchains,
+            vec![GoVersion {
                 major: 1,
                 minor: 16,
                 patch: 3
-            })
+            }]
         );
     }
 
     #[test]
     fn go_toolchain_absent_without_buildinfo() {
         let info = parse_crafted_sections("go-none", &[(".text", b"\0"), (".rodata", b"hello\0")]);
-        assert_eq!(info.go_toolchain, None);
+        assert!(info.go_toolchains.is_empty());
     }
 
     #[test]
@@ -16761,7 +16776,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 &go_buildinfo_inline("devel go1.25-0123456789ab"),
             )],
         );
-        assert_eq!(info.go_toolchain, None);
+        assert!(info.go_toolchains.is_empty());
     }
 
     #[test]
@@ -16770,7 +16785,7 @@ description = "explicit priority string bypasses the system crypto policy"
             "go-garbage",
             &[(".go.buildinfo", b"\xff Go buildinf:\x08\x02\xff\xff\xff")],
         );
-        assert_eq!(info.go_toolchain, None);
+        assert!(info.go_toolchains.is_empty());
     }
 
     #[test]
@@ -16779,9 +16794,9 @@ description = "explicit priority string bypasses the system crypto policy"
         let check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let pkgfile = syn_file("/usr/bin/tool", "ELF 64-bit LSB executable");
-        let lines = |version: Option<GoVersion>| -> Vec<String> {
+        let lines = |versions: Vec<GoVersion>| -> Vec<String> {
             let mut info = syn_info();
-            info.go_toolchain = version;
+            info.go_toolchains = versions;
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_go_toolchain(&pkg, &pkgfile, &info, &mut out);
             let results = out.results().to_vec();
@@ -16790,14 +16805,12 @@ description = "explicit priority string bypasses the system crypto policy"
                 .map(str::to_owned)
                 .collect()
         };
-        let v = |major, minor, patch| {
-            Some(GoVersion {
-                major,
-                minor,
-                patch,
-            })
+        let v = |major, minor, patch| GoVersion {
+            major,
+            minor,
+            patch,
         };
-        let firing = lines(v(1, 22, 4));
+        let firing = lines(vec![v(1, 22, 4)]);
         assert_eq!(firing.len(), 1, "exactly one finding: {firing:?}");
         assert!(firing[0].contains(" W: "), "Warning level: {}", firing[0]);
         assert!(
@@ -16805,13 +16818,75 @@ description = "explicit priority string bypasses the system crypto policy"
             "the detail names the recorded version: {}",
             firing[0]
         );
-        assert_eq!(lines(v(1, 23, 7)).len(), 1);
-        assert_eq!(lines(v(1, 24, 1)).len(), 1);
+        assert_eq!(lines(vec![v(1, 23, 7)]).len(), 1);
+        assert_eq!(lines(vec![v(1, 24, 1)]).len(), 1);
         // The fixed releases, and toolchains newer than the table
         // knows, stay silent.
-        assert_eq!(lines(v(1, 23, 8)).len(), 0);
-        assert_eq!(lines(v(1, 24, 2)).len(), 0);
-        assert_eq!(lines(v(1, 26, 0)).len(), 0);
-        assert_eq!(lines(None).len(), 0);
+        assert_eq!(lines(vec![v(1, 23, 8)]).len(), 0);
+        assert_eq!(lines(vec![v(1, 24, 2)]).len(), 0);
+        assert_eq!(lines(vec![v(1, 26, 0)]).len(), 0);
+        assert_eq!(lines(vec![]).len(), 0);
+    }
+
+    #[test]
+    fn go_toolchain_mixed_lines_judge_each_member_on_its_own_line() {
+        // Issue #1109: members {go1.23.8 (at its line's floor),
+        // go1.24.1 (below the 1.24 line's floor go1.24.2)} must
+        // fire. Judged by a single minimum across members the file
+        // read as go1.23.8 and stayed silent, though the go1.24.1
+        // member carries a vulnerable standard library.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/tool", "ELF 64-bit LSB executable");
+        let lines = |versions: Vec<GoVersion>| -> Vec<String> {
+            let mut info = syn_info();
+            info.go_toolchains = versions;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_go_toolchain(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "go-toolchain-outdated")
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        };
+        let v = |major, minor, patch| GoVersion {
+            major,
+            minor,
+            patch,
+        };
+        let firing = lines(vec![v(1, 23, 8), v(1, 24, 1)]);
+        assert_eq!(firing.len(), 1, "exactly one finding: {firing:?}");
+        assert!(
+            firing[0].contains("go1.24.1"),
+            "the detail names the below-floor member: {}",
+            firing[0]
+        );
+        // Member order does not change the verdict.
+        assert_eq!(lines(vec![v(1, 24, 1), v(1, 23, 8)]).len(), 1);
+        // Every member at its own line's floor stays silent.
+        assert_eq!(lines(vec![v(1, 23, 8), v(1, 24, 2)]).len(), 0);
+    }
+
+    #[test]
+    fn go_toolchains_accumulate_across_members() {
+        let mut info = parse_crafted_sections(
+            "go-members-fixed",
+            &[(".go.buildinfo", &go_buildinfo_inline("go1.23.8"))],
+        );
+        assert_eq!(info.go_toolchains.len(), 1);
+        let bytes = craft_elf_sections(&[(".go.buildinfo", &go_buildinfo_inline("go1.24.1"))]);
+        let elf = goblin::elf::Elf::parse(&bytes).unwrap();
+        info.fill_from_elf(&elf, &bytes);
+        let v = |major, minor, patch| GoVersion {
+            major,
+            minor,
+            patch,
+        };
+        assert_eq!(info.go_toolchains, vec![v(1, 23, 8), v(1, 24, 1)]);
+        // A further member built by an already-recorded toolchain
+        // adds nothing.
+        info.fill_from_elf(&elf, &bytes);
+        assert_eq!(info.go_toolchains.len(), 2);
     }
 }
