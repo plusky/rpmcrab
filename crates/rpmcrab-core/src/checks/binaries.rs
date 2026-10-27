@@ -75,6 +75,200 @@ fn soversion_regex() -> &'static Regex {
     })
 }
 
+/// The `shlib-policy-name-error` name match for one SONAME:
+/// whether `pkg_name` encodes the SONAME's whole version, per the
+/// limbs of `soname_name_match_parts`. Returns the verdict
+/// together with the expected package suffix (the name fragment
+/// the finding reports), or `None` when the SONAME carries no
+/// version the matcher can judge (no capturable version, or an
+/// empty derived suffix). Shared by `BinariesCheck` (the
+/// name-error finding) and `SharedLibraryPolicyCheck` (the
+/// truncated-SONAME-path finding), so a widening of the matcher
+/// moves both checks' fire/quiet sets together.
+pub(crate) fn soname_name_match(pkg_name: &str, soname: &str) -> Option<(bool, String)> {
+    // The (pkgversion, soversion) pair the name arm judges: the
+    // numeric captures for a SONAME that passes the validity
+    // gate, else the whole non-numeric tail admitted by the tail
+    // rule of issue #1029. A SONAME with neither has no version
+    // the matcher can judge.
+    let (pkgversion, soversion) = if validso_regex().is_match(soname).unwrap_or(false) {
+        let caps = soversion_regex().captures(soname).ok()??;
+        (
+            caps.name("pkgversion").map(|m| m.as_str()).unwrap_or(""),
+            caps.name("soversion").map(|m| m.as_str()).unwrap_or(""),
+        )
+    } else {
+        ("", soname_tail(soname)?)
+    };
+    let (name_matches, soversion_str) =
+        soname_name_match_parts(pkg_name, soname, pkgversion, soversion);
+    if soversion_str.is_empty() {
+        return None;
+    }
+    Some((name_matches, soversion_str))
+}
+
+/// The limbs of the name match over a SONAME's pre-extracted
+/// `pkgversion` (its `-<version>` component before `.so`, empty
+/// when it has none) and `soversion` (its version after `.so.` --
+/// the numeric capture for a SONAME that passes the validity
+/// gate, or the whole non-numeric tail for one admitted by the
+/// tail rule). Returns the verdict and the expected package
+/// suffix.
+pub(crate) fn soname_name_match_parts(
+    pkg_name: &str,
+    soname: &str,
+    pkgversion: &str,
+    soversion: &str,
+) -> (bool, String) {
+    let parts: Vec<String> = [pkgversion, soversion]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replace('.', "_"))
+        .collect();
+    let soversion_str = parts.join("-");
+    let mut pkgname = pkg_name;
+    if let Some(idx) = pkgname.rfind('.') {
+        pkgname = &pkgname[..idx];
+    }
+    // A baselibs package carries the version
+    // before a trailing -32bit or -64bit.
+    let pkgname = pkgname
+        .strip_suffix("-32bit")
+        .or_else(|| pkgname.strip_suffix("-64bit"))
+        .unwrap_or(pkgname);
+    // A name matches when either limb accepts
+    // it:
+    //
+    // (A) It equals a name derived from the
+    // SONAME itself, per the SLPP construction:
+    // the stem ('.' folded to '_') plus the
+    // version, glued (libfoo.so.1 -> libfoo1)
+    // or dash-separated (libbz2.so.1 ->
+    // libbz2-1); stem + '-' + soversion when
+    // the SONAME carries a -<pkgversion>
+    // (libgame2-1.9.so.10.0.0 ->
+    // libgame2-1_9-10_0_0). Comparing whole
+    // derived names is what tells a digit that
+    // belongs to the stem (libx11.so.1 ->
+    // libx111) from a longer version run
+    // (libkdecorations3private11 for .so.1,
+    // bsc#1237372).
+    //
+    // (B) It ends with the expected suffix at a
+    // non-digit boundary: the trailing version
+    // run matches as a whole, but the stem is
+    // not policed. A package legitimately ships
+    // libraries whose stems its name does not
+    // derive from (libopenssl3 ships
+    // libssl.so.3, libicu73 ships
+    // libicuuc.so.73), and the reference stays
+    // quiet there.
+    //
+    // Both limbs are tried on the name as-is and
+    // once more with a trailing
+    // -<letters><digits> flavour segment
+    // (libgfortran5-gcc15, libnetcdf22-openmpi5)
+    // stripped: the version sits before the
+    // flavour tail, which is not part of the
+    // name.
+    //
+    // Two further derived forms are credited on
+    // limb A only (the stripped or reduced name
+    // must equal a SONAME-derived name exactly;
+    // limb B's stem-blind suffix is not enough):
+    //
+    // (C) A trailing flavour segment of letters
+    // only (-opencl, -mini, -dummy): the same
+    // flavour shape as above with no digit in
+    // the tail (libarmnn36-opencl ships
+    // libarmnn.so.36, libuna1-mini ships
+    // libuna.so.1). Limb A only, so a name whose
+    // own stem merely ends in the version
+    // (libqt5-qtwebengine for libQt5WebEngine.so.5)
+    // still fires.
+    //
+    // (D) A SONAME version whose trailing
+    // components are all zero, with the zeros
+    // elided: libprotobuf.so.3.21.12.0 is
+    // packaged as libprotobuf3_21_12 and
+    // libCppMicroServices.so.4.0.0 as
+    // libCppMicroServices4. A dropped zero
+    // carries no ABI discrimination — any
+    // non-zero change to the elided components
+    // re-fires — while a partially elided form
+    // (libfoo4_0 for libfoo.so.4.0.0) still
+    // fires.
+    let stem = match soname.split_once(".so") {
+        Some((head, _)) => head,
+        None => soname,
+    }
+    .replace('.', "_");
+    let soversion_pkgform = soversion.replace('.', "_");
+    let mut expected: Vec<String> = if pkgversion.is_empty() {
+        vec![
+            format!("{stem}{soversion_pkgform}"),
+            format!("{stem}-{soversion_pkgform}"),
+        ]
+    } else if soversion.is_empty() {
+        vec![stem.clone()]
+    } else {
+        vec![format!("{stem}-{soversion_pkgform}")]
+    };
+    // (D) The trailing-zero-elided derived
+    // names: drop trailing ".0" components of
+    // the SONAME version (keeping at least one)
+    // and derive again by the same construction.
+    let mut reduced: Vec<&str> = soversion.split('.').collect();
+    while reduced.len() > 1 && reduced.last() == Some(&"0") {
+        reduced.pop();
+    }
+    let reduced_form = reduced.join("_");
+    if reduced_form != soversion_pkgform {
+        if pkgversion.is_empty() {
+            expected.push(format!("{stem}{reduced_form}"));
+            expected.push(format!("{stem}-{reduced_form}"));
+        } else if !soversion.is_empty() {
+            expected.push(format!("{stem}-{reduced_form}"));
+        }
+    }
+    fn strip_flavour(name: &str) -> Option<&str> {
+        let (head, tail) = name.rsplit_once('-')?;
+        if !head.is_empty()
+            && tail.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && tail.chars().last().is_some_and(|c| c.is_ascii_digit())
+            && tail.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            Some(head)
+        } else {
+            None
+        }
+    }
+    fn strip_alpha_flavour(name: &str) -> Option<&str> {
+        let (head, tail) = name.rsplit_once('-')?;
+        if !head.is_empty() && !tail.is_empty() && tail.chars().all(|c| c.is_ascii_alphabetic()) {
+            Some(head)
+        } else {
+            None
+        }
+    }
+    fn whole_suffix(name: &str, suffix: &str) -> bool {
+        name.strip_suffix(suffix).is_some_and(|prefix| {
+            prefix
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_ascii_digit())
+        })
+    }
+    let accepts =
+        |name: &str| expected.iter().any(|e| e == name) || whole_suffix(name, &soversion_str);
+    let derived_only = |name: &str| expected.iter().any(|e| e == name);
+    let name_matches = accepts(pkgname)
+        || strip_flavour(pkgname).is_some_and(accepts)
+        || strip_alpha_flavour(pkgname).is_some_and(derived_only);
+    (name_matches, soversion_str)
+}
+
 static USR_LIB_REGEX: OnceLock<Regex> = OnceLock::new();
 fn usr_lib_regex() -> &'static Regex {
     USR_LIB_REGEX.get_or_init(|| Regex::new(r"^/usr/lib(64)?/").expect("static regex"))

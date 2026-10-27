@@ -3,7 +3,8 @@
 //! Ported from `rpmlint/checks/SharedLibraryPolicyCheck.py`. Findings:
 //! `shlib-policy-missing-lib`, `readelf-failed`, `shlib-unversioned-lib`,
 //! `shlib-fixed-dependency`, `shlib-policy-excessive-dependency`,
-//! `shlib-policy-obsoletes-sibling`, `shlib-policy-etc-payload`.
+//! `shlib-policy-obsoletes-sibling`, `shlib-policy-etc-payload`,
+//! `shlib-policy-truncated-soname-path`.
 //!
 //! One deliberate divergence in an existing finding:
 //! `shlib-policy-excessive-dependency` is not charged for a SONAME that
@@ -262,6 +263,106 @@ impl SharedLibraryPolicyCheck {
             && is_match(&self.re_qlogging_categories, &only.name)
     }
 
+    /// The scan behind `shlib-policy-truncated-soname-path`. A
+    /// versioned library package ships the short path
+    /// `<dir>/<stem>.so.<v>` next to the library whose SONAME is
+    /// `<stem>.so.<w>`, with `w` starting with `v.`: harmless while
+    /// this generation is the only one, but the sibling package for
+    /// the next generation (a SONAME with the same `v` prefix and a
+    /// different tail) ships the same short path, and the two
+    /// co-installable packages conflict on it (mupdf's
+    /// `libmupdf.so.28` shipped by both the .28.0 and the .28.1
+    /// packages; hiredis's `libhiredis.so.1`). The conflict needs
+    /// that co-installable sibling, which exists only when the
+    /// package name changes along with the part of `w` after `v`,
+    /// so the scan fires only when the package name encodes the
+    /// whole of `w`: the `shlib-policy-name-error` name match,
+    /// evaluated without that finding's hpc-location exemption. A
+    /// package that upgrades in place (the MPI flavours of
+    /// scalapack, whose names carry only the leading `2` of the
+    /// SONAME `libscalapack.so.2.2.2`) never gains a sibling and
+    /// stays quiet, as do extension paths (the shipped path extends
+    /// the SONAME, not the reverse) and real files carrying an
+    /// unrelated version (the CMake VERSION shape). `%ghost`
+    /// entries are not shipped payload and stay quiet. The entry
+    /// itself may be the library file (the libgda shape keeps the
+    /// real file at the short name), so symlinks and regular files
+    /// both count as candidates.
+    fn check_truncated_soname_paths(&self, pkg: &Pkg, out: &mut Filter) {
+        // SONAMEs shipped per directory, read from the regular ELF
+        // files. A file that fails to parse contributes nothing:
+        // the walk below reports it as `readelf-failed` when it is
+        // library-named, and a file that fails to parse has no
+        // observable SONAME either way.
+        let mut sonames_by_dir: HashMap<&str, Vec<String>> = HashMap::new();
+        for file in &pkg.files {
+            if file.mode & S_IFMT != S_IFREG || !file.magic.starts_with("ELF ") {
+                continue;
+            }
+            if !file.name.contains(".so.") && !file.name.ends_with(".so") {
+                continue;
+            }
+            let Ok((Some(soname), _)) = Self::elf_dynamic(&file.path) else {
+                continue;
+            };
+            let dir = match file.name.rfind('/') {
+                Some(i) => &file.name[..i],
+                None => "",
+            };
+            sonames_by_dir.entry(dir).or_default().push(soname);
+        }
+        if sonames_by_dir.is_empty() {
+            return;
+        }
+
+        let mut hits: Vec<(&str, &str)> = Vec::new();
+        for file in &pkg.files {
+            if is_dir(file.mode) || file.is_ghost() {
+                continue;
+            }
+            if !is_symlink(file.mode) && file.mode & S_IFMT != S_IFREG {
+                continue;
+            }
+            let (dir, base) = match file.name.rfind('/') {
+                Some(i) => (&file.name[..i], &file.name[i + 1..]),
+                None => ("", file.name.as_str()),
+            };
+            let Some((stem, v)) = base.split_once(".so.") else {
+                continue;
+            };
+            if !is_dotted_digits(v) {
+                continue;
+            }
+            let Some(sonames) = sonames_by_dir.get(dir) else {
+                continue;
+            };
+            for soname in sonames {
+                let Some((soname_stem, w)) = soname.split_once(".so.") else {
+                    continue;
+                };
+                if soname_stem != stem || !w.starts_with(&format!("{v}.")) {
+                    continue;
+                }
+                if crate::checks::binaries::soname_name_match(&pkg.name, soname)
+                    .is_some_and(|(matches, _)| matches)
+                {
+                    hits.push((file.name.as_str(), soname.as_str()));
+                }
+            }
+        }
+        hits.sort_unstable();
+        hits.dedup();
+        for (path, soname) in hits {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "shlib-policy-truncated-soname-path",
+                &[&format!("{path} (SONAME {soname})")],
+            );
+        }
+    }
+
     /// `(soname, needed)` from an ELF file, or the parse failure reason.
     fn elf_dynamic(path: &str) -> Result<(Option<String>, Vec<String>), String> {
         let data = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -367,6 +468,15 @@ impl LoaderWitness {
         let dep = dep.as_bytes();
         self.data.len() > dep.len() && self.data[..dep.len()] == *dep && self.data[dep.len()] == 0
     }
+}
+
+/// Whether `s` is a non-empty dotted sequence of digit components
+/// (`28`, `0.25`, `2.2.2`): the shape of a SONAME version or of one
+/// of its leading-component truncations.
+fn is_dotted_digits(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('.')
+            .all(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// `(stem, SONAME number)` for a package name in the versioned shared
@@ -502,6 +612,12 @@ impl Check for SharedLibraryPolicyCheck {
                     &[path],
                 );
             }
+        }
+
+        // A versioned path shorter than the SONAME of the library
+        // it belongs to (see `check_truncated_soname_paths`).
+        if is_match(&self.re_soname_pkg, &pkg.name) {
+            self.check_truncated_soname_paths(pkg, out);
         }
 
         let pkg_requires: HashSet<&str> = pkg
@@ -1784,6 +1900,263 @@ mod tests {
         elf.extend_from_slice(&strtab);
         assert_eq!(elf.len() as u64, total);
         elf
+    }
+
+    /// Write `bytes` under the per-test payload dir and return the
+    /// path, for fixture entries whose payload the check reads.
+    fn trunc_payload_path(tag: &str, key: &str, bytes: &[u8]) -> String {
+        let dir = std::env::temp_dir().join(format!("rpmcrab-shlib-trunc-{tag}"));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join(key);
+        std::fs::write(&path, bytes).expect("write payload");
+        path.to_string_lossy().into_owned()
+    }
+
+    fn trunc_elf(tag: &str, key: &str, name: &str, soname: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: trunc_payload_path(tag, key, &minimal_elf(soname)),
+            mode: 0o100755,
+            magic: "ELF 64-bit LSB shared object".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn trunc_link(name: &str, linkto: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode: 0o120777,
+            linkto: linkto.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The rendered `shlib-policy-truncated-soname-path` lines for a
+    /// fixture package with the given name and file list.
+    fn truncated_details(tag: &str, name: &str, files: Vec<PkgFile>) -> Vec<String> {
+        let dir = std::env::temp_dir().join(format!("rpmcrab-shlib-trunc-{tag}"));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        pkg.name = name.to_string();
+        pkg.files = files;
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SharedLibraryPolicyCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .filter(|(n, _)| n == "shlib-policy-truncated-soname-path")
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
+
+    #[test]
+    fn truncated_path_fires_for_symlink_shape() {
+        // The mupdf shape: the SONAME file plus upstream's short
+        // symlink, in a package whose name encodes the whole SONAME
+        // version (28_0 for .28.0).
+        let lines = truncated_details(
+            "mupdf",
+            "libmupdf28_0",
+            vec![
+                trunc_elf(
+                    "mupdf",
+                    "lib",
+                    "/usr/lib64/libmupdf.so.28.0",
+                    "libmupdf.so.28.0",
+                ),
+                trunc_link("/usr/lib64/libmupdf.so.28", "libmupdf.so.28.0"),
+            ],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libmupdf.so.28 (SONAME libmupdf.so.28.0)"),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn truncated_path_fires_for_regular_file_shape() {
+        // The libgda shape: the real library file sits at the short
+        // name, its SONAME is the longer form.
+        let lines = truncated_details(
+            "realfile",
+            "libbar2_1",
+            vec![trunc_elf(
+                "realfile",
+                "lib",
+                "/usr/lib64/libbar.so.2",
+                "libbar.so.2.1",
+            )],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(
+            lines[0].contains("/usr/lib64/libbar.so.2 (SONAME libbar.so.2.1)"),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn truncated_path_quiet_when_name_carries_only_the_prefix() {
+        // The scalapack MPI flavours: the short file is a regular
+        // ELF created on purpose, and the package name carries only
+        // the leading `2` of the SONAME 2.2.2, so the package
+        // upgrades in place and never gains a co-installable
+        // sibling. The name match is evaluated without the
+        // hpc-location exemption; the name leg alone keeps it quiet.
+        let dir = "/usr/lib64/mpi/gcc/openmpi4/lib64";
+        let lines = truncated_details(
+            "scalapack",
+            "libscalapack2-openmpi4",
+            vec![
+                trunc_elf(
+                    "scalapack",
+                    "full",
+                    &format!("{dir}/libscalapack.so.2.2.2"),
+                    "libscalapack.so.2.2.2",
+                ),
+                trunc_elf(
+                    "scalapack",
+                    "short",
+                    &format!("{dir}/libscalapack.so.2"),
+                    "libscalapack.so.2.2.2",
+                ),
+            ],
+        );
+        assert!(lines.is_empty(), "in-place upgrade stays quiet: {lines:?}");
+    }
+
+    #[test]
+    fn truncated_path_quiet_for_misnamed_package() {
+        // libxfdashboard0: the truncation shape is present, but the
+        // package name does not encode the whole SONAME version;
+        // shlib-policy-name-error is the finding for that package.
+        let lines = truncated_details(
+            "xfdashboard",
+            "libxfdashboard0",
+            vec![
+                trunc_elf(
+                    "xfdashboard",
+                    "lib",
+                    "/usr/lib64/libxfdashboard.so.0.10100.0",
+                    "libxfdashboard.so.0.10100.0",
+                ),
+                trunc_link(
+                    "/usr/lib64/libxfdashboard.so.0",
+                    "libxfdashboard.so.0.10100.0",
+                ),
+            ],
+        );
+        assert!(lines.is_empty(), "misnamed package stays quiet: {lines:?}");
+    }
+
+    #[test]
+    fn truncated_path_quiet_without_soname() {
+        // libf2c0: the shipped ELF carries no DT_SONAME (its provide
+        // is rpm's filename fallback), so there is no SONAME for a
+        // path to truncate.
+        let dir = std::env::temp_dir().join("rpmcrab-shlib-trunc-f2c");
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let payload = trunc_payload_path("f2c", "lib", &loader_elf(None, &[], &[], None));
+        let lines = truncated_details(
+            "f2c",
+            "libf2c0",
+            vec![
+                PkgFile {
+                    name: "/usr/lib64/libf2c.so.0".to_string(),
+                    path: payload,
+                    mode: 0o100755,
+                    magic: "ELF 64-bit LSB shared object".to_string(),
+                    ..Default::default()
+                },
+                trunc_link("/usr/lib64/libf2c.so", "libf2c.so.0"),
+            ],
+        );
+        let _ = dir;
+        assert!(lines.is_empty(), "no SONAME, no truncation: {lines:?}");
+    }
+
+    #[test]
+    fn truncated_path_quiet_for_extension_and_plain_shapes() {
+        // libQt5Core5 ships libQt5Core.so.5.15 *for* SONAME
+        // libQt5Core.so.5: the shipped path extends the SONAME, not
+        // the reverse. The SONAME file itself (path equal to the
+        // SONAME) is the plain shape every library package has.
+        let lines = truncated_details(
+            "qt-extension",
+            "libQt5Core5",
+            vec![
+                trunc_elf(
+                    "qt-extension",
+                    "lib",
+                    "/usr/lib64/libQt5Core.so.5",
+                    "libQt5Core.so.5",
+                ),
+                trunc_link("/usr/lib64/libQt5Core.so.5.15", "libQt5Core.so.5"),
+            ],
+        );
+        assert!(lines.is_empty(), "extension path stays quiet: {lines:?}");
+    }
+
+    #[test]
+    fn truncated_path_quiet_for_unrelated_version_file() {
+        // The CMake VERSION shape: a real file carrying a version
+        // unrelated to the SONAME (5.1.23 shipped for SONAME .so.7).
+        // The package name encodes the whole SONAME; the version
+        // prefix leg alone keeps it quiet.
+        let lines = truncated_details(
+            "cmake-version",
+            "libFcitx5Core7",
+            vec![trunc_elf(
+                "cmake-version",
+                "lib",
+                "/usr/lib64/libFcitx5Core.so.5.1.23",
+                "libFcitx5Core.so.7",
+            )],
+        );
+        assert!(lines.is_empty(), "unrelated version stays quiet: {lines:?}");
+    }
+
+    #[test]
+    fn truncated_path_quiet_for_ghost_entry() {
+        // A %ghost short path is not shipped payload.
+        let mut ghost = trunc_link("/usr/lib64/libmupdf.so.28", "libmupdf.so.28.0");
+        ghost.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        let lines = truncated_details(
+            "ghost",
+            "libmupdf28_0",
+            vec![
+                trunc_elf(
+                    "ghost",
+                    "lib",
+                    "/usr/lib64/libmupdf.so.28.0",
+                    "libmupdf.so.28.0",
+                ),
+                ghost,
+            ],
+        );
+        assert!(lines.is_empty(), "ghost entry stays quiet: {lines:?}");
+    }
+
+    #[test]
+    fn truncated_path_quiet_for_plain_package() {
+        // The ordinary library package: the SONAME file and the
+        // unversioned -devel-style link. Neither truncates a SONAME.
+        let lines = truncated_details(
+            "plain",
+            "libfoo1",
+            vec![
+                trunc_elf("plain", "lib", "/usr/lib64/libfoo.so.1", "libfoo.so.1"),
+                trunc_link("/usr/lib64/libfoo.so", "libfoo.so.1"),
+            ],
+        );
+        assert!(lines.is_empty(), "plain package stays quiet: {lines:?}");
     }
 
     fn obsoletes_results(name: &str, obsoletes: Vec<DepInfo>) -> Vec<(String, String)> {
