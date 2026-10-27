@@ -791,6 +791,68 @@ fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
     })
 }
 
+/// Whether a file carrying an interpreter line is vendored source
+/// payload: a shipped source tree a developer or a build reads,
+/// rather than a script the installed system executes in place
+/// (corpus E audit 2026-10-26, section 5; ruled in by Tom
+/// 2026-10-27 as the D1 extension of the `script_is_test_data`
+/// gate family). Upstream's own build and helper scripts inside
+/// such a tree use the `env` form of the interpreter line as the
+/// portable choice for whoever unpacks the tree, so it is not an
+/// installed entry point's defect there. Every fact is decidable
+/// from the binary package's name and the file's path alone:
+///
+/// - the package's name carries a `src` or `source` hyphen
+///   component -- the package exists to carry a source tree
+///   (the rust*-src standard-library trees, the bazel, kafka,
+///   boringssl and other -source packages, fpc-src), wherever in
+///   the tree the payload sits (the rust trees live under
+///   /usr/lib/rustlib/src/, fpc's under /usr/share/fpcsrc/);
+/// - or the file sits in the Go source tree
+///   /usr/share/go/<version>/src/ -- the go1.* packages are not
+///   source-named (their payload is the toolchain), but that one
+///   directory is Go's own shipped source tree, build scripts
+///   included.
+///
+/// The bounds of the test gate apply the same way. A file
+/// installed directly in a script directory (/bin, /sbin,
+/// /usr/bin, /usr/sbin, /usr/local/bin or /usr/local/sbin) is an
+/// entry point and never counts as source payload, whatever the
+/// package is called: Go's own /usr/bin/go wrappers fall outside
+/// the Go arm by path, and a source package's /usr/bin helper
+/// keeps firing. A `%doc` file never counts either -- the caller
+/// applies this gate only to non-doc rows -- and fused names
+/// carry no fact: a package merely ending in letters like
+/// `resource` glues the word into a single component and stays
+/// outside the gate. The gate is deliberately not package-wide:
+/// the go1.* packages ship /usr/bin binaries and %doc files by
+/// design, so what is exempt is each source-tree row itself,
+/// never the package's entry points or documentation.
+fn script_is_source_data(pkg_name: &str, fname: &str) -> bool {
+    let parent = fname.rsplit_once('/').map_or("", |(parent, _)| parent);
+    if matches!(
+        parent,
+        "/bin" | "/sbin" | "/usr/bin" | "/usr/sbin" | "/usr/local/bin" | "/usr/local/sbin"
+    ) {
+        return false;
+    }
+    if pkg_name
+        .to_lowercase()
+        .split('-')
+        .any(|c| matches!(c, "src" | "source"))
+    {
+        return true;
+    }
+    // /usr/share/go/<version>/src/... -- the version component is
+    // a single directory between `go` and `src`.
+    let comps: Vec<&str> = fname.split('/').filter(|c| !c.is_empty()).collect();
+    comps.len() >= 6
+        && comps[0] == "usr"
+        && comps[1] == "share"
+        && comps[2] == "go"
+        && comps[4] == "src"
+}
+
 /// One token of the small shell lexer behind
 /// `shell_script_has_top_level_return`. The lexer resolves quoting
 /// and escapes and consumes here-document bodies, so a word token's
@@ -5573,7 +5635,15 @@ impl FilesCheck {
                             // form of its interpreter line is not a
                             // defect there: `script_is_test_data`
                             // carries the shapes and their guards.
-                            if !script_is_test_data(&pkg.name, fname) {
+                            // Vendored source payload is read or
+                            // built from, not executed in place,
+                            // the same way: `script_is_source_data`
+                            // carries the source-tree shapes, and
+                            // its doc bound is the row itself -- a
+                            // %doc file keeps the finding.
+                            if !script_is_test_data(&pkg.name, fname)
+                                && !(!is_doc && script_is_source_data(&pkg.name, fname))
+                            {
                                 add_info(
                                     out,
                                     Level::Error,
@@ -15081,6 +15151,232 @@ reason = "warning hook: executable and %config by design"
             "widget",
             "/usr/share/widget/Tests/helper.py"
         ));
+    }
+
+    /// Source packages carry a vendored source tree as payload:
+    /// upstream's own build and helper scripts inside it draw no
+    /// `env-script-interpreter`, wherever in the tree the payload
+    /// sits (the audit's kafka-source tree under /usr/src/, the
+    /// rust*-src trees under /usr/lib/rustlib/src/, fpc-src under
+    /// /usr/share/fpcsrc/).
+    #[test]
+    fn env_script_silent_in_source_packages() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/src/kafka/kafka-merge-pr.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/fpcsrc/rtl/unix/scripts/check_sys.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+            ],
+        );
+        pkg.name = "kafka-source".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/src/kafka/kafka-merge-pr.py",
+            "/usr/share/fpcsrc/rtl/unix/scripts/check_sys.sh",
+        ] {
+            assert!(
+                !flagged(&lines, "env-script-interpreter", path),
+                "no env-script-interpreter for source payload {path}: {lines:?}"
+            );
+        }
+        let dir2 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir2,
+            &[(
+                "/usr/lib/rustlib/src/rust/library/stdarch/ci/run.sh",
+                0o100755,
+                "Bourne-Again shell script, ASCII text executable",
+                b"#!/usr/bin/env bash\n",
+            )],
+        );
+        pkg.name = "rust1.97-src".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            !flagged(
+                &lines,
+                "env-script-interpreter",
+                "/usr/lib/rustlib/src/rust/library/stdarch/ci/run.sh"
+            ),
+            "no env-script-interpreter for rust source payload: {lines:?}"
+        );
+    }
+
+    /// The Go source tree is source payload the same way: the
+    /// go1.* packages are not source-named, but
+    /// /usr/share/go/<version>/src/ is Go's own shipped source
+    /// tree, build scripts included, at any depth below `src`.
+    #[test]
+    fn env_script_silent_in_go_source_tree() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/go/1.24/src/make.bash",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
+                    "/usr/share/go/1.24/src/cmd/compile/internal/ssa/_gen/cover.bash",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+            ],
+        );
+        pkg.name = "go1.24".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/share/go/1.24/src/make.bash",
+            "/usr/share/go/1.24/src/cmd/compile/internal/ssa/_gen/cover.bash",
+        ] {
+            assert!(
+                !flagged(&lines, "env-script-interpreter", path),
+                "no env-script-interpreter for Go source payload {path}: {lines:?}"
+            );
+        }
+    }
+
+    /// The source gate's bounds: an entry point in a script
+    /// directory keeps firing whatever the package is called; a
+    /// %doc row in a source package keeps firing; the Go arm
+    /// needs the version component and the `src` directory (the
+    /// wasm helpers under misc/ are executed payload, not source);
+    /// fused names (resource) carry no source fact; an ordinary
+    /// package's /usr/src payload is not covered; and the gate
+    /// does not reach `non-executable-script` -- a source tree's
+    /// non-executable script keeps that finding.
+    #[test]
+    fn env_script_still_fires_at_source_gate_bounds() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/bin/kafka-run.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
+                    "/usr/src/kafka/docs/tool.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+            ],
+        );
+        pkg.name = "kafka-source".to_string();
+        pkg.doc_files = vec!["/usr/src/kafka/docs/tool.py".to_string()];
+        let lines = script_finding_lines(&pkg, &config);
+        for (tag, path) in [
+            ("env-script-interpreter", "/usr/bin/kafka-run.sh"),
+            ("env-script-interpreter", "/usr/src/kafka/docs/tool.py"),
+        ] {
+            assert!(
+                flagged(&lines, tag, path),
+                "{tag} must fire for {path}: {lines:?}"
+            );
+        }
+        // The source gate does not reach `non-executable-script`:
+        // fpc-src's non-executable source script (a shape the
+        // corpus fires on today) keeps that finding.
+        let dir4 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir4,
+            &[(
+                "/usr/share/fpcsrc/packages/odata/regen.sh",
+                0o100644,
+                "Bourne-Again shell script, ASCII text executable",
+                b"#!/bin/bash\n",
+            )],
+        );
+        pkg.name = "fpc-src".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(
+                &lines,
+                "non-executable-script",
+                "/usr/share/fpcsrc/packages/odata/regen.sh"
+            ),
+            "non-executable-script must fire in a source package: {lines:?}"
+        );
+        let dir2 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir2,
+            &[
+                (
+                    "/usr/share/go/1.24/misc/wasm/run.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
+                    "/usr/share/go/src/make.bash",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
+                    "/usr/src/myapp/tool.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+            ],
+        );
+        pkg.name = "go1.24".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/share/go/1.24/misc/wasm/run.sh",
+            "/usr/share/go/src/make.bash",
+        ] {
+            assert!(
+                flagged(&lines, "env-script-interpreter", path),
+                "env-script-interpreter must fire for {path}: {lines:?}"
+            );
+        }
+        pkg.name = "myapp".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(&lines, "env-script-interpreter", "/usr/src/myapp/tool.sh"),
+            "env-script-interpreter must fire for a plain package's /usr/src payload: {lines:?}"
+        );
+        let dir3 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir3,
+            &[(
+                "/usr/share/resource/data/tool.py",
+                0o100755,
+                "Python script, ASCII text executable",
+                b"#!/usr/bin/env python3\n",
+            )],
+        );
+        pkg.name = "resource-compiler".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(
+                &lines,
+                "env-script-interpreter",
+                "/usr/share/resource/data/tool.py"
+            ),
+            "env-script-interpreter must fire for a fused name: {lines:?}"
+        );
     }
 
     fn eol_flagged(lines: &[(String, String)], path: &str) -> bool {
