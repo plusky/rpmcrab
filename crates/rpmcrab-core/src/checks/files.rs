@@ -79,24 +79,43 @@ fn is_version_tail(s: &str) -> bool {
 
 /// The base name of a version-suffixed binary name: `exe` minus a
 /// trailing version tail (see `is_version_tail`) and one optional
-/// `-`/`.` separator (`luajit-2.1.1756211046` -> `luajit`,
-/// `perl5.44.0` -> `perl`). `None` when the name carries no such
-/// tail or nothing would remain.
+/// separator. The separator on this (binary) side is `-`, `.` or
+/// nothing at all -- the digit run directly abutting the name
+/// (`luajit-2.1.1756211046` -> `luajit`, `cups-genppd.5.3` ->
+/// `cups-genppd`, `perl5.44.0` -> `perl`). `None` when the name
+/// carries no such tail or nothing would remain.
 fn strip_version_tail(exe: &str) -> Option<&str> {
     let bytes = exe.as_bytes();
     let mut start = bytes.len();
     while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
         start -= 1;
     }
-    let tail = exe[start..].strip_prefix('.').unwrap_or(&exe[start..]);
+    // `start` is computed over bytes and can land inside a
+    // multi-byte character (a non-ASCII char directly before the
+    // digit/dot run); slice through `get` so that fails closed
+    // instead of panicking on a non-boundary index.
+    let run = exe.get(start..)?;
+    let tail = run.strip_prefix('.').unwrap_or(run);
     if start == 0 || !is_version_tail(tail) {
         return None;
     }
-    let mut base = &exe[..start];
-    if base.ends_with('-') || base.ends_with('.') {
-        base = &base[..base.len() - 1];
+    let mut base = exe.get(..start)?;
+    if let Some(stripped) = base.strip_suffix(['-', '.']) {
+        base = stripped;
     }
     if base.is_empty() { None } else { Some(base) }
+}
+
+/// Record a man page basename in the package state, together with
+/// every prefix of it that a `-<version>` tail follows, for the
+/// version-affix credit in `version_affix_documented`.
+fn note_man_basename(st: &mut PkgState, basename: &str) {
+    st.man_basenames.insert(basename.to_string());
+    for (i, _) in basename.match_indices('-') {
+        if is_version_tail(&basename[i + 1..]) {
+            st.man_version_bases.insert(basename[..i].to_string());
+        }
+    }
 }
 
 /// Compression suffixes a shipped man page target may carry, mirroring
@@ -2107,6 +2126,12 @@ struct PkgState {
     ldconfig_dirs: std::collections::HashSet<String>,
     bindir_exes: IndexMap<String, Vec<String>>,
     man_basenames: std::collections::HashSet<String>,
+    /// The subset of `man_basenames` prefixes a `-<version>` tail
+    /// follows (`abimap` for the page basename `abimap-3.13.1`),
+    /// precomputed when a basename is recorded so the version-affix
+    /// credit is a set lookup instead of a per-miss scan of every
+    /// man basename.
+    man_version_bases: std::collections::HashSet<String>,
     /// Symlink targets by shipped path, for resolving a bindir link to
     /// the file it ultimately invokes.
     link_targets: HashMap<String, String>,
@@ -2919,19 +2944,18 @@ impl FilesCheck {
     /// flavour-suffixed pages parallel-installable toolchains ship,
     /// e.g. the Python singlespec `abimap-3.13.1`), or the binary is
     /// itself the version-suffixed name of a documented tool
-    /// (`luajit-2.1.1756211046` for `luajit`). A version tail is at
-    /// least two dot-separated numeric components, so single-suffix
-    /// names (`ps2ps2`, `gio-querymodules-64`) keep firing. The
-    /// reference credits neither shape (FilesCheck.py:559-564
-    /// consults only its man_basenames set); the divergence is
-    /// ledgered.
+    /// (`luajit-2.1.1756211046` for `luajit`). The separator sets are
+    /// exact per side: the man-page side credits only the dash form
+    /// above; the binary side credits a tail preceded by `-`, by `.`
+    /// or by no separator (see `strip_version_tail`). A version tail
+    /// is at least two dot-separated numeric components, so
+    /// single-suffix names (`ps2ps2`, `gio-querymodules-64`) keep
+    /// firing. The reference credits neither shape
+    /// (FilesCheck.py:559-564 consults only its man_basenames set);
+    /// the divergence is ledgered.
     fn version_affix_documented(&self, exe: &str, st: &PkgState) -> bool {
-        for b in &st.man_basenames {
-            if let Some(rest) = b.strip_prefix(exe).and_then(|r| r.strip_prefix('-')) {
-                if is_version_tail(rest) {
-                    return true;
-                }
-            }
+        if st.man_version_bases.contains(exe) {
+            return true;
         }
         if let Some(base) = strip_version_tail(exe) {
             if st.man_basenames.contains(base) {
@@ -3858,7 +3882,7 @@ impl FilesCheck {
         let filename = caps.name("filename").map(|m| m.as_str()).unwrap_or("");
         if is_reg(pkgfile.mode) {
             if let Some(binary) = man_binary_basename(filename) {
-                st.man_basenames.insert(binary.to_string());
+                note_man_basename(st, binary);
             }
         }
         let suffixes: Vec<&str> = filename.rsplit('.').collect();
@@ -4369,7 +4393,7 @@ impl FilesCheck {
         if let Ok(Some(caps)) = self.man_base_re.captures(fname) {
             if let Some(m) = caps.name("filename") {
                 if let Some(binary) = man_binary_basename(m.as_str()) {
-                    st.man_basenames.insert(binary.to_string());
+                    note_man_basename(st, binary);
                 }
             }
         }
@@ -10602,6 +10626,65 @@ mod tests {
     }
 
     #[test]
+    fn version_affix_dot_and_separatorless_forms_for_no_manual_page() {
+        // Binary side, dot separator: cups-genppd.5.3 is documented
+        // by cups-genppd.1.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/cups-genppd.5.3", 0o100755, 31),
+            mkfile("/usr/share/man/man1/cups-genppd.1.gz", 0o100644, 32),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "no-manual-page-for-binary"),
+            "cups-genppd.5.3 is documented by cups-genppd.1: {results:?}"
+        );
+        // Binary side, separatorless: perl5.44.0 is documented by
+        // perl.1.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/perl5.44.0", 0o100755, 33),
+            mkfile("/usr/share/man/man1/perl.1.gz", 0o100644, 34),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "no-manual-page-for-binary"),
+            "perl5.44.0 is documented by perl.1: {results:?}"
+        );
+        // Man side positive: bar is documented by the bar-1.2 page
+        // (shipped as bar-1.2.1, whose man basename is bar-1.2).
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/bar", 0o100755, 35),
+            mkfile("/usr/share/man/man1/bar-1.2.1.gz", 0o100644, 36),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, _)| n == "no-manual-page-for-binary"),
+            "bar is documented by its bar-1.2 page: {results:?}"
+        );
+        // Single-suffix misses keep firing end to end.
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/stunnel3", 0o100755, 37),
+            mkfile("/usr/share/man/man1/stunnel.1.gz", 0o100644, 38),
+            mkfile("/usr/bin/foo-2", 0o100755, 39),
+            mkfile("/usr/share/man/man1/foo.1.gz", 0o100644, 40),
+        ]);
+        let results = run_check_binary(&pkg);
+        for exe in ["stunnel3", "foo-2"] {
+            assert!(
+                results
+                    .iter()
+                    .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with(exe)),
+                "{exe} must still fire: {results:?}"
+            );
+        }
+    }
+
+    #[test]
     fn version_affix_near_misses_still_fire_for_no_manual_page() {
         // A single trailing component is a name suffix, not a
         // version: ps2ps2 is a distinct tool from ps2ps, and a
@@ -10640,6 +10723,14 @@ mod tests {
         assert_eq!(strip_version_tail("ps2ps2"), None);
         assert_eq!(strip_version_tail("gio-querymodules-64"), None);
         assert_eq!(strip_version_tail("plain"), None);
+        // Single-suffix shapes: one trailing component is a name
+        // suffix, not a version.
+        assert_eq!(strip_version_tail("stunnel3"), None);
+        assert_eq!(strip_version_tail("foo-2"), None);
+        // A non-ASCII char directly before the digit/dot run: the
+        // byte-computed split must fail closed or land on a
+        // boundary, never panic.
+        assert_eq!(strip_version_tail("foo\u{e9}5.44.0"), Some("foo\u{e9}"));
     }
 
     #[test]
