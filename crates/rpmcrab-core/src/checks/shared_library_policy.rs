@@ -336,11 +336,15 @@ impl SharedLibraryPolicyCheck {
             let Some(sonames) = sonames_by_dir.get(dir) else {
                 continue;
             };
+            // The prefix is the same for every SONAME in the
+            // directory: format it once per file instead of once per
+            // comparison.
+            let version_prefix = format!("{v}.");
             for soname in sonames {
                 let Some((soname_stem, w)) = soname.split_once(".so.") else {
                     continue;
                 };
-                if soname_stem != stem || !w.starts_with(&format!("{v}.")) {
+                if soname_stem != stem || !w.starts_with(&version_prefix) {
                     continue;
                 }
                 if crate::checks::binaries::soname_name_match(&pkg.name, soname)
