@@ -3125,7 +3125,7 @@ fn explain_reworded_missing_dependency_to_crontabs() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "missing-dependency-to-crontabs:\nThis package installs a file in /etc/cron.*/ but doesn't require a cron daemon\nto be installed. As the cron daemon is not part of the essential packages,\nyour package should explicitly require crontabs, cron or cronie to make sure\nthat your cron job is executed. If it is an optional feature of your package,\nrecommend or suggest one of them.\n\n\n",
+        "missing-dependency-to-crontabs:\nThis package installs a file in /etc/cron.*/ but doesn't require cron support\nto be installed. As cron support is not part of the essential packages, your\npackage should explicitly require crontabs, cron or cronie to make sure that\nyour cron job is executed. If it is an optional feature of your package,\nrecommend or suggest one of them.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
@@ -3139,7 +3139,7 @@ fn explain_reworded_tcl_extension_file() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "tcl-extension-file:\nTcl extensions should be in a package-specific subdir of the Tcl package\ndirectory: /usr/lib64/tcl for extensions that load shared libraries,\n/usr/share/tcl for script-only extensions.\n\n\n",
+        "tcl-extension-file:\nTcl extensions should be in a package-specific subdir of the Tcl package\ndirectory: /usr/lib(64)/tcl for extensions that load shared libraries,\n/usr/share/tcl for script-only extensions.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
