@@ -218,7 +218,19 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
         }
     }
     if !send_policy_seen {
-        findings.push((Level::Error, "dbus-policy-missing-allow", String::new()));
+        // Tom's ruling (2026-10-27): a file carrying a concrete
+        // <allow> own/own_prefix but no send rule is a name-ownership
+        // fragment. Within the XML that shape is indistinguishable
+        // from a forgotten send allow, so it stays visible -- at W,
+        // not E. A file with no concrete own at all keeps the E.
+        // The tag is per file, so the own test is file-level: any
+        // block declaring a concrete own (block_has_own) counts.
+        let level = if policies.iter().any(block_has_own) {
+            Level::Warning
+        } else {
+            Level::Error
+        };
+        findings.push((level, "dbus-policy-missing-allow", String::new()));
     }
     Ok(findings)
 }
@@ -571,6 +583,131 @@ mod tests {
                 .any(|(_, f, _)| *f == "dbus-policy-missing-allow"),
             "{findings:?}"
         );
+    }
+
+    /// The level of the file's dbus-policy-missing-allow finding, if any.
+    fn missing_allow_level(findings: &[(Level, &'static str, String)]) -> Option<Level> {
+        findings
+            .iter()
+            .find(|(_, f, _)| *f == "dbus-policy-missing-allow")
+            .map(|(l, _, _)| *l)
+    }
+
+    #[test]
+    fn own_only_fragment_warns_instead_of_erroring() {
+        // The pulseaudio shape: one subject-scoped policy whose only
+        // rule is a concrete <allow own> -- a name-ownership fragment.
+        let xml = r#"<busconfig><policy user="pulse">
+<allow own="org.pulseaudio.Server"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert_eq!(
+            missing_allow_level(&findings),
+            Some(Level::Warning),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn own_prefix_only_fragment_warns_instead_of_erroring() {
+        let xml = r#"<busconfig><policy user="root">
+<allow own_prefix="org.example."/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert_eq!(
+            missing_allow_level(&findings),
+            Some(Level::Warning),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn own_in_any_block_warns_for_the_file() {
+        // The tag is per file: a concrete own in one block demotes
+        // the file's finding even when another block carries none.
+        let xml = r#"<busconfig>
+<policy user="root">
+<allow own="org.foo.Bar"/>
+</policy>
+<policy user="daemon">
+<deny send_interface="org.foo.Bar"/>
+</policy>
+</busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert_eq!(
+            missing_allow_level(&findings),
+            Some(Level::Warning),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn deny_only_file_stays_error() {
+        // A <deny own> declares no ownership (block_has_own counts
+        // only <allow>), and the stock <deny own="*"/> least of all:
+        // an own-less file keeps the E.
+        let xml = r#"<busconfig><policy context="default">
+<deny own="*"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert_eq!(
+            missing_allow_level(&findings),
+            Some(Level::Error),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn receive_only_file_stays_error() {
+        let xml = r#"<busconfig><policy user="root">
+<allow receive_sender="org.foo.Bar"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert_eq!(
+            missing_allow_level(&findings),
+            Some(Level::Error),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn wildcard_own_only_stays_error() {
+        // own="*" names nothing concrete, so it is not the
+        // name-ownership fragment the W arm covers.
+        let xml = r#"<busconfig><policy user="root">
+<allow own="*"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert_eq!(
+            missing_allow_level(&findings),
+            Some(Level::Error),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn empty_own_only_stays_error() {
+        let xml = r#"<busconfig><policy user="root">
+<allow own=""/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert_eq!(
+            missing_allow_level(&findings),
+            Some(Level::Error),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn own_with_send_rule_is_silent() {
+        // The 142-file majority shape: own paired with a credited
+        // send rule emits no missing-allow at any level.
+        let xml = r#"<busconfig><policy user="root">
+<allow own="org.foo.Bar"/>
+<allow send_destination="org.foo.Bar"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert_eq!(missing_allow_level(&findings), None, "{findings:?}");
     }
 
     #[test]
