@@ -3054,6 +3054,23 @@ mod tests {
     }
 
     #[test]
+    fn systemctl_enable_timer_with_flag_is_quiet() {
+        for script in [
+            "systemctl enable --now foo.timer",
+            "systemctl start --now foo.timer",
+            "systemctl --now enable foo.timer",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "{script} must stay quiet: {found:?}"
+            );
+        }
+    }
+
+    #[test]
     fn systemctl_enable_timer_instance_is_quiet() {
         let found =
             check().check_scriptlet("/bin/sh", "systemctl enable foo@.timer", "%post", &[], &[]);
