@@ -229,7 +229,7 @@ impl SourceCheck {
                 Err(_) => continue,
             };
             let mut hits = Vec::new();
-            prebuilt::inspect_entry(&f.name, &data, &f.name, 0, &mut hits);
+            let members = prebuilt::inspect_top_level(&f.name, &data, &f.name, &mut hits);
             for (kind, path) in hits {
                 add_info(
                     out,
@@ -239,7 +239,6 @@ impl SourceCheck {
                     &[&path, kind.as_str()],
                 );
             }
-            let members = prebuilt::top_level_members(&data);
             if !url_sources.contains(&f.name) {
                 for root in prebuilt::vcs_roots(&members) {
                     let entries = format!("{} entries", root.entries);
@@ -499,12 +498,162 @@ mod prebuilt {
     }
 
     /// One direct member of a source archive. `head` carries the
-    /// member's full bytes when it is at most 1023 bytes long (the
-    /// git-lfs pointer size arm), and is empty for larger members.
+    /// member's first bytes, up to 1024: the whole member when it is
+    /// at most 1023 bytes long (the git-lfs pointer size arm). It is
+    /// empty when the member could not be read.
     pub struct TopLevelMember {
         pub name: String,
         pub size: u64,
         pub head: Vec<u8>,
+    }
+
+    /// A member's head: its first bytes, up to 1024 -- the whole
+    /// member when it is at most 1023 bytes long.
+    fn member_head(bytes: &[u8]) -> Vec<u8> {
+        bytes[..bytes.len().min(1024)].to_vec()
+    }
+
+    /// Inspect one source file at the top level, returning its
+    /// direct members: the prebuilt walk and the member list share
+    /// one pass -- a compressed stream is decompressed once, a zip
+    /// is opened once, a tar's entry table is read once -- where
+    /// they previously decompressed and walked the archive twice.
+    pub fn inspect_top_level(
+        name: &str,
+        data: &[u8],
+        ctx: &str,
+        hits: &mut Vec<(BinaryKind, String)>,
+    ) -> Vec<TopLevelMember> {
+        if let Some(kind) = classify(name, data) {
+            // A jar is reported as a unit; its classes are not listed
+            // separately -- the jar is what the packager removes in
+            // %prep.
+            hits.push((kind, ctx.to_string()));
+            return top_level_members(data);
+        }
+        if data.starts_with(b"\x1f\x8b") {
+            decompress_gzip(data)
+                .map(|d| {
+                    scan_decompressed(&d, ctx, 1, hits);
+                    tar_members(&d)
+                })
+                .unwrap_or_default()
+        } else if data.starts_with(b"\xfd7zXZ\x00") {
+            decompress_xz(data)
+                .map(|d| {
+                    scan_decompressed(&d, ctx, 1, hits);
+                    tar_members(&d)
+                })
+                .unwrap_or_default()
+        } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
+            decompress_zstd(data)
+                .map(|d| {
+                    scan_decompressed(&d, ctx, 1, hits);
+                    tar_members(&d)
+                })
+                .unwrap_or_default()
+        } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
+            decompress_bzip2(data)
+                .map(|d| {
+                    scan_decompressed(&d, ctx, 1, hits);
+                    tar_members(&d)
+                })
+                .unwrap_or_default()
+        } else if data.starts_with(b"PK\x03\x04") {
+            zip_scan(data, ctx, 1, hits)
+        } else if is_tar(data) {
+            let entries = read_tar(data);
+            for (ename, off, len, _size) in &entries {
+                let entry = &data[*off..*off + *len];
+                inspect_entry(ename, entry, &format!("{ctx}: {ename}"), 1, hits);
+            }
+            entries
+                .into_iter()
+                .map(|(ename, off, len, size)| TopLevelMember {
+                    name: normalize_member_name(&ename),
+                    size,
+                    head: member_head(&data[off..off + len]),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The zip pass of `inspect_top_level`: walk the entries for
+    /// prebuilt binaries and record the direct members in one open
+    /// of the archive (the nested-archive walk stays in `walk_zip`).
+    fn zip_scan(
+        data: &[u8],
+        ctx: &str,
+        depth: u8,
+        hits: &mut Vec<(BinaryKind, String)>,
+    ) -> Vec<TopLevelMember> {
+        let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(data)) {
+            Ok(a) => a,
+            Err(_) => return Vec::new(),
+        };
+        let mut members = Vec::new();
+        for i in 0..archive.len() {
+            let entry = match archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.is_file() {
+                continue;
+            }
+            // zip 9 returns entry names as results; skip entries whose
+            // names do not decode, like every other unreadable entry here.
+            let name = match entry.name() {
+                Ok(name) => name.into_owned(),
+                Err(_) => continue,
+            };
+            let size = entry.size();
+            if size > MAX_ENTRY_BYTES as u64 {
+                // The walk skips the entry unread, but the member
+                // list still records it, its head read on its own.
+                let head = {
+                    let mut bytes = Vec::new();
+                    if entry.take(1024).read_to_end(&mut bytes).is_err() {
+                        Vec::new()
+                    } else {
+                        bytes
+                    }
+                };
+                members.push(TopLevelMember {
+                    name: normalize_member_name(&name),
+                    size,
+                    head,
+                });
+                continue;
+            }
+            let mut bytes = Vec::new();
+            if entry
+                .take(MAX_ENTRY_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .is_err()
+            {
+                // An unreadable entry is still a member (with an
+                // empty head); the walk skips it.
+                members.push(TopLevelMember {
+                    name: normalize_member_name(&name),
+                    size,
+                    head: Vec::new(),
+                });
+                continue;
+            }
+            let head = member_head(&bytes);
+            members.push(TopLevelMember {
+                name: normalize_member_name(&name),
+                size,
+                head,
+            });
+            if bytes.len() > MAX_ENTRY_BYTES {
+                continue;
+            }
+            inspect_entry(&name, &bytes, &format!("{ctx}: {name}"), depth, hits);
+        }
+        members
     }
 
     /// The direct members of the archive in `data` (depth 1 only:
@@ -546,11 +695,7 @@ mod prebuilt {
             .map(|(name, off, len, size)| TopLevelMember {
                 name: normalize_member_name(&name),
                 size,
-                head: if size <= 1023 {
-                    data[off..off + len].to_vec()
-                } else {
-                    Vec::new()
-                },
+                head: member_head(&data[off..off + len]),
             })
             .collect()
     }
@@ -574,14 +719,17 @@ mod prebuilt {
                 Err(_) => continue,
             };
             let size = entry.size();
-            let head = if size <= 1023 {
+            // The head is read whatever the declared size says (a
+            // central directory can lie in either direction); a
+            // member whose head cannot be read stays a member, with
+            // an empty head.
+            let head = {
                 let mut bytes = Vec::new();
                 if entry.take(1024).read_to_end(&mut bytes).is_err() {
-                    continue;
+                    Vec::new()
+                } else {
+                    bytes
                 }
-                bytes
-            } else {
-                Vec::new()
             };
             out.push(TopLevelMember { name, size, head });
         }
@@ -620,7 +768,7 @@ mod prebuilt {
             if let Some(root) = vcs_root(&m.name) {
                 let e = by_root.entry(root).or_default();
                 e.0 += 1;
-                e.1 += m.size;
+                e.1 = e.1.saturating_add(m.size);
             }
         }
         by_root
@@ -666,28 +814,41 @@ mod prebuilt {
         best.map(|(_, root)| root)
     }
 
-    /// The names of members holding a git-lfs pointer stub: a regular
-    /// member of 1-1023 bytes that starts with the pointer version
-    /// line (the current git-lfs URL or the legacy hawser one) and
-    /// carries an `oid sha256:` line. A document merely quoting the
-    /// version line after offset 0 is not a pointer.
+    /// The names of members holding a git-lfs pointer stub: a member
+    /// whose head -- its actual first bytes -- is 1-1023 bytes long,
+    /// starts with the pointer version line (the current git-lfs URL
+    /// or the legacy hawser one, LF- or CRLF-terminated) and carries
+    /// an `oid sha256:` line. The gate is the head length, not the
+    /// declared size: a zip central directory can lie about the size
+    /// in either direction, while the head is bytes actually read. A
+    /// document merely quoting the version line after offset 0 is
+    /// not a pointer.
     pub fn lfs_pointers(members: &[TopLevelMember]) -> Vec<String> {
         members
             .iter()
             .filter(|m| {
-                m.size >= 1
-                    && m.size <= 1023
-                    && (m
-                        .head
-                        .starts_with(b"version https://git-lfs.github.com/spec/v1\n")
-                        || m.head
-                            .starts_with(b"version https://hawser.github.com/spec/v1\n"))
+                !m.head.is_empty()
+                    && m.head.len() <= 1023
+                    && (starts_with_version_line(
+                        &m.head,
+                        b"version https://git-lfs.github.com/spec/v1",
+                    ) || starts_with_version_line(
+                        &m.head,
+                        b"version https://hawser.github.com/spec/v1",
+                    ))
                     && m.head
                         .split(|&b| b == b'\n')
                         .any(|line| line.starts_with(b"oid sha256:"))
             })
             .map(|m| m.name.clone())
             .collect()
+    }
+
+    /// Whether `head` opens with the git-lfs pointer version line
+    /// for `url`, terminated by LF or CRLF.
+    fn starts_with_version_line(head: &[u8], url: &[u8]) -> bool {
+        head.strip_prefix(url)
+            .is_some_and(|rest| rest.starts_with(b"\n") || rest.starts_with(b"\r\n"))
     }
 
     /// Capped decompression: one byte past the cap means "too big".
@@ -2154,6 +2315,139 @@ mod prebuilt_tests {
         assert_eq!((roots[0].entries, roots[0].bytes), (1, 2));
         assert_eq!(roots[1].root, "a/CVS");
         assert_eq!((roots[1].entries, roots[1].bytes), (1, 1));
+        assert!(super::prebuilt::lfs_pointers(&members).is_empty());
+    }
+
+    #[test]
+    fn vcs_roots_byte_totals_saturate() {
+        // Zip members carry their central directory's declared size
+        // uncapped: two crafted .git members with huge declared
+        // sizes must saturate the per-root byte total, not wrap it.
+        let members = vec![
+            super::prebuilt::TopLevelMember {
+                name: "a/.git/config".to_string(),
+                size: u64::MAX - 1,
+                head: Vec::new(),
+            },
+            super::prebuilt::TopLevelMember {
+                name: "a/.git/HEAD".to_string(),
+                size: 10,
+                head: Vec::new(),
+            },
+        ];
+        let roots = super::prebuilt::vcs_roots(&members);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].entries, 2);
+        assert_eq!(roots[0].bytes, u64::MAX);
+    }
+
+    #[test]
+    fn lfs_gate_is_the_head_length_not_the_declared_size() {
+        let member = |size: u64, head: Vec<u8>| super::prebuilt::TopLevelMember {
+            name: "tests/a.test.xz".to_string(),
+            size,
+            head,
+        };
+        // A huge declared size over a real pointer head still fires:
+        // the head is bytes actually read.
+        let members = vec![member(u64::MAX, LFS_POINTER.to_vec())];
+        assert_eq!(super::prebuilt::lfs_pointers(&members), ["tests/a.test.xz"]);
+        // A tiny declared size over a 1024-byte head (a longer member
+        // whose first bytes quote the pointer) stays quiet.
+        let mut long_head = LFS_POINTER.to_vec();
+        long_head.resize(1024, b' ');
+        let members = vec![member(10, long_head)];
+        assert!(super::prebuilt::lfs_pointers(&members).is_empty());
+        // An unreadable member (empty head) stays quiet.
+        let members = vec![member(10, Vec::new())];
+        assert!(super::prebuilt::lfs_pointers(&members).is_empty());
+    }
+
+    #[test]
+    fn lfs_crlf_pointers_fire() {
+        let tar = tarball(&[
+            (
+                "tests/a.test.xz",
+                b"version https://git-lfs.github.com/spec/v1\r\noid sha256:0123\r\nsize 12\r\n",
+            ),
+            (
+                "tests/b.test.xz",
+                b"version https://hawser.github.com/spec/v1\r\noid sha256:0123\r\n",
+            ),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            (
+                "prebuilt-test.spec",
+                spec_with_source("lfs-crlf-1.0.tar.gz"),
+            ),
+            ("lfs-crlf-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-lfs-pointer"),
+            [
+                "prebuilt-test.src: W: source-archive-contains-lfs-pointer \
+                 lfs-crlf-1.0.tar.gz: tests/a.test.xz",
+                "prebuilt-test.src: W: source-archive-contains-lfs-pointer \
+                 lfs-crlf-1.0.tar.gz: tests/b.test.xz",
+            ]
+        );
+    }
+
+    #[test]
+    fn zip_member_with_corrupt_data_still_counts_for_vcs() {
+        // A stored member whose data fails its CRC is unreadable:
+        // the walk skips it, but the member still counts toward its
+        // VCS root (with an empty head, so no LFS verdict either).
+        let mut z = zip_bytes(&[("pkg/.git/config", b"VCS-DATA-PAYLOAD")]);
+        let pos = z
+            .windows(b"VCS-DATA-PAYLOAD".len())
+            .position(|w| w == b"VCS-DATA-PAYLOAD")
+            .expect("stored payload is verbatim");
+        z[pos + 2] ^= 0xFF;
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", spec_with_source("vcs-1.0.zip")),
+            ("vcs-1.0.zip", z),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-vcs-metadata"),
+            [
+                "prebuilt-test.src: W: source-archive-contains-vcs-metadata \
+               vcs-1.0.zip pkg/.git 1 entries 16 bytes"
+            ]
+        );
+        assert!(
+            archive_lines(&findings, "source-archive-contains-lfs-pointer").is_empty(),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn zip_lying_declared_size_does_not_hide_or_fake_a_pointer() {
+        // Patch the central directory's uncompressed-size field: the
+        // declared size is what the old gate trusted.
+        let patch = |z: &mut Vec<u8>, size: u32| {
+            let pos = z
+                .windows(4)
+                .position(|w| w == b"PK\x01\x02")
+                .expect("central directory present");
+            z[pos + 24..pos + 28].copy_from_slice(&size.to_le_bytes());
+        };
+        // Declared huge over a real pointer payload: the head is
+        // read anyway and the pointer fires.
+        let mut z = zip_bytes(&[("tests/a.test.xz", LFS_POINTER)]);
+        patch(&mut z, 0xFFFF_FFF0);
+        let members = super::prebuilt::top_level_members(&z);
+        assert_eq!(super::prebuilt::lfs_pointers(&members), ["tests/a.test.xz"]);
+        // Declared tiny over a 1500-byte payload quoting the pointer
+        // text: the head is the actual first 1024 bytes, too long
+        // for a pointer, so it stays quiet.
+        let mut big = LFS_POINTER.to_vec();
+        big.resize(1500, b' ');
+        let mut z = zip_bytes(&[("tests/a.test.xz", &big)]);
+        patch(&mut z, 10);
+        let members = super::prebuilt::top_level_members(&z);
         assert!(super::prebuilt::lfs_pointers(&members).is_empty());
     }
 }

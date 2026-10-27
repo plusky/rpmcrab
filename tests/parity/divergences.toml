@@ -2951,7 +2951,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1022"
 case = "global"
 check = "SourceCheck"
 kind = "behaviour"
-reason = "Fix-and-diverge (issue #1022): a new `source-archive-contains-lfs-pointer` warning fires when a direct member of a source archive is a git-lfs pointer stub: a regular member of 1-1023 bytes that starts with the pointer version line (`version https://git-lfs.github.com/spec/v1`, or the legacy hawser URL) and carries an `oid sha256:` line. A document quoting the version line after offset 0 is not a pointer and stays quiet. Nested archives are not opened. The frozen 2.10.0 reference has no such check."
+reason = "Fix-and-diverge (issue #1022): a new `source-archive-contains-lfs-pointer` warning fires when a direct member of a source archive is a git-lfs pointer stub: a regular member of 1-1023 bytes -- judged on the bytes actually read, not the archive's declared size -- that starts with the pointer version line (`version https://git-lfs.github.com/spec/v1`, or the legacy hawser URL, LF- or CRLF-terminated) and carries an `oid sha256:` line. A document quoting the version line after offset 0 is not a pointer and stays quiet. Nested archives are not opened. The frozen 2.10.0 reference has no such check."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1022"
 
