@@ -10,11 +10,15 @@
 //! by the `filesystem` package, not by the package shipping the logrotate
 //! config.
 //!
-//! Two further deliberate refinements of the not-packaged judgement, both
-//! scoped to that finding only: the derived directory is first reduced to
-//! the literal directory it names (see `judged_log_dir`), and a directory
-//! created by a tmpfiles.d snippet shipped in the same package counts as
-//! provided (see `tmpfiles_created_dirs`).
+//! Two further deliberate refinements of the not-packaged judgement: the
+//! derived directory is first reduced to the literal directory it names
+//! (see `judged_log_dir`), and a directory created by a tmpfiles.d snippet
+//! shipped in the same package counts as provided (see
+//! `tmpfiles_created_dirs`). The tmpfiles credit is scoped to the
+//! not-packaged finding only; the reduction is not -- the packaged entry
+//! the judged directory resolves to is also what the user-writable
+//! judgement runs on, so a satisfied directory still answers for its
+//! owner and mode.
 
 use indexmap::IndexMap;
 
@@ -23,6 +27,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::pkgfile::PkgFile;
 
 pub struct LogrotateCheck;
 
@@ -113,7 +118,11 @@ fn judged_log_dir(dir: &str) -> String {
         if comp.contains(['*', '?', '[']) {
             break;
         }
-        if judged.len() > 1 {
+        // A separator belongs between two components: the accumulated
+        // prefix needs one unless it is empty (nothing yet) or the
+        // root slash itself. A length test conflates the root with a
+        // single-character first component of a relative path.
+        if !judged.is_empty() && !judged.ends_with('/') {
             judged.push('/');
         }
         judged.push_str(comp);
@@ -128,13 +137,21 @@ fn judged_log_dir(dir: &str) -> String {
 /// `d`/`D` lines in tmpfiles.d snippets shipped in the package itself.
 /// Such a directory is guaranteed to exist with its declared mode and
 /// owner once the package is installed, so charging it as not packaged
-/// is a false positive. Only exact path matches count; other line types
-/// (`e` adjusts an existing directory, `x` ignores, ...) never create.
+/// is a false positive. Only `.conf` snippets count -- systemd-tmpfiles
+/// reads nothing else from those directories, so a `d` line in a
+/// README or example file creates nothing. The stored paths are in
+/// judged (literal) form, the same normalisation the log directory
+/// under judgement goes through, so a quoted or trailing-slash tmpfiles
+/// path still matches its directory. Other line types (`e` adjusts an
+/// existing directory, `x` ignores, ...) never create.
 fn tmpfiles_created_dirs(pkg: &Pkg) -> std::collections::HashSet<String> {
     let mut created = std::collections::HashSet::new();
     for file in &pkg.files {
         let fname = file.name.as_str();
         if pkg.ghost_files.iter().any(|g| g == fname) {
+            continue;
+        }
+        if !fname.ends_with(".conf") {
             continue;
         }
         if !fname.starts_with("/usr/lib/tmpfiles.d/")
@@ -157,11 +174,37 @@ fn tmpfiles_created_dirs(pkg: &Pkg) -> std::collections::HashSet<String> {
             };
             // The type letter may carry modifier suffixes (`d-`, `D!`).
             if matches!(kind.chars().next(), Some('d') | Some('D')) {
-                created.insert(path.to_string());
+                created.insert(judged_log_dir(path));
             }
         }
     }
     created
+}
+
+/// The `logrotate-user-writable-log-dir` detail for a packaged log
+/// directory whose owner or mode lets the log owner write where the
+/// config does not sanction it: the owner must be root or the config's
+/// `su` user, and a group-writable mode requires the group to be root
+/// or the `su` group. `None` when the directory is fine.
+fn user_writable_detail(
+    dir: &str,
+    pkgfile: &PkgFile,
+    owners: &Option<(String, String)>,
+) -> Option<String> {
+    let mode = pkgfile.mode & 0o777;
+    let user_ok =
+        pkgfile.user == "root" || owners.as_ref().is_some_and(|(u, _)| u == &pkgfile.user);
+    let group_ok = pkgfile.group == "root"
+        || mode & 0o20 == 0
+        || owners.as_ref().is_some_and(|(_, g)| g == &pkgfile.group);
+    if user_ok && group_ok {
+        None
+    } else {
+        Some(format!(
+            "{} {}:{} {:04o}",
+            dir, pkgfile.user, pkgfile.group, mode
+        ))
+    }
 }
 
 /// The parent directory of a log file path.
@@ -222,11 +265,14 @@ impl Check for LogrotateCheck {
         // so the explicit sort is parity, not a divergence.
         let mut sorted: Vec<&String> = dirs.keys().collect();
         sorted.sort();
-        let tmpfiles_dirs = if dirs.is_empty() {
-            std::collections::HashSet::new()
-        } else {
-            tmpfiles_created_dirs(pkg)
-        };
+        // The tmpfiles set is computed only when a directory actually
+        // misses the file list; most packages need no tmpfiles I/O.
+        let mut tmpfiles_dirs: Option<std::collections::HashSet<String>> = None;
+        // Judged directories already charged as not packaged: distinct
+        // raw directories can reduce to the same judged one, and the
+        // charge names the judged directory, so it is emitted once.
+        let mut charged_judged: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for dir in sorted {
             let owners = &dirs[dir];
             let Some(pkgfile) = pkg.files.iter().find(|f| f.name == *dir) else {
@@ -239,36 +285,54 @@ impl Check for LogrotateCheck {
                 // packaged, and any judged directory the package creates
                 // via its own tmpfiles.d snippets is provided as well.
                 let judged = judged_log_dir(dir);
+                // The judged directory's own file entry, when the package
+                // ships one: the find above already answered for the raw
+                // name, so this scan runs only for a differing judged name.
+                let judged_file = if judged == *dir {
+                    None
+                } else {
+                    pkg.files.iter().find(|f| f.name == judged)
+                };
                 let satisfied = is_exempt_log_dir(&judged)
-                    || pkg.files.iter().any(|f| f.name == judged)
-                    || tmpfiles_dirs.contains(&judged);
+                    || judged_file.is_some()
+                    || tmpfiles_dirs
+                        .get_or_insert_with(|| tmpfiles_created_dirs(pkg))
+                        .contains(&judged);
                 if !satisfied {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "logrotate-log-dir-not-packaged",
-                        &[&judged],
-                    );
+                    if charged_judged.insert(judged.clone()) {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "logrotate-log-dir-not-packaged",
+                            &[&judged],
+                        );
+                    }
+                } else if let Some(judged_file) = judged_file {
+                    // The satisfaction above settles only the not-packaged
+                    // finding: a directory the package does ship still
+                    // answers for its owner and mode, judged on its own
+                    // entry (the same scoping the /var/log exemption
+                    // comment above records).
+                    if let Some(detail) = user_writable_detail(&judged, judged_file, owners) {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "logrotate-user-writable-log-dir",
+                            &[&detail],
+                        );
+                    }
                 }
                 continue;
             };
-            let mode = pkgfile.mode & 0o777;
-            let user_ok =
-                pkgfile.user == "root" || owners.as_ref().is_some_and(|(u, _)| u == &pkgfile.user);
-            let group_ok = pkgfile.group == "root"
-                || mode & 0o20 == 0
-                || owners.as_ref().is_some_and(|(_, g)| g == &pkgfile.group);
-            if !user_ok || !group_ok {
+            if let Some(detail) = user_writable_detail(dir, pkgfile, owners) {
                 add_info(
                     out,
                     Level::Error,
                     pkg,
                     "logrotate-user-writable-log-dir",
-                    &[&format!(
-                        "{} {}:{} {:04o}",
-                        dir, pkgfile.user, pkgfile.group, mode
-                    )],
+                    &[&detail],
                 );
             }
         }
@@ -534,6 +598,11 @@ mod tests {
         );
         assert_eq!(judged_log_dir("/var/log/*"), "/var/log");
         assert_eq!(judged_log_dir("/var/log/*/sub"), "/var/log");
+        // A relative path keeps its separators even when the first
+        // component is a single character, and the root stays the root.
+        assert_eq!(judged_log_dir("a/b"), "a/b");
+        assert_eq!(judged_log_dir("a/b/c"), "a/b/c");
+        assert_eq!(judged_log_dir("/"), "/");
     }
 
     /// Run `LogrotateCheck::check_binary` over a package with one logrotate
@@ -652,6 +721,42 @@ mod tests {
         }
     }
 
+    /// A tmpfiles path is stored in judged form: a trailing slash or a
+    /// quoted path still matches the directory it creates.
+    #[test]
+    fn tmpfiles_path_is_normalised_before_matching() {
+        for content in [
+            "d /var/log/app/ 0755 root root -\n",
+            "d \"/var/log/app\" 0755 root root -\n",
+        ] {
+            let rendered = run_logrotate_with_extras(
+                "/var/log/app/*.log {\n  weekly\n}\n",
+                &[("/usr/lib/tmpfiles.d/app.conf", content, 0o100644)],
+            );
+            assert!(
+                not_packaged_lines(&rendered).is_empty(),
+                "tmpfiles content {content:?} must satisfy: {rendered:?}"
+            );
+        }
+    }
+
+    /// systemd-tmpfiles reads only `*.conf` snippets: a creation line in
+    /// any other file under a tmpfiles.d directory creates nothing.
+    #[test]
+    fn tmpfiles_non_conf_file_creates_nothing() {
+        for name in ["/usr/lib/tmpfiles.d/app.txt", "/usr/lib/tmpfiles.d/README"] {
+            let rendered = run_logrotate_with_extras(
+                "/var/log/app/*.log {\n  weekly\n}\n",
+                &[(name, "d /var/log/app 0755 root root -\n", 0o100644)],
+            );
+            assert_eq!(
+                not_packaged_lines(&rendered).len(),
+                1,
+                "snippet {name} must not satisfy: {rendered:?}"
+            );
+        }
+    }
+
     /// Near misses must keep firing: a non-creating tmpfiles line type, a
     /// commented-out creation line, and a creation line for another dir.
     #[test]
@@ -695,6 +800,85 @@ mod tests {
             duplicates[0].as_str(),
             "logrotate-test.noarch: E: logrotate-duplicate /var/log/myapp",
             "level/name/detail",
+        );
+    }
+
+    /// Two raw directories that reduce to the same judged directory
+    /// draw the not-packaged charge once: the charge names the judged
+    /// directory, so a second emission would be a byte-identical line.
+    #[test]
+    fn duplicate_judged_dir_is_charged_once() {
+        let rendered = run_logrotate_two_confs(
+            "/var/log/app/*.log {\n  weekly\n}\n",
+            "/var/log/app/*/*.log {\n  weekly\n}\n",
+        );
+        let hits = not_packaged_lines(&rendered);
+        assert_eq!(hits.len(), 1, "{rendered:?}");
+        assert!(
+            hits[0].ends_with("logrotate-log-dir-not-packaged /var/log/app"),
+            "unexpected charge: {}",
+            hits[0]
+        );
+    }
+
+    /// A stanza whose raw directory is a pattern still gets the
+    /// user-writable judgement when its judged directory is packaged:
+    /// satisfaction settles only the not-packaged finding, and the
+    /// packaged entry's owner and mode are what is judged.
+    #[test]
+    fn judged_packaged_dir_still_gets_user_writable_check() {
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
+        let conf = dir.join("app");
+        std::fs::write(&conf, "/var/log/app/*/app.log {\n  weekly\n}\n").expect("write conf");
+
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = crate::pkg::Pkg::open(&rpm, dir, true).expect("open fixture pkg");
+        pkg.name = "logrotate-test".to_string();
+        pkg.files = vec![
+            PkgFile {
+                name: "/etc/logrotate.d/app".to_string(),
+                path: conf.to_string_lossy().into_owned(),
+                mode: 0o100644,
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/var/log/app".to_string(),
+                path: "/var/log/app".to_string(),
+                mode: 0o40775,
+                user: "app".to_string(),
+                group: "app".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = LogrotateCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let rendered: Vec<String> = out.results().iter().map(|(_, line)| line.clone()).collect();
+
+        assert!(
+            !rendered
+                .iter()
+                .any(|l| l.contains("logrotate-log-dir-not-packaged")),
+            "unexpected not-packaged: {rendered:?}"
+        );
+        let writable: Vec<&String> = rendered
+            .iter()
+            .filter(|l| l.contains("logrotate-user-writable-log-dir"))
+            .collect();
+        assert_eq!(writable.len(), 1, "{rendered:?}");
+        assert!(
+            writable[0].starts_with(
+                "logrotate-test.noarch: E: logrotate-user-writable-log-dir /var/log/app app:app 0775"
+            ),
+            "unexpected line: {}",
+            writable[0]
         );
     }
 
