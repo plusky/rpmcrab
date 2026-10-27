@@ -153,7 +153,7 @@ executable-marked-as-config-file="""
 Executables must not be marked as config files because that may
 prevent upgrades from working correctly. If you need to be able to
 customize an executable, make it for example read a config file in
-/etc/sysconfig. A file marked %config(noreplace) only warns: the
+/etc/sysconfig. An executable marked %config(noreplace) only warns: the
 noreplace marking is deliberate, so the execution may be by design
 (hook scripts, for example) and the finding can be suppressed for
 the package if it is. A plain %config executable carries no such
