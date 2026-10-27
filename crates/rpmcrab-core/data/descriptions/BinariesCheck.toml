@@ -241,16 +241,17 @@ package with a Go toolchain at or above the recorded floor.
 """
 binary-or-shlib-calls-weak-prng="""
 The binary calls the predictable libc random functions (rand,
-random, srand, srandom, initstate, setstate, the *48 family or
-their reentrant *_r forms) and runs in a privileged
+random, srand, srandom, initstate, setstate and the *48 family,
+each also in its reentrant *_r form) and runs in a privileged
 or exposed context: the file is setuid, setgid or carries file
 capabilities, or the package ships a systemd service or socket.
 Values from these generators are predictable to anyone who can
 guess the seed -- typically the current time or the process id --
 so they must not become session identifiers, tokens, password
 salts, challenges or key material. The same calls are unremarkable
-for jitter, sampling and load spreading, which is why this finding
-is a warning scoped to privileged and daemon-shipped binaries.
+for jitter, retry backoff and identifier uniqueness, which is
+why this finding is a warning scoped to privileged and
+daemon-shipped binaries.
 Where a generated value is security-relevant, take it from
 getrandom(2), arc4random(3) or /dev/urandom in the upstream source
 instead.

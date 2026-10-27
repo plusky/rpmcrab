@@ -4623,7 +4623,8 @@ impl BinariesCheck {
         // to rand/random and the *48 generators. Charged only inside
         // the privilege-or-exposure gate -- the bare population stays
         // silent, because outside a privileged or daemon context the
-        // family's dominant uses are jitter, sampling and test data.
+        // the family's dominant uses are jitter, retry backoff and
+        // identifier uniqueness.
         // Warning inside the gate too: the artefact cannot tell a
         // security value (session id, password salt, token) from
         // jitter, and the gated corpus population is dominated by
