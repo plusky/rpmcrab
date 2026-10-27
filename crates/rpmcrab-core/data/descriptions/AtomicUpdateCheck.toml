@@ -19,6 +19,9 @@ scriptlet runs inside the new snapshot with systemd offline, so the
 code until the next reboot. Use the service macros, which defer the
 restart via systemd-update-helper, or gate the scriptlet on
 $TRANSACTIONAL_UPDATE and defer the restart to the next boot.
+Restarting a timer unit does not draw this finding: starting a
+timer only schedules its oneshot target and activates no daemon
+itself, so a timer-only restart stays quiet.
 """
 
 scriptlet-writes-outside-snapshot="""
