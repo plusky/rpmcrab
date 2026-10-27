@@ -3315,9 +3315,15 @@ impl BinariesCheck {
                 })
                 .unwrap_or_default()
         };
+        // The reference matches each PieExecutables pattern with
+        // `regex.fullmatch(bin_name)`, so anchor the compiled patterns:
+        // an unanchored search would also charge paths that merely
+        // contain a listed name (e.g. /usr/bin/ssh-authorized-keys
+        // containing /usr/bin/ssh, or /usr/bin/susedialog containing
+        // /usr/bin/su) at error severity instead of the suggestion.
         let pie_exec_regexes: Vec<Regex> = get_strings("PieExecutables")
             .iter()
-            .filter_map(|r| Regex::new(r).ok())
+            .filter_map(|r| Regex::new(&format!("^(?:{r})$")).ok())
             .collect();
         let (strings, _) = Tool::probe(&source, "strings", &[]);
         let (ar, _) = Tool::probe(&source, "ar", &["--version"]);
@@ -3546,7 +3552,8 @@ impl BinariesCheck {
                 .iter()
                 .any(|r| r.is_match(bin_name).unwrap_or(false))
             {
-                // fullmatch semantics: the config regexes are anchored by convention
+                // the compiled patterns are anchored at construction,
+                // giving the reference's fullmatch semantics
                 add_info(
                     out,
                     Level::Error,
@@ -10140,6 +10147,49 @@ description = "explicit priority string bypasses the system crypto policy"
             lines[0]
         );
         assert_lacks(&results, "position-independent-executable-suggested");
+    }
+
+    #[test]
+    fn non_pie_executable_error_requires_full_path_match() {
+        // The reference matches PieExecutables with fullmatch: a path
+        // that merely contains a listed name is not the listed
+        // executable and only gets the suggestion. Corpus cases:
+        // ssh-tools' /usr/bin/ssh-authorized-keys and /usr/bin/ssh-sig
+        // (contain /usr/bin/ssh) and susedialog's /usr/bin/susedialog
+        // (contains /usr/bin/su) were charged at E by an unanchored
+        // search; the reference charges all three at W.
+        let config = config_with("PieExecutables = [\"/usr/bin/ssh\", \"/usr/bin/su\"]");
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+
+        // Exact listed paths keep firing at E.
+        for name in ["/usr/bin/ssh", "/usr/bin/su"] {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_non_pie(&pkg, name, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "non-position-independent-executable");
+            assert_eq!(lines.len(), 1, "{name} must fire at E: {results:?}");
+            assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+            assert_lacks(&results, "position-independent-executable-suggested");
+        }
+
+        // Prefix extensions, suffix extensions and paths containing a
+        // listed name in the middle only get the suggestion.
+        for name in [
+            "/usr/bin/ssh-authorized-keys",
+            "/usr/bin/ssh-sig",
+            "/usr/bin/susedialog",
+            "/usr/bin/supercat",
+            "/usr/share/rootfs/usr/bin/ssh",
+        ] {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_non_pie(&pkg, name, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "position-independent-executable-suggested");
+            assert_eq!(lines.len(), 1, "{name} must only be suggested: {results:?}");
+            assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+            assert_lacks(&results, "non-position-independent-executable");
+        }
     }
 
     #[test]
