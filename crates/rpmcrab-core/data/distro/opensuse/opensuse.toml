@@ -166,8 +166,13 @@ Filters = [
     # From mingw{32,64}-filesystem's mingw{32,64}-rpmlintrc (shipped as
     # /opt/testing/share/rpmlint/mingw{32,64}.toml); see EXTRA_FILTERS
     # in scripts/generate-distro-configs.py.
+    # Extra: the kernel -obj build tools and the qemu guest firmware
+    # are stripped / shipped without debuginfo deliberately; see
+    # EXTRA_FILTERS in scripts/generate-distro-configs.py.
     '^mingw32-.*arch-independent-package-contains-binary-or-object.*\.a$',
     '^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$',
+    ' binary-or-shlib-without-debuginfo /usr/src/linux-[^/]+-obj/',
+    ' binary-or-shlib-without-debuginfo /usr/share/qemu/',
 ]
 
 BlockedFilters = [
