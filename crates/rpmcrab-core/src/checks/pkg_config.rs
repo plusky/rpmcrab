@@ -103,6 +103,24 @@ impl PkgConfigCheck {
     }
 }
 
+/// The libdir the arch predicate charges as wrong for this package:
+/// `/usr/lib` on a 64-bit target, `/usr/lib64` on a 32-bit one.
+fn wrong_lib_dir(is_64bit: bool) -> &'static str {
+    if is_64bit { "/usr/lib" } else { "/usr/lib64" }
+}
+
+/// A `.pc` file installed under the charged libdir tree itself
+/// describes that tree's ABI, not the host arch's: the baselibs
+/// `-32bit` packages on a 64-bit host install their `.pc` files
+/// under `/usr/lib/...` and correctly point `-L` at `/usr/lib`, the
+/// directory their libraries live in. Placement is the decidable
+/// signal -- the RPM's arch is the host arch, not the ABI the `.pc`
+/// describes. The trailing slash keeps a sibling prefix
+/// (`/usr/libfoo/...`) from qualifying.
+fn pc_installed_under_wrong_lib_dir(pc_path: &str, is_64bit: bool) -> bool {
+    pc_path.starts_with(&format!("{}/", wrong_lib_dir(is_64bit)))
+}
+
 impl Check for PkgConfigCheck {
     fn name(&self) -> &'static str {
         "PkgConfigCheck"
@@ -129,6 +147,11 @@ impl Check for PkgConfigCheck {
                 Ok(bytes) => match Self::check_bytes(&bytes, is_64bit) {
                     Ok(findings) => {
                         for (check, line) in &findings {
+                            if *check == "pkgconfig-invalid-libs-dir"
+                                && pc_installed_under_wrong_lib_dir(&file.name, is_64bit)
+                            {
+                                continue;
+                            }
                             emit(out, check, line);
                         }
                     }
@@ -486,5 +509,116 @@ mod tests {
             "unexpected line: {}",
             results[0].1
         );
+    }
+
+    /// Write `content` to a scratch `.pc` file, present it as the
+    /// package file `name` on a package of arch `arch`, and run the
+    /// whole check over it.
+    fn run_pc_at(name: &str, arch: &str, content: &str) -> Vec<(String, String)> {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pc = dir.path().join("foo.pc");
+        std::fs::write(&pc, content).expect("write fixture pc file");
+        let mut pkg = pkg_with_pc_path(&pc, name);
+        pkg.arch = arch.to_string();
+        run_pkg_config_check(&pkg)
+    }
+
+    #[test]
+    fn invalid_libs_dir_quiet_when_pc_lives_in_the_charged_tree() {
+        // The freetype2-devel-32bit shape: an x86_64 (host-arch)
+        // baselibs package whose `.pc` sits in the 32-bit tree
+        // `/usr/lib/pkgconfig` and correctly points `-L` at the
+        // directory its libraries live in.
+        let results = run_pc_at(
+            "/usr/lib/pkgconfig/foo.pc",
+            "x86_64",
+            "Libs: -L/usr/lib -lfoo\n",
+        );
+        assert!(results.is_empty(), "unexpected results: {results:?}");
+    }
+
+    #[test]
+    fn invalid_libs_dir_quiet_for_flavour_tree_under_charged_dir() {
+        // Flavoured trees under the charged libdir (the openblas
+        // `-32bit` shape) describe that tree's ABI the same way.
+        let results = run_pc_at(
+            "/usr/lib/openblas-serial/pkgconfig/foo.pc",
+            "x86_64",
+            "Libs: -L/usr/lib -lfoo\n",
+        );
+        assert!(results.is_empty(), "unexpected results: {results:?}");
+    }
+
+    #[test]
+    fn invalid_libs_dir_fires_when_pc_lives_in_the_native_tree() {
+        // The Coin shape: the `.pc` sits in `/usr/lib64/pkgconfig`,
+        // its libraries are the 64-bit ones, and a literal
+        // `-L/usr/lib` in its `Libs:` is a stray wrong dir.
+        let results = run_pc_at(
+            "/usr/lib64/pkgconfig/foo.pc",
+            "x86_64",
+            "Libs: -L/usr/lib -lfoo\n",
+        );
+        assert_eq!(results.len(), 1, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "pkgconfig-invalid-libs-dir");
+    }
+
+    #[test]
+    fn invalid_libs_dir_fires_for_share_placed_pc() {
+        // An arch-independent placement carries no ABI signal: the
+        // charged token still fires on a 64-bit package.
+        let results = run_pc_at(
+            "/usr/share/pkgconfig/foo.pc",
+            "x86_64",
+            "Libs: -L/usr/lib -lfoo\n",
+        );
+        assert_eq!(results.len(), 1, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "pkgconfig-invalid-libs-dir");
+    }
+
+    #[test]
+    fn invalid_libs_dir_fires_for_sibling_prefix_pc() {
+        // `/usr/libfoo` merely shares a prefix with `/usr/lib`; a
+        // `.pc` there is not installed under the charged tree.
+        let results = run_pc_at(
+            "/usr/libfoo/pkgconfig/foo.pc",
+            "x86_64",
+            "Libs: -L/usr/lib -lfoo\n",
+        );
+        assert_eq!(results.len(), 1, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "pkgconfig-invalid-libs-dir");
+    }
+
+    #[test]
+    fn invalid_libs_dir_32bit_direction_follows_placement() {
+        // Mirror direction on a 32-bit package: a `.pc` installed
+        // under `/usr/lib64` describing the 64-bit tree is quiet,
+        // one installed under `/usr/lib` still fires on the token.
+        let quiet = run_pc_at(
+            "/usr/lib64/pkgconfig/foo.pc",
+            "i586",
+            "Libs: -L/usr/lib64 -lfoo\n",
+        );
+        assert!(quiet.is_empty(), "unexpected results: {quiet:?}");
+        let firing = run_pc_at(
+            "/usr/lib/pkgconfig/foo.pc",
+            "i586",
+            "Libs: -L/usr/lib64 -lfoo\n",
+        );
+        assert_eq!(firing.len(), 1, "unexpected results: {firing:?}");
+        assert_eq!(firing[0].0, "pkgconfig-invalid-libs-dir");
+    }
+
+    #[test]
+    fn placement_credit_is_specific_to_invalid_libs_dir() {
+        // The placement credit silences only the libs-dir charge:
+        // another finding on the same placed `.pc` still fires.
+        let results = run_pc_at(
+            "/usr/lib/pkgconfig/foo.pc",
+            "x86_64",
+            "prefix=/usr//lib\nLibs: -L/usr/lib -lfoo\n",
+        );
+        assert_eq!(results.len(), 1, "unexpected results: {results:?}");
+        assert_eq!(results[0].0, "double-slash-in-pkgconfig-path");
     }
 }

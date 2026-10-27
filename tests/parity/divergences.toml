@@ -1900,6 +1900,13 @@ since = "0.3.0"
 
 [[divergence]]
 case = "global"
+check = "pkgconfig-invalid-libs-dir"
+kind = "behaviour"
+reason = "The finding is not reported when the `.pc` file itself is installed under the charged libdir tree (`/usr/lib/...` on a 64-bit target, `/usr/lib64/...` on a 32-bit one). Such a file describes that tree's ABI, not the host arch's: the baselibs `-32bit` packages on a 64-bit host install their `.pc` files under `/usr/lib/...` and correctly point `-L` at the directory their libraries live in (freetype2-devel-32bit: `libdir=/usr/lib`, ships `/usr/lib/libfreetype.so`). The reference (PkgConfigCheck.py) keys only on the RPM arch -- the host arch for a baselibs package -- and fires on exactly those files."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "pkgconfig-exception"
 kind = "behaviour"
 reason = "A `.pc` read failing with NotADirectory draws no `pkgconfig-exception`. That failure is the extractor's collision gap: it leaves entries whose path collides with an incompatible existing object out of the tree and reports each skip itself (grpc-source's file `usr/src/grpc/BUILD` against its directory `usr/src/grpc/build` on a case-insensitive filesystem), so the read runs through the object that won the collision. The reference (PkgConfigCheck.py) turns the same failed `open()` into the finding through its `except Exception`. Everything else matches the reference: %ghost entries are dropped from the dispatch before any read, as AbstractFilesCheck (AbstractCheck.py:45) drops `pkg.ghost_files`, and the remaining read failures -- a header-listed file missing from the tree -- plus decode failures on materialised files report as exceptions exactly as the reference charges them."
