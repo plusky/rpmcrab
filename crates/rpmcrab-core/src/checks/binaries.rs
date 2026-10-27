@@ -4853,10 +4853,16 @@ impl BinariesCheck {
         // call from one whose command is built from untrusted data,
         // so the gated form is a Warning — the maintainer audits
         // what reaches the command (the corpus classification is
-        // recorded in the divergences ledger).
-        if (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg))
-            && info.has_undefined_function_matching(&self.shell_call_regex)
-        {
+        // recorded in the divergences ledger). The second disjunct
+        // covers dynsym imports typed STT_NOTYPE: fill_from_elf
+        // files those only under `undefined_functions`, never under
+        // the FUNC-only `undefined_function_refs`.
+        let shell_call = info.has_undefined_function_matching(&self.shell_call_regex)
+            || info
+                .undefined_functions
+                .iter()
+                .any(|s| self.shell_call_regex.is_match(s).unwrap_or(false));
+        if (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg)) && shell_call {
             add_info(
                 out,
                 Level::Warning,
@@ -15680,6 +15686,33 @@ description = "explicit priority string bypasses the system crypto policy"
         // names do not match - the reference must be to system()/
         // popen() themselves.
         let lines = run(&svc_pkg, &plain, &["asystem", "systemd_foo", "popen2"]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
+
+        // A NOTYPE dynsym import (the stripped-binary shape) lands
+        // only in `undefined_functions`, with no FUNC reference at
+        // all: fires behind the gate, plain and versioned, and
+        // stays silent ungated.
+        fn run_notype(pkg: &Pkg, pkgfile: &PkgFile, symbols: &[&str]) -> Vec<String> {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let mut info = syn_info();
+            info.undefined_functions = symbols.iter().map(|s| s.to_string()).collect();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-shell")
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        let lines = run_notype(&svc_pkg, &plain, &["system"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        let lines = run_notype(&svc_pkg, &plain, &["popen@GLIBC_2.2.5"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        let lines = run_notype(&bare_pkg, &suid, &["system"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        let lines = run_notype(&bare_pkg, &plain, &["system"]);
         assert!(lines.is_empty(), "no finding: {lines:?}");
 
         // Quiet shape: a privileged file in a daemon package that
