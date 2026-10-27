@@ -190,11 +190,18 @@ fn has_end_of_central_dir(path: &Path) -> bool {
     // `_EndRecData` works from the LAST signature occurrence in the
     // tail and requires the complete 22-byte record to start there:
     // signature bytes with a truncated record after them (the shape of
-    // deliberately corrupted test fixtures) do not make a zipfile.
+    // deliberately corrupted test fixtures) do not make a zipfile. It
+    // also requires the record's comment-length field to account for
+    // exactly the bytes remaining after the record, so a record
+    // followed by trailing garbage fails the gate the same way.
     let Some(pos) = buf.windows(EOCD.len()).rposition(|w| w == EOCD) else {
         return false;
     };
-    pos + 22 <= buf.len()
+    if pos + 22 > buf.len() {
+        return false;
+    }
+    let comment_len = usize::from(u16::from_le_bytes([buf[pos + 20], buf[pos + 21]]));
+    pos + 22 + comment_len == buf.len()
 }
 
 /// The jar manifest, decoded lossily like the reference's
@@ -479,6 +486,20 @@ mod tests {
         let path = write_fixture(dir.path(), "a.zip", &bytes);
         let findings = ZipCheck::inspect(&path, "a.zip");
         assert_eq!(fixture_names(&findings), vec!["unable-to-read-zip"]);
+    }
+
+    #[test]
+    fn eocd_record_with_trailing_garbage_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        // A complete EOCD record whose comment-length field (0) does
+        // not account for the bytes after it: `_EndRecData` rejects
+        // the file, so the reference skips it instead of reporting
+        // unable-to-read-zip.
+        let mut bytes = b"PK\x05\x06".to_vec();
+        bytes.extend_from_slice(&[0x00; 18]);
+        bytes.extend_from_slice(b"garbage!");
+        let path = write_fixture(dir.path(), "a.zip", &bytes);
+        assert!(ZipCheck::inspect(&path, "a.zip").is_empty());
     }
 
     #[test]
