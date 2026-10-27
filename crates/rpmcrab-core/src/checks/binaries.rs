@@ -3382,6 +3382,10 @@ struct HardeningObservation {
     /// unreadable note is not absence -- it proves nothing either
     /// way -- so it records false here and blocks the CET listing.
     cet_absent: bool,
+    /// The file carries no ENDBR64 record: the second half of the
+    /// evidence the per-file `missing-cf-protection` finding
+    /// requires before it calls a file unprotected.
+    cet_endbr64_absent: bool,
 }
 
 /// The per-package accumulation of `HardeningObservation`s, reset at
@@ -3394,8 +3398,18 @@ struct HardeningRollup {
     any_fortify_applicable: bool,
     any_ssp_symbol: bool,
     any_fortify_symbol: bool,
+    /// Files applicable to the stack-protector arm.
+    ssp_files: usize,
+    /// Files applicable to the fortify arm.
+    fortify_files: usize,
+    /// Files applicable to at least one arm: the population the
+    /// detail's counts and example paths describe.
+    judged_files: usize,
     cet_judged: bool,
+    /// Judged x86_64 files: the cf-protection arm's population.
+    cet_files: usize,
     cet_absent_everywhere: bool,
+    cet_endbr64_absent_everywhere: bool,
 }
 
 impl HardeningRollup {
@@ -3404,19 +3418,31 @@ impl HardeningRollup {
             return;
         }
         self.files += 1;
-        if self.first_paths.len() < 3 {
-            self.first_paths.push(path.to_string());
-        }
         self.any_ssp_applicable |= obs.ssp_applicable;
         self.any_fortify_applicable |= obs.fortify_applicable;
         self.any_ssp_symbol |= obs.has_ssp_symbol;
         self.any_fortify_symbol |= obs.has_fortify_symbol;
+        if obs.ssp_applicable {
+            self.ssp_files += 1;
+        }
+        if obs.fortify_applicable {
+            self.fortify_files += 1;
+        }
         if obs.cet_judged {
+            self.cet_files += 1;
             if !self.cet_judged {
                 self.cet_judged = true;
                 self.cet_absent_everywhere = true;
+                self.cet_endbr64_absent_everywhere = true;
             }
             self.cet_absent_everywhere &= obs.cet_absent;
+            self.cet_endbr64_absent_everywhere &= obs.cet_endbr64_absent;
+        }
+        if obs.ssp_applicable || obs.fortify_applicable || obs.cet_judged {
+            self.judged_files += 1;
+            if self.first_paths.len() < 3 {
+                self.first_paths.push(path.to_string());
+            }
         }
     }
 }
@@ -3435,11 +3461,20 @@ struct OptflagsExpectations {
 
 fn optflags_expectations(optflags: &str) -> OptflagsExpectations {
     let mut expected = OptflagsExpectations::default();
+    // The last `-O` token seen: at `-O0` the compiler emits no
+    // fortify instrumentation whatever the `-D` says, so a final
+    // `-O0` clears the fortify expectation at the end.
+    let mut final_opt_is_zero = false;
     for token in optflags.split_whitespace() {
+        // A `-Wp,` prefix hands the rest of the token to the
+        // preprocessor: `-Wp,-D_FORTIFY_SOURCE=2` defines the macro
+        // exactly like the bare spelling.
+        let token = token.strip_prefix("-Wp,").unwrap_or(token);
         match token {
             "-fstack-protector" | "-fstack-protector-strong" | "-fstack-protector-all" => {
                 expected.ssp = true;
             }
+            "-fno-stack-protector" => expected.ssp = false,
             // A `-D_FORTIFY_SOURCE` counts only while it stands: a
             // later `-U_FORTIFY_SOURCE` or `=0` undefines it again.
             "-U_FORTIFY_SOURCE" | "-D_FORTIFY_SOURCE=0" => expected.fortify = false,
@@ -3447,13 +3482,29 @@ fn optflags_expectations(optflags: &str) -> OptflagsExpectations {
             | "-D_FORTIFY_SOURCE=1"
             | "-D_FORTIFY_SOURCE=2"
             | "-D_FORTIFY_SOURCE=3" => expected.fortify = true,
-            "-fcf-protection" => expected.cet = true,
+            // Only the full form asks for CET: `=branch` and
+            // `=return` are partial protection and `=none` is an
+            // explicit opt-out; the last token wins.
+            "-fcf-protection" | "-fcf-protection=full" => expected.cet = true,
+            "-fcf-protection=none" | "-fcf-protection=branch" | "-fcf-protection=return" => {
+                expected.cet = false;
+            }
+            "-O0" => final_opt_is_zero = true,
+            "-O" | "-O1" | "-O2" | "-O3" | "-Os" | "-Oz" | "-Og" | "-Ofast" => {
+                final_opt_is_zero = false;
+            }
             _ => {
-                if token.starts_with("-fcf-protection=") {
-                    expected.cet = true;
+                if let Some(level) = token
+                    .strip_prefix("-ffortify-level=")
+                    .and_then(|n| n.parse::<u32>().ok())
+                {
+                    expected.fortify = level >= 1;
                 }
             }
         }
+    }
+    if final_opt_is_zero {
+        expected.fortify = false;
     }
     expected
 }
@@ -5564,19 +5615,18 @@ impl BinariesCheck {
                 &[&pkgfile.name],
             );
         }
+        // Presence is read through the same language gate as
+        // applicability: a gated language's own symbols are not the
+        // C instrumentation the OPTFLAGS tag asks for, so they
+        // cannot stand as presence for the package either.
+        let language_gated = is_rust || is_haskell || is_ocaml;
         HardeningObservation {
             in_population: true,
-            ssp_applicable: !is_rust
-                && !is_haskell
-                && !is_ocaml
-                && is_stack_protector_applicable(info),
-            fortify_applicable: !is_rust && !is_haskell && !is_ocaml && is_fortify_applicable(info),
-            has_ssp_symbol,
-            has_fortify_symbol,
-            cet_judged: info.elf_machine == goblin::elf::header::EM_X86_64
-                && !is_rust
-                && !is_haskell
-                && !is_ocaml,
+            ssp_applicable: !language_gated && is_stack_protector_applicable(info),
+            fortify_applicable: !language_gated && is_fortify_applicable(info),
+            has_ssp_symbol: has_ssp_symbol && !language_gated,
+            has_fortify_symbol: has_fortify_symbol && !language_gated,
+            cet_judged: info.elf_machine == goblin::elf::header::EM_X86_64 && !language_gated,
             cet_absent: match info.x86_feature_1_and {
                 X86Feature1And::Present(f) => {
                     f & X86_FEATURE_1_IBT_SHSTK != X86_FEATURE_1_IBT_SHSTK
@@ -5584,6 +5634,7 @@ impl BinariesCheck {
                 X86Feature1And::Absent => true,
                 X86Feature1And::Unreadable => false,
             },
+            cet_endbr64_absent: !info.has_endbr64,
         }
     }
 
@@ -5595,9 +5646,10 @@ impl BinariesCheck {
     /// `optflags-not-applied` warning names that package-wide cause
     /// alongside the per-file findings. CET joins the named
     /// mitigations when the tag asks for it and every judged x86_64
-    /// file lacks it in its property note; it is never required on
-    /// its own -- CRT glue carries ENDBR64 even in flagless builds,
-    /// so the note, not the instruction, is the evidence.
+    /// file lacks both the full property-note bits and any ENDBR64
+    /// record -- the same two-part evidence the per-file
+    /// `missing-cf-protection` finding requires; it is never
+    /// required on its own.
     fn check_optflags_not_applied(&self, pkg: &Pkg, out: &mut Filter) {
         if pkg.arch == "noarch" {
             return;
@@ -5624,20 +5676,39 @@ impl BinariesCheck {
         if rollup.any_ssp_symbol || rollup.any_fortify_symbol {
             return None;
         }
-        let mut mitigations = vec!["stack-protector", "fortify"];
-        if expected.cet && rollup.cet_judged && rollup.cet_absent_everywhere {
-            mitigations.push("cf-protection");
+        // Each arm is counted over its own applicable population:
+        // the three do not in general coincide (a non-x86_64 file
+        // is no part of the cf-protection population).
+        let mut named: Vec<(&str, usize)> = vec![
+            ("stack-protector", rollup.ssp_files),
+            ("fortify", rollup.fortify_files),
+        ];
+        if expected.cet
+            && rollup.cet_judged
+            && rollup.cet_absent_everywhere
+            && rollup.cet_endbr64_absent_everywhere
+        {
+            named.push(("cf-protection", rollup.cet_files));
         }
         let mut paths = rollup.first_paths.join(", ");
-        if rollup.files > rollup.first_paths.len() {
+        if rollup.judged_files > rollup.first_paths.len() {
             paths.push_str(", \u{2026}");
         }
-        Some(format!(
-            "{} absent from all {} ELF files ({})",
-            mitigations.join(","),
-            rollup.files,
-            paths
-        ))
+        if named.iter().all(|(_, n)| *n == named[0].1) {
+            let names: Vec<&str> = named.iter().map(|(name, _)| *name).collect();
+            Some(format!(
+                "{} absent from all {} ELF files ({})",
+                names.join(","),
+                named[0].1,
+                paths
+            ))
+        } else {
+            let clauses: Vec<String> = named
+                .iter()
+                .map(|(name, n)| format!("{name} absent from all {n} ELF files"))
+                .collect();
+            Some(format!("{} ({})", clauses.join(", "), paths))
+        }
     }
 
     fn check_soname_symlink(&self, pkg: &Pkg, shlib: &str, soname: &str, out: &mut Filter) {
@@ -8771,6 +8842,30 @@ mod tests {
         assert!(optflags_expectations("-fcf-protection").cet);
         assert!(optflags_expectations("-fcf-protection=full").cet);
         assert!(!optflags_expectations("-O2 -g").cet);
+        // Only the full form asks for CET: `=branch` and `=return`
+        // are partial protection, `=none` an explicit opt-out, and
+        // the last token wins.
+        assert!(!optflags_expectations("-fcf-protection=none").cet);
+        assert!(!optflags_expectations("-fcf-protection=branch").cet);
+        assert!(!optflags_expectations("-fcf-protection=return").cet);
+        assert!(!optflags_expectations("-fcf-protection -fcf-protection=none").cet);
+        assert!(optflags_expectations("-fcf-protection=none -fcf-protection=full").cet);
+        // A later `-fno-stack-protector` clears an earlier request,
+        // in tag order, exactly like the FORTIFY arms.
+        assert!(!optflags_expectations("-fstack-protector-strong -fno-stack-protector").ssp);
+        assert!(optflags_expectations("-fno-stack-protector -fstack-protector-strong").ssp);
+        // The remaining FORTIFY spellings: a `-Wp,` pass-through
+        // and `-ffortify-level`, both order-sensitive.
+        assert!(optflags_expectations("-Wp,-D_FORTIFY_SOURCE=2").fortify);
+        assert!(!optflags_expectations("-D_FORTIFY_SOURCE=2 -Wp,-U_FORTIFY_SOURCE").fortify);
+        assert!(optflags_expectations("-ffortify-level=2").fortify);
+        assert!(!optflags_expectations("-ffortify-level=0").fortify);
+        assert!(!optflags_expectations("-D_FORTIFY_SOURCE=2 -ffortify-level=0").fortify);
+        // At `-O0` the compiler emits no fortify instrumentation
+        // whatever the `-D` says; the final `-O` token decides.
+        assert!(!optflags_expectations("-O0 -D_FORTIFY_SOURCE=2").fortify);
+        assert!(!optflags_expectations("-D_FORTIFY_SOURCE=2 -O0").fortify);
+        assert!(optflags_expectations("-O0 -O2 -D_FORTIFY_SOURCE=2").fortify);
         assert_eq!(optflags_expectations(""), OptflagsExpectations::default());
     }
 
@@ -8836,6 +8931,95 @@ mod tests {
         assert_eq!(
             detail.as_deref(),
             Some("stack-protector,fortify absent from all 2 ELF files (/usr/bin/a, /usr/bin/b)")
+        );
+    }
+
+    #[test]
+    fn optflags_not_applied_cet_needs_endbr64_absence_too() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        const TAG: &str = "-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=3 -fcf-protection";
+        // ENDBR64 records present (flag-built CRT glue carries them
+        // even in otherwise flagless builds): the missing property
+        // note alone does not name cf-protection.
+        let mk_endbr = || {
+            let mut info = flagless_info(FLAGLESS_IMPORTS);
+            info.has_endbr64 = true;
+            info
+        };
+        let files: Vec<(&str, ReadelfInfo)> = ["/usr/bin/a", "/usr/bin/b"]
+            .iter()
+            .map(|n| (*n, mk_endbr()))
+            .collect();
+        let check = optflags_rollup_check(&pkg, &files);
+        assert_eq!(
+            check.optflags_not_applied_detail(TAG).as_deref(),
+            Some("stack-protector,fortify absent from all 2 ELF files (/usr/bin/a, /usr/bin/b)")
+        );
+        // An unreadable property note blocks the naming too: it
+        // proves nothing either way.
+        let mk_unreadable = || {
+            let mut info = flagless_info(FLAGLESS_IMPORTS);
+            info.x86_feature_1_and = X86Feature1And::Unreadable;
+            info
+        };
+        let files: Vec<(&str, ReadelfInfo)> = ["/usr/bin/a", "/usr/bin/b"]
+            .iter()
+            .map(|n| (*n, mk_unreadable()))
+            .collect();
+        let check = optflags_rollup_check(&pkg, &files);
+        assert_eq!(
+            check.optflags_not_applied_detail(TAG).as_deref(),
+            Some("stack-protector,fortify absent from all 2 ELF files (/usr/bin/a, /usr/bin/b)")
+        );
+    }
+
+    #[test]
+    fn optflags_not_applied_counts_each_arm_over_its_own_population() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        // The aarch64 file belongs to the stack-protector and
+        // fortify populations but not to the cf-protection one, so
+        // the detail counts each arm over its own population.
+        let mut aarch = flagless_info(FLAGLESS_IMPORTS);
+        aarch.elf_machine = goblin::elf::header::EM_AARCH64;
+        let files: Vec<(&str, ReadelfInfo)> = vec![
+            ("/usr/bin/a", flagless_info(FLAGLESS_IMPORTS)),
+            ("/usr/bin/b", flagless_info(FLAGLESS_IMPORTS)),
+            ("/usr/bin/c", aarch),
+        ];
+        let check = optflags_rollup_check(&pkg, &files);
+        let detail = check.optflags_not_applied_detail(
+            "-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=3 -fcf-protection",
+        );
+        assert_eq!(
+            detail.as_deref(),
+            Some(
+                "stack-protector absent from all 3 ELF files, fortify absent from all 3 \
+                 ELF files, cf-protection absent from all 2 ELF files \
+                 (/usr/bin/a, /usr/bin/b, /usr/bin/c)"
+            )
+        );
+    }
+
+    #[test]
+    fn optflags_not_applied_language_gated_symbols_are_not_presence() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        // A Haskell binary whose own runtime references the canary
+        // and a fortified wrapper: that is not the C
+        // instrumentation the tag asks for, so it does not quiet
+        // the finding, and the counts cover the C file alone.
+        let mut haskell = flagless_info(FLAGLESS_IMPORTS);
+        haskell.needed = vec!["libHSrts-1.0.2.so".to_string()];
+        haskell.functions = vec!["__stack_chk_fail".to_string(), "__memcpy_chk".to_string()];
+        let files: Vec<(&str, ReadelfInfo)> = vec![
+            ("/usr/bin/a", flagless_info(FLAGLESS_IMPORTS)),
+            ("/usr/bin/b", haskell),
+        ];
+        let check = optflags_rollup_check(&pkg, &files);
+        let detail =
+            check.optflags_not_applied_detail("-fstack-protector-strong -D_FORTIFY_SOURCE=2");
+        assert_eq!(
+            detail.as_deref(),
+            Some("stack-protector,fortify absent from all 1 ELF files (/usr/bin/a)")
         );
     }
 
