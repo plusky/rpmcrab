@@ -2689,15 +2689,24 @@ fn source_pkg_name(sourcerpm: &str) -> &str {
     }
 }
 
+/// Whether a scriptlet slot can create a file when the package is
+/// installed: the package's own transaction slots. Removal-time
+/// slots (`%preun`, `%postun`), triggers and `%verifyscript` create
+/// nothing at install, so a mention in one of them does not credit
+/// a ghost -- the slot set the `ghost-files-without-postin` sibling
+/// judges by.
+fn ghost_credit_slot(label: &str) -> bool {
+    matches!(label, "%pretrans" | "%pre" | "%post" | "%posttrans")
+}
+
 /// The concatenated scriptlet bodies of `pkg` for the
-/// `ghost-file-with-buildroot-content` credit: every `SCRIPT_TAGS`
-/// slot except `%verifyscript`, which runs at verify time and creates
-/// nothing. `tag_str_array` accepts both the scalar and the trigger
-/// (parallel-array) shapes.
+/// `ghost-file-with-buildroot-content` credit: the install-time
+/// slots (see `ghost_credit_slot`). `tag_str_array` accepts both the
+/// scalar and the trigger (parallel-array) shapes.
 fn ghost_scriptlet_text(pkg: &Pkg) -> String {
     let mut text = String::new();
     for (tag, _prog, label) in crate::pkg::SCRIPT_TAGS {
-        if *label == "%verifyscript" {
+        if !ghost_credit_slot(label) {
             continue;
         }
         for body in pkg.tag_str_array(*tag) {
@@ -2708,14 +2717,86 @@ fn ghost_scriptlet_text(pkg: &Pkg) -> String {
     text
 }
 
+/// Whether `c` can be part of a path token. A scriptlet mention of
+/// a path credits only at token boundaries: a suffixed lookalike
+/// (`/etc/foo.conf.bak`) or a prefixed one (`/backup/etc/foo.conf`)
+/// does not name the path.
+fn is_path_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+' | '~')
+}
+
+/// Whether `text` names `path` literally at path-token boundaries
+/// on both sides.
+fn scriptlet_names_path(text: &str, path: &str) -> bool {
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(path) {
+        let start = from + rel;
+        let end = start + path.len();
+        let before_ok = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_path_token_char(c));
+        let after_ok = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_path_token_char(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+/// Whether `text` appends the path tail `base` to a variable
+/// expansion at a path-token boundary: `${dir}/ls-R` or `$dir/ls-R`
+/// -- the directory is computed, the file is written for every
+/// value. A literal directory ending in the same basename (another
+/// file's path) does not credit.
+fn scriptlet_appends_tail(text: &str, base: &str) -> bool {
+    let needle = format!("/{base}");
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(&needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let after_ok = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_path_token_char(c));
+        if after_ok {
+            let before = &text[..start];
+            if before.ends_with('}') {
+                return true;
+            }
+            // The unbraced form: the variable name runs back to
+            // its `$` with nothing between it and the slash.
+            if let Some(dollar) = before.rfind('$') {
+                let var = &before[dollar + 1..];
+                if !var.is_empty()
+                    && var
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    return true;
+                }
+            }
+        }
+        from = start + 1;
+    }
+    false
+}
+
 /// The firing predicate of `ghost-file-with-buildroot-content`
 /// (issue #1017): a `%ghost` regular file whose header size is
 /// positive, charged only when it carries the `%config` flag or sits
 /// under /etc or /usr/etc, and silent when a scriptlet names the path
-/// literally (the full path; macros are expanded in the header), or
-/// appends the path tail to a variable expansion (`${dir}/ls-R`: the
-/// directory is computed, the file is written for every value). A
-/// scriptlet that embeds the path behind a variable prefix
+/// literally at path-token boundaries (the full path; macros are
+/// expanded in the header), or appends the path tail to a variable
+/// expansion at a path-token boundary (`${dir}/ls-R`, `$dir/ls-R`:
+/// the directory is computed, the file is written for every value).
+/// A scriptlet that embeds the path behind a variable prefix
 /// (`$sysconfdir/xrdp/rsakeys.ini`) does not name the installed path
 /// and does not credit: the package discards bytes it cannot prove
 /// are recreated.
@@ -2732,16 +2813,15 @@ fn ghost_buildroot_content_fires(pkgfile: &PkgFile, scriptlet_text: &str) -> boo
     if !charged {
         return false;
     }
-    if scriptlet_text.contains(pkgfile.name.as_str()) {
+    if scriptlet_names_path(scriptlet_text, &pkgfile.name) {
         return false;
     }
     // A scriptlet that builds the path from a variable expansion --
     // `${dir}/ls-R` in texlive's %post, which regenerates the file for
     // every texmf tree -- names the path tail directly after the
-    // expansion's closing brace. A literal directory ending in the
-    // same basename (another file's path) does not credit.
+    // expansion.
     let base = pkgfile.name.rsplit('/').next().unwrap_or(&pkgfile.name);
-    !scriptlet_text.contains(&format!("}}/{}", base))
+    !scriptlet_appends_tail(scriptlet_text, base)
 }
 
 /// A compiled cache whose source ships next to it: a `%ghost` named
@@ -3319,9 +3399,8 @@ impl FilesCheck {
     /// regular file with a positive header size had real bytes in the
     /// buildroot that the package silently discards. Only config-shaped
     /// ghosts are charged (the `%config` flag, or a path under /etc or
-    /// /usr/etc), and a scriptlet that names the path literally is
-    /// credited with creating the file at install time, so the charge
-    /// is skipped then.
+    /// /usr/etc), and an install-time scriptlet that names the path is
+    /// credited with creating the file, so the charge is skipped then.
     fn check_ghost_buildroot_content(&self, pkg: &Pkg, out: &mut Filter) {
         let scriptlet_text = ghost_scriptlet_text(pkg);
         for pkgfile in &pkg.files {
@@ -15172,6 +15251,17 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
                 0o100644,
                 402,
             ),
+            // The %config flag alone charges, outside /etc and
+            // /usr/etc alike (issue #1145).
+            ghost_sized_file(
+                "/var/lib/foo/state.conf",
+                RPMFILE_GHOST | RPMFILE_CONFIG,
+                0o100644,
+                128,
+            ),
+            // The /usr/etc path alone charges, with no %config flag
+            // (issue #1145).
+            ghost_sized_file("/usr/etc/foo.conf", RPMFILE_GHOST, 0o100644, 42),
         ];
         for f in &cases {
             assert!(
@@ -15203,6 +15293,51 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
             ghost_buildroot_content_fires(&stub, apparmor_post),
             "a literal path sharing the basename does not credit"
         );
+        // Boundary near-misses (issue #1145): a suffixed or prefixed
+        // lookalike does not name the path, and a tail match must
+        // end at a token boundary too.
+        let conf = ghost_sized_file(
+            "/etc/foo.conf",
+            RPMFILE_GHOST | RPMFILE_CONFIG,
+            0o100644,
+            29,
+        );
+        for text in [
+            "touch /etc/foo.conf.bak",
+            "cp /dev/null /backup/etc/foo.conf",
+        ] {
+            assert!(
+                ghost_buildroot_content_fires(&conf, text),
+                "a boundary-less lookalike does not credit: {text}"
+            );
+        }
+        let tex = ghost_sized_file(
+            "/etc/texmf/ls-R",
+            RPMFILE_GHOST | RPMFILE_CONFIG,
+            0o100664,
+            67,
+        );
+        for text in ["echo x > ${dir}/ls-R.bak", "echo x > $dir/ls-R2"] {
+            assert!(
+                ghost_buildroot_content_fires(&tex, text),
+                "a tail match without a trailing boundary does not credit: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn ghost_credit_slots_are_the_install_time_slots() {
+        // Only the slots that can create the file when the package
+        // is installed credit a ghost (issue #1145): removal-time
+        // slots, triggers and %verifyscript are excluded -- this is
+        // the executable form of the %verifyscript exclusion, over
+        // the real slot table.
+        let credited: Vec<&str> = crate::pkg::SCRIPT_TAGS
+            .iter()
+            .map(|(_, _, label)| *label)
+            .filter(|label| ghost_credit_slot(label))
+            .collect();
+        assert_eq!(credited, ["%pre", "%post", "%pretrans", "%posttrans"]);
     }
 
     #[test]
@@ -15255,6 +15390,19 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
         assert!(
             !ghost_buildroot_content_fires(&tex, tex_post),
             "a path tail appended to a variable expansion credits it"
+        );
+        // The unbraced expansion form credits the same way.
+        assert!(
+            !ghost_buildroot_content_fires(&tex, "echo x > $dir/ls-R"),
+            "an unbraced variable expansion credits the tail"
+        );
+        // A quoted literal names the path: the quotes are token
+        // boundaries, not path characters.
+        let named_post = "[ -f \"/etc/xrdp/rsakeys.ini\" ] || \
+            openssl genrsa -out \"/etc/xrdp/rsakeys.ini\"";
+        assert!(
+            !ghost_buildroot_content_fires(&named, named_post),
+            "a quoted literal names the path"
         );
     }
 
