@@ -367,6 +367,16 @@ fn develfile_regex() -> &'static Regex {
     DEVELFILE_REGEX.get_or_init(|| Regex::new(r"\.(a|cmxa?|mli?|gir)$").expect("static regex"))
 }
 
+/// The devel keyword as a hyphen-delimited name component
+/// (`libstdc++6-devel-gcc7`, `ruby4.0-devel-extra`): a flavoured devel
+/// package. Scoped to the devel keyword alone -- a `-debug-`
+/// component names a debug flavour of a runtime package, not a devel
+/// package.
+static DEVEL_COMPONENT_REGEX: OnceLock<Regex> = OnceLock::new();
+fn devel_component_regex() -> &'static Regex {
+    DEVEL_COMPONENT_REGEX.get_or_init(|| Regex::new(r"(.*)-devel-").expect("static regex"))
+}
+
 static BUILDCONFIGFILE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn buildconfigfile_regex() -> &'static Regex {
     BUILDCONFIGFILE_REGEX
@@ -1829,6 +1839,7 @@ pub struct FilesCheck {
     man_base_re: Regex,
     info_re: Regex,
     devel_re: Regex,
+    devel_component_re: Regex,
     kernel_package_re: Regex,
     debuginfo_package_re: Regex,
     debugsource_package_re: Regex,
@@ -1964,6 +1975,7 @@ impl FilesCheck {
             man_base_re: man_base_regex().clone(),
             info_re: info_regex().clone(),
             devel_re: devel_regex().clone(),
+            devel_component_re: devel_component_regex().clone(),
             kernel_package_re: kernel_package_regex().clone(),
             debuginfo_package_re: debuginfo_package_regex().clone(),
             debugsource_package_re: debugsource_package_regex().clone(),
@@ -2239,7 +2251,17 @@ impl Check for FilesCheck {
         };
         self.check_utf8(pkg, out);
         self.check_bidi_controls(pkg, out);
-        st.devel_pkg = is_match(&self.devel_re, &pkg.name);
+        // A devel keyword as a hyphen-delimited name component
+        // (`libstdc++6-devel-gcc7`, `ruby4.0-devel-extra`) marks a
+        // flavoured devel package just as the suffix form does --
+        // the same component test TagsCheck applies to its
+        // dependency findings, scoped to the devel keyword: a
+        // `-debug-` component names a debug flavour of a runtime
+        // package, not a devel package. Provides names keep the
+        // suffix test: a virtual provide carrying the keyword
+        // mid-name carries no such fact.
+        st.devel_pkg =
+            is_match(&self.devel_re, &pkg.name) || is_match(&self.devel_component_re, &pkg.name);
         if !st.devel_pkg {
             for p in &pkg.provides {
                 if is_match(&self.devel_re, &p.name) {
@@ -12380,6 +12402,71 @@ mod tests {
             rpath_findings(&results).is_empty(),
             "unexpected firing on glued token: {results:?}"
         );
+    }
+
+    #[test]
+    fn devel_file_quiet_in_flavoured_devel_package() {
+        // A devel keyword as a hyphen-delimited name component marks
+        // a flavoured devel package: `libstdc++6-devel-gcc7` ships
+        // the gcc7 libstdc++ headers and `ruby4.0-devel-extra` the
+        // ruby devel extras; neither is a non-devel package stranding
+        // devel files. The same component test TagsCheck applies to
+        // its dependency findings.
+        for name in [
+            "libstdc++6-devel-gcc7",
+            "ruby4.0-devel-extra",
+            "foo-devel-32bit",
+        ] {
+            let (mut pkg, _dir) = pkg_with_files(vec![PkgFile {
+                ..mkfile("/usr/include/foo.h", 0o100644, 77)
+            }]);
+            pkg.name = name.to_string();
+            let results = run_check_binary(&pkg);
+            assert!(
+                !results
+                    .iter()
+                    .any(|(n, _)| n == "devel-file-in-non-devel-package"),
+                "false positive in flavoured devel package {name}: {results:?}"
+            );
+        }
+        // Near misses: the keyword must be a whole hyphen-delimited
+        // component -- a name merely containing the letters stays a
+        // non-devel package and keeps firing.
+        for name in ["foo-development", "foodevel-bar"] {
+            let (mut pkg, _dir) = pkg_with_files(vec![PkgFile {
+                ..mkfile("/usr/include/foo.h", 0o100644, 78)
+            }]);
+            pkg.name = name.to_string();
+            let results = run_check_binary(&pkg);
+            assert!(
+                results
+                    .iter()
+                    .any(|(n, _)| n == "devel-file-in-non-devel-package"),
+                "genuine finding lost for {name}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn devel_component_credit_is_devel_only() {
+        // The credit is scoped to the -devel- component: a -debug-
+        // component names a debug flavour of a runtime package
+        // (dapl-debug-libs), not a devel package -- its headers keep
+        // firing devel-file, and its versioned runtime library does
+        // not trip the inverse finding.
+        let (mut pkg, _dir) = pkg_with_files(vec![PkgFile {
+            ..mkfile("/usr/include/foo.h", 0o100644, 81)
+        }]);
+        pkg.name = "dapl-debug-libs".to_string();
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, _)| n == "devel-file-in-non-devel-package"),
+            "genuine finding lost for dapl-debug-libs: {results:?}"
+        );
+        let lines = non_devel_lines("dapl-debug-libs", &["/usr/lib64/libdat2.so.2.0.0"]);
+        assert!(lines.is_empty(), "{lines:?}");
     }
 
     #[test]

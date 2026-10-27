@@ -1484,6 +1484,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/511"
 
 [[divergence]]
 case = "global"
+check = "devel-file-in-non-devel-package"
+kind = "behaviour"
+reason = "The reference's devel-package test matches the devel keyword only as a name suffix. The port also credits the devel keyword as a hyphen-delimited name component: libstdc++6-devel-gcc7 and ruby4.0-devel-extra are flavoured devel packages, and on the 2026-10-26 Factory sweep the component form carries 536 of the finding's 88,042 lines. The credit is scoped to the devel keyword -- a -debug- name component names a debug flavour of a runtime package (dapl-debug-libs), not a devel package, and crediting it would charge that package's versioned runtime library under non-devel-file-in-devel-package instead. Provides names keep the suffix test."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "no-dependency-on"
 kind = "behaviour"
 reason = "Deliberate removal (issue #534): the port does not emit `no-dependency-on` from I18NCheck. The reference's trailing-language rule (I18NCheck.py) demands a `locales-<lang>` dependency from every binary package whose name ends in an ISO 639 code; that encodes Mandriva's per-language locale packages. Replicated over the Factory repo metadata the rule fires on 7,551 binary packages and not one of the demanded names exists as a package -- there is no `locales-<lang>` package for any code in the table (openSUSE ships a monolithic `glibc-locale`, Fedora uses `glibc-langpack-*`) -- so the demanded dependency can never be satisfied; `doc` alone (Darai) accounts for 5,553, and both the openSUSE and Fedora configs filter the `locales` shape. This supersedes the `-doc` carve-out (plusky/rpmcrab#459). The finding itself stays live: FilesCheck still emits `no-dependency-on` for its dangling-symlink exceptions and the perl/python versioned-dependency rules, which are satisfiable and config-driven. Pinned by `killed_locales_dependency_finding_stays_absent`."
