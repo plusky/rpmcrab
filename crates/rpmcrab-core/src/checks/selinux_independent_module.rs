@@ -24,6 +24,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::pkgfile::is_reg;
 
 const ALLOWED_IF_DIR: &str = "/usr/share/selinux/devel/include/distributed/";
 const INCLUDE_DIR: &str = "/usr/share/selinux/devel/include/";
@@ -93,7 +94,12 @@ impl Check for SELinuxIndependentModuleCheck {
         ) {
             return;
         }
-        for f in Self::misplaced_if_files(pkg.files.iter().map(|f| f.name.as_str())) {
+        for f in Self::misplaced_if_files(
+            pkg.files
+                .iter()
+                .filter(|f| !f.is_ghost() && is_reg(f.mode))
+                .map(|f| f.name.as_str()),
+        ) {
             add_info(
                 out,
                 Level::Error,
@@ -138,6 +144,28 @@ mod tests {
             mode: 0o100644,
             ..Default::default()
         }
+    }
+
+    fn ghost(name: &str) -> PkgFile {
+        PkgFile {
+            flags: crate::pkg::pkgfile::RPMFILE_GHOST,
+            ..regular(name)
+        }
+    }
+
+    fn directory(name: &str) -> PkgFile {
+        PkgFile {
+            mode: 0o040755,
+            ..regular(name)
+        }
+    }
+
+    fn selinux_pkg_with(files: Vec<PkgFile>) -> Pkg {
+        let mut pkg = fixture_pkg();
+        pkg.name = "selinux-policy-foo".to_string();
+        pkg.requires = vec![dep("selinux-policy-base")];
+        pkg.files = files;
+        pkg
     }
 
     fn selinux_pkg(name: &str, files: &[&str]) -> Pkg {
@@ -300,5 +328,26 @@ mod tests {
                 "{results:?}"
             );
         }
+    }
+
+    #[test]
+    fn ghost_if_file_is_quiet() {
+        let pkg = selinux_pkg_with(vec![ghost("/usr/share/selinux/packages/foo.if")]);
+        let results = run(&pkg);
+        assert!(results.is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn directory_if_entry_is_quiet() {
+        let pkg = selinux_pkg_with(vec![directory("/usr/share/selinux/packages/foo.if")]);
+        let results = run(&pkg);
+        assert!(results.is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn regular_if_file_is_still_reported() {
+        let pkg = selinux_pkg_with(vec![regular("/usr/share/selinux/packages/foo.if")]);
+        let results = run(&pkg);
+        assert_eq!(results.len(), 1, "{results:?}");
     }
 }
