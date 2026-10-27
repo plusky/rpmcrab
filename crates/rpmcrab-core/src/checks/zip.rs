@@ -50,38 +50,112 @@ const MAX_ENTRY_BYTES: usize = 64 * 1024 * 1024;
 enum CrcOutcome {
     Ok,
     BadEntry(String),
-    Unreadable,
+    /// The archive's CRC cannot be verified by this reader; the string is
+    /// the detail for the `unable-to-read-zip` warning.
+    Unreadable(String),
+}
+
+/// Read one entry of the CRC pass into `sink`, capped at
+/// `MAX_ENTRY_BYTES + 1` inflated bytes, opening it by its
+/// central-directory position (`by_index`) rather than by name.
+///
+/// Positional opening is what makes the pass exact:
+///
+/// - A legacy-encoded name (cp437 without the UTF-8 flag) decodes to a
+///   string that does not re-encode to the raw central-directory
+///   bytes, so a by-name lookup cannot address the entry at all.
+/// - Two distinct raw names can decode to the same string (the same
+///   name stored once as cp437 bytes and once as UTF-8 bytes); a
+///   by-name lookup re-encodes the decoded string and resolves both
+///   positions to the one raw entry matching it, so that entry would
+///   be verified twice and the other never.
+/// - A name that fails to decode has no by-name address at all.
+///
+/// The reference's `testzip()` likewise reaches its entries by walking
+/// `filelist` in central-directory order. `name` is kept only as the
+/// identifier a failure is reported under. (Entries sharing the exact
+/// same raw name are collapsed into one position by the zip reader
+/// itself, before this pass runs.)
+///
+/// The read happens inside this call rather than returning the opened
+/// entry: a returned `ZipFile` would keep the archive borrowed while
+/// the caller works through the entries, which the borrow checker
+/// rejects (NLL problem case 3).
+///
+/// A password-protected entry surfaces as
+/// `UnsupportedArchive(PASSWORD_REQUIRED)` (zip 9 reports it at open,
+/// not at read); like the reference's `RuntimeError` path it aborts
+/// the file instead of naming an entry. An entry whose compression
+/// method the reader cannot inflate aborts the file the same way
+/// (see `map_open_error`).
+fn read_entry(
+    archive: &mut ZipArchive<File>,
+    index: usize,
+    name: &str,
+    sink: &mut Vec<u8>,
+) -> Result<std::io::Result<usize>, CrcOutcome> {
+    match archive.by_index(index) {
+        Ok(entry) => Ok(entry.take(MAX_ENTRY_BYTES as u64 + 1).read_to_end(sink)),
+        Err(err) => Err(map_open_error(err, name)),
+    }
+}
+
+/// Map an entry-open failure to the CRC pass outcome it aborts with.
+///
+/// Password-required and unsupported-compression-method failures abort
+/// the whole CRC pass — and with it the file's remaining checks — as
+/// `unable-to-read-zip` (W): no CRC verdict exists for such an entry,
+/// and the pass names no entry for it. The unsupported-method branch
+/// is decided at open, before any data is read, so a corrupt entry
+/// behind an unsupported method is W here regardless of its stored
+/// CRC. Against the reference that is a codec-dependent split: on a
+/// Python without the codec, `testzip()` raises `NotImplementedError`
+/// — a `RuntimeError` subclass — and the reference's outer handler
+/// reports the same W; on a Python with the codec (zstd ships with
+/// Python 3.14+) it inflates the entry, and a corrupt one is then
+/// `bad-crc-in-zip` (E). Any other open failure names the entry as a
+/// bad one instead of aborting.
+fn map_open_error(err: ZipError, name: &str) -> CrcOutcome {
+    match err {
+        ZipError::UnsupportedArchive(msg) if msg == ZipError::PASSWORD_REQUIRED => {
+            CrcOutcome::Unreadable("password required".to_string())
+        }
+        ZipError::InvalidPassword => CrcOutcome::Unreadable("password required".to_string()),
+        ZipError::CompressionMethodNotSupported(id) => {
+            CrcOutcome::Unreadable(format!("compression method not supported: {id}"))
+        }
+        _ => CrcOutcome::BadEntry(name.to_string()),
+    }
 }
 
 /// `ZipFile.testzip()`: the first entry whose data fails to read. Entries are
 /// visited in central-directory order, as `filelist` is in the reference.
 ///
-/// A password-protected entry surfaces as
-/// `UnsupportedArchive(PASSWORD_REQUIRED)` (zip 2.x reports it at open, not
-/// at read); like the reference's `RuntimeError` path it aborts the file
-/// instead of naming an entry.
-///
 /// An entry inflating past `MAX_ENTRY_BYTES` is a bad entry: it is
 /// reported, never inflated in full.
 fn first_bad_crc(archive: &mut ZipArchive<File>) -> CrcOutcome {
-    // zip 9 yields entry names as results: a name that fails to
-    // decode cannot be addressed by name, so it is skipped here.
-    let names: Vec<String> = archive
-        .file_names()
-        .filter_map(|name| name.ok().map(|name| name.into_owned()))
+    // zip 9 yields entry names as results, one per central-directory
+    // position. The vector stays index-aligned (no compaction) so a
+    // position always names the same entry `by_index` opens. A name
+    // that fails to decode does not skip its entry — the reference's
+    // `testzip()` walks every `filelist` entry — so the entry is
+    // verified positionally and reported under a fallback identifier
+    // naming its position.
+    let names: Vec<String> = (0..archive.len())
+        .map(|index| {
+            archive
+                .name_for_index(index)
+                .and_then(|name| name.ok())
+                .map(|name| name.into_owned())
+                .unwrap_or_else(|| format!("<undecodable name: entry {index}>"))
+        })
         .collect();
     let mut sink = Vec::new();
-    for name in &names {
+    for (index, name) in names.iter().enumerate() {
         sink.clear();
-        let read = match archive.by_name(name) {
-            Ok(entry) => entry
-                .take(MAX_ENTRY_BYTES as u64 + 1)
-                .read_to_end(&mut sink),
-            Err(ZipError::UnsupportedArchive(msg)) if msg == ZipError::PASSWORD_REQUIRED => {
-                return CrcOutcome::Unreadable;
-            }
-            Err(ZipError::InvalidPassword) => return CrcOutcome::Unreadable,
-            Err(_) => return CrcOutcome::BadEntry(name.clone()),
+        let read = match read_entry(archive, index, name, &mut sink) {
+            Ok(read) => read,
+            Err(outcome) => return outcome,
         };
         if read.is_err() || sink.len() > MAX_ENTRY_BYTES {
             return CrcOutcome::BadEntry(name.clone());
@@ -188,8 +262,8 @@ impl ZipCheck {
             CrcOutcome::BadEntry(bad) => {
                 out.push((Level::Error, "bad-crc-in-zip", vec![bad, fname.to_string()]))
             }
-            CrcOutcome::Unreadable => {
-                return unreadable("password required".to_string());
+            CrcOutcome::Unreadable(detail) => {
+                return unreadable(detail);
             }
         }
         if is_match(jar_regex(), fname) {
@@ -562,6 +636,142 @@ mod tests {
         let path = write_fixture(dir.path(), "full.zip", &bytes);
         let findings = ZipCheck::inspect(&path, "full.zip");
         assert_eq!(fixture_names(&findings), vec!["bad-crc-in-zip"]);
+    }
+
+    /// Build a zip from raw parts: `(name bytes, payload, stored CRC,
+    /// method)` entries, all stored in one local header + central
+    /// directory + EOCD sequence. Needed for shapes `ZipWriter` cannot
+    /// produce (legacy-encoded names, foreign compression methods).
+    /// The stored CRC is written verbatim so a test can lie about it.
+    fn build_raw_zip(entries: &[(&[u8], &[u8], u32, u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut cd = Vec::new();
+        for (name, data, crc, method) in entries {
+            let offset = out.len() as u32;
+            out.extend_from_slice(b"PK\x03\x04");
+            out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            out.extend_from_slice(&0u16.to_le_bytes()); // flags
+            out.extend_from_slice(&method.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            out.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // extra length
+            out.extend_from_slice(name);
+            out.extend_from_slice(data);
+            cd.extend_from_slice(b"PK\x01\x02");
+            cd.extend_from_slice(&20u16.to_le_bytes()); // version made by
+            cd.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            cd.extend_from_slice(&0u16.to_le_bytes()); // flags
+            cd.extend_from_slice(&method.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            cd.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            cd.extend_from_slice(&crc.to_le_bytes());
+            cd.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            cd.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            cd.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes()); // extra length
+            cd.extend_from_slice(&0u16.to_le_bytes()); // comment length
+            cd.extend_from_slice(&0u16.to_le_bytes()); // disk number
+            cd.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+            cd.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+            cd.extend_from_slice(&offset.to_le_bytes());
+            cd.extend_from_slice(name);
+        }
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&cd);
+        out.extend_from_slice(b"PK\x05\x06");
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        out.extend_from_slice(&0u16.to_le_bytes()); // cd disk
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(cd.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        out
+    }
+
+    #[test]
+    fn legacy_encoded_name_with_good_crc_is_quiet() {
+        // The CPython test-suite fixture shape (zip_cp437_header.zip,
+        // fspy's iso-8859-1.zip): the entry name's raw bytes are cp437
+        // without the UTF-8 flag, so the decoded name does not
+        // re-encode to the raw bytes and a by-name lookup cannot
+        // address the entry. Its data is intact (CRC32 of "hello" is
+        // 0x3610a686) and the reference verifies it, so the archive is
+        // quiet.
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = build_raw_zip(&[
+            (b"plain.txt", b"hello", 0x3610_a686, 0),
+            (b"filename_with_\x91o\x86.txt", b"hello", 0x3610_a686, 0),
+        ]);
+        let path = write_fixture(dir.path(), "a.zip", &bytes);
+        assert!(ZipCheck::inspect(&path, "a.zip").is_empty());
+    }
+
+    #[test]
+    fn legacy_encoded_name_with_bad_crc_still_reports() {
+        // Positional opening must actually verify the entry, not
+        // skip it: the same legacy-encoded name carrying a wrong stored
+        // CRC is reported under its decoded (cp437) name.
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = build_raw_zip(&[
+            (b"plain.txt", b"hello", 0x3610_a686, 0),
+            (b"filename_with_\x91o\x86.txt", b"hello", 0xdead_beef, 0),
+        ]);
+        let path = write_fixture(dir.path(), "a.zip", &bytes);
+        let findings = ZipCheck::inspect(&path, "a.zip");
+        assert_eq!(fixture_names(&findings), vec!["bad-crc-in-zip"]);
+        assert_eq!(
+            findings[0].2,
+            vec![
+                "filename_with_\u{00e6}o\u{00e5}.txt".to_string(),
+                "a.zip".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_decoded_name_second_entry_is_verified() {
+        // The same name stored twice under different raw encodings —
+        // UTF-8 bytes and cp437 bytes, both decoding to "été.txt" —
+        // occupies two central-directory positions. A by-name lookup
+        // re-encodes the decoded name as UTF-8, so it resolves both
+        // positions to the UTF-8 entry and the cp437 entry's bad CRC
+        // would never be seen; positional opening verifies each
+        // position in turn and reports the bad one.
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = build_raw_zip(&[
+            ("\u{00e9}t\u{00e9}.txt".as_bytes(), b"hello", 0x3610_a686, 0),
+            (b"\x82t\x82.txt", b"hello", 0xdead_beef, 0),
+        ]);
+        let path = write_fixture(dir.path(), "a.zip", &bytes);
+        let findings = ZipCheck::inspect(&path, "a.zip");
+        assert_eq!(fixture_names(&findings), vec!["bad-crc-in-zip"]);
+        assert_eq!(
+            findings[0].2,
+            vec!["\u{00e9}t\u{00e9}.txt".to_string(), "a.zip".to_string()]
+        );
+    }
+
+    #[test]
+    fn unsupported_compression_method_is_unable_to_read_warning() {
+        // Method 93 (zstd): the reader is built with stored and
+        // deflate only, so the entry cannot be inflated and no CRC
+        // verdict exists. Like the password case this is
+        // unable-to-read-zip as a warning, never bad-crc-in-zip.
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = build_raw_zip(&[(b"data.bin", b"payload", 0, 93)]);
+        let path = write_fixture(dir.path(), "a.zip", &bytes);
+        let findings = ZipCheck::inspect(&path, "a.zip");
+        assert_eq!(fixture_names(&findings), vec!["unable-to-read-zip"]);
+        assert!(matches!(findings[0].0, Level::Warning));
+        assert_eq!(
+            findings[0].2,
+            vec!["a.zip: compression method not supported: 93".to_string()]
+        );
     }
 
     #[test]

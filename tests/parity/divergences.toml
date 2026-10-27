@@ -3478,7 +3478,7 @@ since = "0.3.0"
 case = "global"
 check = "unable-to-read-zip"
 kind = "severity"
-reason = "The reference reports E on BadZipFile and W on RuntimeError (a password-protected archive). The pure-Rust zip crate surfaces a single error type, so rpmcrab reports E for every archive that fails to open; only password-protected entries (zip::ZipError::PASSWORD_REQUIRED, the reference's RuntimeError case) stay W and abort the file instead of naming an entry."
+reason = "The reference reports E on BadZipFile and W on RuntimeError (a password-protected archive). The pure-Rust zip crate surfaces a single error type, so rpmcrab reports E for every archive that fails to open; the entries that stay W and abort the file instead of naming an entry are the RuntimeError-shaped ones: password-protected entries (zip::ZipError::PASSWORD_REQUIRED, the reference's RuntimeError case) and, since 0.4.1, entries whose compression method the reader cannot inflate (zip::ZipError::CompressionMethodNotSupported, the reference's NotImplementedError case — see the ZipCheck behaviour entry for the unsupported-method mapping)."
 since = "0.1.0"
 
 [[divergence]]
@@ -3510,6 +3510,14 @@ check = "jar-not-indexed"
 kind = "missing"
 reason = "Deliberate removal per triage: niche Java index check with negligible value at distro scale. The port does not emit it. The reference still emits it."
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py"
+
+[[divergence]]
+case = "global"
+check = "ZipCheck"
+kind = "behaviour"
+reason = "An entry whose compression method the reader cannot inflate (the reader supports stored and deflate only; e.g. zstd, method 93) is reported unable-to-read-zip (W), aborting the file, where the pre-change port charged it bad-crc-in-zip (E): no CRC verdict exists in this reader for an entry it cannot inflate, corrupt or not, so a corrupt unsupported-method entry is W here regardless of its stored CRC. Against the reference the split is codec-dependent: on a Python without the codec, testzip() raises NotImplementedError (a RuntimeError subclass) and ZipCheck's outer handler reports the same W; on a Python with the codec (zstd ships with Python 3.14+) the reference verifies the entry and stays silent or reports bad-crc-in-zip (E). Measured on Factory: taisei-data 1.4.6-1.1 ships two archives carrying zstd-method entries — /usr/share/taisei/00-taisei.zip (239 of 1,090 entries) and /usr/share/taisei/10-l10n.zip (3 of 10 entries) — and 7z t verifies both archives intact (Everything is Ok); both fired bad-crc-in-zip before this change."
+since = "0.4.1"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py"
 
 [[divergence]]
