@@ -5287,11 +5287,12 @@ impl FilesCheck {
     /// example a `cpython-312` cache file under `python3.13`). The tree's
     /// interpreter never consults such a file -- the cache filename is keyed
     /// to the other version -- so its embedded timestamp cannot make the
-    /// shipped source's bytecode stale in this tree. A version mismatch is
-    /// the wrong-magic check's jurisdiction, not the mtime check's.
-    /// Anything that does not parse (no PEP 3147 tag, a non-CPython
-    /// tag, no version in the tree path) returns false: the mtime check
-    /// keeps its say.
+    /// shipped source's bytecode stale in this tree. (The wrong-magic
+    /// check does not take the shape over either: its magic table ends
+    /// at 3.7, so for a current tree version it returns no finding and
+    /// the file is silent in both tags.) Anything that does not parse
+    /// (no PEP 3147 tag, a non-CPython tag, no version in the tree
+    /// path) returns false: the mtime check keeps its say.
     fn pyc_cache_version_mismatch(&self, fname: &str) -> bool {
         let Ok(Some(caps)) = self.python_bytecode_pep3147_re.captures(fname) else {
             return false;
