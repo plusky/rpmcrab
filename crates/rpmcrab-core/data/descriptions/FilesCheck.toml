@@ -428,3 +428,16 @@ Migrate to daemon-native configuration, or to systemd drop-ins and an
 EnvironmentFile pointing at a package-owned path, instead of configuration
 merged into /etc/sysconfig by fillup.
 """
+fillup-template-without-fillup-call="""
+The package ships a fillup template and a systemd unit reads the
+template's /etc/sysconfig file with EnvironmentFile, but no scriptlet
+calls fillup, so the configuration file is never created on a fresh
+install and new template variables are never merged into an existing
+file on update. With the optional `-` prefix on the EnvironmentFile
+line this is a warning: the daemon runs on its defaults while the
+documented settings file is missing. Without the prefix the
+EnvironmentFile is mandatory and the unit fails to start on a fresh
+install, so the finding is an error. Restore the fillup call (for
+example %fillup_only in %post), or finish the migration: drop the
+template and the EnvironmentFile line.
+"""

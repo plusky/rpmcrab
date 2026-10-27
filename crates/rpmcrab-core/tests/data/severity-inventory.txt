@@ -97,6 +97,7 @@ filelist-forbidden-opt = E,W
 filename-not-utf8 = E
 files-duplicate = W
 files-duplicated-waste = W
+fillup-template-without-fillup-call = E,W
 forbidden-controlchar-found = E,W
 forbidden-optflags = E
 ghost-file-with-buildroot-content = W
