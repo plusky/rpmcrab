@@ -286,8 +286,10 @@ declared instead: add Provides: bundled(<source package>), with
 `= <version>` naming the version of the library that is actually
 linked where the binary names one. The finding fires only when the library's own
 byte pattern is present in the binary; a crate that was resolved
-but not linked, and a binary that links the system library, stay
-silent.
+but not linked stays silent. A binary that links the system
+library and carries the vendored code as well fires: the linked
+copy does not replace the vendored one, which is declared (or
+patched out) like any other.
 """
 binary-or-shlib-calls-weak-prng="""
 The binary calls the predictable libc random functions (rand,

@@ -1708,8 +1708,10 @@ struct VendoredCCrate {
     srpm: String,
     /// `bundled()` names that satisfy the finding.
     accepted_names: Vec<String>,
-    /// DT_NEEDED prefix proving the system library is linked instead;
-    /// `None` when the library has no system shared form to link.
+    /// DT_NEEDED prefix of the library's system shared form; a
+    /// binary that links it and still carries the witness fires
+    /// without the link remedy. `None` when the library has no
+    /// system shared form to link.
     system_soname_prefix: Option<String>,
     /// The soname the detail names for the link-the-system remedy;
     /// present exactly when `system_soname_prefix` is.
@@ -6525,6 +6527,10 @@ impl BinariesCheck {
                     .and_then(|rest| rest.strip_suffix(')'))
             })
             .collect();
+        // One finding per crate per binary: a graph listing the
+        // crate at two versions still carries one vendored library
+        // in this file, and a finding per version is noise.
+        let mut reported: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for vc in &info.vendored_crates {
             let Some(entry) = map.iter().find(|e| e.name == vc.name) else {
                 continue;
@@ -6536,12 +6542,8 @@ impl BinariesCheck {
                 // is about some other file, or about nothing.
                 continue;
             }
-            if let Some(prefix) = &entry.system_soname_prefix {
-                if info.needed.iter().any(|n| n.starts_with(prefix.as_str())) {
-                    // Links the system library: nothing is bundled
-                    // here, whatever the crate marker says.
-                    continue;
-                }
+            if !reported.insert(vc.name.as_str()) {
+                continue;
             }
             let declared = entry
                 .accepted_names
@@ -6550,10 +6552,21 @@ impl BinariesCheck {
             if declared {
                 continue;
             }
+            // The witness puts the vendored code in this binary; a
+            // DT_NEEDED on the system library alongside it does not
+            // remove the vendored copy, so the link is no exemption.
+            // It only drops the link remedy from the detail: the
+            // binary already links the library named there.
+            let links_system = entry
+                .system_soname_prefix
+                .as_ref()
+                .is_some_and(|prefix| info.needed.iter().any(|n| n.starts_with(prefix.as_str())));
             let mut detail = format!("{} {}", vc.name, vc.crate_version);
             detail.push_str(": ");
-            if let Some(soname) = &entry.link_soname {
-                detail.push_str(&format!("link the system {soname} or "));
+            if !links_system {
+                if let Some(soname) = &entry.link_soname {
+                    detail.push_str(&format!("link the system {soname} or "));
+                }
             }
             detail.push_str(&format!("add Provides: bundled({})", entry.srpm));
             if let Some(version) = &vc.c_version {
@@ -20580,15 +20593,25 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn bundled_library_quiet_when_system_linked() {
-        // rtk / openai-codex: the crate is in the graph and its code
-        // pattern is present, but the binary links the system
-        // library, so nothing is bundled.
+    fn bundled_library_fires_when_system_linked_and_witness_present() {
+        // The binary links the system library AND carries the
+        // vendored code (its witness pattern is present): the
+        // linked copy does not replace the vendored one, so the
+        // finding fires, prescribing only the declaration -- the
+        // link remedy it already follows is dropped from the
+        // detail.
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let mut info = syn_info();
         info.needed = vec!["libsqlite3.so.0".to_string()];
         info.vendored_crates = vec![vendored("libsqlite3-sys", "0.35.0", Some("3.50.2"), true)];
-        assert!(bundled_lines(&pkg, &info).is_empty());
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe libsqlite3-sys 0.35.0: add Provides: bundled(sqlite3) = 3.50.2"
+            ],
+            "dual-link sqlite firing line: {lines:?}"
+        );
         let mut info = syn_info();
         info.needed = vec!["libzstd.so.1".to_string()];
         info.vendored_crates = vec![vendored(
@@ -20597,7 +20620,79 @@ description = "explicit priority string bypasses the system crypto policy"
             Some("1.5.7"),
             true,
         )];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe zstd-sys 2.0.16+zstd.1.5.7: add Provides: bundled(zstd) = 1.5.7"
+            ],
+            "dual-link zstd firing line: {lines:?}"
+        );
+        // Declared under an accepted name, the dual-link binary is
+        // satisfied like any other carrier of the vendored code.
+        let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        pkg.provides = vec![bundled_provide("sqlite3")];
+        let mut info = syn_info();
+        info.needed = vec!["libsqlite3.so.0".to_string()];
+        info.vendored_crates = vec![vendored("libsqlite3-sys", "0.35.0", Some("3.50.2"), true)];
         assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn bundled_library_quiet_when_system_linked_without_witness() {
+        // Dynamic-only: the binary links the system library and
+        // the vendored code pattern is absent from it, so nothing
+        // vendored is carried and nothing fires.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.needed = vec!["libsqlite3.so.0".to_string()];
+        info.vendored_crates = vec![vendored("libsqlite3-sys", "0.35.0", None, false)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn bundled_library_version_qualified_provide_satisfies() {
+        // A versioned provide -- bundled(sqlite3) = 3.50.2, the
+        // shape an RPM header records with the EQUAL sense flag
+        // and the version in its own field -- declares the library
+        // like the unversioned form: the match is on the bundled()
+        // name alone.
+        let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut declared = bundled_provide("sqlite3");
+        declared.flags = crate::pkg::dep::RPMSENSE_EQUAL;
+        declared.version = Some("3.50.2".to_string());
+        pkg.provides = vec![declared];
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("libsqlite3-sys", "0.35.0", Some("3.50.2"), true)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn bundled_library_one_finding_per_crate_per_binary() {
+        // One .dep-v0 listing the same -sys crate at two versions
+        // reports the crate once per binary, not once per version.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![
+            vendored("zstd-sys", "2.0.16+zstd.1.5.6", Some("1.5.6"), true),
+            vendored("zstd-sys", "2.1.0+zstd.1.5.7", Some("1.5.7"), true),
+        ];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(lines.len(), 1, "one finding per crate: {lines:?}");
+        // The dedup counts findings, not listings: when the first
+        // listing carries no code, the witnessed one still fires.
+        let mut info = syn_info();
+        info.vendored_crates = vec![
+            vendored("zstd-sys", "2.0.16+zstd.1.5.6", None, false),
+            vendored("zstd-sys", "2.1.0+zstd.1.5.7", Some("1.5.7"), true),
+        ];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines.len(),
+            1,
+            "the witnessed listing fires once: {lines:?}"
+        );
+        assert!(lines[0].contains("zstd-sys 2.1.0+zstd.1.5.7"), "{lines:?}");
     }
 
     #[test]
