@@ -11,7 +11,10 @@
 //! `systemd-preset-packaged` (preset files are distro policy, shipped only
 //! by the packages named in the `SystemdPresetPackages` config key) and
 //! `symlink-loop` (a symlink whose in-package resolution chain cycles;
-//! every open of such a link fails with ELOOP).
+//! every open of such a link fails with ELOOP). Two more are
+//! defect-pattern finders (issue #1023): `udev-rule-world-writable-mode`
+//! and `udev-rule-world-writable-node-creator`, which read the content
+//! of shipped udev rules for world-writable device modes.
 
 #![allow(clippy::collapsible_if)]
 
@@ -3261,6 +3264,7 @@ impl FilesCheck {
         self.check_file_systemd_unit_in_etc(pkg, fname, out);
         self.check_file_systemd_preset(pkg, fname, pkgfile, out);
         self.check_file_udev_rule_in_etc(pkg, fname, out);
+        self.check_file_udev_rules(pkg, fname, pkgfile, out);
         self.check_file_tmpfiles_conf_in_etc(pkg, fname, out);
         self.check_file_subdir_in_bin(pkg, fname, out);
         self.check_file_siteperl_in_perl_module(pkg, fname, out);
@@ -4065,6 +4069,147 @@ impl FilesCheck {
     }
 }
 
+/// The embedded world-writable-udev allowlist (issue #1023): the
+/// device node names whose MODE="0666" in a shipped rule is an
+/// upstream systemd default rather than a package defect. Baked in
+/// like the other check data so an installed binary needs no data
+/// dir next to it.
+const UDEV_WW_ALLOWLIST_TOML: &str = include_str!("../../data/udev-world-writable-allowlist.toml");
+
+static UDEV_WW_ALLOWLIST: OnceLock<HashSet<String>> = OnceLock::new();
+
+/// The allowlisted node names, parsed once from
+/// [`UDEV_WW_ALLOWLIST_TOML`]. Panics on a malformed table, the way a
+/// broken staged description corpus surfaces at startup.
+fn udev_ww_allowlist() -> &'static HashSet<String> {
+    UDEV_WW_ALLOWLIST.get_or_init(|| {
+        let table: toml::Table = UDEV_WW_ALLOWLIST_TOML
+            .parse()
+            .expect("udev world-writable allowlist is valid TOML");
+        table
+            .get("entry")
+            .and_then(toml::Value::as_array)
+            .expect("udev world-writable allowlist has an [[entry]] array")
+            .iter()
+            .map(|e| {
+                e.get("name")
+                    .and_then(toml::Value::as_str)
+                    .expect("udev world-writable allowlist entry has a name")
+                    .to_string()
+            })
+            .collect()
+    })
+}
+
+/// The device nodes whose write access creates new devices other
+/// processes trust: uinput (input devices), uhid (HID devices) and
+/// cuse (character devices, CVE-2016-1233). Curated (issue #1023):
+/// userio and vhci have the same shape and stay out until the corpus
+/// evidence decides them.
+const UDEV_NODE_CREATORS: [&str; 3] = ["cuse", "uhid", "uinput"];
+
+/// Whether `fname` matches `*/udev/rules.d/*.rules`, the rules-file
+/// population the udev content finders scan.
+fn is_udev_rules_file(fname: &str) -> bool {
+    if !fname.ends_with(".rules") {
+        return false;
+    }
+    let Some(idx) = fname.find("/udev/rules.d/") else {
+        return false;
+    };
+    !fname[idx + "/udev/rules.d/".len()..].contains('/')
+}
+
+/// Join a rules file's physical lines into logical lines at a
+/// trailing `\`, the continuation udev itself applies.
+fn udev_logical_lines(content: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for raw in content.lines() {
+        let raw = raw.strip_suffix('\r').unwrap_or(raw);
+        match raw.strip_suffix('\\') {
+            Some(head) => current.push_str(head),
+            None => {
+                current.push_str(raw);
+                lines.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// One assignment of a udev rule: the key (`KERNEL`, `MODE`,
+/// `ENV{MODE}`, ...), the operator (`==`, `=`, `:=`, ...) and the
+/// unquoted value.
+struct UdevAssignment<'a> {
+    key: &'a str,
+    op: &'a str,
+    value: &'a str,
+}
+
+/// Split one logical rule line into its comma-separated assignments.
+/// Commas inside a quoted value do not separate assignments.
+fn udev_assignments(line: &str) -> Vec<UdevAssignment<'_>> {
+    let mut tokens = Vec::new();
+    let mut in_quotes = false;
+    let mut start = 0;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                tokens.push(&line[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    tokens.push(&line[start..]);
+    tokens
+        .iter()
+        .filter_map(|t| parse_udev_assignment(t.trim()))
+        .collect()
+}
+
+/// Parse one `KEY<op>"value"` token; `None` when the token carries
+/// no assignment operator (a stray word is not an assignment).
+fn parse_udev_assignment(token: &str) -> Option<UdevAssignment<'_>> {
+    let eq = token.find('=')?;
+    // The operator ends at the first '='; a two-character operator
+    // either precedes it (!=, <=, >=, +=, -=, :=) or is the doubled
+    // '==' itself.
+    let (key, op, val_start) = if token[eq..].starts_with("==") {
+        (&token[..eq], "==", eq + 2)
+    } else if eq > 0
+        && matches!(
+            token.as_bytes()[eq - 1],
+            b'!' | b'<' | b'>' | b'+' | b'-' | b':'
+        )
+    {
+        (&token[..eq - 1], &token[eq - 1..eq + 1], eq + 1)
+    } else {
+        (&token[..eq], "=", eq + 1)
+    };
+    let raw_value = token[val_start..].trim();
+    let value = raw_value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or(raw_value);
+    Some(UdevAssignment {
+        key: key.trim(),
+        op,
+        value,
+    })
+}
+
+/// The octal mode an assignment value names, when it parses as one;
+/// a value that does not parse is not a mode this check charges.
+fn udev_mode_value(value: &str) -> Option<u32> {
+    u32::from_str_radix(value.trim(), 8).ok()
+}
+
 impl FilesCheck {
     fn check_file_manpage(
         &self,
@@ -4301,6 +4446,64 @@ impl FilesCheck {
     fn check_file_udev_rule_in_etc(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
         if fname.starts_with("/etc/udev/rules.d/") {
             add_info(out, Level::Warning, pkg, "udev-rule-in-etc", &[fname]);
+        }
+    }
+
+    /// Defect-pattern finders (issue #1023): a shipped udev rule that
+    /// assigns a world-writable mode to a device node. The bare tag
+    /// fires on every such rule whose KERNEL match does not name an
+    /// allowlisted upstream systemd default exactly; a rule naming
+    /// one of the node creators (uinput, uhid, cuse) carries the
+    /// node-creator tag instead, so each line yields one finding.
+    /// Access granted through a bare TAG+="uaccess" and chmod commands
+    /// in RUN assignments are out of scope: neither is a MODE
+    /// assignment.
+    fn check_file_udev_rules(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
+        if !is_reg(pkgfile.mode) || !is_udev_rules_file(fname) {
+            return;
+        }
+        let content = pkg.read_file(fname);
+        for line in udev_logical_lines(&content) {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let assignments = udev_assignments(line);
+            let world_writable = assignments.iter().any(|a| {
+                a.key == "MODE"
+                    && (a.op == "=" || a.op == ":=")
+                    && udev_mode_value(a.value).is_some_and(|m| m & 0o002 != 0)
+            });
+            if !world_writable {
+                continue;
+            }
+            let kernel = assignments
+                .iter()
+                .find(|a| a.key == "KERNEL" && a.op == "==")
+                .map(|a| a.value);
+            let detail = format!("\"{line}\"");
+            if let Some(name) = kernel {
+                if UDEV_NODE_CREATORS.contains(&name) {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "udev-rule-world-writable-node-creator",
+                        &[fname, &detail],
+                    );
+                    continue;
+                }
+                if udev_ww_allowlist().contains(name) {
+                    continue;
+                }
+            }
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "udev-rule-world-writable-mode",
+                &[fname, &detail],
+            );
         }
     }
 
@@ -13150,6 +13353,204 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_binary(pkg, &config, &mut out);
         out.results().to_vec()
+    }
+
+    /// Build an extracted package shipping the given (path, content)
+    /// files with real on-disk content, so the content-reading
+    /// per-file checks parse the real bytes.
+    fn content_pkg(dir: &tempfile::TempDir, files: &[(&str, &str)]) -> Pkg {
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.name = "udev-rules-test".to_string();
+        let root = pkg
+            .extracted_dir()
+            .expect("extracted fixture")
+            .to_path_buf();
+        pkg.files = files
+            .iter()
+            .map(|(name, content)| {
+                let path = root.join(name.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+                std::fs::write(&path, content).expect("write temp file");
+                PkgFile {
+                    name: name.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: 0o100644,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        pkg
+    }
+
+    fn udev_findings(pkg: &Pkg) -> Vec<(String, String)> {
+        run_check_binary(pkg)
+            .into_iter()
+            .filter(|(n, _)| n.starts_with("udev-rule-world-writable"))
+            .collect()
+    }
+
+    const UDEV_RULES_PATH: &str = "/usr/lib/udev/rules.d/99-test.rules";
+
+    #[test]
+    fn udev_allowlist_holds_the_systemd_defaults() {
+        let mut names: Vec<&str> = udev_ww_allowlist().iter().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "fuse",
+                "kvm",
+                "ptmx",
+                "tty",
+                "tun",
+                "vfio",
+                "vhost-net",
+                "vhost-vsock",
+                "vsock"
+            ]
+        );
+        // Deliberately absent: the security team removed renderD*
+        // from systemd's 0666 set (boo#1217118), and the node
+        // creators are charged by their own tag, never allowlisted.
+        for absent in ["renderD*", "uinput", "uhid", "cuse", "userio", "vhci"] {
+            assert!(!udev_ww_allowlist().contains(absent), "{absent}");
+        }
+    }
+
+    #[test]
+    fn udev_rules_file_population() {
+        assert!(is_udev_rules_file("/usr/lib/udev/rules.d/50-x.rules"));
+        assert!(is_udev_rules_file("/etc/udev/rules.d/99-y.rules"));
+        assert!(!is_udev_rules_file("/usr/lib/udev/rules.d/sub/x.rules"));
+        assert!(!is_udev_rules_file("/usr/lib/udev/hwdb.d/20-x.hwdb"));
+        assert!(!is_udev_rules_file("/usr/lib/udev/rules.d/x.conf"));
+    }
+
+    #[test]
+    fn udev_world_writable_mode_fires() {
+        // The firing shapes of issue #1023 section 4.
+        for line in [
+            // boo#1202160, verbatim from the shipped 90-libiio.rules:
+            // the mode behind PROGRAM/RESULT guards.
+            "SUBSYSTEM==\"usb\", PROGRAM==\"/bin/sh -c '/usr/bin/iio_info -S usb=%s{idVendor}:%s{idProduct} | grep %s{idVendor}:%s{idProduct}'\", RESULT!=\"\", MODE=\"666\"",
+            // boo#1274923, verbatim from the shipped
+            // 69-sc-controller.rules (the 28de vendor rules).
+            "SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"28de\", MODE=\"0666\", TAG+=\"uaccess\"",
+            "KERNEL==\"vboxguest\", MODE=\"0666\"",
+            "KERNEL==\"vboxuser\", MODE=\"0666\"",
+            // boo#1217118's class: renderD* is not on the allowlist.
+            "SUBSYSTEM==\"drm\", KERNEL==\"renderD*\", GROUP=\"render\", MODE=\"0666\"",
+            "KERNEL==\"somechar\", MODE:=\"0666\"",
+            "KERNEL==\"somechar\", MODE=\"0777\"",
+            // The allowlist matches exact names only: a glob fires.
+            "KERNEL==\"tun*\", MODE=\"0666\"",
+        ] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let pkg = content_pkg(&dir, &[(UDEV_RULES_PATH, line)]);
+            let hits = udev_findings(&pkg);
+            assert_eq!(hits.len(), 1, "line must fire once: {line}: {hits:?}");
+            assert_eq!(hits[0].0, "udev-rule-world-writable-mode");
+            assert!(
+                hits[0].1.contains(
+                    ": W: udev-rule-world-writable-mode /usr/lib/udev/rules.d/99-test.rules"
+                ),
+                "name, level and path must render, got: {}",
+                hits[0].1
+            );
+        }
+    }
+
+    #[test]
+    fn udev_world_writable_continuation_line_fires() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let content = "KERNEL==\"somechar\", \\\n    MODE=\"0666\"\n";
+        let pkg = content_pkg(&dir, &[(UDEV_RULES_PATH, content)]);
+        let hits = udev_findings(&pkg);
+        assert_eq!(hits.len(), 1, "continued rule must fire: {hits:?}");
+        assert_eq!(hits[0].0, "udev-rule-world-writable-mode");
+    }
+
+    #[test]
+    fn udev_world_writable_node_creator_replaces_bare_tag() {
+        for line in [
+            // The DSA-3451 line of CVE-2016-1233.
+            "KERNEL==\"cuse\", MODE=\"0666\", OPTIONS+=\"static_node=cuse\"",
+            "KERNEL==\"uinput\", MODE=\"0666\"",
+            "KERNEL==\"uhid\", MODE=\"0666\"",
+            // boo#1274923, verbatim from the shipped
+            // 69-sc-controller.rules: the mode alongside uaccess.
+            "KERNEL==\"uinput\", SUBSYSTEM==\"misc\", TAG+=\"uaccess\", OPTIONS+=\"static_node=uinput\", MODE=\"0666\"",
+        ] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let pkg = content_pkg(&dir, &[(UDEV_RULES_PATH, line)]);
+            let hits = udev_findings(&pkg);
+            assert_eq!(
+                hits.len(),
+                1,
+                "node-creator line yields exactly one finding: {line}: {hits:?}"
+            );
+            assert_eq!(hits[0].0, "udev-rule-world-writable-node-creator");
+        }
+    }
+
+    #[test]
+    fn udev_world_writable_quiet_shapes() {
+        for line in [
+            // The allowlisted upstream systemd defaults, in their
+            // shipped shapes.
+            "SUBSYSTEM==\"tty\", KERNEL==\"ptmx\", GROUP=\"tty\", MODE=\"0666\"",
+            "SUBSYSTEM==\"tty\", KERNEL==\"tty\", GROUP=\"tty\", MODE=\"0666\"",
+            "KERNEL==\"tun\", MODE=\"0666\", OPTIONS+=\"static_node=net/tun\"",
+            "KERNEL==\"fuse\", MODE=\"0666\", OPTIONS+=\"static_node=fuse\"",
+            "KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"0666\", OPTIONS+=\"static_node=kvm\"",
+            "KERNEL==\"vfio\", MODE=\"0666\", OPTIONS+=\"static_node=vfio/vfio\"",
+            "KERNEL==\"vsock\", MODE=\"0666\"",
+            "KERNEL==\"vhost-vsock\", GROUP=\"kvm\", MODE=\"0666\", OPTIONS+=\"static_node=vhost-vsock\"",
+            "KERNEL==\"vhost-net\", GROUP=\"kvm\", MODE=\"0666\", OPTIONS+=\"static_node=vhost-net\"",
+            // Other-readable is not world-writable; 0664 on js* is a
+            // systemd default too.
+            "SUBSYSTEM==\"input\", KERNEL==\"js[0-9]*\", MODE=\"0664\"",
+            // The sanctioned shape: group-scoped, seat access via
+            // uaccess.
+            "KERNEL==\"uinput\", MODE=\"0660\", TAG+=\"uaccess\"",
+            // uaccess alone assigns no mode.
+            "KERNEL==\"uinput\", TAG+=\"uaccess\"",
+            // A match is not an assignment.
+            "KERNEL==\"somechar\", MODE==\"0666\"",
+            // ENV{MODE} is not MODE.
+            "KERNEL==\"somechar\", ENV{MODE}=\"0666\"",
+            // Out of scope (issue #1023): chmod in a RUN assignment.
+            "SUBSYSTEM==\"usb\", RUN+=\"/bin/chmod 0666 /dev/bus/usb/001/001\"",
+        ] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let pkg = content_pkg(&dir, &[(UDEV_RULES_PATH, line)]);
+            let hits = udev_findings(&pkg);
+            assert!(hits.is_empty(), "line must stay quiet: {line}: {hits:?}");
+        }
+        // Comment lines are skipped.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = content_pkg(
+            &dir,
+            &[(UDEV_RULES_PATH, "# KERNEL==\"uinput\", MODE=\"0666\"\n")],
+        );
+        assert!(udev_findings(&pkg).is_empty());
+    }
+
+    #[test]
+    fn udev_world_writable_mixed_file_counts_each_line_once() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let content = "KERNEL==\"vboxguest\", MODE=\"0666\"
+KERNEL==\"uinput\", MODE=\"0666\"
+KERNEL==\"kvm\", MODE=\"0666\"
+KERNEL==\"hidraw*\", MODE=\"0660\"
+";
+        let pkg = content_pkg(&dir, &[(UDEV_RULES_PATH, content)]);
+        let hits = udev_findings(&pkg);
+        assert_eq!(hits.len(), 2, "one bare + one node-creator: {hits:?}");
+        assert_eq!(hits[0].0, "udev-rule-world-writable-mode");
+        assert_eq!(hits[1].0, "udev-rule-world-writable-node-creator");
     }
 
     #[test]

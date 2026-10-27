@@ -9,8 +9,9 @@
 # Fields per member:
 #   tag        the finding tag, exactly as emitted.
 #   class      the class the tag belongs to.
-#   family     "pattern" (a dangerous-API / call pattern) or
-#              "hardening" (a mitigation-absence pattern).
+#   family     "pattern" (a decidable defect pattern in shipped
+#              artefacts (calls, file content)) or "hardening" (a
+#              mitigation-absence pattern).
 #   gate       the context gate the finder's severity hangs on:
 #              "privilege-or-exposure", "no-safe-use", "self", "none".
 #   provenance the recorded defect samples that put the finder on
@@ -198,4 +199,24 @@ gate = "none"
 provenance = [
     "CVE-2025-22871: net/http chunked request parsing accepts a bare LF in chunk extensions, enabling request smuggling; a Go binary keeps the standard library of the toolchain that built it, so the defect stays in shipped binaries until they are rebuilt with a fixed toolchain (fixed in go1.23.8 and go1.24.2).",
     "Factory corpus measurement in rpmcrab#972: 874 Go binaries in 613 binary packages record a parseable toolchain version; 44 files in 4 binary packages sit below the floor (the go1.21 and go1.22 toolchain packages' own tools, aws-nitro-enclaves-binaryblobs-upstream's linuxkit blob at go1.22.3, kubectl-validate at go1.22.12).",
+]
+
+[[member]]
+tag = "udev-rule-world-writable-mode"
+class = "defect-pattern"
+family = "pattern"
+gate = "none"
+provenance = [
+    "CVE-2016-1233 (DSA-3451; boo#963182): a shipped udev rule assigning MODE=\"0666\" to the cuse node let any local user create an arbitrarily named character device, modify the memory of processes that use it, and potentially escalate to root. openSUSE did not ship that rule; its /dev/cuse was crw-------.",
+    "Verified in-distro instances, filed as AUDIT-FIND: boo#1202160 (libiio-usb-udev-rules sets MODE=\"666\"; open since 2022), boo#1274923 (sc-controller assigns MODE=\"0666\" on 8 rules), boo#1270013 (/dev/vboxguest at 0666, fixed), boo#1203370 (/dev/vboxuser at 0666, fixed) and boo#1217118 (renderD* at 0666 in systemd's own 50-udev-default.rules, fixed).",
+]
+
+[[member]]
+tag = "udev-rule-world-writable-node-creator"
+class = "defect-pattern"
+family = "pattern"
+gate = "no-safe-use"
+provenance = [
+    "CVE-2016-1233 (DSA-3451; boo#963182): the cuse node at MODE=\"0666\" let any local user create an arbitrarily named character device and potentially escalate to root; uinput and uhid have the same shape, since writing to them creates input and HID devices other processes trust.",
+    "boo#1274923 (AUDIT-FIND): sc-controller assigns MODE=\"0666\" with TAG+=\"uaccess\" on 8 rules including /dev/uinput, and the current Factory package still ships all 8 lines.",
 ]

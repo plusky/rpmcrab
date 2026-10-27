@@ -36,6 +36,23 @@ udev-rule-in-etc="""
 A udev rule has been packaged in /etc/udev/rules.d. These rules should be
 installed in the system rules dir instead.
 """
+udev-rule-world-writable-mode="""
+A udev rule shipped by this package assigns a world-writable mode to
+a device node (a MODE assignment with the other-write bit, such as
+0666). Every local user can then open the device, which for many
+drivers means control of the hardware function. Restrict the mode,
+for example 0660 with a GROUP assignment, or TAG+="uaccess" for the
+logged-in user. The only exception is the set of upstream systemd
+default rules, which this check allows.
+"""
+udev-rule-world-writable-node-creator="""
+A udev rule shipped by this package assigns a world-writable mode to
+a device node that creates new devices (uinput, uhid or cuse). Every
+local user can write to such a node to create input, HID or
+character devices that other processes trust, up to privilege
+escalation (CVE-2016-1233). Restrict the mode, for example 0660 with
+a GROUP assignment, or TAG+="uaccess" for the logged-in user.
+"""
 tmpfiles-conf-in-etc="""
 A tmpfiles config has been packaged in /etc/tmpfiles.d. These rules should be
 installed in the system tmpfiles dir instead.
