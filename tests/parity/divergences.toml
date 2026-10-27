@@ -2021,6 +2021,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "htaccess-file"
+kind = "severity"
+reason = "Deliberate severity recalibration (Tom's ruling, 2026-10-27): the port reports W where the reference reports E for a .htaccess file that is %doc-flagged and shipped under /usr/share/doc/packages/ -- documentation-tree website artefacts (lensfun-doc's DirectoryIndex for its shipped website source; the OpenStack Sphinx doc packages' RedirectMatch maps written for the upstream docs website's URL space), inert unless an admin serves the doc tree. Both conditions are required: an unflagged .htaccess inside the doc tree and a %doc-flagged one outside it keep the reference's E, as do all web-root and application payloads. Measured over the Factory corpus firing set (11 packages, header-validated: the four W files carry FILEFLAGS=2, the eleven E files flags 0): 15 findings stay 15, with 4 moving from E to W and 11 staying E. The reference (FilesCheck.py:741-742) fires flat E on the bare name with no flag or location qualification."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
