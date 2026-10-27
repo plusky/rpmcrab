@@ -441,3 +441,19 @@ install, so the finding is an error. Restore the fillup call (for
 example %fillup_only in %post), or finish the migration: drop the
 template and the EnvironmentFile line.
 """
+spdx-license-not-in-license-tag="""
+A shipped file declares a license in an SPDX-License-Identifier header
+that the package's License tag does not cover. The detail names the
+declared license, the first file declaring it, and the number of files
+declaring it. Add the license to the License tag, or correct the
+file's declaration if it is wrong (for example a header copied from
+another project at build time).
+"""
+license-grant-not-in-license-tag="""
+A shipped file grants a license in its license notice text (the GNU,
+Apache, Mozilla or WTFPL grant wording) that the package's License tag
+does not cover, and the file carries no SPDX-License-Identifier
+header. The detail names the granted license, the first file granting
+it, and the number of files granting it. Add the license to the
+License tag, or correct the notice if it is wrong.
+"""
