@@ -4346,33 +4346,46 @@ impl FilesCheck {
 
     /// Name credits for `incoherent-logrotate-file` beyond the
     /// reference's exact package-name equality (FilesCheck ledger;
-    /// measured over the Factory
-    /// corpus, 15 findings -> 9). A logrotate file is coherent when
-    /// it is named after the package up to case, after the package
-    /// plus a logrotate suffix, or after a daemon the same package
-    /// ships as an executable:
+    /// measured over the Factory corpus, 15 findings -> 9). A
+    /// logrotate file is coherent when it is named after the package
+    /// up to case, after the package plus a logrotate suffix, or
+    /// after a daemon the same package ships as an executable:
     ///
     /// - case-only difference: openQA ships `openqa`;
     /// - suffix: `grommunio-sync.lr` counts as `grommunio-sync`;
     ///   only the logrotate suffixes `.lr` and `.conf` strip, and
-    ///   the stem must equal the package name exactly (slurm-config's
-    ///   `slurmctld.conf` stem still differs and keeps firing);
+    ///   the stem is compared with the same case-insensitive
+    ///   equality as the bare name, so the two credits compose
+    ///   (openQA's `openqa.lr` is coherent). A stem differing by
+    ///   more than case still fires (slurm-config's `slurmctld.conf`
+    ///   stem differs and keeps firing);
     /// - daemon name: cobbler ships /usr/bin/cobblerd, so its
     ///   `cobblerd` file is coherent. The name must be an executable
     ///   regular file in THIS package, compared case-sensitively --
     ///   ceph-base ships only lib directories called `ceph` (the
     ///   `ceph` executable lives in ceph-common) and keeps firing.
-    fn logrotate_name_credited(pkg: &Pkg, basename: &str) -> bool {
+    ///   The scan excludes the logrotate file under judgement
+    ///   itself and any %ghost entry: neither is a shipped daemon
+    ///   binary, and an executable logrotate file must not suppress
+    ///   its own finding.
+    fn logrotate_name_credited(pkg: &Pkg, fname: &str, basename: &str) -> bool {
         if basename.eq_ignore_ascii_case(&pkg.name) {
             return true;
         }
         for suffix in [".lr", ".conf"] {
-            if basename.strip_suffix(suffix) == Some(pkg.name.as_str()) {
+            if basename
+                .strip_suffix(suffix)
+                .is_some_and(|stem| stem.eq_ignore_ascii_case(&pkg.name))
+            {
                 return true;
             }
         }
         pkg.files.iter().any(|f| {
-            is_reg(f.mode) && f.mode & 0o111 != 0 && f.name.rsplit('/').next() == Some(basename)
+            f.name != fname
+                && !f.is_ghost()
+                && is_reg(f.mode)
+                && f.mode & 0o111 != 0
+                && f.name.rsplit('/').next() == Some(basename)
         })
     }
 
@@ -4380,7 +4393,7 @@ impl FilesCheck {
         // logrotate_regex: /etc/logrotate.d/
         if fname.starts_with("/etc/logrotate.d/") && fname != "/etc/logrotate.d/" {
             let basename = fname.rsplit('/').next().unwrap_or("");
-            if basename != pkg.name && !Self::logrotate_name_credited(pkg, basename) {
+            if basename != pkg.name && !Self::logrotate_name_credited(pkg, fname, basename) {
                 add_info(
                     out,
                     Level::Error,
@@ -6445,14 +6458,11 @@ mod tests {
 
     #[test]
     fn incoherent_logrotate_suffix_strip_is_exact_and_closed() {
-        // Only .lr/.conf strip, and the stem must equal the package
-        // name exactly: other extensions, a case-different stem, and
-        // the slurm shape (stem != the -config package's name) all
-        // keep firing.
+        // Only .lr/.conf strip: other extensions and the slurm shape
+        // (stem != the -config package's name) keep firing.
         for file in [
             "/etc/logrotate.d/fcprobe.txt",
             "/etc/logrotate.d/fcprobe.bak",
-            "/etc/logrotate.d/FCprobe.lr",
         ] {
             let names = named_pkg_findings("fcprobe", vec![mode_file(file, 0o100644)]);
             assert_has(&names, "incoherent-logrotate-file");
@@ -6460,6 +6470,53 @@ mod tests {
         let names = named_pkg_findings(
             "slurm-config",
             vec![mode_file("/etc/logrotate.d/slurmctld.conf", 0o100644)],
+        );
+        assert_has(&names, "incoherent-logrotate-file");
+    }
+
+    #[test]
+    fn incoherent_logrotate_case_and_suffix_compose() {
+        // The case credit and the suffix credit compose: the stem
+        // left by stripping .lr/.conf is compared with the same
+        // case-insensitive equality as the bare name.
+        let names = named_pkg_findings(
+            "openQA",
+            vec![mode_file("/etc/logrotate.d/openqa.lr", 0o100644)],
+        );
+        assert_lacks(&names, "incoherent-logrotate-file");
+        let names = named_pkg_findings(
+            "fcprobe",
+            vec![mode_file("/etc/logrotate.d/FCprobe.conf", 0o100644)],
+        );
+        assert_lacks(&names, "incoherent-logrotate-file");
+        // A stem differing by more than case still fires.
+        let names = named_pkg_findings(
+            "openQA",
+            vec![mode_file("/etc/logrotate.d/openqax.lr", 0o100644)],
+        );
+        assert_has(&names, "incoherent-logrotate-file");
+    }
+
+    #[test]
+    fn incoherent_logrotate_daemon_credit_excludes_the_file_itself() {
+        // The judged file is not its own daemon evidence: an
+        // executable logrotate file does not suppress its own
+        // finding.
+        let names = named_pkg_findings("bar", vec![mode_file("/etc/logrotate.d/bard", 0o100755)]);
+        assert_has(&names, "incoherent-logrotate-file");
+    }
+
+    #[test]
+    fn incoherent_logrotate_daemon_credit_skips_ghosts() {
+        // A %ghost entry is not a shipped executable: a ghost daemon
+        // path does not credit.
+        use crate::pkg::pkgfile::RPMFILE_GHOST;
+
+        let mut ghost = mode_file("/usr/bin/bard", 0o100755);
+        ghost.flags = RPMFILE_GHOST;
+        let names = named_pkg_findings(
+            "bar",
+            vec![mode_file("/etc/logrotate.d/bard", 0o100644), ghost],
         );
         assert_has(&names, "incoherent-logrotate-file");
     }
