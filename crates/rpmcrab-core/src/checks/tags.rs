@@ -2897,6 +2897,31 @@ mod tests {
     }
 
     #[test]
+    fn spelling_skips_language_without_dictionary() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-spell-1.0-1.noarch.rpm");
+        let config = test_config();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        // A language the checker has no dictionary for is not checked.
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_description(&pkg, &mut out, "hello wrld", "de", &[]);
+        let results = out.results().to_vec();
+        assert!(
+            tag_hits(&results, "spelling-error").is_empty(),
+            "all: {results:?}"
+        );
+        // The same text in the C locale is checked.
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_description(&pkg, &mut out, "hello wrld", "C", &[]);
+        let results = out.results().to_vec();
+        assert_eq!(
+            tag_hits(&results, "spelling-error").len(),
+            1,
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
     fn obsolete_not_provided_emits() {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-obsolete-1.0-1.noarch.rpm");
         let results = run_check(&pkg);

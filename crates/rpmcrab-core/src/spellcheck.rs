@@ -1109,6 +1109,45 @@ SFX N 0 en [^ey]\n";
     }
 
     #[test]
+    fn wordlist_stems_cover_their_regular_inflections() {
+        // Entries recorded in one number form are normalised to the
+        // stem with its inflection flags, so the listed vocabulary
+        // covers both forms: a stem listed only as its plural
+        // (runtimes) accepts the singular, and a stem listed bare
+        // (config) accepts its regular plural.
+        let checker = Spellchecker::from_strings(TEST_AFF_WITH_AFFIXES, TEST_DIC)
+            .expect("test dictionary")
+            .with_supplementary_words();
+        for word in [
+            "runtime",
+            "runtimes",
+            "boolean",
+            "booleans",
+            "monad",
+            "monads",
+            "setuptool",
+            "setuptools",
+            "config",
+            "configs",
+            "changelog",
+            "changelogs",
+            "syscall",
+            "syscalls",
+            "subnet",
+            "subnets",
+            "parallelize",
+            "parallelized",
+            "parallelizes",
+            "chroot",
+            "chrooted",
+            "uncompress",
+            "uncompresses",
+        ] {
+            assert!(checker.accepts(word), "inflection {word:?} not accepted");
+        }
+    }
+
+    #[test]
     fn british_spelling_is_flagged() {
         // Package descriptions are en_US text: a British spelling is a
         // finding (the tags check reports spelling findings at warning
@@ -1121,6 +1160,70 @@ SFX N 0 en [^ey]\n";
             let result = checker.check(&text, "testpkg", &[]);
             assert_eq!(result.len(), 1, "word {word:?}: {result:?}");
             assert_eq!(result[0].0, word);
+        }
+    }
+
+    #[test]
+    fn digit_adjacent_tokens_are_not_checked() {
+        let checker = test_checker();
+        // A token fragment split off a number is not a finding: the
+        // digit is on either side of the fragment.
+        for text in ["hello utf8 world", "hello 20th world", "hello a1b world"] {
+            let result = checker.check(text, "testpkg", &[]);
+            assert!(result.is_empty(), "{text}: {result:?}");
+        }
+        // The same fragments with no neighbouring digit are findings.
+        let words: Vec<String> = checker
+            .check("hello utf th world", "testpkg", &[])
+            .into_iter()
+            .map(|(w, _)| w)
+            .collect();
+        assert_eq!(words, ["utf", "th"], "{words:?}");
+    }
+
+    #[test]
+    fn package_name_possessive_is_not_checked() {
+        let checker = test_checker();
+        // "django" is not in the test dictionary: for another package
+        // the name and its possessive are both findings.
+        let words: Vec<String> = checker
+            .check("hello django world", "otherpkg", &[])
+            .into_iter()
+            .map(|(w, _)| w)
+            .collect();
+        assert_eq!(words, ["django"], "{words:?}");
+        let words: Vec<String> = checker
+            .check("hello django's world", "otherpkg", &[])
+            .into_iter()
+            .map(|(w, _)| w)
+            .collect();
+        assert_eq!(words, ["django's"], "{words:?}");
+        // For the django package itself both are name matches, and a
+        // name part's possessive is credited the same way.
+        assert!(
+            checker
+                .check("hello django world", "django", &[])
+                .is_empty()
+        );
+        assert!(
+            checker
+                .check("hello django's world", "django", &[])
+                .is_empty()
+        );
+        assert!(
+            checker
+                .check("hello django's world", "python3-django", &[])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn spellcheckable_languages() {
+        for lang in ["C", "C.UTF-8", "en", "en_US", "en_GB"] {
+            assert!(spellcheckable_language(lang), "{lang}");
+        }
+        for lang in ["de", "fr", "cs", "uk", "zh_CN", "sr@latin"] {
+            assert!(!spellcheckable_language(lang), "{lang}");
         }
     }
 }
