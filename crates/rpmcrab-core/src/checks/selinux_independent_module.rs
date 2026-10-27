@@ -4,6 +4,17 @@
 //! Ported from `rpmlint/checks/SELinuxIndependentModuleCheck.py`. One finding:
 //! `selinux-incorrect-if-file-location`.
 //!
+//! Divergence from the reference: the reference credits only the
+//! `distributed/` directory, but the devel Makefile the policy toolchain
+//! ships collects interfaces from every layer directory of the include
+//! tree (`$(layer)/*.if` for each direct subdirectory other than
+//! `support`), so a `.if` sitting directly in any layer directory is
+//! found by consuming policy builds exactly like one in `distributed/`.
+//! Only files outside that grammar (directly in the include directory,
+//! nested inside a layer, in `support/`, or outside the include tree)
+//! are reported. Ledgered in the SELinuxIndependentModuleCheck
+//! divergences source.
+//!
 //! `new` takes a `Config` only to satisfy the `Check` construction signature;
 //! the reference's class attributes are `const`s here and no config keys are
 //! read.
@@ -15,6 +26,7 @@ use crate::level::Level;
 use crate::pkg::Pkg;
 
 const ALLOWED_IF_DIR: &str = "/usr/share/selinux/devel/include/distributed/";
+const INCLUDE_DIR: &str = "/usr/share/selinux/devel/include/";
 const SELINUX_MAIN_POLICY_PACKAGES: &[&str] = &["selinux-policy-devel"];
 
 pub struct SELinuxIndependentModuleCheck;
@@ -35,10 +47,30 @@ impl SELinuxIndependentModuleCheck {
             .any(|name| name == "selinux-policy-base")
     }
 
-    /// The `.if` files outside the allowed directory.
+    /// True when the file sits directly in a layer directory of the
+    /// devel include tree: the shipped devel Makefile's
+    /// `header_interfaces` collects `$(layer)/*.if` for every direct
+    /// subdirectory of the include directory other than `support`, so
+    /// consuming policy builds find such files. Files directly in the
+    /// include directory, nested below a layer, or in `support/` are
+    /// not collected.
+    fn in_include_layer(f: &str) -> bool {
+        let Some(rest) = f.strip_prefix(INCLUDE_DIR) else {
+            return false;
+        };
+        let Some((layer, name)) = rest.split_once('/') else {
+            return false;
+        };
+        !layer.is_empty() && layer != "support" && !name.is_empty() && !name.contains('/')
+    }
+
+    /// The `.if` files outside the allowed directory and outside every
+    /// layer directory of the devel include tree.
     fn misplaced_if_files<'a>(files: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
         files
-            .filter(|f| f.ends_with(".if") && !f.starts_with(ALLOWED_IF_DIR))
+            .filter(|f| {
+                f.ends_with(".if") && !f.starts_with(ALLOWED_IF_DIR) && !Self::in_include_layer(f)
+            })
             .collect()
     }
 }
@@ -165,18 +197,66 @@ mod tests {
     }
 
     #[test]
+    fn if_file_in_layer_dir_is_quiet() {
+        for f in [
+            "/usr/share/selinux/devel/include/contrib/foo.if",
+            "/usr/share/selinux/devel/include/services/foo.if",
+            "/usr/share/selinux/devel/include/kernel/foo.if",
+        ] {
+            let found = SELinuxIndependentModuleCheck::misplaced_if_files([f].into_iter());
+            assert!(found.is_empty(), "{f}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn if_file_not_collected_by_devel_makefile_is_reported() {
+        // The devel Makefile collects only $(layer)/*.if: a file
+        // directly in the include directory, one nested below a layer,
+        // and one in the excluded support directory are not collected.
+        for f in [
+            "/usr/share/selinux/devel/include/foo.if",
+            "/usr/share/selinux/devel/include/contrib/sub/foo.if",
+            "/usr/share/selinux/devel/include/support/foo.if",
+        ] {
+            let found = SELinuxIndependentModuleCheck::misplaced_if_files([f].into_iter());
+            assert_eq!(found, vec![f], "{f}");
+        }
+    }
+
+    #[test]
+    fn layer_placed_if_file_is_quiet() {
+        let pkg = selinux_pkg(
+            "container-selinux",
+            &[
+                "/usr/share/selinux/devel/include/services/container.if",
+                "/usr/share/selinux/packages/container.pp.bz2",
+            ],
+        );
+        let results = run(&pkg);
+        assert!(
+            results
+                .iter()
+                .all(|(n, _)| n != "selinux-incorrect-if-file-location"),
+            "{results:?}"
+        );
+    }
+
+    #[test]
     fn non_if_files_are_ignored() {
         let found = SELinuxIndependentModuleCheck::misplaced_if_files(["/usr/bin/foo"].into_iter());
         assert!(found.is_empty(), "{found:?}");
     }
 
-    // Mirrors the reference's test_selinux.py::test_selinux_independent_module.
+    // Mirrors the reference's test_selinux.py::test_selinux_independent_module,
+    // with the misplaced file directly in the include directory: the
+    // reference's contrib/ example is a layer directory the devel
+    // Makefile collects, so it is quiet here (see the ledger entry).
     #[test]
     fn misplaced_if_file_is_error() {
         let pkg = selinux_pkg(
             "flatpak-selinux",
             &[
-                "/usr/share/selinux/devel/include/contrib/flatpak.if",
+                "/usr/share/selinux/devel/include/flatpak.if",
                 "/usr/share/selinux/packages/flatpak.pp.bz2",
             ],
         );
@@ -189,7 +269,7 @@ mod tests {
         assert_eq!(findings.len(), 1, "{results:?}");
         assert!(findings[0].contains(": E: "), "level: {}", findings[0]);
         assert!(
-            findings[0].ends_with("/usr/share/selinux/devel/include/contrib/flatpak.if"),
+            findings[0].ends_with("/usr/share/selinux/devel/include/flatpak.if"),
             "detail: {}",
             findings[0]
         );

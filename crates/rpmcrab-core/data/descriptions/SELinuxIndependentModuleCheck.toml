@@ -1,3 +1,3 @@
 selinux-incorrect-if-file-location = '''
-SELinux interface (.if) files must be installed in /usr/share/selinux/devel/include/distributed/ as per Fedora and openSUSE independent module packaging guidelines. Files found elsewhere are packaging errors.
+SELinux interface (.if) files must be installed in the policy devel include tree, /usr/share/selinux/devel/include/ — in distributed/ for independent modules, or directly in one of its layer directories, which the policy devel Makefile collects when building consuming modules, as per Fedora and openSUSE independent module packaging guidelines. Files found elsewhere are packaging errors.
 '''

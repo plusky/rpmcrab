@@ -139,6 +139,11 @@ Provenance, verified against the pinned reference (`84848c0`):
   `no-library-dependency-for`, `pkgconfig-exception`; the last also names
   reading alongside parsing, which is what the check fires on). Ledgered
   in `tests/parity/divergences.toml`.
+- `SELinuxIndependentModuleCheck.toml` — the reference file, with the
+  `selinux-incorrect-if-file-location` entry reworded to state the layer
+  directories the port credits (the devel Makefile collects interfaces
+  from every layer of the include tree, not only `distributed/`).
+  Ledgered in `tests/parity/divergences.toml`.
 - Every other `*.toml` file — byte-identical to the reference
   `rpmlint/descriptions/` file of the same name.
 
