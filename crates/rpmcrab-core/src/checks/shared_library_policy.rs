@@ -64,6 +64,8 @@ pub struct SharedLibraryPolicyCheck {
     re_soname_pkg: Regex,
     re_so_files: Regex,
     re_versioned_so_file: Regex,
+    re_devel_flavoured: Regex,
+    re_qlogging_categories: Regex,
     seen: Vec<SeenPkg>,
     /// Index of `seen` by (name, arch, source), for the dedup in
     /// `record_seen`.
@@ -104,6 +106,16 @@ impl SharedLibraryPolicyCheck {
             )
             .expect("static regex"),
             re_versioned_so_file: Regex::new(r"\.so\.\d").expect("static regex"),
+            // A `-devel` package in baselibs flavour dress carries the
+            // micro-architecture flavour after the `-devel` component:
+            // `libgcrypt-devel-x86-64-v3`.
+            re_devel_flavoured: Regex::new(r"-devel-x86-64-v\d+$").expect("static regex"),
+            // A Qt logging-categories data file in its standard
+            // location: `/usr/share/qlogging-categories6/libkdcraw.categories`.
+            re_qlogging_categories: Regex::new(
+                r"^/usr/share/qlogging-categories\d+/[^/]+\.categories$",
+            )
+            .expect("static regex"),
             seen: Vec::new(),
             seen_index: HashMap::new(),
         }
@@ -217,6 +229,33 @@ impl SharedLibraryPolicyCheck {
         })
     }
 
+    /// Whether the name is a development package's: the plain
+    /// `-devel` suffix, or `-devel` followed by a baselibs
+    /// micro-architecture flavour (`libfoo1-devel-x86-64-v3`).
+    /// A flavour tail with no `-devel` component, or any other tail
+    /// after `-devel`, is not a development name.
+    fn is_devel_package(&self, name: &str) -> bool {
+        name.ends_with("-devel") || is_match(&self.re_devel_flavoured, name)
+    }
+
+    /// Whether the package's sole payload is a Qt logging-categories
+    /// data file: the KDE categories-only split (`libkdcraw-qt6`
+    /// ships only
+    /// `/usr/share/qlogging-categories6/libkdcraw.categories`; the
+    /// library itself ships under an unrelated name, e.g.
+    /// `libKDcrawQt6-5`). Directory entries are not payload. Any
+    /// further payload entry \— a second data file, a symlink, a
+    /// script \— defeats the credit: the finding exists for
+    /// scheme-named packages shipping no library, and only the pure
+    /// data split is credited.
+    fn sole_payload_is_qlogging_categories(&self, pkg: &Pkg) -> bool {
+        let mut payload = pkg.files.iter().filter(|f| !is_dir(f.mode));
+        let Some(only) = payload.next() else {
+            return false;
+        };
+        payload.next().is_none() && is_match(&self.re_qlogging_categories, &only.name)
+    }
+
     /// `(soname, needed)` from an ELF file, or the parse failure reason.
     fn elf_dynamic(path: &str) -> Result<(Option<String>, Vec<String>), String> {
         let data = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -322,7 +361,7 @@ impl Check for SharedLibraryPolicyCheck {
         self.record(pkg);
         // Only non-development, non-language library packages.
         if !pkg.name.starts_with("lib")
-            || pkg.name.ends_with("-devel")
+            || self.is_devel_package(&pkg.name)
             || pkg.name.ends_with("-lang")
         {
             return;
@@ -392,12 +431,18 @@ impl Check for SharedLibraryPolicyCheck {
             }
         }
 
-        // A policy-named package with no library files at all.
+        // A policy-named package with no library files at all. The
+        // one credited exception is the KDE categories-only split,
+        // whose sole payload is a logging-categories data file (see
+        // `sole_payload_is_qlogging_categories`).
         let has_lib_files = pkg
             .files
             .iter()
             .any(|f| is_match(&self.re_so_files, &f.name));
-        if !has_lib_files && is_match(&self.re_soname_pkg, &pkg.name) {
+        if !has_lib_files
+            && is_match(&self.re_soname_pkg, &pkg.name)
+            && !self.sole_payload_is_qlogging_categories(pkg)
+        {
             add_info(out, Level::Error, pkg, "shlib-policy-missing-lib", &[]);
         }
 
@@ -811,6 +856,209 @@ mod tests {
             names.contains(&"shlib-policy-missing-lib"),
             "script-only payload must still be charged: {names:?}"
         );
+    }
+
+    /// Run `check_binary` over the fixture package renamed to
+    /// `name` with its file list replaced by `files`, returning the
+    /// finding names emitted. `tag` keeps the extraction dir unique
+    /// per call site (tests run in parallel).
+    fn finding_names(tag: &str, name: &str, files: Vec<PkgFile>) -> Vec<String> {
+        let dir = std::env::temp_dir().join(format!("rpmcrab-shlib-missinglib-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        pkg.name = name.to_string();
+        pkg.files = files;
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SharedLibraryPolicyCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().iter().map(|(n, _)| n.to_string()).collect()
+    }
+
+    fn data_file(name: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode: 0o100644,
+            magic: "ASCII text".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn dir_entry(name: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode: 0o40755,
+            ..Default::default()
+        }
+    }
+
+    fn link_file(name: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode: 0o120777,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn missing_lib_silent_for_categories_only_split() {
+        // The KDE categories-only split: the scheme-named package's
+        // sole payload is a Qt logging-categories data file; the
+        // library itself ships under an unrelated package name. The
+        // directory entries around it are not payload.
+        let names = finding_names(
+            "categories-only",
+            "libkdcraw6",
+            vec![
+                dir_entry("/usr/share/qlogging-categories6"),
+                data_file("/usr/share/qlogging-categories6/libkdcraw.categories"),
+            ],
+        );
+        assert!(
+            !names.iter().any(|n| n == "shlib-policy-missing-lib"),
+            "categories-only split must not be charged as missing: {names:?}"
+        );
+    }
+
+    #[test]
+    fn missing_lib_fires_when_categories_file_has_company() {
+        // A categories file plus any other payload is not the pure
+        // data split: the package still ships no library.
+        for (tag, companion) in [
+            ("categories-plus-doc", "/usr/share/doc/libkdcraw6/README"),
+            (
+                "categories-plus-categories",
+                "/usr/share/qlogging-categories6/libkdcraw-extra.categories",
+            ),
+            ("categories-plus-link", "/usr/share/libkdcraw6/helper"),
+        ] {
+            let companion = if tag == "categories-plus-link" {
+                link_file(companion)
+            } else {
+                data_file(companion)
+            };
+            let names = finding_names(
+                tag,
+                "libkdcraw6",
+                vec![
+                    data_file("/usr/share/qlogging-categories6/libkdcraw.categories"),
+                    companion,
+                ],
+            );
+            assert!(
+                names.iter().any(|n| n == "shlib-policy-missing-lib"),
+                "{tag} must still be charged: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_lib_fires_for_categories_outside_standard_location() {
+        // The credit keys on the standard categories location and
+        // the `.categories` file kind, not on either alone.
+        for (tag, path) in [
+            (
+                "categories-doc-dir",
+                "/usr/share/doc/libkdcraw6/libkdcraw.categories",
+            ),
+            (
+                "categories-no-qt-major",
+                "/usr/share/qlogging-categories/libkdcraw.categories",
+            ),
+            (
+                "categories-nested",
+                "/usr/share/qlogging-categories6/subdir/libkdcraw.categories",
+            ),
+            (
+                "categories-wrong-kind",
+                "/usr/share/qlogging-categories6/libkdcraw.txt",
+            ),
+        ] {
+            let names = finding_names(tag, "libkdcraw6", vec![data_file(path)]);
+            assert!(
+                names.iter().any(|n| n == "shlib-policy-missing-lib"),
+                "{path} must keep firing: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_lib_silent_for_devel_package_in_baselibs_dress() {
+        // A `-devel` package carrying the baselibs flavour suffix is
+        // a development package: skipped like a plain `-devel`
+        // package, though it ships no library (only config scripts
+        // under the baselibs prefix).
+        let names = finding_names(
+            "devel-flavoured",
+            "libfoo1-devel-x86-64-v3",
+            vec![data_file("/usr/lib/baselibs-x86-64-v3/bin/libfoo-config")],
+        );
+        assert!(
+            !names.iter().any(|n| n == "shlib-policy-missing-lib"),
+            "flavoured devel package must not be charged: {names:?}"
+        );
+    }
+
+    #[test]
+    fn missing_lib_devel_gate_near_misses_keep_firing() {
+        // A flavour tail without the `-devel` component is a library
+        // package name, and `-devel` followed by a non-flavour tail
+        // is not the baselibs dress: all keep firing when they ship
+        // no library.
+        for name in [
+            "libfoo1-x86-64-v3",
+            "libfoo1-devel-2",
+            "libfoo1-devel-x86-64",
+        ] {
+            let names = finding_names(
+                &format!("near-miss-{name}"),
+                name,
+                vec![data_file("/usr/share/doc/pkg/README")],
+            );
+            assert!(
+                names.iter().any(|n| n == "shlib-policy-missing-lib"),
+                "{name} must keep firing: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_lib_residue_shapes_keep_firing() {
+        // The deliberate residue: trailing digits that are stem or
+        // product numbers, not SONAME generations, on packages
+        // shipping no library \— the charge is literally true.
+        let cases: Vec<(&str, Vec<PkgFile>)> = vec![
+            // A CLI tool plus docs: the "64" is base64.
+            (
+                "libb64",
+                vec![
+                    data_file("/usr/bin/b64"),
+                    data_file("/usr/share/doc/libb64/README"),
+                ],
+            ),
+            // A grub.d hook symlink plus a libexec helper: the "2"
+            // is GRUB 2's product number.
+            (
+                "libostree-grub2",
+                vec![
+                    link_file("/etc/grub.d/15_ostree"),
+                    data_file("/usr/libexec/libostree/grub2-15_ostree"),
+                ],
+            ),
+        ];
+        for (name, files) in cases {
+            let names = finding_names(&format!("residue-{name}"), name, files);
+            assert!(
+                names.iter().any(|n| n == "shlib-policy-missing-lib"),
+                "{name} must keep firing: {names:?}"
+            );
+        }
     }
 
     #[test]

@@ -86,6 +86,16 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("shared_library_policy.rs", "re_so_files", "ctor-once"),
     (
         "shared_library_policy.rs",
+        "re_devel_flavoured",
+        "ctor-once",
+    ),
+    (
+        "shared_library_policy.rs",
+        "re_qlogging_categories",
+        "ctor-once",
+    ),
+    (
+        "shared_library_policy.rs",
         "re_versioned_so_file",
         "ctor-once",
     ),
