@@ -419,8 +419,11 @@ impl Check for SharedLibraryPolicyCheck {
         // (gcc's pretty-printer packages, `libstdc++6-pp-gcc<N>`, ship
         // only Python printer scripts) is not a SONAME generation, and
         // its obsoletes of other compiler-version packages do not
-        // break any library co-installability.
-        if let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name)
+        // break any library co-installability. An empty obsoletes list
+        // has nothing to judge, so the versioned-library scan is
+        // skipped for it outright.
+        if !pkg.obsoletes.is_empty()
+            && let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name)
             && self.ships_versioned_library(pkg)
         {
             for obs in &pkg.obsoletes {
@@ -488,9 +491,12 @@ impl Check for SharedLibraryPolicyCheck {
         // finding; it does mark the consumer set incomplete, which
         // withholds the dlopen credit below (the failed file's
         // DT_NEEDED entries are unobservable, so the absence the
-        // credit requires cannot be shown).
+        // credit requires cannot be shown). The library files' entries
+        // are collected in the walk below; the non-library files are
+        // only listed there and parsed after the walk, and only when a
+        // charged candidate makes the consumer set matter at all.
         let mut all_needed: HashSet<String> = HashSet::new();
-        let mut consumer_set_incomplete = false;
+        let mut non_library_elf_paths: Vec<&str> = Vec::new();
 
         // The `shlib-policy-missing-lib` decision is taken after this
         // walk (issue #1029): a library-named file the walk reads as an
@@ -513,10 +519,7 @@ impl Check for SharedLibraryPolicyCheck {
                 continue;
             }
             if !fname.contains(".so.") && !fname.ends_with(".so") {
-                match Self::elf_dynamic(&file.path) {
-                    Ok((_, needed)) => all_needed.extend(needed),
-                    Err(_) => consumer_set_incomplete = true,
-                }
+                non_library_elf_paths.push(file.path.as_str());
                 continue;
             }
             match Self::elf_dynamic(&file.path) {
@@ -649,6 +652,21 @@ impl Check for SharedLibraryPolicyCheck {
         // Non-lib stuff must not add dependencies. Sorted for the same reason
         // as above: one finding per dep, all sharing (check, level).
         if !libs.is_empty() {
+            // The consumer set is complete only when every shipped
+            // program parsed; it is computed here, not in the walk,
+            // because it matters only when a charged candidate exists
+            // (a required SONAME nothing links against).
+            let mut consumer_set_incomplete = false;
+            if pkg_requires.iter().any(|dep| {
+                dep.contains(".so.") && !libs.contains(*dep) && !libs_needed.contains(*dep)
+            }) {
+                for path in &non_library_elf_paths {
+                    match Self::elf_dynamic(path) {
+                        Ok((_, needed)) => all_needed.extend(needed),
+                        Err(_) => consumer_set_incomplete = true,
+                    }
+                }
+            }
             // Witness evidence per shipped library file, computed
             // once here instead of re-reading and re-parsing every
             // library for every charged SONAME in the loop below.
