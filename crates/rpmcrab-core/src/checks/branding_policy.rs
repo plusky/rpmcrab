@@ -31,6 +31,9 @@
 //! on package names — require names that parse as a flavour pin; an ELF
 //! shared-library capability name (`lib....so...`) is not a package
 //! name and pins no flavour.
+//! Theme-type requires are not charged at all: themes are additive
+//! content packs selected by name, and the generic `<base>-theme`
+//! name the finding prescribes usually has no provider.
 
 use fancy_regex::Regex;
 
@@ -119,8 +122,8 @@ impl BrandingPolicyCheck {
     /// pins are the selection itself, not a consumer bypassing the
     /// generic mechanism, and `branding-requires-specific-flavor` is
     /// not charged for them. Theme-type pins are not composition
-    /// pins: themes are additive content packs selected by name, and
-    /// they stay charged on every requirer, patterns packages
+    /// pins either: they are exempt on every requirer by the
+    /// 2026-10-27 ruling (see `is_theme_pin`), patterns packages
     /// included.
     fn is_composition_pin(re: &Regex, pkg_name: &str, require_name: &str) -> bool {
         pkg_name.starts_with("patterns-")
@@ -128,6 +131,34 @@ impl BrandingPolicyCheck {
                 Self::parse_branding(re, require_name),
                 Some((_, kind, _)) if kind == "branding"
             )
+    }
+
+    /// Whether `require_name` is a theme-type pin: its parsed type
+    /// component is `theme`. Theme pins are not charged
+    /// `branding-requires-specific-flavor` on any requirer
+    /// (maintainer ruling, 2026-10-27). The specific-flavor
+    /// doctrine redirects a pin to the sanctioned generic virtual;
+    /// for themes that virtual usually does not exist — of the 15
+    /// theme-type findings on the Factory corpus, 13 require a
+    /// generic `<base>-theme` name with zero providers corpus-wide,
+    /// so the prescribed require is unsatisfiable — and the rest
+    /// sit in ecosystems whose theme names are flavour-specific by
+    /// design. Themes are additive content packs selected by name
+    /// (the #954 doctrine), not flavour selections. The exemption
+    /// keys on the parsed type component only: a name merely
+    /// containing `theme` outside that position
+    /// (`libtheme-branding-openSUSE`) is a branding pin and keeps
+    /// firing, and ELF capability names stay governed by
+    /// `is_elf_capability`. The charge site skips a theme pin
+    /// before either requirer arm runs: it is not a generic-name
+    /// require either, so the unversioned arm cannot re-read a
+    /// pin whose flavour is `branding` as a generic branding
+    /// require.
+    fn is_theme_pin(re: &Regex, require_name: &str) -> bool {
+        matches!(
+            Self::parse_branding(re, require_name),
+            Some((_, kind, _)) if kind == "theme"
+        )
     }
 }
 
@@ -167,6 +198,17 @@ impl Check for BrandingPolicyCheck {
         let Some((branding_pkg, branding_type, branding_flavor)) = parsed else {
             // Not a branding package: check its requires.
             for require in &pkg.requires {
+                // Theme-type pins are exempt from the specific-flavor
+                // doctrine entirely (maintainer ruling, 2026-10-27):
+                // they select a concrete theme pack, and they are not
+                // generic-name requires either, so neither the
+                // specific-flavor arm nor the unversioned arm below
+                // applies to them — a theme pin whose flavour is
+                // `branding` would otherwise be re-read as a generic
+                // branding require by the second arm.
+                if Self::is_theme_pin(&self.re_branding, &require.name) {
+                    continue;
+                }
                 if is_match(&self.re_branding, &require.name)
                     && !Self::is_composition_pin(&self.re_branding, &pkg.name, &require.name)
                     && !Self::is_elf_capability(&require.name)
@@ -426,9 +468,12 @@ mod tests {
     }
 
     // An ELF capability name whose soname is branding-shaped is not a
-    // flavour pin: it names a library, not a package. Package-name
-    // near-misses (no `.so` component) keep firing, as does a dotted
-    // name that continues past its soname decoration.
+    // flavour pin: it names a library, not a package. Branding-type
+    // package-name near-misses (no `.so` component) keep firing, as
+    // does a dotted branding name that continues past its soname
+    // decoration. The theme-type names in the list stay silent under
+    // the theme-type exemption (maintainer ruling, 2026-10-27), not
+    // because they are capabilities.
     #[test]
     fn soname_requires_are_not_flavor_pins() {
         let mut pkg = fixture_pkg();
@@ -441,15 +486,17 @@ mod tests {
             dep("lib-theme-resources.so.1()(64bit)", 0),
             dep("libtheme-branding-openSUSE", 0),
             dep("testingpackage-branding-openSUSE", 0),
-            // The stripped stem is a plain theme-arm package name.
+            // The stripped stem is a plain theme-arm package name:
+            // silent under the theme-type exemption.
             dep("lib-theme-resources", 0),
-            // Decoration followed by more name is no capability.
+            // Decoration followed by more name is no capability, but
+            // the name is theme-type, so the exemption silences it.
             dep("libfoo.so.1-theme-openSUSE", 0),
         ];
         let results = run(&pkg);
 
         let specific = has(&results, "branding-requires-specific-flavor");
-        assert_eq!(specific.len(), 4, "{results:?}");
+        assert_eq!(specific.len(), 2, "{results:?}");
         assert!(
             specific
                 .iter()
@@ -459,12 +506,6 @@ mod tests {
             specific
                 .iter()
                 .any(|l| l.contains("testingpackage-branding-openSUSE"))
-        );
-        assert!(specific.iter().any(|l| l.ends_with("lib-theme-resources")));
-        assert!(
-            specific
-                .iter()
-                .any(|l| l.contains("libfoo.so.1-theme-openSUSE"))
         );
     }
 
@@ -805,8 +846,9 @@ mod tests {
     // patterns-* namespace are the composition layer. Their branding
     // pins, own-flavour, borrowed-flavour and rich conditional alike,
     // make the flavour selection, so the specific-flavor error is not
-    // charged for them. Theme pins are not flavour selections and
-    // stay charged on patterns packages too, and the generic-name
+    // charged for them. Theme pins are not flavour selections; since
+    // the 2026-10-27 ruling they are exempt on every requirer, so no
+    // specific-flavor finding remains here at all. The generic-name
     // (unversioned) arm is untouched.
     #[test]
     fn patterns_branding_pins_are_composition_not_consumption() {
@@ -822,8 +864,7 @@ mod tests {
         let results = run(&pkg);
 
         let specific = has(&results, "branding-requires-specific-flavor");
-        assert_eq!(specific.len(), 1, "{results:?}");
-        assert!(specific[0].contains("testingpackage-theme-openSUSE"));
+        assert_eq!(specific.len(), 0, "{results:?}");
 
         let unversioned = has(&results, "branding-requires-unversioned");
         assert_eq!(unversioned.len(), 1, "{results:?}");
@@ -851,18 +892,62 @@ mod tests {
         }
     }
 
-    // A non-patterns requirer keeps the full behaviour: branding pins
-    // and theme pins both fire.
+    // The specific-flavor charge as a matrix (maintainer rulings
+    // 2026-10-26 and 2026-10-27): a branding-type pin fires on a
+    // plain requirer and is composition on a patterns requirer; a
+    // theme-type pin is exempt on both, because the generic
+    // <base>-theme name it would be redirected to has no provider
+    // for most bases. A name merely containing "theme" outside
+    // the type position (libtheme-branding-openSUSE) is a branding
+    // pin and keeps firing.
     #[test]
-    fn non_patterns_requirer_branding_and_theme_pins_fire() {
+    fn specific_flavor_charge_matrix() {
+        for (requirer, require, fires) in [
+            (
+                "plain-testpackage",
+                "testingpackage-branding-openSUSE",
+                true,
+            ),
+            (
+                "patterns-test-base",
+                "testingpackage-branding-openSUSE",
+                false,
+            ),
+            ("plain-testpackage", "testingpackage-theme-openSUSE", false),
+            ("patterns-test-base", "testingpackage-theme-openSUSE", false),
+            ("plain-testpackage", "libtheme-branding-openSUSE", true),
+        ] {
+            let mut pkg = fixture_pkg();
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![dep(require, 0)];
+            let results = run(&pkg);
+            let specific = has(&results, "branding-requires-specific-flavor");
+            assert_eq!(
+                specific.len(),
+                usize::from(fires),
+                "{requirer} requiring {require}: {results:?}"
+            );
+        }
+    }
+
+    // A theme pin whose flavour component is `branding`
+    // (the corpus shape: icewm-theme-branding) parses as a theme
+    // pin for the specific-flavor arm and as a generic branding
+    // name for the unversioned arm. The exemption covers the
+    // require: neither arm fires.
+    #[test]
+    fn theme_pin_with_branding_flavour_is_fully_silent() {
         let mut pkg = fixture_pkg();
         pkg.name = "plain-testpackage".to_string();
-        pkg.requires = vec![
-            dep("testingpackage-branding-openSUSE", 0),
-            dep("testingpackage-theme-openSUSE", 0),
-        ];
+        pkg.requires = vec![dep("testingpackage-theme-branding", 0)];
         let results = run(&pkg);
-        let specific = has(&results, "branding-requires-specific-flavor");
-        assert_eq!(specific.len(), 2, "{results:?}");
+        assert!(
+            has(&results, "branding-requires-specific-flavor").is_empty(),
+            "{results:?}"
+        );
+        assert!(
+            has(&results, "branding-requires-unversioned").is_empty(),
+            "{results:?}"
+        );
     }
 }
