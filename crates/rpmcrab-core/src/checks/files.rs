@@ -5390,9 +5390,20 @@ fn udev_assignments(line: &str) -> Vec<UdevAssignment<'_>> {
     let mut tokens = Vec::new();
     let mut in_quotes = false;
     let mut start = 0;
+    let bytes = line.as_bytes();
     for (i, c) in line.char_indices() {
         match c {
-            '"' => in_quotes = !in_quotes,
+            // Only an unescaped quote delimits: a quote preceded by
+            // an odd run of backslashes is part of the value, and
+            // toggling on it desyncs the tracking so the comma after
+            // the value reads as quoted and the next assignment is
+            // swallowed.
+            '"' => {
+                let backslashes = bytes[..i].iter().rev().take_while(|b| **b == b'\\').count();
+                if backslashes % 2 == 0 {
+                    in_quotes = !in_quotes;
+                }
+            }
             ',' if !in_quotes => {
                 tokens.push(&line[start..i]);
                 start = i + 1;
@@ -14730,6 +14741,24 @@ mod tests {
                 "name, level and path must render, got: {}",
                 hits[0].1
             );
+        }
+    }
+
+    #[test]
+    fn udev_world_writable_after_escaped_quote_fires() {
+        // An escaped quote inside a value is part of the value, not
+        // a delimiter: the MODE after it stays its own assignment.
+        // Toggling on the escaped quote desyncs the split and
+        // swallows the MODE token (issue #1144).
+        for line in [
+            "PROGRAM==\"a\\\"\", MODE=\"0666\"",
+            // An even run of backslashes leaves the quote a
+            // delimiter, so this line splits the same way.
+            "PROGRAM==\"a\\\\\", MODE=\"0666\"",
+        ] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let pkg = content_pkg(&dir, &[(UDEV_RULES_PATH, line)]);
+            assert_eq!(udev_findings(&pkg).len(), 1, "{line}");
         }
     }
 
