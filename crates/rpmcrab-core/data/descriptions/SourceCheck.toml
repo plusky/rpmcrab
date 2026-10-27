@@ -12,3 +12,22 @@ setBadness does not adjust finding levels in rpmcrab, and Factory
 submissions cannot use it: suppress the finding it names with
 addFilter instead.
 """
+
+source-archive-contains-vcs-metadata="""
+A source archive contains a version-control metadata tree (a .git,
+.svn, .hg or .bzr directory, or files directly inside a CVS
+directory). The metadata is dead weight in the archive -- it can be
+most of it -- and can leak the project's history. Remove the metadata
+before packaging the archive; when the archive is produced by the
+service, drop the package-meta opt-in that keeps it. The finding only
+fires for sources the spec declares without an upstream URL, so
+metadata inside an upstream tarball stays quiet.
+"""
+source-archive-contains-lfs-pointer="""
+A source archive contains a git-lfs pointer stub instead of the
+file's real content: a small text file starting with the git-lfs
+version line and an oid sha256: line. Whatever reads the file during
+the build gets the pointer text, not the content, and fails. Report
+the stubs upstream and remove them (and the tests that need them), or
+ship the real files.
+"""
