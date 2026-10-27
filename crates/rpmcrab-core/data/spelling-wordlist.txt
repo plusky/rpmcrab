@@ -39,6 +39,7 @@ accessor/MS
 addon/MS
 allocator/S
 applicative
+analytics
 archiver/S
 arg/MS
 async
@@ -98,6 +99,7 @@ customizable
 dataclass/MS
 datafile/MS
 dataframe/MS
+dataset/MS
 datatypes
 datetime/MS
 declaratively
@@ -123,6 +125,7 @@ embeddable
 enablement
 encodings
 endian/MPS
+extensibility
 entrypoint
 evdev
 executables
@@ -157,6 +160,7 @@ initramfs
 initrd/S
 inlined
 instantiation
+installable
 integrations
 interprocess
 introspectable
@@ -303,6 +307,7 @@ sysconfig
 syslog
 systemd
 templating
+transactional
 testsuite/MS
 themeable
 theming
@@ -320,6 +325,7 @@ typesafe
 uncompress/S
 uninstallation
 univariate
+unmaintained
 untrusted
 unversioned
 uptime
@@ -474,8 +480,10 @@ traceroute
 troff
 txt
 uinput
+unicode
 unittest/MS
 urllib
+wayland
 wasm
 wsgi
 xfs
