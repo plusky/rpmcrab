@@ -205,7 +205,7 @@ units.
 """
 binary-or-shlib-calls-md5="""
 The binary calls the low-level MD5 functions (MD5, MD5_Init,
-MD5_Update, MD5_Final). MD5 is broken as a cryptographic hash --
+MD5_Update, MD5_Final, MD5_Transform). MD5 is broken as a cryptographic hash --
 collisions are cheap -- so it must not protect integrity,
 authenticity or credentials. A checksum over public, non-adversarial
 data is a legitimate use that the binary alone cannot rule out,
@@ -225,7 +225,7 @@ upstream source; where it is a compatibility surface, the finding
 records that the surface exists.
 """
 binary-or-shlib-calls-rc4="""
-The binary calls RC4 (RC4, RC4_set_key). RC4's keystream biases
+The binary calls RC4 (RC4, RC4_set_key, RC4_options). RC4's keystream biases
 make it unsuitable for confidentiality or integrity -- it is
 prohibited in TLS by RFC 7465 -- and it survives legitimately only
 as a compatibility relic. Where RC4 protects anything current,
