@@ -4301,11 +4301,43 @@ impl FilesCheck {
             .collect()
     }
 
+    /// Name credits for `incoherent-logrotate-file` beyond the
+    /// reference's exact package-name equality (FilesCheck ledger;
+    /// maintainer ruling 2026-10-27; measured over the Factory
+    /// corpus, 15 findings -> 9). A logrotate file is coherent when
+    /// it is named after the package up to case, after the package
+    /// plus a logrotate suffix, or after a daemon the same package
+    /// ships as an executable:
+    ///
+    /// - case-only difference: openQA ships `openqa`;
+    /// - suffix: `grommunio-sync.lr` counts as `grommunio-sync`;
+    ///   only the logrotate suffixes `.lr` and `.conf` strip, and
+    ///   the stem must equal the package name exactly (slurm-config's
+    ///   `slurmctld.conf` stem still differs and keeps firing);
+    /// - daemon name: cobbler ships /usr/bin/cobblerd, so its
+    ///   `cobblerd` file is coherent. The name must be an executable
+    ///   regular file in THIS package, compared case-sensitively --
+    ///   ceph-base ships only lib directories called `ceph` (the
+    ///   `ceph` executable lives in ceph-common) and keeps firing.
+    fn logrotate_name_credited(pkg: &Pkg, basename: &str) -> bool {
+        if basename.eq_ignore_ascii_case(&pkg.name) {
+            return true;
+        }
+        for suffix in [".lr", ".conf"] {
+            if basename.strip_suffix(suffix) == Some(pkg.name.as_str()) {
+                return true;
+            }
+        }
+        pkg.files.iter().any(|f| {
+            is_reg(f.mode) && f.mode & 0o111 != 0 && f.name.rsplit('/').next() == Some(basename)
+        })
+    }
+
     fn check_file_logrotate(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
         // logrotate_regex: /etc/logrotate.d/
         if fname.starts_with("/etc/logrotate.d/") && fname != "/etc/logrotate.d/" {
             let basename = fname.rsplit('/').next().unwrap_or("");
-            if basename != pkg.name {
+            if basename != pkg.name && !Self::logrotate_name_credited(pkg, basename) {
                 add_info(
                     out,
                     Level::Error,
@@ -6224,6 +6256,160 @@ mod tests {
         // Negative guard: with no logrotate dep of any kind the finding stays.
         let names = run_files_check_with_deps("/etc/logrotate.d/fcprobe", vec![], vec![], vec![]);
         assert_has(&names, "missing-dependency-to-logrotate");
+    }
+
+    /// Run the full FilesCheck over one package called `name`
+    /// shipping exactly `files`; return the finding names.
+    fn named_pkg_findings(name: &str, files: Vec<PkgFile>) -> Vec<String> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = name.to_string();
+        pkg.ghost_files = files
+            .iter()
+            .filter(|f| f.is_ghost())
+            .map(|f| f.name.clone())
+            .collect();
+        pkg.files = files;
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &test_config());
+        results.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    fn mode_file(name: &str, mode: u32) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn incoherent_logrotate_credits_shipped_daemon_name() {
+        // Ruling 2026-10-27: a logrotate file named after a daemon
+        // the same package ships as an executable is coherent
+        // (cobbler ships /usr/bin/cobblerd and /etc/logrotate.d/cobblerd).
+        let names = named_pkg_findings(
+            "cobbler",
+            vec![
+                mode_file("/etc/logrotate.d/cobblerd", 0o100644),
+                mode_file("/usr/bin/cobblerd", 0o100755),
+            ],
+        );
+        assert_lacks(&names, "incoherent-logrotate-file");
+    }
+
+    #[test]
+    fn incoherent_logrotate_daemon_credit_needs_an_executable() {
+        // ceph-base shape: only a lib directory and a plain data
+        // file are called `ceph` -- the `ceph` executable lives in
+        // ceph-common -- so nothing credits and the finding stays.
+        let names = named_pkg_findings(
+            "ceph-base",
+            vec![
+                mode_file("/etc/logrotate.d/ceph", 0o100644),
+                mode_file("/usr/lib64/ceph", 0o40755),
+                mode_file("/usr/share/ceph", 0o100644),
+            ],
+        );
+        assert_has(&names, "incoherent-logrotate-file");
+    }
+
+    #[test]
+    fn incoherent_logrotate_daemon_credit_is_case_sensitive() {
+        // The case credit compares the file name against the
+        // package name only; a daemon whose shipped name differs
+        // from the logrotate file's in case does not credit.
+        let names = named_pkg_findings(
+            "bar",
+            vec![
+                mode_file("/etc/logrotate.d/bard", 0o100644),
+                mode_file("/usr/bin/BarD", 0o100755),
+            ],
+        );
+        assert_has(&names, "incoherent-logrotate-file");
+    }
+
+    #[test]
+    fn incoherent_logrotate_daemon_credit_is_per_package() {
+        // The executable must ship in the SAME package: a sibling
+        // package owning the daemon does not credit this package's
+        // logrotate file.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut owner = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        owner.name = "daemon-owner".to_string();
+        owner.files = vec![mode_file("/usr/bin/shared", 0o100755)];
+        let mut logger = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        logger.name = "log-owner".to_string();
+        logger.files = vec![mode_file("/etc/logrotate.d/shared", 0o100644)];
+        let (results, _levels) = run_files_check_pkgs(&[owner, logger], &test_config());
+        let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "incoherent-logrotate-file");
+    }
+
+    #[test]
+    fn incoherent_logrotate_credits_case_only_difference() {
+        // openQA ships /etc/logrotate.d/openqa.
+        let names = named_pkg_findings(
+            "openQA",
+            vec![mode_file("/etc/logrotate.d/openqa", 0o100644)],
+        );
+        assert_lacks(&names, "incoherent-logrotate-file");
+    }
+
+    #[test]
+    fn incoherent_logrotate_credits_logrotate_suffix() {
+        // grommunio-sync ships /etc/logrotate.d/grommunio-sync.lr;
+        // the .conf form strips the same way.
+        let names = named_pkg_findings(
+            "grommunio-sync",
+            vec![mode_file("/etc/logrotate.d/grommunio-sync.lr", 0o100644)],
+        );
+        assert_lacks(&names, "incoherent-logrotate-file");
+        let names = named_pkg_findings(
+            "fcprobe",
+            vec![mode_file("/etc/logrotate.d/fcprobe.conf", 0o100644)],
+        );
+        assert_lacks(&names, "incoherent-logrotate-file");
+    }
+
+    #[test]
+    fn incoherent_logrotate_suffix_strip_is_exact_and_closed() {
+        // Only .lr/.conf strip, and the stem must equal the package
+        // name exactly: other extensions, a case-different stem, and
+        // the slurm shape (stem != the -config package's name) all
+        // keep firing.
+        for file in [
+            "/etc/logrotate.d/fcprobe.txt",
+            "/etc/logrotate.d/fcprobe.bak",
+            "/etc/logrotate.d/FCprobe.lr",
+        ] {
+            let names = named_pkg_findings("fcprobe", vec![mode_file(file, 0o100644)]);
+            assert_has(&names, "incoherent-logrotate-file");
+        }
+        let names = named_pkg_findings(
+            "slurm-config",
+            vec![mode_file("/etc/logrotate.d/slurmctld.conf", 0o100644)],
+        );
+        assert_has(&names, "incoherent-logrotate-file");
+    }
+
+    #[test]
+    fn incoherent_logrotate_residue_keeps_firing() {
+        // Shapes with no credit (the 2026-10-27 ruling's residue):
+        // a subpackage carrying the product-named file (dnf-data)
+        // and a stale previous-major name (tomcat11 ships tomcat10).
+        let names = named_pkg_findings(
+            "dnf-data",
+            vec![mode_file("/etc/logrotate.d/dnf", 0o100644)],
+        );
+        assert_has(&names, "incoherent-logrotate-file");
+        let names = named_pkg_findings(
+            "tomcat11",
+            vec![mode_file("/etc/logrotate.d/tomcat10", 0o100644)],
+        );
+        assert_has(&names, "incoherent-logrotate-file");
     }
 
     /// Run the full FilesCheck over a package shipping exactly `files`;

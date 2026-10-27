@@ -793,3 +793,10 @@ check = "standard-dir-owned-by-package"
 kind = "behaviour"
 reason = "Tom's ruling (2026-10-27): `filesystem-media` is exempt alongside `filesystem`. openSUSE splits the designated ownership of /media out of the filesystem package into filesystem-media, which is the dir's designated owner; the reference's filesys_packages list names only `filesystem`, so crab fired on the designated owner itself. The exemption stays an exact name match -- other filesystem-* names keep firing, and virtualbox-guest-tools' /media entry, a true duplicate of filesystem-media's, keeps firing. Measured on the Factory corpus (51,589 RPMs, FilesCheck): 76 findings before, 75 after; the removed set is exactly filesystem-media's /media finding. The remaining tail (/etc/xinetd.d x4, the dir's only owners, which the filesystem package does not ship at all) was left firing: its distinguishing feature is the repo-wide ownership landscape, which a per-package check cannot use; the venue is distro-side (the filesystem package adopting the dir, precedent bsc#834681)."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "incoherent-logrotate-file"
+kind = "behaviour"
+reason = "Three name credits the reference does not have (maintainer ruling 2026-10-27; measured over the Factory corpus: 15 findings -> 9, removed set exactly 6). A logrotate file counts as named after its package when the names differ only in case (openQA ships openqa); when stripping a logrotate suffix (.lr/.conf) leaves the package name (grommunio-sync ships grommunio-sync.lr; the stem must match exactly, so slurm-config's slurmctld.conf keeps firing); or when the file is named after a daemon the same package ships as an executable regular file (cobblerd, radiusd, hmland, xsp2). The daemon credit needs the executable in this package, compared case-sensitively: ceph-base ships only lib directories called ceph (the ceph executable lives in ceph-common) and keeps firing, as does the rest of the residue (dnf-data, krb5-mini, ntpsec, openSUSE-release-tools-slsa-build-service, slurm-config, tomcat11)."
+since = "0.4.1"
