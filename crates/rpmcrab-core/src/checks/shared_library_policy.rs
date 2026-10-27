@@ -1140,6 +1140,74 @@ mod tests {
     }
 
     #[test]
+    fn missing_lib_walk_stops_at_the_first_unreadable_elf() {
+        // The ELF pass breaks on the first file it cannot read: a
+        // SONAME credit earned earlier in the walk stands (the
+        // missing-lib finding stays silent, readelf-failed still
+        // fires), while a carrier sitting behind the unreadable
+        // file goes unseen and the finding fires.
+        let run = |order: &[bool]| {
+            let dir = std::env::temp_dir().join(format!(
+                "rpmcrab-shlib-missinglib-mixedorder-{}",
+                order
+                    .iter()
+                    .map(|b| if *b { "g" } else { "b" })
+                    .collect::<String>()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("tmpdir");
+            let mut files = Vec::new();
+            for (i, good) in order.iter().enumerate() {
+                let soname = format!("lib{}{}.so.beta", if *good { "good" } else { "bad" }, i);
+                let path = dir.join(&soname);
+                let mut bytes = minimal_elf(&soname);
+                if !good {
+                    bytes.truncate(32);
+                }
+                std::fs::write(&path, bytes).expect("write elf");
+                files.push(PkgFile {
+                    name: format!("/usr/lib64/{soname}"),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: 0o100755,
+                    magic: "ELF 64-bit LSB shared object".to_string(),
+                    ..Default::default()
+                });
+            }
+            let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+            let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+            pkg.name = "libfoo1".to_string();
+            pkg.files = files;
+            let config = Config::default();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            let mut check = SharedLibraryPolicyCheck::new(&config);
+            check.check_binary(&pkg, &config, &mut out);
+            out.results()
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<String>>()
+        };
+        let names = run(&[true, false]);
+        assert!(
+            !names.iter().any(|n| n == "shlib-policy-missing-lib"),
+            "an earlier SONAME credit stands: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "readelf-failed"),
+            "the unreadable file is still reported: {names:?}"
+        );
+        let names = run(&[false, true]);
+        assert!(
+            names.iter().any(|n| n == "shlib-policy-missing-lib"),
+            "a SONAME behind the unreadable file goes unseen: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "readelf-failed"),
+            "the unreadable file is still reported: {names:?}"
+        );
+    }
+
+    #[test]
     fn missing_lib_fires_when_only_script_payload() {
         // A policy-named package shipping no library file at all keeps
         // firing: a gdb auto-load script embedding the versioned
