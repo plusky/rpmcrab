@@ -178,9 +178,13 @@ impl AlternativesCheck {
             // prefix of the removed one (tolua+ is not removed by a
             // tolua++ line).
             let name = fancy_regex::escape(&binary);
-            let re = Regex::new(&format!(r"--remove\s+{}(?=\s|$|[;|&)])", name))
-                .expect("remove pattern");
-            if lines.iter().any(|l| is_match(&re, l)) {
+            // The name comes from the package's own %post lines, so
+            // an uncompilable pattern must not panic the run: skip
+            // the credit, the shape `check_binary` uses for the
+            // libalternatives conf pattern.
+            if let Ok(re) = Regex::new(&format!(r"--remove\s+{}(?=\s|$|[;|&)])", name))
+                && lines.iter().any(|l| is_match(&re, l))
+            {
                 missing.retain(|b| b != &binary);
             }
         }
@@ -807,16 +811,22 @@ mod tests {
 
     #[test]
     fn postun_remove_of_longer_name_does_not_credit_prefix() {
-        let install = vec![("/usr/bin/tolua+".to_string(), "tolua+".to_string())];
+        // A word-ending installed name: the reference's `\b` credits
+        // the longer removed name (`a`->`+` is a boundary), the
+        // token-end form does not.
+        let install = vec![("/usr/bin/tolua".to_string(), "tolua".to_string())];
         let lines = vec!["update-alternatives --remove tolua++ /usr/bin/toluapp-5.1".to_string()];
         let missing = AlternativesCheck::check_postun_phase(&lines, &install);
-        assert_eq!(missing, vec!["tolua+".to_string()]);
+        assert_eq!(missing, vec!["tolua".to_string()]);
     }
 
     #[test]
     fn postun_remove_of_suffixed_word_name_does_not_credit() {
+        // `foo` -> `-` is a word boundary (the reference credits it)
+        // but not a token end, so the removal of `foo-bar` does not
+        // credit the installed `foo`.
         let install = vec![("/usr/bin/foo".to_string(), "foo".to_string())];
-        let lines = vec!["update-alternatives --remove foo2 /usr/bin/foo2-1.0".to_string()];
+        let lines = vec!["update-alternatives --remove foo-bar /usr/bin/foo-bar-1.0".to_string()];
         let missing = AlternativesCheck::check_postun_phase(&lines, &install);
         assert_eq!(missing, vec!["foo".to_string()]);
     }
