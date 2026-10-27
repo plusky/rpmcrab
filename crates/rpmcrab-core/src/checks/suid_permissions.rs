@@ -32,7 +32,7 @@
 //! findings, reports at warning level instead of error, its detail
 //! gaining the verbatim suffix ` (matches the {level} profile)`
 //! naming the matched profile (`easy` is consulted first and wins
-//! when both match) (Tom's ruling, 2026-10-27); a mismatch with
+//! when both match); a mismatch with
 //! every shipped profile stays an error. A malformed `easy` or
 //! `paranoid` file is skipped rather than aborting the run: the
 //! reference never reads those profiles, so their parse failures
@@ -528,7 +528,7 @@ impl SUIDPermissionsCheck {
             );
         }
 
-        // Severity rule (Tom, 2026-10-27): the verdicts below judge the
+        // Severity rule: the verdicts below judge the
         // packaged values against the secure baseline entry (the secure
         // composition as this package's drop-ins extend it), but when
         // mode AND owner exactly match another shipped profile's entry
