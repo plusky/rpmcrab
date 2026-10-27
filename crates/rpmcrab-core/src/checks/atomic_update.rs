@@ -2070,54 +2070,38 @@ fi
     }
 
     #[test]
-    fn srv_www_payload_is_quiet_under_the_flavour_allowed_dirs() {
-        // The vendored SUSE flavour config whitelists /srv/www/ in
+    fn srv_payload_is_quiet_under_the_flavour_allowed_dirs() {
+        // The vendored SUSE flavour config whitelists /srv/ in
         // AtomicAllowedDirs (EXTRA_ATOMIC_ALLOWED_DIRS in the distro
         // config generator; a whitelist with a known regression,
-        // ledgered as a config divergence): payload under the web
-        // root stays quiet, while the near-miss prefix, the rest of
-        // /srv and the /var tail keep firing.
+        // ledgered as a config divergence): payload anywhere under
+        // /srv stays quiet, while the near-miss prefix and the /var
+        // tail keep firing.
         let mut pkg = fixture_pkg();
         pkg.files = vec![
             regular("/srv/www/app/index.php"),
-            regular("/srv/www2/index.php"),
             regular("/srv/ftp/pub/file"),
+            regular("/srv2/index.php"),
             regular("/var/lib/app/a.db"),
         ];
         let mut check = check_with(
             &[
-                "/etc/",
-                "/usr/",
-                "/bin/",
-                "/lib/",
-                "/lib64/",
-                "/sbin/",
-                "/boot/",
-                "/srv/www/",
+                "/etc/", "/usr/", "/bin/", "/lib/", "/lib64/", "/sbin/", "/boot/", "/srv/",
             ],
             &["/usr/local/", "/boot/efi/"],
             false,
         );
         let results = run(&mut check, &pkg);
-        assert_eq!(results.len(), 3);
+        assert_eq!(results.len(), 2);
         for (name, line) in &results {
             assert_eq!(name, "dir-or-file-outside-snapshot");
             assert!(line.contains(": E: "), "level: {line}");
         }
+        assert!(results[0].1.contains("/srv2 (1 file)"), "{}", results[0].1);
         assert!(
-            results[0].1.contains("/srv/www2 (1 file)"),
-            "{}",
-            results[0].1
-        );
-        assert!(
-            results[1].1.contains("/srv/ftp/pub (1 file)"),
+            results[1].1.contains("/var/lib/app (1 file)"),
             "{}",
             results[1].1
-        );
-        assert!(
-            results[2].1.contains("/var/lib/app (1 file)"),
-            "{}",
-            results[2].1
         );
     }
 
