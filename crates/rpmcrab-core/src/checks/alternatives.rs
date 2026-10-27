@@ -171,13 +171,15 @@ impl AlternativesCheck {
             // character (tolua++) has no word boundary before the
             // whitespace that follows it, so the reference's pattern
             // never credits its --remove line. Require the name to end
-            // the token instead — whitespace, a command separator, or
-            // end of line — which also refuses the reference's false
-            // credit for a name that is a proper prefix of the removed
-            // one (tolua+ is not removed by a tolua++ line).
+            // the token instead — whitespace, a command separator, a
+            // closing paren (a --remove inside a command substitution
+            // can end the line), or end of line — which also refuses
+            // the reference's false credit for a name that is a proper
+            // prefix of the removed one (tolua+ is not removed by a
+            // tolua++ line).
             let name = fancy_regex::escape(&binary);
-            let re =
-                Regex::new(&format!(r"--remove\s+{}(?=\s|$|[;|&])", name)).expect("remove pattern");
+            let re = Regex::new(&format!(r"--remove\s+{}(?=\s|$|[;|&)])", name))
+                .expect("remove pattern");
             if lines.iter().any(|l| is_match(&re, l)) {
                 missing.retain(|b| b != &binary);
             }
@@ -791,6 +793,14 @@ mod tests {
     fn postun_remove_of_plus_suffixed_name_is_credited() {
         let install = vec![("/usr/bin/tolua++".to_string(), "tolua++".to_string())];
         let lines = vec!["update-alternatives --remove tolua++ /usr/bin/toluapp-5.1".to_string()];
+        let missing = AlternativesCheck::check_postun_phase(&lines, &install);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn postun_remove_paren_terminated_is_credited() {
+        let install = vec![("/usr/bin/foo".to_string(), "foo".to_string())];
+        let lines = vec!["x=$(update-alternatives --remove foo)".to_string()];
         let missing = AlternativesCheck::check_postun_phase(&lines, &install);
         assert!(missing.is_empty());
     }
