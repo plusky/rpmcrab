@@ -4964,7 +4964,7 @@ impl FilesCheck {
         }
         fd.nonexec_file = true;
         if pkgfile.user != "root" || pkgfile.group != "root" {
-            // Severity split (maintainer ruling, 2026-10-27; see the
+            // Severity split (see the
             // divergence ledger): an owner this package itself declares
             // through a sysusers.d snippet it ships warns instead of
             // erroring. The snippet is the service's runtime identity
