@@ -1924,6 +1924,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "KMPPolicyCheck"
+kind = "behaviour"
+reason = "The reference fires `kmp-missing-requires` whenever no Require is named exactly `kernel-<flavor>`. A KMP whose modules link flavor-pinned symbols instead carries `ksym(<flavor>:...)` requires, which only a kernel package exporting those symbols satisfies -- the SLE 16 KMP Manual (section 7, RPM Provides and Requires) defines installation success exactly that way, and both `kernel-<flavor>` and `kernel-<flavor>-base` provide the symbols, so the plain name require would force the full kernel package where the `-base` subset suffices. rpmcrab credits own-flavor ksym requires; a KMP with neither form, or only another flavor's ksym, still fires. Corpus: all 13 live findings carry 33-831 own-flavor ksym requires alongside the proper Enhances and Supplements, and no corpus KMP lacks both dependency forms."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "LSBCheck"
 kind = "missing"
 reason = "Deliberate: the LSB effort is defunct (issue #483). The reference validates package name, version and release against LSB character rules (LSBCheck.py); the check is enabled in no shipped config -- neither configdefaults.toml, opensuse.toml nor the Fedora flavour lists it -- so the port does not keep it, it deletes the whole check instead of carrying dead code. The staged `LSBCheck.toml` was removed as well: no descriptions for a deleted check."

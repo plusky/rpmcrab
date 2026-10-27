@@ -50,8 +50,21 @@ impl Check for KMPPolicyCheck {
             return;
         };
 
-        // Requires must name the specific kernel flavor.
-        if !pkg.requires.iter().any(|d| d.name == kernel_flavor) {
+        // Requires must name the specific kernel flavor, or pin it
+        // through the modules' symbol dependencies: a
+        // `ksym(<flavor>:...)` require is satisfiable only by a kernel
+        // package exporting those symbols (the `kernel-<flavor>`
+        // package or its `-base` subset), which is the dependency form
+        // produced when the preamble carries no plain
+        // `Requires: kernel-<flavor>`.
+        let flavor = &kernel_flavor["kernel-".len()..];
+        let ksym_prefix = format!("ksym({flavor}:");
+        let kernel_required = pkg.requires.iter().any(|d| d.name == kernel_flavor)
+            || pkg
+                .requires
+                .iter()
+                .any(|d| d.name.starts_with(&ksym_prefix));
+        if !kernel_required {
             add_info(
                 out,
                 Level::Error,
@@ -190,6 +203,69 @@ mod tests {
 
         assert_eq!(
             has(&results, "kmp-missing-supplements").len(),
+            1,
+            "{results:?}"
+        );
+    }
+
+    // A KMP whose modules pin the flavor through their symbol
+    // dependencies (`ksym(<flavor>:...)` requires) has its kernel
+    // dependency expressed without a plain `Requires: kernel-<flavor>`;
+    // only the requires arm is credited, the rest of the policy still
+    // applies.
+    #[test]
+    fn kmp_with_ksym_requires_is_quiet_on_requires() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "ksymreq-kmp-default".to_string();
+        pkg.requires = vec![
+            dep("ksym(default:__fentry__)"),
+            dep("ksym(default:module_layout)"),
+        ];
+        let results = run(&pkg);
+
+        assert!(
+            has(&results, "kmp-missing-requires").is_empty(),
+            "{results:?}"
+        );
+        assert_eq!(
+            has(&results, "kmp-missing-enhances").len(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            has(&results, "kmp-missing-supplements").len(),
+            1,
+            "{results:?}"
+        );
+    }
+
+    // Symbol dependencies for a DIFFERENT flavor do not credit the
+    // package's own flavor.
+    #[test]
+    fn kmp_with_other_flavor_ksym_still_fires() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "otherksym-kmp-default".to_string();
+        pkg.requires = vec![dep("ksym(longterm:__fentry__)")];
+        let results = run(&pkg);
+
+        assert_eq!(
+            has(&results, "kmp-missing-requires").len(),
+            1,
+            "{results:?}"
+        );
+    }
+
+    // The flavor prefix is colon-anchored: a longer flavor name that
+    // merely starts with this one does not credit it.
+    #[test]
+    fn kmp_with_lookalike_ksym_still_fires() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "lookalike-kmp-default".to_string();
+        pkg.requires = vec![dep("ksym(defaultx:__fentry__)")];
+        let results = run(&pkg);
+
+        assert_eq!(
+            has(&results, "kmp-missing-requires").len(),
             1,
             "{results:?}"
         );
