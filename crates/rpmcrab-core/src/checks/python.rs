@@ -7,6 +7,17 @@
 //! `python-pyc-multiple-versions`, `python-missing-require`,
 //! `python-leftover-require`.
 //!
+//! The require/metadata coherence tags — `python-unflavoured-require`,
+//! `python-dist-info-version-mismatch` and
+//! `python-require-floor-below-metadata`, plus the `python-missing-require`
+//! satisfaction changes they ride on — are crab-only (#1024, ledgered in
+//! `data/divergences/PythonCheck.toml`): the package's own
+//! `python3.Xdist()` Provides satisfy its declared requirements, a
+//! requirement met only by a bare `python-<name>` Require is reported
+//! under its own tag, the shipped dist-info version is compared against
+//! the RPM version under PEP 440, and an RPM Require whose floor sits
+//! below the floor the shipped metadata declares is reported.
+//!
 //! Requirement metadata is read from `egg-info/requires.txt` or
 //! `dist-info/METADATA` natively (no `importlib.metadata`); environment
 //! markers are evaluated for the common `python_version` / `sys_platform`
@@ -24,6 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use fancy_regex::Regex;
+use librpm::Tag;
 use std::sync::OnceLock;
 
 use crate::check::{Check, add_info, make_finding};
@@ -77,13 +89,18 @@ struct DistInfo {
     /// The distribution's own name (`Name:` for dist-info, derived from
     /// the directory name for egg-info).
     dist_name: Option<String>,
+    /// The dist-info `Version:` header (dist-info only; egg-info
+    /// carries no version this port reads).
+    metadata_version: Option<String>,
 }
 
-/// A parsed requirement: distribution name, environment marker, extras.
+/// A parsed requirement: distribution name, environment marker, extras,
+/// and the raw version specifier (possibly empty).
 struct Requirement {
     name: String,
     marker: Option<String>,
     extras: Vec<String>,
+    specifier: String,
 }
 
 /// Find the byte index of a top-level `and`/`or` operator, skipping quoted
@@ -283,38 +300,52 @@ impl PythonCheck {
         out
     }
 
-    /// Split `name[extras]; marker` into its parts, stripping version
-    /// specifiers: `foo[bar]>=1.0` -> name `foo`, extras `["bar"]`.
+    /// Split `name[extras]; marker` into its parts, keeping the version
+    /// specifier: `foo[bar]>=1.0` -> name `foo`, extras `["bar"]`,
+    /// specifier `">=1.0"`.
     fn split_marker(req: &str) -> Requirement {
         let mut parts = req.splitn(2, ';');
-        let name = parts.next().unwrap_or("").trim();
-        // Extras live between `[` and the first `]`; the version specifier
-        // follows the closing bracket (`Twisted[tls]>=14.0`), so split on
-        // `]` instead of trimming a trailing one that may not be there.
-        let (name, extras) = match name.split_once('[') {
-            Some((n, rest)) => {
-                let (extra_part, _) = rest.split_once(']').unwrap_or((rest, ""));
-                let extras = extra_part
-                    .split(',')
-                    .map(|e| e.trim().to_string())
-                    .filter(|e| !e.is_empty())
-                    .collect();
-                (n, extras)
-            }
-            None => (name, Vec::new()),
-        };
-        let name = name
-            .split(|c| "<>=!~ [(,".contains(c))
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let head = parts.next().unwrap_or("").trim();
+        let (name, extras, specifier) = Self::split_head(head);
         let marker = parts.next().map(|m| m.trim().to_string());
         Requirement {
             name,
             marker,
             extras,
+            specifier,
         }
+    }
+
+    /// Split a requirement head (`name[extras]specifier`) into the name,
+    /// the extras and the raw version specifier. The name ends at the
+    /// first specifier/bracket character (the historical charset
+    /// split); extras live between `[` and the first `]`; the version
+    /// specifier follows the closing bracket (`Twisted[tls]>=14.0`), so
+    /// split on `]` instead of trimming a trailing one that may not be
+    /// there.
+    fn split_head(head: &str) -> (String, Vec<String>, String) {
+        let name_end = head.find(|c| "<>=!~ [(,".contains(c)).unwrap_or(head.len());
+        let name = head[..name_end].trim().to_string();
+        let mut rest = &head[name_end..];
+        let mut extras = Vec::new();
+        if let Some(bracketed) = rest.strip_prefix('[') {
+            let (extra_part, after) = match bracketed.split_once(']') {
+                Some((e, a)) => (e, a),
+                None => (bracketed, ""),
+            };
+            extras = extra_part
+                .split(',')
+                .map(|e| e.trim().to_string())
+                .filter(|e| !e.is_empty())
+                .collect();
+            rest = after;
+        }
+        let mut specifier = rest.trim().to_string();
+        // The legacy parenthesised form: `name (>=1.0)`.
+        if specifier.len() >= 2 && specifier.starts_with('(') && specifier.ends_with(')') {
+            specifier = specifier[1..specifier.len() - 1].trim().to_string();
+        }
+        (name, extras, specifier)
     }
 
     /// Evaluate the common environment markers. Unknown markers are treated
@@ -693,6 +724,296 @@ fn compare_versions(a: &str, b: &str) -> i32 {
     0
 }
 
+/// A PEP 440 version, normalised for comparison (#1024 §3.2/§3.3):
+/// release segments compare zero-padded (`2.18` equals `2.18.0`),
+/// and the local segment never participates (a `+git` suffix on an
+/// equal base is quiet by the issue's ruling).
+#[derive(Debug, Clone, PartialEq)]
+struct Pep440Version {
+    epoch: u64,
+    release: Vec<u64>,
+    /// Pre-release: (kind rank, number); a < b < c < dev-only.
+    pre: Option<(u8, u64)>,
+    post: Option<u64>,
+    dev: Option<u64>,
+}
+
+impl Pep440Version {
+    fn is_zero(&self) -> bool {
+        self.epoch == 0
+            && self.release.iter().all(|&n| n == 0)
+            && self.pre.is_none()
+            && self.post.is_none()
+            && self.dev.is_none()
+    }
+}
+
+/// Parse a PEP 440 version string; `None` when it is not one. The
+/// grammar covered is the one distribution metadata and openSUSE
+/// version strings actually use: `[epoch!]release[.pre][.post][.dev]
+/// [+local]`, with the letter-spelled pre-release forms (`alpha`,
+/// `beta`, `preview`, `rc`, `pre`, `a`, `b`, `c`) and separator
+/// variants (`.`, `-`, `_`) normalised.
+fn pep440_parse(text: &str) -> Option<Pep440Version> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    // The local segment is dropped for comparison.
+    let text = text.split('+').next().unwrap_or("");
+    let (epoch, rest) = match text.split_once('!') {
+        Some((e, r)) => (e.parse::<u64>().ok()?, r),
+        None => (0, text),
+    };
+    // `X.Y-N` with no letters anywhere is the implicit post-release
+    // spelling (`1.0-1` == `1.0.post1`).
+    let (rest, tail_post) = split_tail_post(rest);
+    // Tokenise into release numbers and letter markers: insert a dot
+    // at every digit<->letter boundary, then split on separators.
+    let mut norm = String::with_capacity(rest.len());
+    let mut prev: Option<char> = None;
+    for c in rest.chars() {
+        if let Some(p) = prev
+            && ((p.is_ascii_digit() && c.is_ascii_alphabetic())
+                || (p.is_ascii_alphabetic() && c.is_ascii_digit()))
+        {
+            norm.push('.');
+        }
+        norm.push(c);
+        prev = Some(c);
+    }
+    // The marker a letter token opens, waiting for its number.
+    #[derive(PartialEq, Clone, Copy)]
+    enum Marker {
+        Pre(u8),
+        Post,
+        Dev,
+    }
+    let mut release: Vec<u64> = Vec::new();
+    let mut pre: Option<(u8, u64)> = None;
+    let mut post: Option<u64> = tail_post;
+    let mut dev: Option<u64> = None;
+    let mut pending: Option<Marker> = None;
+    // Whether a letter marker has been assigned: a bare number after
+    // that closes nothing and is not a version (`1.0a1.2`). The
+    // implicit tail post does not count — it precedes the release.
+    let mut closed = false;
+    for tok in norm.split(['.', '-', '_']) {
+        if tok.is_empty() {
+            continue;
+        }
+        if let Ok(n) = tok.parse::<u64>() {
+            match pending.take() {
+                Some(Marker::Pre(rank)) => {
+                    if pre.is_some() {
+                        return None;
+                    }
+                    pre = Some((rank, n));
+                    closed = true;
+                }
+                Some(Marker::Post) => {
+                    if post.is_some() {
+                        return None;
+                    }
+                    post = Some(n);
+                    closed = true;
+                }
+                Some(Marker::Dev) => {
+                    if dev.is_some() {
+                        return None;
+                    }
+                    dev = Some(n);
+                    closed = true;
+                }
+                None => {
+                    if closed {
+                        return None;
+                    }
+                    release.push(n);
+                }
+            }
+            continue;
+        }
+        // A letter token closes any pending marker at value 0 (the
+        // `1.0a` spelling) before opening its own.
+        if let Some(m) = pending.take() {
+            match m {
+                Marker::Pre(rank) => {
+                    if pre.is_some() {
+                        return None;
+                    }
+                    pre = Some((rank, 0));
+                }
+                Marker::Post => {
+                    if post.is_some() {
+                        return None;
+                    }
+                    post = Some(0);
+                }
+                Marker::Dev => {
+                    if dev.is_some() {
+                        return None;
+                    }
+                    dev = Some(0);
+                }
+            }
+            closed = true;
+        }
+        pending = Some(match tok.to_ascii_lowercase().as_str() {
+            "dev" => Marker::Dev,
+            "post" | "rev" | "r" => Marker::Post,
+            "a" | "alpha" => Marker::Pre(0),
+            "b" | "beta" => Marker::Pre(1),
+            "c" | "rc" | "pre" | "preview" => Marker::Pre(2),
+            _ => return None,
+        });
+    }
+    if let Some(m) = pending.take() {
+        match m {
+            Marker::Pre(rank) => {
+                if pre.is_some() {
+                    return None;
+                }
+                pre = Some((rank, 0));
+            }
+            Marker::Post => {
+                if post.is_some() {
+                    return None;
+                }
+                post = Some(0);
+            }
+            Marker::Dev => {
+                if dev.is_some() {
+                    return None;
+                }
+                dev = Some(0);
+            }
+        }
+    }
+    if release.is_empty() {
+        return None;
+    }
+    Some(Pep440Version {
+        epoch,
+        release,
+        pre,
+        post,
+        dev,
+    })
+}
+
+/// The implicit post-release tail of `X.Y-N` spellings: returns the
+/// string without the tail and the post number, when the tail is a
+/// lone `-<digits>` and the head carries no letters or markers.
+fn split_tail_post(rest: &str) -> (&str, Option<u64>) {
+    if let Some((head, tail)) = rest.rsplit_once('-')
+        && !tail.is_empty()
+        && tail.bytes().all(|b| b.is_ascii_digit())
+        && !head.is_empty()
+        && head.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        && let Ok(n) = tail.parse::<u64>()
+    {
+        return (head, Some(n));
+    }
+    (rest, None)
+}
+
+/// PEP 440 ordering: epoch, then release (zero-padded), then the
+/// pre/post/dev phase (`.devN` alone first, pre-releases before the
+/// final, post-releases after; a dev segment sorts before its own
+/// phase).
+fn pep440_cmp(a: &Pep440Version, b: &Pep440Version) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if a.epoch != b.epoch {
+        return a.epoch.cmp(&b.epoch);
+    }
+    let n = a.release.len().max(b.release.len());
+    for i in 0..n {
+        let x = a.release.get(i).copied().unwrap_or(0);
+        let y = b.release.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x.cmp(&y);
+        }
+    }
+    // No pre, no post, with dev: the .devN-of-the-final phase, which
+    // sorts before every pre-release.
+    let phase = |v: &Pep440Version| match (v.pre.is_some(), v.post.is_some(), v.dev.is_some()) {
+        (false, false, true) => 0,
+        (true, _, _) => 1,
+        (false, false, false) => 2,
+        (false, true, _) => 3,
+    };
+    let (pa, pb) = (phase(a), phase(b));
+    if pa != pb {
+        return pa.cmp(&pb);
+    }
+    if let (Some(x), Some(y)) = (a.pre, b.pre)
+        && x != y
+    {
+        return x.cmp(&y);
+    }
+    if a.post != b.post {
+        return a.post.cmp(&b.post);
+    }
+    // dev sorts ascending, and its absence sorts after any dev.
+    match (a.dev, b.dev) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// Normalise an RPM version into PEP 440 space for the #1024
+/// comparisons: `~` introduces a pre-release segment and `^` a
+/// post-release one, the epoch comes from the header, and any
+/// segment that is not PEP 440-shaped (letters fused into a release
+/// segment, e.g. `1.2a1` snapshot suffixes) keeps the string
+/// unparsable rather than guessing — the caller then stays quiet.
+fn rpm_to_pep440(version: &str, epoch: Option<i64>) -> Option<Pep440Version> {
+    let epoch_prefix = match epoch {
+        Some(e) if e > 0 => format!("{e}!"),
+        _ => String::new(),
+    };
+    let mut out = String::with_capacity(version.len() + 8);
+    out.push_str(&epoch_prefix);
+    let mut chars = version.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // `~` marks what follows as a pre-release of the version
+            // in front of it. A letter segment after it is the
+            // pre-release itself (`1.0~rc1` is `1.0rc1`), so the
+            // marker contributes nothing; a bare number after it is
+            // a snapshot counter and becomes a dev segment
+            // (`5.0~1` is `5.0.dev1`).
+            '~' => {
+                if chars.peek().is_some_and(|n| n.is_ascii_digit()) {
+                    out.push_str(".dev");
+                }
+            }
+            '^' => {
+                // `^` needs a release in front of it to post-date; at
+                // the start it is not a version. The generator
+                // spelling repeats the marker (`2.9^post0`): consume
+                // a literal `post` after the caret instead of
+                // emitting it twice.
+                if out.len() == epoch_prefix.len() {
+                    return None;
+                }
+                out.push_str(".post");
+                let rest: String = chars.clone().collect();
+                if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case("post") {
+                    for _ in 0..4 {
+                        chars.next();
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    pep440_parse(&out)
+}
+
 impl Check for PythonCheck {
     fn name(&self) -> &'static str {
         "PythonCheck"
@@ -734,6 +1055,7 @@ impl Check for PythonCheck {
                     python_version,
                     dir,
                     dist_name,
+                    metadata_version: None,
                 });
                 continue;
             }
@@ -751,11 +1073,17 @@ impl Check for PythonCheck {
                     .find_map(|l| l.strip_prefix("Name:"))
                     .map(|n| n.trim().to_string())
                     .filter(|n| !n.is_empty());
+                let metadata_version = content
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Version:"))
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty());
                 dist_infos.push(DistInfo {
                     reqs,
                     python_version,
                     dir,
                     dist_name,
+                    metadata_version,
                 });
                 continue;
             }
@@ -843,6 +1171,11 @@ impl Check for PythonCheck {
         }
         if dist_infos.is_empty() {
             return;
+        }
+        // Dist-info version coherence (#1024 §3.2): the package's own
+        // dist-info version against the RPM version.
+        for di in &dist_infos {
+            self.check_dist_info_version(pkg, out, di);
         }
         // Provider metadata (#481b), dist-info part: this package's
         // dist-infos state which module paths they ship, so another
@@ -940,9 +1273,35 @@ impl Check for PythonCheck {
 
 static PYTHON_NAME_RE: OnceLock<Regex> = OnceLock::new();
 
+/// How a declared requirement is met by the package (#1024 §3.1).
+enum Satisfaction {
+    Satisfied,
+    /// Met only by bare `python-<name>` Require(s); carries the
+    /// first such require string for the finding detail.
+    BareOnly(String),
+    Missing,
+}
+
+/// How the require strings classify against a requirement's variants.
+enum MatchClass {
+    Full,
+    BareOnly(String),
+    Unknown,
+}
+
+/// One require atom's shape against a requirement's variants.
+enum AtomMatch {
+    Full,
+    Bare,
+}
+
 impl PythonCheck {
     /// `python-missing-require`: declared requirements the RPM requires
-    /// do not satisfy.
+    /// do not satisfy. A requirement met only by a bare `python-<name>`
+    /// Require is reported as `python-unflavoured-require` instead
+    /// (#1024 §3.1), and every kept requirement also goes through the
+    /// floor comparison (`python-require-floor-below-metadata`,
+    /// #1024 §3.3).
     fn check_missing_requirements(
         &self,
         pkg: &Pkg,
@@ -965,16 +1324,394 @@ impl PythonCheck {
             {
                 continue;
             }
-            if !Self::require_satisfied(&pkg.req_names, req) {
+            match Self::require_satisfaction(pkg, req) {
+                Satisfaction::Satisfied => {}
+                Satisfaction::BareOnly(bare) => {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "python-unflavoured-require",
+                        &[&bare],
+                    );
+                }
+                Satisfaction::Missing => {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "python-missing-require",
+                        &[&req.name],
+                    );
+                }
+            }
+            Self::check_require_floor(pkg, out, req);
+        }
+    }
+
+    /// How a declared requirement is met by the package itself (#1024
+    /// §3.1): by one of its own `python3.Xdist()` Provides, by a
+    /// flavoured or dist-spelled RPM Require, only by a bare
+    /// `python-<name>` Require, or not at all.
+    fn require_satisfaction(pkg: &Pkg, req: &Requirement) -> Satisfaction {
+        let variants = Self::module_names(&req.name, &req.extras);
+        // The package's own `python3.Xdist()` Provides satisfy: the
+        // reference ignores them, so a package shipping the very dist
+        // it declares a requirement on (python313-ua-parser on
+        // `ua-parser-builtins`) warned on itself.
+        let own_provides = pkg
+            .provides
+            .iter()
+            .flat_map(|p| p.leaf_names())
+            .any(|name| {
+                Self::dist_provide_inner(&name)
+                    .is_some_and(|inner| variants.iter().any(|v| v.eq_ignore_ascii_case(inner)))
+            });
+        if own_provides {
+            return Satisfaction::Satisfied;
+        }
+        if !Self::require_satisfied(&pkg.req_names, req) {
+            return Satisfaction::Missing;
+        }
+        match Self::classify_matches(&pkg.req_names, &variants) {
+            MatchClass::Full | MatchClass::Unknown => Satisfaction::Satisfied,
+            MatchClass::BareOnly(bare) => Satisfaction::BareOnly(bare),
+        }
+    }
+
+    /// Classify how the require strings match a requirement's name
+    /// variants: any fully-shaped atom (the name itself, a
+    /// `python<digits>-` flavour name, a `python3.Xdist()` spelling)
+    /// wins; otherwise the first bare `python-<name>` atom decides.
+    /// Shapes the atomiser cannot classify leave the match `Unknown`,
+    /// and the caller keeps the historical satisfied verdict — the
+    /// bare-only demotion must never invent a finding.
+    fn classify_matches(req_names: &[String], variants: &[String]) -> MatchClass {
+        let mut bare: Option<String> = None;
+        for req_name in req_names {
+            for atom in Self::split_rich_atoms(req_name) {
+                match Self::classify_atom(&atom, variants) {
+                    Some(AtomMatch::Full) => return MatchClass::Full,
+                    Some(AtomMatch::Bare) if bare.is_none() => {
+                        bare = Some(req_name.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        bare.map(MatchClass::BareOnly)
+            .unwrap_or(MatchClass::Unknown)
+    }
+
+    /// The atoms of a require string: a plain name yields itself; a
+    /// rich `(a or b)` expression yields its requirement atoms,
+    /// recursing into parenthesised groups. Segments behind an
+    /// `if` / `unless` / `else` keyword are conditions, not
+    /// requirements, and end the list at that nesting level.
+    fn split_rich_atoms(req_name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        Self::split_rich_into(req_name.trim(), &mut out);
+        out
+    }
+
+    fn split_rich_into(s: &str, out: &mut Vec<String>) {
+        let mut atoms = Vec::new();
+        let mut depth = 0i32;
+        let mut current = String::new();
+        for word in s.split(' ') {
+            for c in word.chars() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+            }
+            if depth == 0 && matches!(word, "and" | "or" | "with") {
+                atoms.push(std::mem::take(&mut current));
+                continue;
+            }
+            if depth == 0 && matches!(word, "if" | "unless" | "else") {
+                // The condition tail belongs to the segment being
+                // built; the atoms collected so far (plus this one)
+                // are the requirement side.
+                break;
+            }
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+        if !current.trim().is_empty() {
+            atoms.push(current);
+        }
+        for atom in atoms {
+            let atom = atom.trim();
+            // A fully parenthesised group is a sub-expression: its
+            // atoms are the requirements.
+            if atom.len() >= 2 && atom.starts_with('(') && atom.ends_with(')') {
+                let inner = &atom[1..atom.len() - 1];
+                // Only recurse when the opening paren really spans
+                // the whole atom (balanced at the last character).
+                let mut d = 0i32;
+                let mut spans = true;
+                for (i, c) in inner.char_indices() {
+                    match c {
+                        '(' => d += 1,
+                        ')' => {
+                            d -= 1;
+                            if d < 0 && i != inner.len() - 1 {
+                                spans = false;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if spans {
+                    Self::split_rich_into(inner.trim(), out);
+                    continue;
+                }
+            }
+            // Only a leading grouping paren can cling to a leaf
+            // atom (a group the splitter did not recurse into); a
+            // trailing one is part of the atom itself
+            // (`python3.13dist(<name>)`).
+            let cleaned = atom.trim_start_matches('(').trim().to_string();
+            if !cleaned.is_empty() {
+                out.push(cleaned);
+            }
+        }
+    }
+
+    /// Classify one require atom against a requirement's name
+    /// variants: `Full` for the name itself, a flavoured
+    /// `python<digits>-<name>`, or a `python3.Xdist(<name>)` spelling;
+    /// `Bare` for the unflavoured `python-<name>` only.
+    fn classify_atom(atom: &str, variants: &[String]) -> Option<AtomMatch> {
+        // The atom's name token: up to whitespace or a comparison
+        // operator (a version tail may follow).
+        let name = atom
+            .split(|c: char| c.is_whitespace() || "<>=!".contains(c))
+            .next()
+            .unwrap_or("")
+            .trim();
+        if name.is_empty() {
+            return None;
+        }
+        let in_variants = |n: &str| variants.iter().any(|v| v.eq_ignore_ascii_case(n));
+        if let Some(inner) = Self::dist_provide_inner(name) {
+            return in_variants(inner).then_some(AtomMatch::Full);
+        }
+        if in_variants(name) {
+            return Some(AtomMatch::Full);
+        }
+        if let Some(rest) = name.strip_prefix("python")
+            && let Some((digits, sub)) = rest.split_once('-')
+        {
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return in_variants(sub).then_some(AtomMatch::Full);
+            }
+            if digits.is_empty() {
+                return in_variants(sub).then_some(AtomMatch::Bare);
+            }
+        }
+        None
+    }
+
+    /// The inner name of a `python3.Xdist(<name>)` capability, if the
+    /// string has that shape.
+    fn dist_provide_inner(name: &str) -> Option<&str> {
+        static DIST_RE: OnceLock<Regex> = OnceLock::new();
+        let re = DIST_RE.get_or_init(|| {
+            Regex::new(r"(?i)^python\d+(\.\d+)?dist\(([^()]*)\)$").expect("static regex")
+        });
+        let caps = re.captures(name).ok().flatten()?;
+        caps.get(2).map(|m| m.as_str())
+    }
+
+    /// `python-require-floor-below-metadata` (#1024 §3.3): a kept
+    /// requirement whose declared lower bound the matching RPM
+    /// Requires do not carry — they are unversioned, or their highest
+    /// floor sits below the metadata's. A requirement no RPM Require
+    /// names at all is `python-missing-require`'s finding, not this
+    /// one's, and a requirement met by the package's own Provides has
+    /// no RPM floor to compare.
+    fn check_require_floor(pkg: &Pkg, out: &mut Filter, req: &Requirement) {
+        let Some((floor, floor_text)) = Self::metadata_floor(req) else {
+            return;
+        };
+        let variants = Self::module_names(&req.name, &req.extras);
+        let mut any_match = false;
+        let mut highest: Option<(Pep440Version, String)> = None;
+        for dep in pkg.requires.iter().chain(&pkg.prereq) {
+            for leaf in dep.leaves() {
+                if Self::classify_atom(&leaf.name, &variants).is_none() {
+                    continue;
+                }
+                any_match = true;
+                let Some(leaf_floor) = Self::leaf_floor(&leaf) else {
+                    continue;
+                };
+                let floor_str = match leaf.epoch {
+                    Some(e) if e > 0 => format!("{e}:{}", leaf.version.as_deref().unwrap_or("")),
+                    _ => leaf.version.clone().unwrap_or_default(),
+                };
+                if highest
+                    .as_ref()
+                    .is_none_or(|(h, _)| pep440_cmp(&leaf_floor, h) == std::cmp::Ordering::Greater)
+                {
+                    highest = Some((leaf_floor, floor_str));
+                }
+            }
+        }
+        if !any_match {
+            return;
+        }
+        match highest {
+            None => add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "python-require-floor-below-metadata",
+                &[
+                    &req.name,
+                    "metadata-floor",
+                    &floor_text,
+                    "rpm-floor",
+                    "unversioned",
+                ],
+            ),
+            Some((h, h_text)) if pep440_cmp(&h, &floor) == std::cmp::Ordering::Less => {
                 add_info(
                     out,
                     Level::Warning,
                     pkg,
-                    "python-missing-require",
-                    &[&req.name],
+                    "python-require-floor-below-metadata",
+                    &[
+                        &req.name,
+                        "metadata-floor",
+                        &floor_text,
+                        "rpm-floor",
+                        &h_text,
+                    ],
                 );
             }
+            _ => {}
         }
+    }
+
+    /// The strongest lower bound a requirement's specifier declares
+    /// (#1024 §3.3): the largest version among its `>=`, `>`, `~=`
+    /// and `==` clauses. The bound is the version value alone — a
+    /// `> 2.0` clause contributes 2.0, exactly as the issue defines
+    /// the comparison — and `!=`-only requirements declare no bound.
+    fn metadata_floor(req: &Requirement) -> Option<(Pep440Version, String)> {
+        let mut best: Option<(Pep440Version, String)> = None;
+        for clause in req.specifier.split(',') {
+            let clause = clause.trim();
+            let Some((op, ver)) = ["===", "==", ">=", "<=", "!=", "~=", ">", "<"]
+                .iter()
+                .find_map(|op| clause.strip_prefix(op).map(|v| (*op, v.trim())))
+            else {
+                continue;
+            };
+            if !matches!(op, ">=" | ">" | "~=" | "==" | "===") {
+                continue;
+            }
+            let ver = ver.strip_suffix(".*").unwrap_or(ver);
+            let Some(v) = pep440_parse(ver) else {
+                continue;
+            };
+            if best
+                .as_ref()
+                .is_none_or(|(b, _)| pep440_cmp(&v, b) == std::cmp::Ordering::Greater)
+            {
+                best = Some((v, ver.to_string()));
+            }
+        }
+        best
+    }
+
+    /// The floor one RPM require leaf carries, if any: a `>`/`>=`
+    /// constraint, or an exact `=` pin. A `<`/`<=` constraint bounds
+    /// from above and carries no floor.
+    fn leaf_floor(leaf: &crate::pkg::dep::DepLeaf) -> Option<Pep440Version> {
+        use crate::pkg::dep::{RPMSENSE_EQUAL, RPMSENSE_GREATER, RPMSENSE_LESS};
+        let sense = leaf.flags & (RPMSENSE_LESS | RPMSENSE_GREATER | RPMSENSE_EQUAL);
+        if sense == 0 {
+            return None;
+        }
+        if sense & RPMSENSE_GREATER == 0
+            && !(sense & RPMSENSE_EQUAL != 0 && sense & RPMSENSE_LESS == 0)
+        {
+            return None;
+        }
+        let version = leaf.version.as_deref()?;
+        rpm_to_pep440(version, leaf.epoch)
+    }
+
+    /// `python-dist-info-version-mismatch` (#1024 §3.2): the version
+    /// in the package's own dist-info METADATA disagrees with the RPM
+    /// version under PEP 440. The version-0 arm — an own-name
+    /// dist-info at 0.0.0 in a non-0 RPM, the metadata never stamped —
+    /// fires for any source package; the general arm is scoped to
+    /// `python-*` sources. A dist-info that is not the package's own
+    /// (its `Name` does not PEP 503-match the package key) never
+    /// fires.
+    fn check_dist_info_version(&self, pkg: &Pkg, out: &mut Filter, di: &DistInfo) {
+        let (Some(dist_name), Some(meta_text)) = (&di.dist_name, &di.metadata_version) else {
+            return;
+        };
+        if pep503(dist_name) != Self::package_key(&pkg.name) {
+            return;
+        }
+        let Some(meta) = pep440_parse(meta_text) else {
+            return;
+        };
+        let rpm_text = pkg.tag_str(Tag::VERSION).unwrap_or_default();
+        let Some(rpmv) = rpm_to_pep440(&rpm_text, pkg.tag_i64(Tag::EPOCH)) else {
+            return;
+        };
+        if meta.is_zero() {
+            if !rpmv.is_zero() {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "python-dist-info-version-mismatch",
+                    &[dist_name, meta_text, &rpm_text],
+                );
+            }
+            return;
+        }
+        if !Self::source_is_python(pkg) {
+            return;
+        }
+        if pep440_cmp(&meta, &rpmv) != std::cmp::Ordering::Equal {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "python-dist-info-version-mismatch",
+                &[dist_name, meta_text, &rpm_text],
+            );
+        }
+    }
+
+    /// Whether the package's source package is a `python-*` source,
+    /// from the `SOURCERPM` header (`python-foo-1.0-1.src.rpm`).
+    fn source_is_python(pkg: &Pkg) -> bool {
+        let Some(srpm) = pkg.source_rpm.as_deref() else {
+            return false;
+        };
+        let stem = srpm.strip_suffix(".src.rpm").unwrap_or(srpm);
+        // Version and release contain no '-': the source name is what
+        // precedes the last two dash-separated components.
+        let mut parts = stem.rsplitn(3, '-');
+        let (Some(_rel), Some(_ver), Some(name)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        name == "python" || name.starts_with("python-") || name.starts_with("python3.")
     }
 
     /// The dependency name a `python3-foo`-style RPM require stands for,
@@ -1745,6 +2482,7 @@ mod tests {
             name: name.to_string(),
             marker: None,
             extras: Vec::new(),
+            specifier: String::new(),
         }
     }
 
@@ -1992,6 +2730,418 @@ mod tests {
             line,
             "python-test.noarch: W: python-leftover-require python3-w6leftover"
         );
+    }
+
+    fn dep(name: &str, flags: u32, version: Option<&str>) -> crate::pkg::dep::DepInfo {
+        crate::pkg::dep::DepInfo {
+            name: name.to_string(),
+            flags,
+            epoch: None,
+            version: version.map(str::to_string),
+            release: None,
+        }
+    }
+
+    /// Run `check_missing_requirements` over a fixture package the
+    /// closure customises (requires / provides / source), returning
+    /// every finding as (name, level, line).
+    fn findings_with_pkg(
+        reqs: &[Requirement],
+        mutate: impl FnOnce(&mut Pkg),
+    ) -> Vec<(String, Level, String)> {
+        use crate::color::Color;
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.name = "python-test".to_string();
+        pkg.arch = "noarch".to_string();
+        mutate(&mut pkg);
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = PythonCheck::new(&config);
+        check.check_missing_requirements(&pkg, &mut out, reqs, "3.13");
+        let levels = out.result_levels().to_vec();
+        out.results()
+            .iter()
+            .zip(levels)
+            .map(|((name, line), level)| (name.clone(), level, line.clone()))
+            .collect()
+    }
+
+    fn tags_of(findings: &[(String, Level, String)]) -> Vec<&str> {
+        findings.iter().map(|(n, _, _)| n.as_str()).collect()
+    }
+
+    #[test]
+    fn own_dist_provides_satisfy_requirements() {
+        // #1024 §3.1: python313-ua-parser requires
+        // `ua-parser-builtins` (Requires-Dist of its own dist) and
+        // provides it itself as `python3.13dist(ua-parser-builtins)`.
+        // The reference ignores own Provides and warns on the package
+        // itself; the provide satisfies here.
+        let reqs = PythonCheck::parse_requirements("ua-parser-builtins\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = Vec::new();
+            pkg.requires = Vec::new();
+            pkg.provides = vec![dep(
+                "python3.13dist(ua-parser-builtins)",
+                crate::pkg::dep::RPMSENSE_EQUAL,
+                Some("0.18.2"),
+            )];
+        });
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn bare_python_require_moves_to_unflavoured_tag() {
+        // #1024 §3.1: satisfaction via a bare `python-<name>` Require
+        // (the in-toto shape) is reported on the new tag, with the
+        // bare require string as the detail.
+        let reqs = PythonCheck::parse_requirements("securesystemslib\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python-securesystemslib".to_string()];
+            pkg.requires = vec![dep("python-securesystemslib", 0, None)];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-unflavoured-require");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            "python-test.noarch: W: python-unflavoured-require python-securesystemslib"
+        );
+    }
+
+    #[test]
+    fn flavoured_and_dist_spelled_requires_stay_quiet() {
+        // #1024 §3.1: only the bare shape moves; the flavoured and
+        // dist spellings keep satisfying silently.
+        let reqs = PythonCheck::parse_requirements("securesystemslib\n", false, "3.13");
+        for req_name in [
+            "python313-securesystemslib",
+            "python3-securesystemslib",
+            "python3.13dist(securesystemslib)",
+        ] {
+            let findings = check_requirements_findings(&reqs, &[req_name]);
+            let non_leftover: Vec<_> = findings
+                .iter()
+                .filter(|(n, _, _)| n != "python-leftover-require")
+                .collect();
+            assert!(non_leftover.is_empty(), "{req_name}: {findings:?}");
+        }
+    }
+
+    #[test]
+    fn rich_dep_with_a_full_atom_is_not_bare_only() {
+        // #1024 §3.1: in a rich require, one fully-shaped atom is
+        // enough; the bare alternative does not demote the match.
+        let reqs = PythonCheck::parse_requirements("securesystemslib\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names =
+                vec!["(python-securesystemslib or python3.13dist(securesystemslib))".to_string()];
+            pkg.requires = vec![dep(
+                "(python-securesystemslib or python3.13dist(securesystemslib))",
+                0,
+                None,
+            )];
+        });
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn floor_below_metadata_fires() {
+        // #1024 §3.3: the metadata declares `>=0.22`, the RPM floor
+        // sits at 0.21.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) >= 0.21".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_GREATER | crate::pkg::dep::RPMSENSE_EQUAL,
+                Some("0.21"),
+            )];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-require-floor-below-metadata");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            "python-test.noarch: W: python-require-floor-below-metadata dulwich metadata-floor 0.22 rpm-floor 0.21"
+        );
+    }
+
+    #[test]
+    fn floor_unversioned_require_fires() {
+        // #1024 §3.3: a matching RPM Require with no version at all
+        // carries no floor.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3-dulwich".to_string()];
+            pkg.requires = vec![dep("python3-dulwich", 0, None)];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(
+            findings[0].2,
+            "python-test.noarch: W: python-require-floor-below-metadata dulwich metadata-floor 0.22 rpm-floor unversioned"
+        );
+    }
+
+    #[test]
+    fn floor_met_or_exceeded_stays_quiet() {
+        // #1024 §3.3: RPM floors at or above the metadata floor.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        for rpm_ver in ["0.22", "0.23", "1.0"] {
+            let findings = findings_with_pkg(&reqs, |pkg| {
+                pkg.req_names = vec![format!("python3.13dist(dulwich) >= {rpm_ver}")];
+                pkg.requires = vec![dep(
+                    "python3.13dist(dulwich)",
+                    crate::pkg::dep::RPMSENSE_GREATER | crate::pkg::dep::RPMSENSE_EQUAL,
+                    Some(rpm_ver),
+                )];
+            });
+            assert!(findings.is_empty(), "rpm {rpm_ver}: {findings:?}");
+        }
+    }
+
+    #[test]
+    fn floor_generator_caret_spelling_counts_as_post() {
+        // #1024 §3.3 quiet rule: the generator spelling
+        // `>= 2.9^post0` is a floor of 2.9.post0 and meets a
+        // metadata floor of 2.9. (The require string itself keeps
+        // whatever `python-missing-require` verdict the reference
+        // gives it — the `^` is outside that check's version
+        // grammar; only the floor tag is asserted here.)
+        let reqs = PythonCheck::parse_requirements("something>=2.9\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(something) >= 2.9^post0".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(something)",
+                crate::pkg::dep::RPMSENSE_GREATER | crate::pkg::dep::RPMSENSE_EQUAL,
+                Some("2.9^post0"),
+            )];
+        });
+        assert!(
+            !tags_of(&findings).contains(&"python-require-floor-below-metadata"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn floor_not_equal_only_requirement_declares_no_floor() {
+        // #1024 §3.3 quiet rule: `!=`-only requirements have no
+        // lower bound to compare.
+        let reqs = PythonCheck::parse_requirements("dulwich!=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3-dulwich".to_string()];
+            pkg.requires = vec![dep("python3-dulwich", 0, None)];
+        });
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn floor_without_rpm_match_is_missing_require_only() {
+        // #1024 §3.3: no RPM Require names the requirement at all —
+        // that is `python-missing-require`'s finding alone.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = Vec::new();
+            pkg.requires = Vec::new();
+        });
+        assert_eq!(tags_of(&findings), ["python-missing-require"]);
+    }
+
+    #[test]
+    fn floor_marker_false_branch_stays_quiet() {
+        // #1024 §3.3 quiet rule (the python313-mistral-common
+        // shape): the strict floor sits under a marker that is false
+        // for this dist-info's python; the true branch's floor is
+        // what the RPM Requires carry.
+        let content = "mistral-lib>=2.12; python_version >= \"3.14\"\n\
+                       mistral-lib>=2.7; python_version < \"3.14\"\n";
+        let reqs = PythonCheck::parse_requirements(content, false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(mistral-lib) >= 2.7".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(mistral-lib)",
+                crate::pkg::dep::RPMSENSE_GREATER | crate::pkg::dep::RPMSENSE_EQUAL,
+                Some("2.7"),
+            )];
+        });
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    /// Run `check_dist_info_version` over a fixture package; the
+    /// fixture's RPM version is `1`.
+    fn dist_info_findings(
+        pkg_name: &str,
+        source_rpm: Option<&str>,
+        dist_name: &str,
+        metadata_version: &str,
+    ) -> Vec<(String, Level, String)> {
+        use crate::color::Color;
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.name = pkg_name.to_string();
+        pkg.arch = "noarch".to_string();
+        pkg.source_rpm = source_rpm.map(str::to_string);
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = PythonCheck::new(&config);
+        let di = DistInfo {
+            reqs: Vec::new(),
+            python_version: "3.13".to_string(),
+            dir: String::new(),
+            dist_name: Some(dist_name.to_string()),
+            metadata_version: Some(metadata_version.to_string()),
+        };
+        check.check_dist_info_version(&pkg, &mut out, &di);
+        let levels = out.result_levels().to_vec();
+        out.results()
+            .iter()
+            .zip(levels)
+            .map(|((name, line), level)| (name.clone(), level, line.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn dist_info_version_mismatch_fires_for_python_source() {
+        // #1024 §3.2 general arm: own-name dist-info at 2.0 in an
+        // RPM at version 1 (the fixture's), python-* source.
+        let findings =
+            dist_info_findings("python3-foo", Some("python-foo-1-1.src.rpm"), "foo", "2.0");
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-dist-info-version-mismatch");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            "python3-foo.noarch: W: python-dist-info-version-mismatch foo 2.0 1"
+        );
+    }
+
+    #[test]
+    fn dist_info_pep440_equal_spelling_stays_quiet() {
+        // #1024 §3.2 quiet rule: `1.0` and the RPM's `1` are the
+        // same PEP 440 version (zero-padded release).
+        let findings =
+            dist_info_findings("python3-foo", Some("python-foo-1-1.src.rpm"), "foo", "1.0");
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn dist_info_mismatch_in_non_python_source_stays_quiet() {
+        // #1024 §3.2 scope: the general arm covers `python-*`
+        // sources only.
+        let findings = dist_info_findings("bar", Some("bar-1-1.src.rpm"), "bar", "2.0");
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn dist_info_version_zero_arm_fires_for_any_source() {
+        // #1024 §3.2 version-0 arm: an own-name dist-info stamped
+        // 0.0.0 inside a non-0 RPM, whatever the source.
+        let findings = dist_info_findings("bar", Some("bar-1-1.src.rpm"), "bar", "0.0.0");
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(findings[0].0, "python-dist-info-version-mismatch");
+        assert_eq!(
+            findings[0].2,
+            "bar.noarch: W: python-dist-info-version-mismatch bar 0.0.0 1"
+        );
+    }
+
+    #[test]
+    fn dist_info_not_own_name_stays_quiet() {
+        // #1024 §3.2 quiet rule: cockpit-bridge ships a `cockpit`
+        // dist-info at 0 — not its own name, never a finding.
+        let findings = dist_info_findings(
+            "cockpit-bridge",
+            Some("cockpit-1-1.src.rpm"),
+            "cockpit",
+            "0.0.0",
+        );
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn pep440_equal_spellings_compare_equal() {
+        // #1024 §3.2: the PEP 440 census quiet rules — trailing
+        // zero segments and local segments do not differ.
+        for (a, b) in [
+            ("2.18", "2.18.0"),
+            ("1.0", "1"),
+            ("1.0+git", "1.0"),
+            ("0.33.3+git20150318", "0.33.3"),
+            ("1.0a", "1.0a0"),
+            ("1.0-1", "1.0.post1"),
+            ("1.0_alpha1", "1.0a1"),
+        ] {
+            let (va, vb) = (pep440_parse(a).unwrap(), pep440_parse(b).unwrap());
+            assert_eq!(
+                pep440_cmp(&va, &vb),
+                std::cmp::Ordering::Equal,
+                "{a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn pep440_ordering_follows_the_spec() {
+        let chain = [
+            "1.0.dev1",
+            "1.0a1.dev1",
+            "1.0a1",
+            "1.0a2",
+            "1.0b1",
+            "1.0rc1",
+            "1.0",
+            "1.0.post1.dev1",
+            "1.0.post1",
+            "1.0.1",
+        ];
+        for w in chain.windows(2) {
+            let (va, vb) = (pep440_parse(w[0]).unwrap(), pep440_parse(w[1]).unwrap());
+            assert_eq!(
+                pep440_cmp(&va, &vb),
+                std::cmp::Ordering::Less,
+                "{} < {}",
+                w[0],
+                w[1]
+            );
+        }
+        let epoch = pep440_parse("1!0.1").unwrap();
+        let plain = pep440_parse("2.0").unwrap();
+        assert_eq!(pep440_cmp(&epoch, &plain), std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn pep440_rejects_non_versions() {
+        assert!(pep440_parse("").is_none());
+        assert!(pep440_parse("abc").is_none());
+        assert!(pep440_parse("1.0a1.2").is_none());
+        assert!(pep440_parse("1.0.x").is_none());
+    }
+
+    #[test]
+    fn rpm_versions_translate_to_pep440() {
+        // openSUSE spellings: `~` pre-release, `^` post-release, the
+        // generator's repeated `^post`, letter suffixes as
+        // pre-releases, epochs from the header.
+        for (rpm, epoch, pep) in [
+            ("1.0~rc1", None, "1.0rc1"),
+            ("5.0~1", None, "5.0.dev1"),
+            ("2.9^post0", None, "2.9.post0"),
+            ("0.1.5a", None, "0.1.5a0"),
+            ("2.18.0", None, "2.18"),
+            ("1.0", Some(2), "2!1.0"),
+        ] {
+            let got = rpm_to_pep440(rpm, epoch).unwrap();
+            let want = pep440_parse(pep).unwrap();
+            assert_eq!(pep440_cmp(&got, &want), std::cmp::Ordering::Equal, "{rpm}");
+        }
+        assert!(rpm_to_pep440("0", None).unwrap().is_zero());
+        assert!(!rpm_to_pep440("0.0.1", None).unwrap().is_zero());
     }
 
     #[test]
@@ -2596,6 +3746,7 @@ azure_mgmt_core-1.0.dist-info/RECORD,,
             python_version: "3.13".to_string(),
             dir: dir.to_string(),
             dist_name: Some("azure-mgmt-core".to_string()),
+            metadata_version: None,
         };
         assert_eq!(
             PythonCheck::dist_module_paths(&pkg, &di),

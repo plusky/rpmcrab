@@ -2795,6 +2795,38 @@ upstream = "https://github.com/plusky/rpmcrab/issues/481"
 
 [[divergence]]
 case = "global"
+check = "python-missing-require"
+kind = "behaviour"
+reason = "The port credits the package's own `python3.Xdist()` Provides when testing declared requirements; the reference tests them only against the package's RPM Requires, so it warns on requirements the package itself provides (python313-ua-parser: `python-missing-require ua-parser-builtins`, a dist the same package ships and provides) — a warning no spec edit can act on short of a self-Require. Satisfaction that only a bare `python-<name>` Require provides is not credited here either; it is reported as `python-unflavoured-require` instead. Measured on the Tumbleweed snapshot 20261026 targeted set (8,149 packages of the x86_64 oss tree shipping a dist-info/egg-info or a `python3.Xdist` provide, pristine vs patched, `--checks PythonCheck`): `python-missing-require` drops 1,142 -> 1,079 (63 own-Provides satisfactions removed, 0 findings added); every other PythonCheck tag is unchanged."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1024"
+
+[[divergence]]
+case = "global"
+check = "python-unflavoured-require"
+kind = "behaviour"
+reason = "Port-only, no reference counterpart: a declared requirement the reference accepts via a bare `python-<name>` Require is reported here instead of passing silently, because the bare name binds no Python flavour and so does not guarantee the module for the interpreter the package targets; the flavour-shaped spellings (`python3.13-<name>`, `python3.13dist(<name>)`, and the package's own dist Provides) satisfy silently. The known real-world shape is in-toto's bare `python-securesystemslib` Require. Measured on the Tumbleweed snapshot 20261026 targeted set (8,149 python-carrying packages): 0 firings."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1024"
+
+[[divergence]]
+case = "global"
+check = "python-dist-info-version-mismatch"
+kind = "behaviour"
+reason = "Port-only, no reference counterpart: the Version of the package's own dist-info (its METADATA `Name` PEP 503-matching the package key) is compared with the RPM Version under PEP 440 — release segments zero-padded, local segments ignored on both sides (a `+git` suffix on an equal base is quiet), RPM `~` and `^` mapped to pre- and post-release segments. The general arm is scoped to `python-*` source packages; the version-0 arm — an own-name dist-info at 0.0.0 in a non-0 RPM, the metadata never stamped with the release version — fires for any source. A dist-info that is not the package's own never fires (cockpit-bridge ships a `cockpit` dist-info at 0). Measured on the Tumbleweed snapshot 20261026 targeted set (8,149 python-carrying packages): 61 firings — 32 in the general arm over 16 sources (among them the issue's named gps3, pybluez and pyu2f, whose bases genuinely disagree, and rtslib-fb, whose METADATA carries 2.2.3.dev0 against RPM 2.2.2) and 29 in the version-0 arm over 16 sources. Every version-0 firing was classified from the payload: in all 16 sources the shipped METADATA literally reads 0 or 0.0.0 against the real RPM release — buildstream is NOT among them (its `python3.13dist(buildstream) = 0` provide is hand-written and it ships no dist-info) — chirp 20261016, molecule 26.9.0, python-caldav 1.4.0, python-cmd2 4.2.4, python-cytoolz 1.1.0, python-django-auth-ldap 5.3.0, python-humanreadable 0.4.3, python-keyrings.alt 5.0.2, python-openqa_review 1.40.0, python-pingparsing 1.4.2, python-podman 5.8.0, python-py-gitea-opensuse-org 1.22.4, python-pydrive2 1.18.1, python-pytest-plus 0.8.1, python-tcolorpy 0.1.7 and marisa 0.3.1: one genuine unstamped-metadata class, no checker artefacts."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1024"
+
+[[divergence]]
+case = "global"
+check = "python-require-floor-below-metadata"
+kind = "behaviour"
+reason = "Port-only, no reference counterpart: for each declared requirement that survives marker filtering, the strongest lower bound of its specifier (the largest of its `>=`, `>`, `~=` and `==` clauses) is compared with the floors carried by the RPM Requires that name it, rich-dep atoms included: the finding fires when those Requires are unversioned or their highest floor sits below the metadata's floor. A requirement no RPM Require names at all stays `python-missing-require`'s finding — including one met only by the package's own Provides, which has no RPM floor to compare — and `!=`-only requirements declare no bound; the generator spelling `>= 2.9^post0` parses as the 2.9.post0 floor it is. Hand-verified against payloads (ansible-core: METADATA `resolvelib>=0.8.0` against the rich Require `(python3-resolvelib >= 0.5.3 with python3-resolvelib < 2.0.0)`). Measured on the Tumbleweed snapshot 20261026 targeted set (8,149 python-carrying packages): 2,022 firings over 1,074 packages — 815 below-floor and 1,207 unversioned — against the issue's presentation sample (207 matched requirements: 15 below, 14 unversioned); the sample was a sample, and over the full population the dominant shape is the hand-written unversioned Require carried against floored metadata."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1024"
+
+[[divergence]]
+case = "global"
 check = "selinux-incorrect-if-file-location"
 kind = "behaviour"
 reason = "The reference credits only /usr/share/selinux/devel/include/distributed/, but the devel Makefile shipped in selinux-policy-devel collects interfaces from every layer directory of the include tree: header_interfaces is $(layer)/*.if for each direct subdirectory other than support, fed into tmp/all_interfaces.conf for every module build. A .if placed directly in a layer directory is therefore found by consuming policy builds, measured on the corpus packages: container-selinux (include/services/container.if), fapolicyd-selinux, k3s-selinux and rke2-selinux (include/contrib/*.if) all land in all_interfaces.conf, and a consumer module calling container_read_share_files and fapolicyd_read_lib_files compiles against them; the reference fires on all four. rpmcrab credits a .if directly in any layer directory of the include tree (the distributed/ prefix credit, at any depth, is unchanged); files directly in the include directory, nested below a layer, in support/, or outside the include tree keep firing, as in the reference (a .if directly in the include directory and one under /usr/share/selinux/packages/ were measured absent from all_interfaces.conf). The staged description is reworded to state the credited grammar. Pinned by if_file_in_layer_dir_is_quiet, if_file_not_collected_by_devel_makefile_is_reported and layer_placed_if_file_is_quiet in selinux_independent_module.rs."
