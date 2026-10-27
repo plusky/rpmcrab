@@ -3051,9 +3051,13 @@ fn is_stack_protector_symbol(name: &str) -> bool {
     name.split('@').next().unwrap_or(name) == "__stack_chk_fail"
 }
 
-/// The host ELF machines: `EM_386` and `EM_X86_64`. An x86-64 host
-/// executes both natively, so a binary for either in a noarch package
-/// is host code wherever it sits in the package.
+/// The host ELF machines for the *noarch* classification below:
+/// `EM_386` and `EM_X86_64`. A noarch package has no architecture of
+/// its own to classify against, and that check's standing definition
+/// of the host family is x86 (an x86-64 host executes both natively).
+/// The /usr/share predicate does NOT use this: it classifies against
+/// the package's own architecture via `foreign_elf_machine`, so on a
+/// non-x86 build the host family is that build's family.
 fn is_host_elf_machine(machine: u16) -> bool {
     machine == goblin::elf::header::EM_386 || machine == goblin::elf::header::EM_X86_64
 }
@@ -3066,16 +3070,28 @@ enum ElfMachineClass {
     Unknown,
 }
 
+/// The `e_machine` in an ELF header's first 20 bytes, read in the
+/// header's own byte order. `None` when the bytes carry no readable
+/// ELF header (no magic, truncated, or an unknown data encoding).
+fn elf_e_machine(data: &[u8]) -> Option<u16> {
+    if !data.starts_with(ELF_MAGIC) || data.len() < 20 {
+        return None;
+    }
+    match data[5] {
+        1 => Some(u16::from_le_bytes([data[18], data[19]])),
+        2 => Some(u16::from_be_bytes([data[18], data[19]])),
+        _ => None,
+    }
+}
+
 /// Classify the `e_machine` in an ELF header's first 20 bytes. `None`
 /// when the bytes carry no ELF header to read.
 fn elf_machine_class_from_bytes(data: &[u8]) -> Option<ElfMachineClass> {
     if !data.starts_with(ELF_MAGIC) || data.len() < 20 {
         return None;
     }
-    let machine = match data[5] {
-        1 => u16::from_le_bytes([data[18], data[19]]),
-        2 => u16::from_be_bytes([data[18], data[19]]),
-        _ => return Some(ElfMachineClass::Unknown),
+    let Some(machine) = elf_e_machine(data) else {
+        return Some(ElfMachineClass::Unknown);
     };
     Some(if is_host_elf_machine(machine) {
         ElfMachineClass::Host
@@ -3142,6 +3158,64 @@ fn elf_machine_class(pkgfile: &PkgFile) -> ElfMachineClass {
         }
     }
     elf_machine_class_from_magic(&pkgfile.magic)
+}
+
+/// ISA family of the machine a magic string names, in the spellings
+/// libmagic uses, for the families `elf_machine_family` knows. A
+/// magic naming a machine outside that map (or no machine) yields
+/// `None`: not positive evidence of foreign payload for any arch.
+fn magic_machine_family(magic: &str) -> Option<&'static str> {
+    if magic.contains("x86-64") || magic.contains("Intel 80386") {
+        Some("x86")
+    } else if magic.contains("ARM") {
+        Some("arm")
+    } else if magic.contains("UCB RISC-V") {
+        Some("riscv")
+    } else if magic.contains("LoongArch") {
+        Some("loongarch")
+    } else if magic.contains("PA-RISC") {
+        Some("parisc")
+    } else if magic.contains("IBM S/390") {
+        Some("s390")
+    } else if magic.contains("PowerPC") {
+        Some("ppc")
+    } else if magic.contains("MIPS") {
+        Some("mips")
+    } else if magic.contains("SPARC") {
+        Some("sparc")
+    } else if magic.contains("IA-64") {
+        Some("ia64")
+    } else if magic.contains("MC68000") {
+        Some("m68k")
+    } else if magic.contains("Alpha") {
+        Some("alpha")
+    } else if magic.contains("Hitachi SH") {
+        Some("sh")
+    } else {
+        None
+    }
+}
+
+/// Whether a bare ELF file is foreign-target payload for a package
+/// of architecture `arch`: the payload header's `e_machine` first,
+/// the magic string's machine family second (the only evidence for a
+/// file that cannot be opened). A machine outside the family map, or
+/// an unmapped package arch, is not foreign: the exemption takes
+/// positive evidence.
+fn elf_is_foreign_for_arch(pkgfile: &PkgFile, arch: &str) -> bool {
+    use std::io::Read;
+    if let Ok(mut f) = std::fs::File::open(&pkgfile.path) {
+        let mut head = [0u8; 20];
+        if f.read_exact(&mut head).is_ok()
+            && let Some(machine) = elf_e_machine(&head)
+        {
+            return foreign_elf_machine(machine, arch);
+        }
+    }
+    match (magic_machine_family(&pkgfile.magic), pkg_arch_family(arch)) {
+        (Some(machine_family), Some(arch_family)) => machine_family != arch_family,
+        _ => false,
+    }
 }
 
 /// How the ELF members of an ar archive classify as a whole.
@@ -3228,6 +3302,73 @@ fn sysroot_parent_is_target_prefix(seg: &str) -> bool {
     seg.contains('-') || !HOST_USR_DIRS.contains(&seg)
 }
 
+/// Classify an archive's members against the package architecture
+/// `arch`, for the /usr/share predicate, over bytes already read by
+/// the caller. Like `archive_elf_class`, but ELF members are judged
+/// with `foreign_elf_machine` (the package arch's family is the host
+/// family), and the no-ELF-members arm is narrowed to positive
+/// evidence: every payload member must be text (the measured
+/// population is ASxxxx `.rel` text objects and plain text data), or
+/// there must be no payload members at all. A binary member in a
+/// non-ELF format (COFF, wasm, bitcode, raw data) is not evidence --
+/// its target cannot be classified -- so the archive keeps firing.
+/// Archive bookkeeping members (the symbol index and the long-name
+/// string table) are not payload and are skipped.
+fn archive_elf_class_for_arch(data: &[u8], arch: &str) -> ArchiveElfClass {
+    if !data.starts_with(AR_MAGIC) {
+        return ArchiveElfClass::Unreadable;
+    }
+    let Ok(archive) = goblin::archive::Archive::parse(data) else {
+        return ArchiveElfClass::Unreadable;
+    };
+    let mut elf_members = 0usize;
+    let mut payload_members = 0usize;
+    let mut all_payload_text = true;
+    for i in 0..archive.len() {
+        // See `archive_elf_class`: an unextractable member or an
+        // out-of-range member range leaves the classification
+        // incomplete, so the archive is unreadable (fail closed).
+        let Some(member) = archive.get_at(i) else {
+            return ArchiveElfClass::Unreadable;
+        };
+        let Ok(start) = usize::try_from(member.offset) else {
+            return ArchiveElfClass::Unreadable;
+        };
+        let Ok(end) = usize::try_from(member.offset.saturating_add(member.size() as u64)) else {
+            return ArchiveElfClass::Unreadable;
+        };
+        let Some(bytes) = data.get(start..end) else {
+            return ArchiveElfClass::Unreadable;
+        };
+        if matches!(
+            member.extended_name(),
+            "/" | "/SYM64/" | "__.SYMDEF" | "__.SYMDEF SORTED" | "//"
+        ) {
+            continue;
+        }
+        payload_members += 1;
+        if bytes.starts_with(ELF_MAGIC) {
+            elf_members += 1;
+            match elf_e_machine(bytes) {
+                Some(machine) if foreign_elf_machine(machine, arch) => {}
+                _ => return ArchiveElfClass::HasHostOrUnknown,
+            }
+        } else if !bytes
+            .iter()
+            .all(|&b| b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7e).contains(&b))
+        {
+            all_payload_text = false;
+        }
+    }
+    if elf_members > 0 {
+        ArchiveElfClass::AllForeign
+    } else if payload_members == 0 || all_payload_text {
+        ArchiveElfClass::NoElfMembers
+    } else {
+        ArchiveElfClass::HasHostOrUnknown
+    }
+}
+
 /// Whether `fname` sits in a location that holds target payload by
 /// layout: a cross sys-root (`/usr/<target>/sys-root/...`, the layout
 /// the MinGW sys-root predicate in FilesCheck also recognises, with
@@ -3276,41 +3417,54 @@ fn noarch_binary_is_foreign_target(pkgfile: &PkgFile) -> bool {
 }
 
 /// Whether a binary-class file in /usr/share is foreign-target
-/// payload: an ar archive carrying no ELF members at all holds only
-/// foreign-format objects or data (the sdcc cross libraries are
-/// archives of ASxxxx text objects for 8-bit MCU targets), and an
-/// archive of foreign-machine ELFs or a bare foreign-machine ELF is
-/// code for another target stored as data (emulator guest firmware).
-/// Such a file's bytes are the same in every architecture build of
-/// the package, so the arch-independence /usr/share exists to
-/// provide is not broken by it. Unlike the noarch form
+/// payload for a package of architecture `arch`: an ar archive whose
+/// payload members are all text and which carries no ELF members at
+/// all holds only foreign-format text objects or data (the sdcc
+/// cross libraries are archives of ASxxxx text objects for 8-bit MCU
+/// targets), an archive of foreign-machine ELFs or a bare
+/// foreign-machine ELF is code for another target stored as data
+/// (emulator guest firmware), and a structurally valid gplib archive
+/// carries only PIC COFF objects. "Foreign" and "host" are judged
+/// against the package's own architecture (`foreign_elf_machine`):
+/// on an aarch64 build an AArch64 ELF is host code and keeps firing,
+/// exactly as an x86-64 ELF does on an x86_64 build. Such a file's
+/// bytes are the same in every architecture build of the package, so
+/// the arch-independence /usr/share exists to provide is not broken
+/// by it. Unlike the noarch form
 /// (`noarch_binary_is_foreign_target`) there is no location
 /// condition: the package here is archful, so the only question is
-/// whether the file is code for the host family. A host-family ELF
-/// or archive member keeps firing, an archive that parses neither
-/// as GNU ar nor as a structurally valid gplib archive keeps
-/// firing, and a file whose machine cannot be determined keeps
-/// firing: the exemption takes positive evidence.
-fn usr_share_binary_is_foreign_target(pkgfile: &PkgFile) -> bool {
+/// whether the file is code for the package arch's family. A
+/// host-family ELF or archive member keeps firing, a binary non-ELF
+/// archive member keeps firing (its target cannot be classified), an
+/// archive that parses neither as GNU ar nor as a structurally valid
+/// gplib archive keeps firing, and a file whose machine cannot be
+/// determined keeps firing: the exemption takes positive evidence.
+/// The archive is read once; the same bytes feed both the GNU walk
+/// and the gplib validator.
+fn usr_share_binary_is_foreign_target(pkgfile: &PkgFile, arch: &str) -> bool {
     if pkgfile.magic.contains("current ar archive") {
-        match archive_elf_class(pkgfile) {
+        let Ok(data) = std::fs::read(&pkgfile.path) else {
+            return false;
+        };
+        match archive_elf_class_for_arch(&data, arch) {
             ArchiveElfClass::NoElfMembers | ArchiveElfClass::AllForeign => true,
             ArchiveElfClass::HasHostOrUnknown => false,
             ArchiveElfClass::Unreadable => {
                 // The MPLIB dialect (the gplib archives SDCC ships
-                // for its pic14/pic16 targets) has no GNU member
-                // index for the walk above to enumerate, so it
-                // classifies as unreadable even though it is a
-                // working library. The gplib structural validator
-                // is the positive evidence instead: a valid gplib
-                // archive's object members are all PIC COFF, so it
-                // carries no ELF members at all. An archive that
-                // parses neither way keeps firing.
-                std::fs::read(&pkgfile.path).is_ok_and(|data| is_gplib_archive(&data))
+                // for its pic14/pic16 targets) cannot be walked as
+                // GNU ar, so it lands here even though it is a
+                // working library -- the same dialect the ar-failed
+                // gate credits through this validator. The gplib
+                // structural validator is the positive evidence
+                // instead: a valid gplib archive's object members
+                // are all PIC COFF, so it carries no ELF members at
+                // all. An archive that parses neither way keeps
+                // firing.
+                is_gplib_archive(&data)
             }
         }
     } else if elf_regex().is_match(&pkgfile.magic).unwrap_or(false) {
-        elf_machine_class(pkgfile) == ElfMachineClass::Foreign
+        elf_is_foreign_for_arch(pkgfile, arch)
     } else {
         // OCaml native code and Lua bytecode carry no ELF machine to
         // classify; the finding keeps firing for them.
@@ -3736,7 +3890,7 @@ impl BinariesCheck {
         let bin_name: &str = &pkgfile.name;
         if bin_name.starts_with("/usr/share/")
             && !usr_arch_share_regex().is_match(bin_name).unwrap_or(false)
-            && !usr_share_binary_is_foreign_target(pkgfile)
+            && !usr_share_binary_is_foreign_target(pkgfile, &pkg.arch)
         {
             add_info(
                 out,
@@ -10946,6 +11100,155 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = driver_results(&pkg, &config);
         let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
         assert_eq!(lines.len(), 1, "host ELF fires: {results:?}");
+    }
+
+    #[test]
+    fn usr_share_aarch64_host_elf_still_fires() {
+        // Non-x86 host pin: the host family is the package arch's
+        // family, not x86 -- an AArch64 ELF in an aarch64 package is
+        // host code in /usr/share and keeps firing.
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let file = real_file_pkgfile(
+            &dir,
+            "helper",
+            "/usr/share/testpkg/helper",
+            "ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV)",
+            &elf_with_machine(goblin::elf::header::EM_AARCH64),
+        );
+        let pkg = synthetic_pkg("testpkg", "aarch64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert_eq!(lines.len(), 1, "aarch64 host ELF fires: {results:?}");
+    }
+
+    #[test]
+    fn usr_share_x86_elf_in_aarch64_package_is_silent() {
+        // The mirror pin: an x86-64 ELF is foreign payload in an
+        // aarch64 package, so it is exempt there even though the same
+        // bytes fire in an x86_64 package.
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let file = real_file_pkgfile(
+            &dir,
+            "payload",
+            "/usr/share/testpkg/payload",
+            "ELF 64-bit LSB shared object, x86-64, version 1 (SYSV)",
+            &elf_with_machine(goblin::elf::header::EM_X86_64),
+        );
+        let pkg = synthetic_pkg("testpkg", "aarch64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert!(
+            lines.is_empty(),
+            "x86 ELF in aarch64 pkg quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn usr_share_archive_with_aarch64_member_in_aarch64_package_still_fires() {
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let host = elf_with_machine(goblin::elf::header::EM_AARCH64);
+        let archive = craft_ar_archive(&[("a.o", &host)]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.a",
+            "/usr/share/testpkg/libfoo.a",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("testpkg", "aarch64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert_eq!(lines.len(), 1, "aarch64-member archive fires: {results:?}");
+    }
+
+    #[test]
+    fn usr_share_archive_of_x86_elves_in_aarch64_package_is_silent() {
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let foreign = elf_with_machine(goblin::elf::header::EM_X86_64);
+        let archive = craft_ar_archive(&[("a.o", &foreign)]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.a",
+            "/usr/share/testpkg/libfoo.a",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("testpkg", "aarch64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert!(
+            lines.is_empty(),
+            "all-x86 archive in aarch64 pkg quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn usr_share_archive_with_binary_nonelf_member_still_fires() {
+        // The no-ELF-members arm is narrowed to text payload: a
+        // binary member in another object format (a COFF object
+        // here) is not positive evidence of foreign-target payload,
+        // since its target cannot be classified.
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let coff = b"\x4c\x01\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        let archive = craft_ar_archive(&[("a.obj", coff.as_slice())]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.a",
+            "/usr/share/testpkg/libfoo.a",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert_eq!(lines.len(), 1, "binary non-ELF member fires: {results:?}");
+    }
+
+    #[test]
+    fn usr_share_empty_archive_is_silent() {
+        // An archive with no members at all carries no code: the
+        // limiting case of the no-ELF-members arm stays exempt.
+        let config = test_config();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let archive = craft_ar_archive(&[]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libfoo.a",
+            "/usr/share/testpkg/libfoo.a",
+            "current ar archive",
+            &archive,
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "arch-dependent-file-in-usr-share");
+        assert!(lines.is_empty(), "empty archive quiet: {results:?}");
+    }
+
+    #[test]
+    fn magic_machine_family_names_families() {
+        assert_eq!(
+            magic_machine_family("ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV)"),
+            Some("arm")
+        );
+        assert_eq!(
+            magic_machine_family("ELF 64-bit LSB executable, x86-64, version 1 (SYSV)"),
+            Some("x86")
+        );
+        assert_eq!(
+            magic_machine_family(
+                "ELF 32-bit MSB executable, PowerPC or cisco 4500, version 1 (SYSV)"
+            ),
+            Some("ppc")
+        );
+        assert_eq!(
+            magic_machine_family("ELF 64-bit LSB shared object, version 1 (SYSV)"),
+            None
+        );
     }
 
     #[test]
