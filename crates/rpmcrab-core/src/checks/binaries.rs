@@ -23,7 +23,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
-use crate::pkg::pkgfile::PkgFile;
+use crate::pkg::pkgfile::{PkgFile, is_symlink};
 use crate::tools::{Tool, ToolSource, spawn_with_retry, test_source};
 use std::sync::OnceLock;
 
@@ -3415,12 +3415,28 @@ fn file_is_privileged(pkgfile: &PkgFile) -> bool {
 /// Exposure gate (#959): the package ships a systemd service or
 /// socket unit, so its binaries form daemon surface. Only units in
 /// the package's own file list count, and only `.service`/`.socket`
-/// under a `systemd/system` directory -- a D-Bus activation file
-/// under share/dbus-1/services is not a daemon unit.
+/// under one of the systemd unit directories -- a D-Bus activation
+/// file under share/dbus-1/services is not a daemon unit. Three
+/// shapes do not count (#969 follow-up): a `%ghost` unit entry (the
+/// package declares the path but ships no unit), a masked unit (a
+/// symlink to /dev/null: the name is occupied precisely so that no
+/// unit loads), and a path that merely contains a unit directory
+/// as a substring (a documentation example under share/doc), so
+/// the test is on the unit-directory prefixes systemd searches.
 fn pkg_ships_daemon_units(pkg: &Pkg) -> bool {
+    const UNIT_DIRS: [&str; 5] = [
+        "/usr/lib/systemd/system/",
+        "/lib/systemd/system/",
+        "/etc/systemd/system/",
+        "/run/systemd/system/",
+        "/usr/local/lib/systemd/system/",
+    ];
     pkg.files.iter().any(|f| {
-        f.name.contains("/systemd/system/")
+        UNIT_DIRS.iter().any(|dir| f.name.starts_with(dir))
             && (f.name.ends_with(".service") || f.name.ends_with(".socket"))
+            && !f.is_ghost()
+            && !pkg.ghost_files.iter().any(|g| g == &f.name)
+            && !(is_symlink(f.mode) && f.linkto == "/dev/null")
     })
 }
 
@@ -15011,6 +15027,29 @@ description = "explicit priority string bypasses the system crypto policy"
         );
         assert_eq!(count(&sock_pkg, &plain, &["lrand48"], &["lrand48"]), 1);
 
+        // Near miss: a %ghost unit entry ships no unit -> silent.
+        let mut ghost_unit = syn_file("/usr/lib/systemd/system/foo.service", "ASCII text");
+        ghost_unit.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        let ghost_pkg = synthetic_pkg("testpkg", "x86_64", vec![ghost_unit]);
+        assert_eq!(count(&ghost_pkg, &plain, &["rand"], &["rand"]), 0);
+        // Near miss: a masked unit (a symlink to /dev/null) loads
+        // nothing -> silent.
+        let mut masked_unit = syn_file("/usr/lib/systemd/system/foo.service", "ASCII text");
+        masked_unit.mode = 0o120777;
+        masked_unit.linkto = "/dev/null".to_string();
+        let masked_pkg = synthetic_pkg("testpkg", "x86_64", vec![masked_unit]);
+        assert_eq!(count(&masked_pkg, &plain, &["rand"], &["rand"]), 0);
+        // Near miss: a unit path outside the unit directories (a
+        // documentation example) is not daemon surface -> silent.
+        let doc_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/share/doc/foo/systemd/system/bar.service",
+                "ASCII text",
+            )],
+        );
+        assert_eq!(count(&doc_pkg, &plain, &["rand"], &["rand"]), 0);
         // Near miss: a timer unit is not daemon surface -> silent.
         let timer_pkg = synthetic_pkg(
             "testpkg",
