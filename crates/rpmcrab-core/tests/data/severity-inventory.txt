@@ -51,6 +51,7 @@ branding-requires-unversioned = W
 branding-supplements-missing = E
 buildarch-instead-of-exclusivearch-tag = E
 buildprereq-use = E
+bundled-library-without-provides = W
 call-to-gets = E
 call-to-mktemp = E
 call-to-tmpnam = E

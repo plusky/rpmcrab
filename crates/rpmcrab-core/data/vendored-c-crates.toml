@@ -1,0 +1,64 @@
+# Vendored C libraries behind Rust -sys crates, for BinariesCheck's
+# bundled-library-without-provides finding.
+#
+# Each entry names one -sys crate whose C library the openSUSE bundled
+# software policy wants declared as bundled(<srpm>): the crate itself
+# only ever earns a crate-level bundled(rust-crate:...) marker from
+# cargo-packaging, which the maintenance query for bundled(<srpm>)
+# misses. A library joins this map one at a time, with a measured
+# witness: a byte string the library's code leaves in every binary
+# that actually links it. The witness is what separates "the crate
+# was resolved" (.dep-v0 lists the whole crate graph) from "the C
+# code is in this binary".
+#
+# Fields:
+#   name                  the -sys crate name in .dep-v0
+#   srpm                  the source RPM name the detail prescribes
+#   accepted_names        bundled() names that satisfy the finding
+#   system_soname_prefix  DT_NEEDED prefix proving the system library
+#                         is linked instead (absent: the library has
+#                         no system shared form to link)
+#   link_soname           the soname the detail names for that remedy
+#   witness               byte string proving the C code is linked
+#   c_version_source      where the C version comes from:
+#                         "embedded-version-string" (a dotted
+#                         version string standing alone in the
+#                         binary's data) or
+#                         "crate-build-metadata" (the +<lib>.X.Y.Z
+#                         build metadata of the crate version);
+#                         absent: no version source, and the detail
+#                         prescribes no version
+#   embedded_version_major  for "embedded-version-string": the major
+#                         component the embedded string must carry.
+#                         A binary holds many components' version
+#                         strings; the library's own major narrows
+#                         them, and the version is named only when
+#                         the strings of that major agree on one
+#                         value.
+
+as_of = "2026-10-27"
+
+[[crate]]
+name = "libsqlite3-sys"
+srpm = "sqlite3"
+accepted_names = ["sqlite3", "libsqlite3", "sqlcipher"]
+system_soname_prefix = "libsqlite3.so."
+link_soname = "libsqlite3.so.0"
+witness = "SQLite format 3"
+c_version_source = "embedded-version-string"
+embedded_version_major = "3"
+
+[[crate]]
+name = "aws-lc-sys"
+srpm = "aws-lc"
+accepted_names = ["aws-lc"]
+witness = "/aws-lc/crypto/fipsmodule/"
+
+[[crate]]
+name = "zstd-sys"
+srpm = "zstd"
+accepted_names = ["zstd", "libzstd"]
+system_soname_prefix = "libzstd.so."
+link_soname = "libzstd.so.1"
+witness = "Unknown frame descriptor"
+c_version_source = "crate-build-metadata"
