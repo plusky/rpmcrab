@@ -696,7 +696,13 @@ fn non_executable_script_is_data(
 /// /usr/local/bin or /usr/local/sbin) is an entry point and never
 /// counts as test payload, whatever the package or the tree is
 /// called: a test suite's own runner installed in /usr/bin keeps
-/// the interpreter findings. And fused names carry no fact:
+/// the interpreter findings. Matching folds case on both the
+/// package name and the directory components -- a packager's
+/// capitalisation carries no test fact -- where the #813
+/// data-shape gate beside it matches its path literals
+/// case-sensitively: the two gates judge different things,
+/// packager naming here, installed content shapes there. And
+/// fused names carry no fact:
 /// blktests and xfstests glue the word into a single component,
 /// so they and their `common/` fragments stay outside this gate --
 /// a raw suffix match would also claim non-test names
@@ -14952,6 +14958,33 @@ reason = "warning hook: executable and %config by design"
                 "{tag} must fire for {path}: {lines:?}"
             );
         }
+    }
+
+    /// The test gate's case folding and branch isolation, pinned
+    /// at the predicate: the package-name branch alone (no test
+    /// component anywhere in the tree) exempts; the same tree
+    /// under a plain name does not; the script-directory bound
+    /// beats the package-name branch; capitalisation changes
+    /// nothing on either branch.
+    #[test]
+    fn script_is_test_data_case_and_branch_pins() {
+        assert!(script_is_test_data(
+            "widget-testsuite",
+            "/usr/libexec/widget/helper.sh"
+        ));
+        assert!(!script_is_test_data(
+            "widget",
+            "/usr/libexec/widget/helper.sh"
+        ));
+        assert!(!script_is_test_data("lvm2-testsuite", "/usr/bin/runner"));
+        assert!(script_is_test_data(
+            "Widget-TestSuite",
+            "/usr/libexec/widget/helper.sh"
+        ));
+        assert!(script_is_test_data(
+            "widget",
+            "/usr/share/widget/Tests/helper.py"
+        ));
     }
 
     fn eol_flagged(lines: &[(String, String)], path: &str) -> bool {
