@@ -4326,15 +4326,27 @@ impl FilesCheck {
             }
             // A .. left in the target after the leading run means the
             // link goes up and then back down, e.g. ../foo/../bar.
-            for segment in mylink.split("/") {
-                if segment == ".." {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "symlink-contains-up-and-down-segments",
-                        &[fname, link],
-                    );
+            // A target made only of .. segments never goes back down:
+            // the leading-run scan cannot consume its final .. (the
+            // pattern needs a trailing slash), so that segment
+            // survives as the whole remainder and would be counted
+            // here even though the link is already in its shortest
+            // form (a chroot mirror link such as ../..). The
+            // reference counts it; the divergence is ledgered.
+            let pure_up = link
+                .split('/')
+                .all(|segment| segment.is_empty() || segment == "..");
+            if !pure_up {
+                for segment in mylink.split("/") {
+                    if segment == ".." {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "symlink-contains-up-and-down-segments",
+                            &[fname, link],
+                        );
+                    }
                 }
             }
         }
@@ -9429,7 +9441,13 @@ mod tests {
         // per ".." segment left in the link target after the leading "../"
         // run is consumed. Only targets starting with "../" are examined;
         // an empty remainder stays silent. Cases verified against the
-        // pinned reference interpreter.
+        // pinned reference interpreter, except the all-".." targets:
+        // the reference counts the final ".." of a pure-up target such
+        // as "../.." (it needs a trailing slash to be consumed as part
+        // of the leading run), but such a link has no down segment and
+        // is already in its shortest form, so crab stays silent there;
+        // the divergence is ledgered (ntp's chroot mirror link
+        // /var/lib/ntp/var/lib/ntp -> ../.. is the corpus instance).
         let config = test_config();
         let mut check = FilesCheck::new(&config);
         // (fname, link target, expected E count)
@@ -9437,7 +9455,10 @@ mod tests {
             ("/a/b/c", "../foo/../bar", 1),
             ("/a/b/c", "../../x/../y", 1),
             ("/a/b/c", "../../a/../b/../c", 2),
-            ("/a/b/c", "../..", 1),
+            ("/a/b/c", "../..", 0),
+            ("/a/b/c", "../../..", 0),
+            ("/a/b/c", "../foo/..", 1),
+            ("/a/b/c", "../..../..", 1),
             ("/a/b/c", "../", 0),
             ("/a/b/c", "foo/../bar", 0),
             ("/a/b/c", "../foo", 0),
