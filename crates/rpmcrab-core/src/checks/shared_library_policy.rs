@@ -127,7 +127,7 @@ impl SharedLibraryPolicyCheck {
         // finding judges) and a scheme-named sibling's provides (the
         // names a require may satisfy the pairing through). No other
         // package's lists are ever read, so they are not cloned.
-        let is_devel = pkg.name.ends_with("-devel");
+        let is_devel = self.is_devel_package(&pkg.name);
         let is_scheme_named = self.sibling_group(&pkg.name).is_some();
         self.record_seen(SeenPkg {
             name: pkg.name.clone(),
@@ -253,7 +253,13 @@ impl SharedLibraryPolicyCheck {
         let Some(only) = payload.next() else {
             return false;
         };
-        payload.next().is_none() && is_match(&self.re_qlogging_categories, &only.name)
+        // The entry itself must be a regular file the package actually
+        // ships: a symlink to a categories file, or a %ghost categories
+        // path, is not the data split this exemption describes.
+        payload.next().is_none()
+            && only.mode & S_IFMT == S_IFREG
+            && !only.is_ghost()
+            && is_match(&self.re_qlogging_categories, &only.name)
     }
 
     /// `(soname, needed)` from an ELF file, or the parse failure reason.
@@ -331,8 +337,9 @@ struct LoaderWitness {
 impl LoaderWitness {
     /// Whether this file is evidence that the library loads `dep`
     /// at runtime: it imports the dynamic loader and its raw bytes
-    /// contain `dep` as a NUL-delimited string -- the name it hands
-    /// to the loader. The NUL delimiters are the boundary test: a
+    /// contain `dep` as a complete string -- the name it hands to the
+    /// loader. The delimiters are the boundary test (a leading NUL,
+    /// or the start of the buffer, plus a trailing NUL): a
     /// longer name merely containing `dep` (`libbar.so.20` for
     /// `libbar.so.2`), or one glued to a preceding character
     /// (`Xlibbar.so.2`), is not the name being loaded.
@@ -344,9 +351,21 @@ impl LoaderWitness {
         needle.push(0);
         needle.extend_from_slice(dep.as_bytes());
         needle.push(0);
-        self.data
+        if self
+            .data
             .windows(needle.len())
             .any(|w| w == needle.as_slice())
+        {
+            return true;
+        }
+        // The start of the buffer is the one other left boundary a raw
+        // scan can decide: a name beginning at offset 0 and terminated
+        // by a NUL is a complete string. Real ELF bytes never carry a
+        // name there (the ELF magic occupies offset 0), so this arm is
+        // inert on real files; it keeps the boundary rule exact for
+        // the scan itself.
+        let dep = dep.as_bytes();
+        self.data.len() > dep.len() && self.data[..dep.len()] == *dep && self.data[dep.len()] == 0
     }
 }
 
@@ -358,6 +377,20 @@ impl LoaderWitness {
 /// so an obsoletes in any bitness form removes the sibling generation
 /// in every form. The number is the full trailing digit run with
 /// leading zeroes dropped.
+/// The name the devel pairing judges a package by: a baselibs flavour
+/// tail (`-devel-x86-64-v3`) is dress on the plain `-devel` name, so a
+/// flavoured devel package pairs as its plain base.
+fn devel_pairing_name<'a>(re_flavoured: &Regex, name: &'a str) -> &'a str {
+    if is_match(re_flavoured, name) {
+        match name.rfind("-x86-64-") {
+            Some(i) => &name[..i],
+            None => name,
+        }
+    } else {
+        name
+    }
+}
+
 fn soname_package_parts(re_soname_pkg: &Regex, name: &str) -> Option<(String, String)> {
     if !is_match(re_soname_pkg, name) {
         return None;
@@ -748,7 +781,7 @@ impl Check for SharedLibraryPolicyCheck {
         }
         // Lint order of the `-devel` packages drives the finding order.
         for d in 0..self.seen.len() {
-            if !self.seen[d].name.ends_with("-devel") {
+            if !self.is_devel_package(&self.seen[d].name) {
                 continue;
             }
             let Some(source_rpm) = self.seen[d].source_rpm.clone() else {
@@ -764,9 +797,9 @@ impl Check for SharedLibraryPolicyCheck {
                 }
                 let sibling = &self.seen[s];
                 if !sibling.has_versioned_so
-                    || !self
-                        .devel_names_for(&sibling.name)
-                        .contains(&self.seen[d].name)
+                    || !self.devel_names_for(&sibling.name).iter().any(|n| {
+                        n == devel_pairing_name(&self.re_devel_flavoured, &self.seen[d].name)
+                    })
                 {
                     continue;
                 }
@@ -1096,6 +1129,51 @@ mod tests {
             !names.iter().any(|n| n == "shlib-policy-missing-lib"),
             "categories-only split must not be charged as missing: {names:?}"
         );
+    }
+
+    #[test]
+    fn missing_lib_fires_when_categories_entry_is_not_a_shipped_file() {
+        // The exemption describes a shipped data file: a symlink to a
+        // categories file, or a %ghost categories path, is not payload
+        // the package ships, so the charge stands.
+        use crate::pkg::pkgfile::RPMFILE_GHOST;
+
+        let mut ghost = data_file("/usr/share/qlogging-categories6/libkdcraw.categories");
+        ghost.flags = RPMFILE_GHOST;
+        for (tag, entry) in [
+            (
+                "categories-symlink",
+                link_file("/usr/share/qlogging-categories6/libkdcraw.categories"),
+            ),
+            ("categories-ghost", ghost),
+        ] {
+            let names = finding_names(tag, "libkdcraw6", vec![entry]);
+            assert!(
+                names.iter().any(|n| n == "shlib-policy-missing-lib"),
+                "{tag} must still be charged as missing: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn loads_treats_buffer_start_as_a_left_boundary() {
+        // A name at offset 0 terminated by a NUL is a complete string;
+        // a name glued to a preceding byte is not, wherever it sits.
+        let at_start = LoaderWitness {
+            imports_loader: true,
+            data: b"libbar.so.2\0rest".to_vec(),
+        };
+        assert!(at_start.loads("libbar.so.2"));
+        let glued = LoaderWitness {
+            imports_loader: true,
+            data: b"Xlibbar.so.2\0".to_vec(),
+        };
+        assert!(!glued.loads("libbar.so.2"));
+        let longer = LoaderWitness {
+            imports_loader: true,
+            data: b"libbar.so.20\0".to_vec(),
+        };
+        assert!(!longer.loads("libbar.so.2"));
     }
 
     #[test]
