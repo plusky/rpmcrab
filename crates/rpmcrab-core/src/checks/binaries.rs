@@ -672,6 +672,16 @@ struct ReadelfInfo {
     /// table or debuglink states nothing about stripping. Computed
     /// during parse; see `comment_has_ghc_version`.
     ghc_comment: bool,
+    /// The vendored C libraries this file's `.dep-v0` records, one per
+    /// `data/vendored-c-crates.toml` entry the crate graph names.
+    /// `.dep-v0` lists every resolved crate, linked or not, so each
+    /// entry also records whether the library's witness bytes occur
+    /// in the file -- the witness is what proves the C code is
+    /// actually linked. Computed during parse; see
+    /// `detect_vendored_c_crates`. Empty for a file without `.dep-v0`
+    /// (every non-Rust binary, and a Rust binary built without the
+    /// section: the bundled check is blind to both).
+    vendored_crates: Vec<VendoredCrate>,
     soname: Option<String>,
     needed: Vec<String>,
     runpaths: Vec<String>,
@@ -757,6 +767,7 @@ impl ReadelfInfo {
             go_toolchains: Vec::new(),
             go_buildinfo: false,
             ghc_comment: false,
+            vendored_crates: Vec::new(),
             soname: None,
             needed: Vec::new(),
             runpaths: Vec::new(),
@@ -1104,6 +1115,25 @@ impl ReadelfInfo {
         // section test already established Go for this file.
         if !self.go_buildinfo && !self.is_go_binary() {
             self.go_buildinfo = has_go_buildinfo_magic(data);
+        }
+        // Vendored C crates merge across archive members like the Go
+        // toolchains: members normally agree, but every distinct
+        // (crate, version) stands for itself, and a witness found in
+        // any member marks the file.
+        for vc in detect_vendored_c_crates(elf, data) {
+            match self
+                .vendored_crates
+                .iter_mut()
+                .find(|e| e.name == vc.name && e.crate_version == vc.crate_version)
+            {
+                Some(existing) => {
+                    existing.witness_present |= vc.witness_present;
+                    if existing.c_version.is_none() {
+                        existing.c_version = vc.c_version;
+                    }
+                }
+                None => self.vendored_crates.push(vc),
+            }
         }
     }
     fn has_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
@@ -1595,6 +1625,345 @@ fn detect_go_toolchain(elf: &goblin::elf::Elf, data: &[u8]) -> Option<GoVersion>
         }
     }
     None
+}
+
+/// One vendored C library recorded in a Rust binary's `.dep-v0`, as
+/// matched against `data/vendored-c-crates.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VendoredCrate {
+    /// The -sys crate name (the map key), e.g. `zstd-sys`.
+    name: String,
+    /// The crate version from `.dep-v0`, build metadata included
+    /// (e.g. `2.1.0+zstd.1.5.7`).
+    crate_version: String,
+    /// The C library's version, where the map names a source for it:
+    /// a standalone version string embedded in the binary (sqlite) or
+    /// the crate version's build metadata (zstd). `None` where the
+    /// map has no source (aws-lc).
+    c_version: Option<String>,
+    /// The map entry's witness bytes occur in the file: the C code is
+    /// linked into this binary, not merely resolved in its crate
+    /// graph.
+    witness_present: bool,
+}
+
+/// Where a vendored C library's version is read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CVersionSource {
+    /// A standalone dotted version string embedded in the binary
+    /// (the sqlite amalgamation's `sqlite3_version[]`).
+    EmbeddedVersionString,
+    /// The crate version's `+build` metadata (`+zstd.1.5.7`).
+    CrateBuildMetadata,
+}
+
+/// One entry of `data/vendored-c-crates.toml`: a -sys crate whose C
+/// library the bundled software policy wants declared as
+/// `bundled(<srpm>)`.
+#[derive(Debug, Clone)]
+struct VendoredCCrate {
+    /// The -sys crate name in `.dep-v0`.
+    name: String,
+    /// The source RPM name the finding's detail prescribes.
+    srpm: String,
+    /// `bundled()` names that satisfy the finding.
+    accepted_names: Vec<String>,
+    /// DT_NEEDED prefix proving the system library is linked instead;
+    /// `None` when the library has no system shared form to link.
+    system_soname_prefix: Option<String>,
+    /// The soname the detail names for the link-the-system remedy;
+    /// present exactly when `system_soname_prefix` is.
+    link_soname: Option<String>,
+    /// Byte string the library's code leaves in a binary that links
+    /// it.
+    witness: String,
+    /// Where the C version is read from, when the map names a source.
+    c_version_source: Option<CVersionSource>,
+    /// For `EmbeddedVersionString`: the major component the embedded
+    /// string must carry (a binary holds many components' version
+    /// strings; only the library's own major identifies its string).
+    embedded_version_major: Option<String>,
+}
+
+/// The vendored C crate map: baked in like the Go toolchain floor so
+/// an installed binary needs no data dir next to it; the table's
+/// as-of date and admission rule are recorded in the file itself.
+const VENDORED_C_CRATES_TOML: &str = include_str!("../../data/vendored-c-crates.toml");
+
+/// The parsed map, parsed once (the `defect_pattern::registry`
+/// pattern).
+fn vendored_c_crates() -> &'static [VendoredCCrate] {
+    static MAP: OnceLock<Vec<VendoredCCrate>> = OnceLock::new();
+    MAP.get_or_init(|| parse_vendored_c_crates(VENDORED_C_CRATES_TOML))
+}
+
+/// Parse and validate the map. Validation takes the staged-data
+/// posture (the registry's): a malformed table panics at startup
+/// instead of silently disabling the finder.
+fn parse_vendored_c_crates(raw: &str) -> Vec<VendoredCCrate> {
+    let table: toml::Table = raw.parse().expect("vendored C crates is valid TOML");
+    assert!(
+        table.get("as_of").and_then(toml::Value::as_str).is_some(),
+        "vendored C crates records an as_of date"
+    );
+    let records = table
+        .get("crate")
+        .and_then(toml::Value::as_array)
+        .expect("vendored C crates has a [[crate]] array");
+    let mut map: Vec<VendoredCCrate> = records
+        .iter()
+        .map(|record| {
+            let field = |name: &str| -> String {
+                record
+                    .get(name)
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_else(|| panic!("vendored C crate is missing {name:?}"))
+                    .to_string()
+            };
+            let opt_field = |name: &str| -> Option<String> {
+                record
+                    .get(name)
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_string)
+            };
+            let accepted_names: Vec<String> = record
+                .get("accepted_names")
+                .and_then(toml::Value::as_array)
+                .expect("vendored C crate has an accepted_names array")
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .expect("vendored C crate accepted name is a string")
+                        .to_string()
+                })
+                .collect();
+            let srpm = field("srpm");
+            assert!(
+                accepted_names.contains(&srpm),
+                "vendored C crate accepted_names includes its srpm"
+            );
+            assert!(
+                !accepted_names.is_empty(),
+                "vendored C crate lists at least one accepted name"
+            );
+            let witness = field("witness");
+            assert!(!witness.is_empty(), "vendored C crate witness is non-empty");
+            let system_soname_prefix = opt_field("system_soname_prefix");
+            let link_soname = opt_field("link_soname");
+            assert_eq!(
+                system_soname_prefix.is_some(),
+                link_soname.is_some(),
+                "vendored C crate soname prefix and link soname come as a pair"
+            );
+            let c_version_source = match opt_field("c_version_source").as_deref() {
+                None => None,
+                Some("embedded-version-string") => Some(CVersionSource::EmbeddedVersionString),
+                Some("crate-build-metadata") => Some(CVersionSource::CrateBuildMetadata),
+                Some(other) => panic!("vendored C crate has unknown c_version_source {other:?}"),
+            };
+            let embedded_version_major = opt_field("embedded_version_major");
+            assert_eq!(
+                c_version_source == Some(CVersionSource::EmbeddedVersionString),
+                embedded_version_major.is_some(),
+                "vendored C crate embedded version major comes exactly with the embedded source"
+            );
+            VendoredCCrate {
+                name: field("name"),
+                srpm,
+                accepted_names,
+                system_soname_prefix,
+                link_soname,
+                witness,
+                c_version_source,
+                embedded_version_major,
+            }
+        })
+        .collect();
+    assert!(
+        !map.is_empty(),
+        "vendored C crates lists at least one crate"
+    );
+    map.sort_by(|a, b| a.name.cmp(&b.name));
+    assert!(
+        map.windows(2).all(|pair| pair[0].name != pair[1].name),
+        "vendored C crate names are unique"
+    );
+    map
+}
+
+/// Read one ELF's `.dep-v0` section: zlib-compressed JSON whose
+/// `packages` array lists the crate graph (`{"name", "version", ...}`
+/// per crate, the version carrying any `+build` metadata). Returns
+/// the entries naming a crate from the vendored-C map, each with the
+/// witness verdict for this file's bytes. A missing section, bad
+/// zlib, or JSON in an unexpected shape yields an empty vec: the
+/// finding stays silent, the posture of the other detectors -- an
+/// ELF without `.dep-v0` is invisible to the check.
+fn detect_vendored_c_crates(elf: &goblin::elf::Elf, data: &[u8]) -> Vec<VendoredCrate> {
+    let map = vendored_c_crates();
+    let Some(sh) = elf
+        .section_headers
+        .iter()
+        .find(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(".dep-v0"))
+    else {
+        return Vec::new();
+    };
+    let start = sh.sh_offset as usize;
+    let end = start.saturating_add(sh.sh_size as usize);
+    let Some(raw) = data.get(start..end) else {
+        return Vec::new();
+    };
+    use std::io::Read;
+    let mut json = Vec::new();
+    if flate2::read::ZlibDecoder::new(raw)
+        .read_to_end(&mut json)
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&json) else {
+        return Vec::new();
+    };
+    let Some(packages) = doc.get("packages").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for pkg in packages {
+        let (Some(name), Some(version)) = (
+            pkg.get("name").and_then(serde_json::Value::as_str),
+            pkg.get("version").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let Some(entry) = map.iter().find(|e| e.name == name) else {
+            continue;
+        };
+        let witness_present = data
+            .windows(entry.witness.len())
+            .any(|w| w == entry.witness.as_bytes());
+        // The C version is only worth reading when the code is
+        // actually here; a resolved-but-unlinked crate reports none.
+        let c_version = if witness_present {
+            match entry.c_version_source {
+                Some(CVersionSource::EmbeddedVersionString) => {
+                    embedded_version_string(data, entry.embedded_version_major.as_deref())
+                        .map(str::to_string)
+                }
+                Some(CVersionSource::CrateBuildMetadata) => crate_build_metadata_version(version),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let vc = VendoredCrate {
+            name: name.to_string(),
+            crate_version: version.to_string(),
+            c_version,
+            witness_present,
+        };
+        if !found.contains(&vc) {
+            found.push(vc);
+        }
+    }
+    found
+}
+
+/// The standalone dotted version string in `data`: a maximal
+/// `N.N.N` token bounded on both sides by a non-printable byte or a
+/// data edge. That is how a C string constant sits in `.rodata`:
+/// the sqlite amalgamation's version (its `sqlite3_version[]`) is
+/// such a token, suffix-merged into a neighbouring data blob in
+/// some builds, so NUL-delimiting would be too strict; a version
+/// mentioned inside a longer printable string (a rustc banner, a
+/// path, `lib-3.4.0`) has a printable neighbour and does not count.
+/// When `major` is given, only strings carrying that major
+/// component count: a binary holds many components' version
+/// strings, and the first one is not necessarily the library's.
+/// The version is named only when every matching standalone string
+/// agrees on it: atuin carries lsm-tree's standalone 3.1.10 next to
+/// sqlite's 3.46.0, and between two disagreeing candidates there
+/// is no decidable way to tell which is the library's, so the
+/// finding then prescribes no version.
+fn embedded_version_string<'a>(data: &'a [u8], major: Option<&str>) -> Option<&'a str> {
+    let printable = |b: u8| (0x20..0x7f).contains(&b);
+    let mut found: Option<&'a str> = None;
+    let mut i = 0;
+    while i < data.len() {
+        // A candidate starts at a digit whose predecessor is
+        // neither a digit nor a dot (not the tail of a longer
+        // dotted run).
+        if data[i].is_ascii_digit()
+            && (i == 0 || !(data[i - 1].is_ascii_digit() || data[i - 1] == b'.'))
+            && let Some((text, len)) = dotted_version_at(data, i)
+        {
+            let end = i + len;
+            let bounded =
+                (i == 0 || !printable(data[i - 1])) && (end == data.len() || !printable(data[end]));
+            if bounded && major.is_none_or(|m| text.split('.').next() == Some(m)) {
+                match found {
+                    None => found = Some(text),
+                    Some(prev) if prev != text => return None,
+                    _ => {}
+                }
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    found
+}
+
+/// The dotted version starting exactly at `start`: three numeric
+/// components of 1-4 digits each, the token not continuing into a
+/// fourth component or a longer digit run.
+fn dotted_version_at(data: &[u8], start: usize) -> Option<(&str, usize)> {
+    let mut pos = start;
+    for part in 0..3 {
+        let part_start = pos;
+        while pos < data.len() && data[pos].is_ascii_digit() && pos - part_start <= 4 {
+            pos += 1;
+        }
+        let digits = pos - part_start;
+        if digits == 0 || digits > 4 {
+            return None;
+        }
+        if part < 2 {
+            if pos >= data.len() || data[pos] != b'.' {
+                return None;
+            }
+            pos += 1;
+        }
+    }
+    if pos < data.len() && (data[pos] == b'.' || data[pos].is_ascii_digit()) {
+        return None;
+    }
+    std::str::from_utf8(&data[start..pos])
+        .ok()
+        .map(|text| (text, pos - start))
+}
+
+/// The C version from a crate version's `+build` metadata, in the
+/// `<lib>.X.Y.Z` shape the -sys crates record (`2.1.0+zstd.1.5.7`
+/// carries zstd 1.5.7): the metadata's trailing all-numeric dotted
+/// run. `None` when there is no metadata or its tail is not a plain
+/// dotted version.
+fn crate_build_metadata_version(crate_version: &str) -> Option<String> {
+    let metadata = crate_version.split_once('+')?.1;
+    let segments: Vec<&str> = metadata.split('.').collect();
+    let start = segments
+        .iter()
+        .position(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))?;
+    let tail = &segments[start..];
+    if tail
+        .iter()
+        .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        && tail.len() >= 2
+    {
+        Some(tail.join("."))
+    } else {
+        None
+    }
 }
 
 /// The embedded Go toolchain floor: per release line, the minimum
@@ -5924,6 +6293,71 @@ impl BinariesCheck {
         );
     }
 
+    /// `bundled-library-without-provides`: a Rust binary that links
+    /// a vendored C library from the map carries only the crate-level
+    /// `bundled(rust-crate:...)` marker cargo-packaging generates,
+    /// never the `bundled(<srpm>)` the bundled software policy's
+    /// maintenance query looks for. Fires per (file, crate) when the
+    /// witness proves the C code is linked, the file does not link
+    /// the system library instead, and the package declares none of
+    /// the accepted names.
+    fn check_bundled_library_provides(
+        &self,
+        pkg: &Pkg,
+        pkgfile: &PkgFile,
+        info: &ReadelfInfo,
+        out: &mut Filter,
+    ) {
+        if info.vendored_crates.is_empty() {
+            return;
+        }
+        let map = vendored_c_crates();
+        for vc in &info.vendored_crates {
+            let Some(entry) = map.iter().find(|e| e.name == vc.name) else {
+                continue;
+            };
+            if !vc.witness_present {
+                // The crate was resolved, but its code is not in
+                // this binary (a feature- or target-gated dependency
+                // of another crate in the graph): the crate marker
+                // is about some other file, or about nothing.
+                continue;
+            }
+            if let Some(prefix) = &entry.system_soname_prefix {
+                if info.needed.iter().any(|n| n.starts_with(prefix.as_str())) {
+                    // Links the system library: nothing is bundled
+                    // here, whatever the crate marker says.
+                    continue;
+                }
+            }
+            let declared = pkg.provides.iter().any(|p| {
+                entry
+                    .accepted_names
+                    .iter()
+                    .any(|accepted| p.name == format!("bundled({accepted})"))
+            });
+            if declared {
+                continue;
+            }
+            let mut detail = format!("{} {}", vc.name, vc.crate_version);
+            detail.push_str(": ");
+            if let Some(soname) = &entry.link_soname {
+                detail.push_str(&format!("link the system {soname} or "));
+            }
+            detail.push_str(&format!("add Provides: bundled({})", entry.srpm));
+            if let Some(version) = &vc.c_version {
+                detail.push_str(&format!(" = {version}"));
+            }
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "bundled-library-without-provides",
+                &[&pkgfile.name, &detail],
+            );
+        }
+    }
+
     fn check_rpath(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
         for runpaths in &info.runpaths {
             // The reference readelf parser only records non-empty
@@ -6253,6 +6687,7 @@ impl BinariesCheck {
         }
         self.check_security_functions(pkg, pkgfile, info, out);
         self.check_go_toolchain(pkg, pkgfile, info, out);
+        self.check_bundled_library_provides(pkg, pkgfile, info, out);
         self.check_rpath(pkg, pkgfile, info, out);
         self.check_library_dependency(pkg, pkgfile, info, out);
         self.check_forbidden_functions(pkg, pkgfile, info, config, out);
@@ -7776,6 +8211,7 @@ mod tests {
                 failed: None,
                 no_elf_members: false,
                 no_members: false,
+                vendored_crates: Vec::new(),
             };
             let pkgfile = PkgFile {
                 name: name.to_string(),
@@ -10373,6 +10809,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 go_toolchains: Vec::new(),
                 go_buildinfo: false,
                 ghc_comment: false,
+                vendored_crates: Vec::new(),
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_hash_sections(&pkg, &pkgfile, &info, &mut out);
@@ -10518,6 +10955,7 @@ description = "explicit priority string bypasses the system crypto policy"
             go_toolchains: Vec::new(),
             go_buildinfo: false,
             ghc_comment: false,
+            vendored_crates: Vec::new(),
         }
     }
 
@@ -19459,6 +19897,382 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(lines(vec![v(1, 24, 2)]).len(), 0);
         assert_eq!(lines(vec![v(1, 26, 0)]).len(), 0);
         assert_eq!(lines(vec![]).len(), 0);
+    }
+
+    /// `.dep-v0` bytes for a synthetic crate graph, in the shape
+    /// rustc writes: zlib-compressed JSON whose `packages` array
+    /// carries name/version per crate.
+    fn dep_v0_bytes(packages: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write;
+        let doc = serde_json::json!({
+            "format": 1,
+            "packages": packages
+                .iter()
+                .map(|(name, version)| {
+                    serde_json::json!({"name": name, "version": version, "source": "crates.io"})
+                })
+                .collect::<Vec<_>>(),
+        });
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(doc.to_string().as_bytes()).unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn vendored(
+        name: &str,
+        version: &str,
+        c_version: Option<&str>,
+        witness: bool,
+    ) -> VendoredCrate {
+        VendoredCrate {
+            name: name.to_string(),
+            crate_version: version.to_string(),
+            c_version: c_version.map(str::to_string),
+            witness_present: witness,
+        }
+    }
+
+    fn bundled_provide(name: &str) -> crate::pkg::dep::DepInfo {
+        crate::pkg::dep::DepInfo {
+            name: format!("bundled({name})"),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }
+    }
+
+    /// Run `check_bundled_library_provides` over a synthetic package
+    /// and file, returning the finding's rendered lines.
+    fn bundled_lines(pkg: &Pkg, info: &ReadelfInfo) -> Vec<String> {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkgfile = syn_file("/usr/bin/probe", "ELF 64-bit LSB executable");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_bundled_library_provides(pkg, &pkgfile, info, &mut out);
+        let results = out.results().to_vec();
+        lines_for(&results, "bundled-library-without-provides")
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn vendored_c_crates_map_is_the_measured_trio() {
+        let map = vendored_c_crates();
+        let names: Vec<&str> = map.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["aws-lc-sys", "libsqlite3-sys", "zstd-sys"]);
+        // ring stays out: its C code is forked into the crate and
+        // bundled(rust-crate:ring) already names it.
+        assert!(!names.contains(&"ring"));
+        let sqlite = map.iter().find(|e| e.name == "libsqlite3-sys").unwrap();
+        assert_eq!(sqlite.srpm, "sqlite3");
+        assert_eq!(
+            sqlite.accepted_names,
+            ["sqlite3", "libsqlite3", "sqlcipher"]
+        );
+        assert_eq!(
+            sqlite.system_soname_prefix.as_deref(),
+            Some("libsqlite3.so.")
+        );
+        assert_eq!(sqlite.link_soname.as_deref(), Some("libsqlite3.so.0"));
+        assert_eq!(sqlite.embedded_version_major.as_deref(), Some("3"));
+        let aws = map.iter().find(|e| e.name == "aws-lc-sys").unwrap();
+        assert_eq!(aws.srpm, "aws-lc");
+        // aws-lc ships no system shared library: no soname pair, and
+        // no version source.
+        assert!(aws.system_soname_prefix.is_none() && aws.link_soname.is_none());
+        assert!(aws.c_version_source.is_none());
+        let zstd = map.iter().find(|e| e.name == "zstd-sys").unwrap();
+        assert_eq!(zstd.accepted_names, ["zstd", "libzstd"]);
+        assert_eq!(
+            zstd.c_version_source,
+            Some(CVersionSource::CrateBuildMetadata)
+        );
+    }
+
+    #[test]
+    fn bundled_library_fires_with_both_remedies_named() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        // The grok-build shape for sqlite: crate resolved, witness
+        // present, no system soname needed, nothing declared.
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("libsqlite3-sys", "0.35.0", Some("3.50.2"), true)];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe libsqlite3-sys 0.35.0: link the system libsqlite3.so.0 or add Provides: bundled(sqlite3) = 3.50.2"
+            ],
+            "sqlite firing line: {lines:?}"
+        );
+        // The rpmcrab shape for zstd: the C version comes from the
+        // crate build metadata.
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored(
+            "zstd-sys",
+            "2.1.1+zstd.1.5.7",
+            Some("1.5.7"),
+            true,
+        )];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe zstd-sys 2.1.1+zstd.1.5.7: link the system libzstd.so.1 or add Provides: bundled(zstd) = 1.5.7"
+            ],
+            "zstd firing line: {lines:?}"
+        );
+        // All three map crates in one file fire one finding each.
+        let mut info = syn_info();
+        info.vendored_crates = vec![
+            vendored("libsqlite3-sys", "0.35.0", Some("3.50.2"), true),
+            vendored("aws-lc-sys", "0.39.1", None, true),
+            vendored("zstd-sys", "2.1.0+zstd.1.5.7", Some("1.5.7"), true),
+        ];
+        assert_eq!(bundled_lines(&pkg, &info).len(), 3);
+    }
+
+    #[test]
+    fn bundled_library_aws_lc_detail_drops_link_and_version() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("aws-lc-sys", "0.39.1", None, true)];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe aws-lc-sys 0.39.1: add Provides: bundled(aws-lc)"
+            ],
+            "aws-lc has no system soname to link and no version source: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn bundled_library_quiet_when_system_linked() {
+        // rtk / openai-codex: the crate is in the graph and its code
+        // pattern is present, but the binary links the system
+        // library, so nothing is bundled.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.needed = vec!["libsqlite3.so.0".to_string()];
+        info.vendored_crates = vec![vendored("libsqlite3-sys", "0.35.0", Some("3.50.2"), true)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+        let mut info = syn_info();
+        info.needed = vec!["libzstd.so.1".to_string()];
+        info.vendored_crates = vec![vendored(
+            "zstd-sys",
+            "2.0.16+zstd.1.5.7",
+            Some("1.5.7"),
+            true,
+        )];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn bundled_library_quiet_when_declared_under_any_accepted_name() {
+        let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("libsqlite3-sys", "0.35.0", Some("3.50.2"), true)];
+        for accepted in ["sqlite3", "libsqlite3", "sqlcipher"] {
+            pkg.provides = vec![bundled_provide(accepted)];
+            assert!(
+                bundled_lines(&pkg, &info).is_empty(),
+                "bundled({accepted}) must satisfy the finding"
+            );
+        }
+        // goose's spelling for zstd is the lib-prefixed alias.
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored(
+            "zstd-sys",
+            "2.1.0+zstd.1.5.7",
+            Some("1.5.7"),
+            true,
+        )];
+        pkg.provides = vec![bundled_provide("libzstd")];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+        // A version on the provide does not matter.
+        let mut declared = bundled_provide("aws-lc");
+        declared.version = Some("0.39.1".to_string());
+        pkg.provides = vec![declared];
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("aws-lc-sys", "0.39.1", None, true)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn bundled_library_crate_marker_never_counts() {
+        // The marker cargo-packaging generates is the gap itself:
+        // bundled(rust-crate:zstd-sys) does not satisfy the finding.
+        let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        pkg.provides = vec![bundled_provide("rust-crate:zstd-sys")];
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored(
+            "zstd-sys",
+            "2.1.0+zstd.1.5.7",
+            Some("1.5.7"),
+            true,
+        )];
+        assert_eq!(bundled_lines(&pkg, &info).len(), 1);
+    }
+
+    #[test]
+    fn bundled_library_quiet_without_witness() {
+        // kryoptic-tools / lldap-set-password / rustdesk-server-utils:
+        // the crate marker sits on the package, but this ELF contains
+        // none of the library's code.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("libsqlite3-sys", "0.35.0", None, false)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn dep_v0_extraction_reads_the_graph_witnesses_and_versions() {
+        let dep = dep_v0_bytes(&[
+            ("serde", "1.0.0"),
+            ("libsqlite3-sys", "0.35.0"),
+            ("aws-lc-sys", "0.39.1"),
+            ("zstd-sys", "2.1.0+zstd.1.5.7"),
+        ]);
+        let mut rodata = Vec::new();
+        // A rustc banner carries a version inside a longer string;
+        // the standalone sqlite version must win over it.
+        rodata.extend_from_slice(b"rustc version 1.90.0\0");
+        rodata.extend_from_slice(b"SQLite format 3\0");
+        rodata.extend_from_slice(b"3.50.2\0");
+        rodata.extend_from_slice(b"/build/aws-lc/crypto/fipsmodule/bcm.cc\0");
+        rodata.extend_from_slice(b"Unknown frame descriptor\0");
+        let info = parse_crafted_sections("depv0-full", &[(".rodata", &rodata), (".dep-v0", &dep)]);
+        assert_eq!(info.vendored_crates.len(), 3, "{:?}", info.vendored_crates);
+        let sqlite = &info.vendored_crates[0];
+        assert_eq!(sqlite.name, "libsqlite3-sys");
+        assert!(sqlite.witness_present);
+        assert_eq!(sqlite.c_version.as_deref(), Some("3.50.2"));
+        let aws = &info.vendored_crates[1];
+        assert_eq!(aws.name, "aws-lc-sys");
+        assert!(aws.witness_present);
+        assert_eq!(aws.c_version, None);
+        let zstd = &info.vendored_crates[2];
+        assert_eq!(zstd.name, "zstd-sys");
+        assert!(zstd.witness_present);
+        assert_eq!(zstd.c_version.as_deref(), Some("1.5.7"));
+    }
+
+    #[test]
+    fn dep_v0_extraction_witness_absent_marks_resolved_but_unlinked() {
+        // The zstd witness is the error table's string: a binary that
+        // never reaches ZSTD_getErrorName may not carry it. That is a
+        // known silent miss of the witness method, pinned here.
+        let dep = dep_v0_bytes(&[("zstd-sys", "2.1.0+zstd.1.5.7")]);
+        let info = parse_crafted_sections(
+            "depv0-nowitness",
+            &[(".rodata", b"some other string\0"), (".dep-v0", &dep)],
+        );
+        assert_eq!(info.vendored_crates.len(), 1);
+        assert!(!info.vendored_crates[0].witness_present);
+        assert_eq!(info.vendored_crates[0].c_version, None);
+    }
+
+    #[test]
+    fn dep_v0_aws_lc_witness_needs_the_fipsmodule_tail() {
+        // The aws-lc witness is a remapped __FILE__ path: it matches
+        // only while the path keeps its /aws-lc/crypto/fipsmodule/
+        // tail. A build whose remap drops that tail is invisible --
+        // the second known witness limit, pinned here.
+        let dep = dep_v0_bytes(&[("aws-lc-sys", "0.39.1")]);
+        let info = parse_crafted_sections(
+            "depv0-aws-remap",
+            &[
+                (".rodata", b"/checkout/crypto/fipsmodule/bcm.cc\0"),
+                (".dep-v0", &dep),
+            ],
+        );
+        assert_eq!(info.vendored_crates.len(), 1);
+        assert!(!info.vendored_crates[0].witness_present);
+    }
+
+    #[test]
+    fn dep_v0_absent_is_invisible() {
+        // zoxide's shape: a Rust binary built without .dep-v0 carries
+        // no graph for the check to read, witness or not.
+        let info = parse_crafted_sections(
+            "depv0-absent",
+            &[(".rodata", b"SQLite format 3\0Unknown frame descriptor\0")],
+        );
+        assert!(info.vendored_crates.is_empty());
+    }
+
+    #[test]
+    fn dep_v0_malformed_stays_silent() {
+        let info =
+            parse_crafted_sections("depv0-garbage", &[(".dep-v0", b"not a zlib stream at all")]);
+        assert!(info.vendored_crates.is_empty());
+    }
+
+    #[test]
+    fn embedded_version_string_shapes() {
+        assert_eq!(
+            embedded_version_string(b"\x003.50.2\x00", None),
+            Some("3.50.2")
+        );
+        // Inside a longer string: not standalone.
+        assert_eq!(
+            embedded_version_string(b"rustc version 1.90.0\x00", None),
+            None
+        );
+        assert_eq!(embedded_version_string(b"v3.50.2\x00", None), None);
+        assert_eq!(embedded_version_string(b"3.50.2.1\x00", None), None);
+        assert_eq!(embedded_version_string(b"3.50\x00", None), None);
+        // Disagreeing standalone strings name no version; the
+        // same string twice is one candidate, not two.
+        assert_eq!(
+            embedded_version_string(b"gcc 15.2\x001.2.3\x009.9.9\x00", None),
+            None
+        );
+        assert_eq!(
+            embedded_version_string(b"\x001.2.3\x001.2.3\x00", None),
+            Some("1.2.3")
+        );
+        // The atuin shape: two components share a major (lsm-tree
+        // 3.1.10 next to sqlite 3.46.0); the version is undecidable.
+        assert_eq!(
+            embedded_version_string(b"\x003.1.10\x003.46.0\x00", Some("3")),
+            None
+        );
+        // With a major filter, another component's string (grok
+        // carries a standalone 1.3.1 ahead of sqlite's 3.50.2) is
+        // skipped.
+        assert_eq!(
+            embedded_version_string(b"\x001.3.1\x003.50.2\x00", Some("3")),
+            Some("3.50.2")
+        );
+        assert_eq!(embedded_version_string(b"\x001.3.1\x00", Some("3")), None);
+        // Suffix-merged into a binary blob (the grok/goose shape):
+        // non-printable neighbours, not NULs, bound the string.
+        assert_eq!(
+            embedded_version_string(b"\x01\x013.50.2\x00\x00", Some("3")),
+            Some("3.50.2")
+        );
+        // A printable neighbour makes it a mention, not a constant.
+        assert_eq!(embedded_version_string(b"lib-3.4.0\x00", Some("3")), None);
+        assert_eq!(embedded_version_string(b"see 3.50.2\x00", Some("3")), None);
+    }
+
+    #[test]
+    fn crate_build_metadata_version_shapes() {
+        assert_eq!(
+            crate_build_metadata_version("2.1.0+zstd.1.5.7").as_deref(),
+            Some("1.5.7")
+        );
+        assert_eq!(
+            crate_build_metadata_version("2.0.16+zstd.1.5.7").as_deref(),
+            Some("1.5.7")
+        );
+        assert_eq!(crate_build_metadata_version("0.35.0"), None);
+        // A lone trailing number is not a dotted version.
+        assert_eq!(crate_build_metadata_version("1.0.0+zstd.2"), None);
+        assert_eq!(crate_build_metadata_version("1.0.0+build.info"), None);
     }
 
     #[test]
