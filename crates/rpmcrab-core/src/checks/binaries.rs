@@ -3192,6 +3192,7 @@ fn elf_machine_class_from_magic(magic: &str) -> ElfMachineClass {
         "CSKY",
         "VAX",
         "XCore",
+        "VideoCore",
     ];
     if FOREIGN_TOKENS.iter().any(|t| magic.contains(t)) {
         ElfMachineClass::Foreign
@@ -3339,25 +3340,43 @@ fn archive_elf_class(pkgfile: &PkgFile) -> ArchiveElfClass {
     }
 }
 
-/// The second-level directories of the host `/usr` layout: the set
-/// the `filesystem` package owns (bin, etc, include, lib, lib64,
-/// libexec, local, sbin, share, src) plus the remaining FHS names
-/// (games, lib32, libx32, tmp, X11R6). A `sys-root` component below
-/// one of these is a directory inside host layout that happens to be
-/// named sys-root, not a cross sys-root.
-const HOST_USR_DIRS: &[&str] = &[
-    "X11R6", "bin", "etc", "games", "include", "lib", "lib32", "lib64", "libexec", "libx32",
-    "local", "sbin", "share", "src", "tmp",
+/// The complete set of `/usr/<seg>/sys-root/` parents in the
+/// Factory corpus (file-list census over all 51,589 RPMs, 2026-10-27):
+/// the cross toolchains' target prefixes -- the dashed triplets,
+/// the bare `avr` of the AVR toolchain, and the two MinGW triplet
+/// forms. The sys-root test is an allowlist over this measured set:
+/// the shape it replaced (any dashed segment, or any segment that
+/// is not a host-layout directory name) credited spellings the
+/// corpus does not contain -- bare architecture names above all,
+/// whose real layouts are triplet-form -- and a sys-root below a
+/// host-layout directory (/usr/spool/sys-root/..., a spool tree
+/// that happens to contain the component) must not credit either.
+/// A new toolchain target earns its entry by measurement, the same
+/// way this set was built.
+const SYSROOT_TARGET_PARENTS: &[&str] = &[
+    "aarch64-suse-linux",
+    "arm-suse-linux-gnueabi",
+    "avr",
+    "hppa-suse-linux",
+    "i586-suse-linux",
+    "i686-w64-mingw32",
+    "loongarch64-suse-linux",
+    "m68k-suse-linux",
+    "mips-suse-linux",
+    "powerpc64-suse-linux",
+    "powerpc64le-suse-linux",
+    "riscv64-suse-linux",
+    "s390x-suse-linux",
+    "sparc-suse-linux",
+    "sparc64-suse-linux",
+    "x86_64-suse-linux",
+    "x86_64-w64-mingw32",
 ];
 
-/// Whether the path segment above a `sys-root` component names a
-/// target prefix: a triplet (riscv64-suse-linux,
-/// x86_64-w64-mingw32) carries its dashes, and a bare target name
-/// (avr, the AVR toolchain's /usr/avr/sys-root; the MinGW
-/// /usr/<arch>/sys-root layouts) is a single component that is not
-/// a host /usr layout directory.
+/// Whether the path segment above a `sys-root` component is one of
+/// the measured cross-target prefixes.
 fn sysroot_parent_is_target_prefix(seg: &str) -> bool {
-    seg.contains('-') || !HOST_USR_DIRS.contains(&seg)
+    SYSROOT_TARGET_PARENTS.contains(&seg)
 }
 
 /// Classify an archive's members against the package architecture
@@ -3428,15 +3447,19 @@ fn archive_elf_class_for_arch(data: &[u8], arch: &str) -> ArchiveElfClass {
 }
 
 /// Whether `fname` sits in a location that holds target payload by
-/// layout: a cross sys-root (`/usr/<target>/sys-root/...`, the layout
-/// the MinGW sys-root predicate in FilesCheck also recognises, with
-/// any target triplet or bare target prefix), a firmware directory,
-/// or `/boot` -- locations whose files the boot chain or the device
-/// executes and the host only stores.
+/// layout: a cross sys-root (`/usr/<target>/sys-root/...` with one
+/// of the measured target prefixes, the layout the MinGW sys-root
+/// predicate in FilesCheck also recognises), a firmware directory,
+/// or `/boot/vc/` -- locations whose files the boot chain or the
+/// device executes and the host only stores. The /boot arm is the
+/// VideoCore firmware directory, the one /boot location whose
+/// payload is device code: the rest of /boot in the corpus is
+/// host data (device-tree blobs, themes, config), which binary
+/// classification must keep judging on the file's own evidence.
 fn in_target_payload_location(fname: &str) -> bool {
     if fname.starts_with("/usr/lib/firmware/")
         || fname.starts_with("/lib/firmware/")
-        || fname.starts_with("/boot/")
+        || fname.starts_with("/boot/vc/")
     {
         return true;
     }
@@ -10825,45 +10848,72 @@ description = "explicit priority string bypasses the system crypto policy"
 
     #[test]
     fn target_payload_location_shapes() {
-        // Issue #848: a cross sys-root with any target triplet, and the
-        // firmware directories, are target-payload locations.
+        // Issue #848: a cross sys-root with any measured target
+        // prefix, and the firmware directories, are target-payload
+        // locations.
         assert!(in_target_payload_location(
             "/usr/riscv64-suse-linux/sys-root/lib64/libc.so.6"
         ));
         assert!(in_target_payload_location(
             "/usr/x86_64-w64-mingw32/sys-root/mingw/lib/libfoo.a"
         ));
-        // A bare target prefix is a sys-root parent too: the AVR
-        // toolchain's single-component target directory, and the
-        // MinGW /usr/<arch>/sys-root layouts.
+        // The one bare target prefix in the corpus: the AVR
+        // toolchain's single-component target directory.
         assert!(in_target_payload_location(
             "/usr/avr/sys-root/lib/avr/libc.a"
         ));
-        assert!(in_target_payload_location(
-            "/usr/x86_64/sys-root/win32/lib/libfoo.a"
-        ));
         assert!(in_target_payload_location("/usr/lib/firmware/miXart8.elf"));
         assert!(in_target_payload_location("/lib/firmware/miXart8.elf"));
-        // The boot partition holds boot payload by layout: the
-        // Raspberry Pi GPU firmware lives under /boot/vc.
+        // The VideoCore firmware directory is the one /boot location
+        // holding device payload by layout; the rest of /boot (data,
+        // device-tree blobs, themes) is judged on the file itself.
         assert!(in_target_payload_location("/boot/vc/start.elf"));
         assert!(!in_target_payload_location("/boot"));
+        assert!(!in_target_payload_location("/boot/dtb8.elf"));
         assert!(!in_target_payload_location("/bootx/start.elf"));
-        // The segment after /usr must name a target: a bare `sys-root`
-        // component below a host /usr layout directory does not make
-        // a location a sys-root.
+        // Bare architecture names are not sys-root parents: the real
+        // MinGW layouts are triplet-form (the allowlist above), so
+        // the spelling the old deny-list test invented does not
+        // qualify, and neither do other bare names.
+        assert!(!in_target_payload_location(
+            "/usr/x86_64/sys-root/win32/lib/libfoo.a"
+        ));
+        assert!(!in_target_payload_location(
+            "/usr/aarch64/sys-root/lib/libfoo.a"
+        ));
+        assert!(!in_target_payload_location(
+            "/usr/arm/sys-root/lib/libfoo.a"
+        ));
+        // A `sys-root` component below a host /usr layout directory
+        // does not make a location a sys-root, nor does an empty
+        // segment.
         assert!(!in_target_payload_location("/usr/lib/sys-root/libfoo.so"));
         assert!(!in_target_payload_location("/usr/share/sys-root/libfoo.so"));
         assert!(!in_target_payload_location("/usr/local/sys-root/libfoo.so"));
         assert!(!in_target_payload_location(
             "/usr/libexec/sys-root/libfoo.so"
         ));
+        assert!(!in_target_payload_location("/usr/spool/sys-root/libfoo.so"));
+        assert!(!in_target_payload_location("/usr//sys-root/libfoo.so"));
         // A triplet directory without the sys-root level is host layout.
         assert!(!in_target_payload_location(
             "/usr/riscv64-suse-linux/lib/libc.so.6"
         ));
         assert!(!in_target_payload_location("/usr/bin/foo"));
         assert!(!in_target_payload_location("/usr/lib/firmware2/foo.elf"));
+    }
+
+    #[test]
+    fn elf_machine_class_from_magic_names_videocore() {
+        // libmagic's spelling for the Raspberry Pi GPU firmware
+        // (verified against the corpus start.elf: "ELF 32-bit LSB
+        // executable, Broadcom VideoCore III, ...").
+        assert_eq!(
+            elf_machine_class_from_magic(
+                "ELF 32-bit LSB executable, Broadcom VideoCore III, version 1 (SYSV), statically linked, stripped"
+            ),
+            ElfMachineClass::Foreign
+        );
     }
 
     #[test]
