@@ -5678,13 +5678,28 @@ impl FilesCheck {
                         }
                         Ok(Some(_)) => {}
                         _ => {
-                            add_info(
-                                out,
-                                Level::Error,
-                                pkg,
-                                "wrong-script-interpreter",
-                                &[fname, &interpreter, &fd.interpreter_args],
-                            );
+                            // The interpreter line is wrong here,
+                            // but in test or vendored source payload
+                            // it is the harness's or upstream's
+                            // business the same way as the env form
+                            // above (Tom, 2026-10-27): the shared
+                            // `script_is_test_data` and
+                            // `script_is_source_data` gates carry
+                            // the shapes and their guards, doc bound
+                            // included, so the ruling extends the
+                            // gate family to this emission rather
+                            // than adding a second one.
+                            if !script_is_test_data(&pkg.name, fname)
+                                && !(!is_doc && script_is_source_data(&pkg.name, fname))
+                            {
+                                add_info(
+                                    out,
+                                    Level::Error,
+                                    pkg,
+                                    "wrong-script-interpreter",
+                                    &[fname, &interpreter, &fd.interpreter_args],
+                                );
+                            }
                         }
                     }
                 }
@@ -15508,6 +15523,235 @@ reason = "warning hook: executable and %config by design"
                 "/usr/share/resource/data/tool.py"
             ),
             "env-script-interpreter must fire for a fused name: {lines:?}"
+        );
+    }
+
+    /// The gate family reaches `wrong-script-interpreter` the
+    /// same way (Tom, 2026-10-27): the bazel wheel fixtures are
+    /// test payload inside a -source package's tests tree, a
+    /// testsuite package's own scripts are its payload wherever
+    /// they sit, a source package's helper scripts are vendored
+    /// source, and the Go source tree is source payload -- a
+    /// wrong interpreter line in any of them is the harness's or
+    /// upstream's business, not an installed entry point's defect.
+    #[test]
+    fn wrong_script_silent_in_test_and_source_payload() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/src/bazel-rules-python/tests/repos/whl_with_data1/whl_with_data1-1.0.data/scripts/whl_with_data1_pythonw",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!pythonw\n",
+                ),
+                (
+                    "/usr/src/bazel-rules-python/tests/repos/whl_with_data1/whl_with_data1-1.0.data/scripts/whl_with_data1_script",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!python\n",
+                ),
+            ],
+        );
+        pkg.name = "bazel-rules-python-source".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/src/bazel-rules-python/tests/repos/whl_with_data1/whl_with_data1-1.0.data/scripts/whl_with_data1_pythonw",
+            "/usr/src/bazel-rules-python/tests/repos/whl_with_data1/whl_with_data1-1.0.data/scripts/whl_with_data1_script",
+        ] {
+            assert!(
+                !flagged(&lines, "wrong-script-interpreter", path),
+                "no wrong-script-interpreter for bazel fixture {path}: {lines:?}"
+            );
+        }
+        let dir2 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir2,
+            &[(
+                "/usr/share/lvm2-testsuite/shell/check.pl",
+                0o100755,
+                "Perl script text executable",
+                b"#!perl\n",
+            )],
+        );
+        pkg.name = "lvm2-testsuite".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            !flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/usr/share/lvm2-testsuite/shell/check.pl"
+            ),
+            "no wrong-script-interpreter for testsuite payload: {lines:?}"
+        );
+        let dir3 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir3,
+            &[(
+                "/usr/src/kafka/kafka-merge-pr.py",
+                0o100755,
+                "Python script, ASCII text executable",
+                b"#!/usr/local/bin/python3\n",
+            )],
+        );
+        pkg.name = "kafka-source".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            !flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/usr/src/kafka/kafka-merge-pr.py"
+            ),
+            "no wrong-script-interpreter for source payload: {lines:?}"
+        );
+        let dir4 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir4,
+            &[(
+                "/usr/share/go/1.24/src/cmd/tool.py",
+                0o100755,
+                "Python script, ASCII text executable",
+                b"#!python3\n",
+            )],
+        );
+        pkg.name = "go1.24".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            !flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/usr/share/go/1.24/src/cmd/tool.py"
+            ),
+            "no wrong-script-interpreter for Go source payload: {lines:?}"
+        );
+    }
+
+    /// The bounds of the family bind this emission identically:
+    /// doc and example payload is not a gate shape (the audit's
+    /// perl and texlive examples keep firing); an entry point in
+    /// a script directory keeps firing whatever the package is
+    /// called; a %doc row in a source package keeps firing;
+    /// fused names carry no fact; a plain package's /usr/src
+    /// payload is not covered; and a private /opt/testing tree
+    /// is not a gate shape either (rpmlint-mini's own script
+    /// keeps the finding).
+    #[test]
+    fn wrong_script_still_fires_at_gate_bounds() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/doc/packages/perl-Dumbbench/examples/timethese.pl",
+                    0o100755,
+                    "Perl script text executable",
+                    b"#!perl\n",
+                ),
+                (
+                    "/usr/share/texmf/doc/metapost/metapost-examples/mp2html.pl",
+                    0o100755,
+                    "Perl script text executable",
+                    b"#!perl -w\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/share/doc/packages/perl-Dumbbench/examples/timethese.pl",
+            "/usr/share/texmf/doc/metapost/metapost-examples/mp2html.pl",
+        ] {
+            assert!(
+                flagged(&lines, "wrong-script-interpreter", path),
+                "wrong-script-interpreter must fire for doc payload {path}: {lines:?}"
+            );
+        }
+        let dir2 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir2,
+            &[
+                (
+                    "/usr/bin/runner.pl",
+                    0o100755,
+                    "Perl script text executable",
+                    b"#!perl\n",
+                ),
+                (
+                    "/usr/src/kafka/docs/tool.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/local/bin/python3\n",
+                ),
+            ],
+        );
+        pkg.name = "lvm2-testsuite".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(&lines, "wrong-script-interpreter", "/usr/bin/runner.pl"),
+            "wrong-script-interpreter must fire in a script directory: {lines:?}"
+        );
+        pkg.name = "kafka-source".to_string();
+        pkg.doc_files = vec!["/usr/src/kafka/docs/tool.py".to_string()];
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/usr/src/kafka/docs/tool.py"
+            ),
+            "wrong-script-interpreter must fire for a %doc row: {lines:?}"
+        );
+        let dir3 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir3,
+            &[
+                (
+                    "/usr/share/resource/data/tool.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!python3\n",
+                ),
+                (
+                    "/usr/src/myapp/tool.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!python3\n",
+                ),
+                (
+                    "/opt/testing/bin/rpmlint.real",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/opt/testing/bin/python3\n",
+                ),
+            ],
+        );
+        pkg.name = "resource-compiler".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/usr/share/resource/data/tool.py"
+            ),
+            "wrong-script-interpreter must fire for a fused name: {lines:?}"
+        );
+        pkg.name = "myapp".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(&lines, "wrong-script-interpreter", "/usr/src/myapp/tool.py"),
+            "wrong-script-interpreter must fire for a plain package's /usr/src payload: {lines:?}"
+        );
+        pkg.name = "rpmlint-mini".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(
+                &lines,
+                "wrong-script-interpreter",
+                "/opt/testing/bin/rpmlint.real"
+            ),
+            "wrong-script-interpreter must fire for the /opt/testing tree: {lines:?}"
         );
     }
 
