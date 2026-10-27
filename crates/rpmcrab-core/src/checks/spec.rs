@@ -3835,8 +3835,12 @@ impl SpecCheck {
                     j += 1;
                 }
                 let mut quoted = false;
+                let mut quote: Option<u8> = None;
                 if matches!(bytes.get(j), Some(b'\'') | Some(b'"') | Some(b'\\')) {
                     quoted = true;
+                    if matches!(bytes.get(j), Some(b'\'') | Some(b'"')) {
+                        quote = bytes.get(j).copied();
+                    }
                     j += 1;
                 }
                 let dstart = j;
@@ -3847,6 +3851,13 @@ impl SpecCheck {
                 }
                 if j > dstart {
                     let delim = line[dstart..j].to_string();
+                    // Skip the closing quote of a quoted delimiter
+                    // before pushing the heredoc: resuming the scan
+                    // on it would toggle quote state the delimiter
+                    // never opened.
+                    if quote.is_some() && bytes.get(j) == quote.as_ref() {
+                        j += 1;
+                    }
                     self.sc_heredocs.push((delim, quoted));
                     i = j;
                     continue;
@@ -6754,6 +6765,38 @@ exit 1"#,
             lines_for(&results, "spec-tag-as-shell-variable").is_empty(),
             "{results:?}"
         );
+    }
+
+    #[test]
+    fn quoted_heredoc_keeps_quote_state_1020() {
+        // A quoted heredoc delimiter does not open a quote: lines
+        // after the terminator scan as plain shell, so a tag
+        // variable there still fires and continuation tracking
+        // still works, while a single-quoted variable stays quiet.
+        for opener in ["cat <<'EOF'", "cat <<\"EOF\""] {
+            let spec = format!("Name: foo\n%prep\n{opener}\nbody\nEOF\necho $name\n");
+            let results = run_mini(&spec);
+            assert_eq!(
+                lines_for(&results, "spec-tag-as-shell-variable").len(),
+                1,
+                "opener {opener}: {results:?}"
+            );
+            let spec = format!(
+                "Name: foo\n%prep\n{opener}\nbody\nEOF\n./configure \\\n# comment\n--flags\n"
+            );
+            let results = run_mini(&spec);
+            assert_eq!(
+                lines_for(&results, "comment-in-continued-command").len(),
+                1,
+                "opener {opener}: {results:?}"
+            );
+            let spec = format!("Name: foo\n%prep\n{opener}\nbody\nEOF\necho '$name'\n");
+            let results = run_mini(&spec);
+            assert!(
+                !has(&results, "spec-tag-as-shell-variable"),
+                "opener {opener}: {results:?}"
+            );
+        }
     }
 
     #[test]
