@@ -4209,7 +4209,17 @@ impl FilesCheck {
         // Same #388 root cause as logrotate: the reference also counts
         // requires + recommends + suggests here.
         let deps = Self::dep_names(pkg);
-        if !fname.starts_with("/etc/cron.") || deps.contains(&"crontabs") || pkg.name == "crontabs"
+        // Divergence (FilesCheck ledger): the reference credits only the
+        // literal name `crontabs`, but that provider was renamed -- the
+        // cron.* directories are shipped by `cron` and the daemon is
+        // `cronie`, and the name `crontabs` exists nowhere in the corpus.
+        // A dep on either current name satisfies the check the same way
+        // (ruling 2026-10-27); exact name matches only, so lookalikes
+        // (cronie-anacron, systemd-cron, cron-utils) keep firing.
+        const CRON_PROVIDERS: [&str; 3] = ["crontabs", "cron", "cronie"];
+        if !fname.starts_with("/etc/cron.")
+            || CRON_PROVIDERS.iter().any(|name| deps.contains(name))
+            || CRON_PROVIDERS.contains(&pkg.name.as_str())
         {
             return;
         }
@@ -6709,18 +6719,80 @@ mod tests {
     }
 
     #[test]
-    fn missing_dependency_to_crontabs_cron_dep_does_not_credit() {
-        // Boundary pin: a dep on `cron` (the renamed provider of the
-        // cron.* directories) does NOT satisfy this check -- only the
-        // literal `crontabs` name credits. Crediting the modern name is
-        // a separate ruling, not part of the entry-shape tightening.
+    fn missing_dependency_to_crontabs_cron_dep_credits() {
+        // Ruling 2026-10-27 supersedes the boundary pin this test used
+        // to carry: a dep on `cron` (the renamed provider of the cron.*
+        // directories) satisfies the check, exactly as `crontabs` did.
+        // Corpus shape: nextcloud (Requires: cron).
         let names = run_files_check_with_deps(
-            "/etc/cron.d/fcprobe",
+            "/etc/cron.d/nextcloud",
             vec![dep_named("cron")],
             vec![],
             vec![],
         );
-        assert_has(&names, "missing-dependency-to-crontabs");
+        assert_lacks(&names, "missing-dependency-to-crontabs");
+    }
+
+    #[test]
+    fn missing_dependency_to_crontabs_cronie_dep_credits() {
+        // Corpus shape: cronie-anacron (Requires: cronie) -- the
+        // daemon package is the cron stack its scripts run under.
+        let names = run_files_check_with_deps(
+            "/etc/cron.hourly/0anacron",
+            vec![dep_named("cronie")],
+            vec![],
+            vec![],
+        );
+        assert_lacks(&names, "missing-dependency-to-crontabs");
+    }
+
+    #[test]
+    fn missing_dependency_to_crontabs_recommended_cron_credits() {
+        // Corpus shape: matomo (Recommends: cron) -- the relation arms
+        // are the ones the check already counts (#388), unchanged.
+        let names = run_files_check_with_deps(
+            "/etc/cron.d/matomo-archive",
+            vec![],
+            vec![dep_named("cron")],
+            vec![],
+        );
+        assert_lacks(&names, "missing-dependency-to-crontabs");
+    }
+
+    #[test]
+    fn missing_dependency_to_crontabs_lookalike_deps_still_fire() {
+        // The credit is an exact name match on the provider's real
+        // names; lookalike dep names do not satisfy the check.
+        for lookalike in ["cronie-anacron", "systemd-cron", "cron-utils"] {
+            let names = run_files_check_with_deps(
+                "/etc/cron.d/fcprobe",
+                vec![dep_named(lookalike)],
+                vec![],
+                vec![],
+            );
+            assert_has(&names, "missing-dependency-to-crontabs");
+        }
+    }
+
+    #[test]
+    fn missing_dependency_to_crontabs_provider_package_itself_quiet() {
+        // A package that IS one of the credited provider names needs
+        // no dep on the stack (the `crontabs` self-credit, extended
+        // to the current names): cronie shipping a script stays quiet.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = "cronie".to_string();
+        pkg.files = vec![cron_entry("/etc/cron.d/cronie-probe", 0o100755)];
+        pkg.requires = vec![];
+        pkg.recommends = vec![];
+        pkg.suggests = vec![];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "missing-dependency-to-crontabs");
     }
 
     /// Negative pin for the removed `no-documentation` finding: a
