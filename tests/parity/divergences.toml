@@ -2126,6 +2126,22 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1017"
 
 [[divergence]]
 case = "global"
+check = "spdx-license-not-in-license-tag"
+kind = "behaviour"
+reason = "New port-only Warning: an SPDX-License-Identifier declaration in a shipped file that the package License tag does not cover is reported once per package and license, with the first declaring file and the file count. No upstream counterpart compares file content against the License tag. Factory sweep of 51,589 RPMs: 1,473 findings in 1,064 packages, every firing pair classified as a correct reading (declarations of the package's own or vendored content, 11 of them license-text or template files); no false positives."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1033"
+
+[[divergence]]
+case = "global"
+check = "license-grant-not-in-license-tag"
+kind = "behaviour"
+reason = "New port-only Warning: a GNU, Apache, MPL or WTFPL license grant in a shipped file without an SPDX declaration, naming a license the package License tag does not cover, is reported once per package and license, with the first granting file and the file count. No upstream counterpart compares file content against the License tag. Factory sweep of 51,589 RPMs: 1,140 findings in 1,030 packages, every firing pair classified as a correct reading (declarations of the package's own or vendored content, 5 of them license-text or template files, 1 the recorded mirisdr-udev Legal-Review-Notice case); no false positives."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1033"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."

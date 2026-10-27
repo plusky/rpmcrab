@@ -1925,6 +1925,7 @@ pub struct FilesCheck {
     lib_path_re: Regex,
     start_certificate_re: Regex,
     start_private_key_re: Regex,
+    valid_license_keys: HashSet<String>,
     use_debugsource: bool,
     module_rpms_ok: bool,
     use_relative_symlinks: bool,
@@ -2064,6 +2065,10 @@ impl FilesCheck {
             lib_path_re: lib_path_regex().clone(),
             start_certificate_re: start_certificate_regex().clone(),
             start_private_key_re: start_private_key_regex().clone(),
+            valid_license_keys: {
+                let valid: Vec<String> = get_strings("ValidLicenses");
+                valid.iter().map(|s| canonical_license_id(s).key).collect()
+            },
             use_debugsource: get_bool("UseDebugSource"),
             module_rpms_ok: get_bool("KernelModuleRPMsOK"),
             use_relative_symlinks: get_bool("UseRelativeSymlinks"),
@@ -2243,6 +2248,13 @@ struct PkgState {
     /// `no-dependency-on` candidates this package recorded (issue
     /// #862), drained into the check's session state by `check_binary`.
     nodep_candidates: Vec<NodepCandidate>,
+    /// The parsed `License` tag identifiers for the license-coverage
+    /// tags (issue #1033); empty when the package carries no usable
+    /// License tag, which disables the coverage scan for the package.
+    license_tag_ids: Vec<LicenseId>,
+    /// Unsatisfied license declarations of this package by
+    /// aggregation key, in first-seen order (issue #1033).
+    license_units: IndexMap<String, LicenseUnitAgg>,
     debuginfo_srcs: bool,
     debuginfo_debugs: bool,
     postin: String,
@@ -2344,6 +2356,10 @@ impl Check for FilesCheck {
             librpm::Tag::PREUNPROG,
         );
         st.ldconfig_dirs = ldconfig_conf_dirs(pkg);
+        st.license_tag_ids = pkg
+            .tag_str(librpm::Tag::LICENSE)
+            .map(|t| parse_license_tag(&t))
+            .unwrap_or_default();
 
         self.session_files
             .extend(pkg.files.iter().map(|f| f.name.clone()));
@@ -2364,6 +2380,7 @@ impl Check for FilesCheck {
         self.check_sysconfig_fillup_usage(pkg, out);
         self.check_ghost_buildroot_content(pkg, out);
         self.check_fillup_template_without_call(pkg, out);
+        self.check_license_coverage(pkg, &st, out);
         self.nodep_candidates.append(&mut st.nodep_candidates);
     }
 
@@ -3768,6 +3785,661 @@ const FSF_SCAN_OVERLAP: usize = 1024;
 
 /// Per-normal-file scratch state, mirroring the reference's `_file_*`
 /// attributes.
+/// One license identifier in canonical comparison form (issue #1033):
+/// the deprecated combined `-with-` spelling is cut at the exception,
+/// a trailing `+` is folded into the suffix, and the remaining stem is
+/// split into family and trailing version where it carries one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LicenseId {
+    /// Canonical comparison key: lowercase stem plus suffix marker.
+    key: String,
+    /// The stem minus a trailing version, or the whole stem.
+    family: String,
+    /// The stem's trailing version, when it carries one.
+    version: Option<Vec<u32>>,
+    /// The `-only` / `-or-later` suffix after `+`-form normalisation.
+    suffix: LicenseSuffix,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LicenseSuffix {
+    None,
+    Only,
+    OrLater,
+}
+
+/// Split a lowercase stem at its last `-` when the tail is a dotted
+/// version (`2.1` in `lgpl-2.1`); otherwise the stem is its own family.
+fn license_family_version(stem: &str) -> (String, Option<Vec<u32>>) {
+    if let Some(pos) = stem.rfind('-') {
+        let tail = &stem[pos + 1..];
+        if !tail.is_empty()
+            && tail.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && tail.chars().any(|c| c.is_ascii_digit())
+            && !tail.starts_with('.')
+            && !tail.ends_with('.')
+        {
+            let version: Vec<u32> = tail.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+            return (stem[..pos].to_string(), Some(version));
+        }
+    }
+    (stem.to_string(), None)
+}
+
+fn canonical_license_id(raw: &str) -> LicenseId {
+    let mut s = raw.trim().to_lowercase();
+    // The deprecated combined spelling (`GPL-2.0-with-classpath-exception`)
+    // names the license before `-with-`; the exception is ignored, as for
+    // the `WITH` operator.
+    if let Some(pos) = s.find("-with-") {
+        s.truncate(pos);
+    }
+    let mut plus = false;
+    if let Some(stripped) = s.strip_suffix('+') {
+        s = stripped.to_string();
+        plus = true;
+    }
+    let (stem, mut suffix) = if let Some(stem) = s.strip_suffix("-or-later") {
+        (stem.to_string(), LicenseSuffix::OrLater)
+    } else if let Some(stem) = s.strip_suffix("-only") {
+        (stem.to_string(), LicenseSuffix::Only)
+    } else {
+        (s, LicenseSuffix::None)
+    };
+    if plus && suffix == LicenseSuffix::None {
+        suffix = LicenseSuffix::OrLater;
+    }
+    let key = match suffix {
+        LicenseSuffix::None => stem.clone(),
+        LicenseSuffix::Only => format!("{stem}-only"),
+        LicenseSuffix::OrLater => format!("{stem}-or-later"),
+    };
+    let (family, version) = license_family_version(&stem);
+    LicenseId {
+        key,
+        family,
+        version,
+        suffix,
+    }
+}
+
+/// Lexicographic version comparison with zero padding (`2.0` == `2.0.0`).
+fn license_version_cmp(a: &[u32], b: &[u32]) -> std::cmp::Ordering {
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        match x.cmp(&y) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// Whether the tag's identifier set covers the declared identifier
+/// (issue #1033): exact canonical equality, or the same family where an
+/// `-or-later` declaration is met by any tag version at or above it and
+/// any other declaration by the same version in any suffix form.
+fn license_id_covered(declared: &LicenseId, tag_ids: &[LicenseId]) -> bool {
+    tag_ids.iter().any(|t| {
+        if t.key == declared.key {
+            return true;
+        }
+        if t.family != declared.family {
+            return false;
+        }
+        let (Some(dv), Some(tv)) = (&declared.version, &t.version) else {
+            return false;
+        };
+        match declared.suffix {
+            LicenseSuffix::OrLater => license_version_cmp(tv, dv) != std::cmp::Ordering::Less,
+            _ => license_version_cmp(tv, dv) == std::cmp::Ordering::Equal,
+        }
+    })
+}
+
+/// A parsed license expression: the subset of SPDX expression syntax
+/// the coverage tags evaluate (`AND` / `OR` / `WITH`, parentheses).
+#[derive(Debug, Clone, PartialEq)]
+enum LicenseExpr {
+    Leaf(String),
+    And(Vec<LicenseExpr>),
+    Or(Vec<LicenseExpr>),
+}
+
+fn license_expr_tokens(text: &str) -> Vec<String> {
+    let mut toks = Vec::new();
+    let mut cur = String::new();
+    for c in text.chars() {
+        if c == '(' || c == ')' {
+            if !cur.is_empty() {
+                toks.push(std::mem::take(&mut cur));
+            }
+            toks.push(c.to_string());
+        } else if c.is_whitespace() {
+            if !cur.is_empty() {
+                toks.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        toks.push(cur);
+    }
+    toks
+}
+
+struct LicenseExprParser {
+    toks: Vec<String>,
+    pos: usize,
+}
+
+impl LicenseExprParser {
+    fn peek(&self) -> Option<&str> {
+        self.toks.get(self.pos).map(String::as_str)
+    }
+
+    fn advance(&mut self) -> Option<String> {
+        let tok = self.toks.get(self.pos).cloned();
+        if tok.is_some() {
+            self.pos += 1;
+        }
+        tok
+    }
+
+    fn parse_or(&mut self) -> Option<LicenseExpr> {
+        let mut arms = vec![self.parse_and()?];
+        while self.peek().is_some_and(|t| t.eq_ignore_ascii_case("or")) {
+            self.pos += 1;
+            arms.push(self.parse_and()?);
+        }
+        Some(if arms.len() == 1 {
+            arms.pop().unwrap()
+        } else {
+            LicenseExpr::Or(arms)
+        })
+    }
+
+    fn parse_and(&mut self) -> Option<LicenseExpr> {
+        let mut arms = vec![self.parse_atom()?];
+        while self.peek().is_some_and(|t| t.eq_ignore_ascii_case("and")) {
+            self.pos += 1;
+            arms.push(self.parse_atom()?);
+        }
+        Some(if arms.len() == 1 {
+            arms.pop().unwrap()
+        } else {
+            LicenseExpr::And(arms)
+        })
+    }
+
+    fn parse_atom(&mut self) -> Option<LicenseExpr> {
+        match self.advance()? {
+            t if t == "(" => {
+                let inner = self.parse_or()?;
+                if self.advance().as_deref() == Some(")") {
+                    Some(inner)
+                } else {
+                    None
+                }
+            }
+            t if t == ")" => None,
+            t if t.eq_ignore_ascii_case("and")
+                || t.eq_ignore_ascii_case("or")
+                || t.eq_ignore_ascii_case("with") =>
+            {
+                None
+            }
+            t => {
+                // `WITH <exception>`: the exception is ignored.
+                if self.peek().is_some_and(|x| x.eq_ignore_ascii_case("with")) {
+                    self.pos += 1;
+                    self.advance()?;
+                }
+                Some(LicenseExpr::Leaf(t))
+            }
+        }
+    }
+}
+
+/// Parse a license expression; `None` on any structural defect, in
+/// which case the declaration is not read at all.
+fn parse_license_expr(text: &str) -> Option<LicenseExpr> {
+    let toks = license_expr_tokens(text);
+    if toks.is_empty() {
+        return None;
+    }
+    let mut parser = LicenseExprParser { toks, pos: 0 };
+    let expr = parser.parse_or()?;
+    if parser.pos != parser.toks.len() {
+        return None;
+    }
+    Some(expr)
+}
+
+fn collect_license_leaves(expr: &LicenseExpr, out: &mut Vec<String>) {
+    match expr {
+        LicenseExpr::Leaf(raw) => out.push(raw.clone()),
+        LicenseExpr::And(arms) | LicenseExpr::Or(arms) => {
+            for arm in arms {
+                collect_license_leaves(arm, out);
+            }
+        }
+    }
+}
+
+/// The parsed identifier set of a package `License` tag. An
+/// unparsable tag falls back to bare token splitting so its plain
+/// identifiers still credit coverage.
+fn parse_license_tag(tag: &str) -> Vec<LicenseId> {
+    let mut raws = Vec::new();
+    if let Some(expr) = parse_license_expr(tag) {
+        collect_license_leaves(&expr, &mut raws);
+    } else {
+        let mut skip_exception = false;
+        for tok in license_expr_tokens(tag) {
+            if skip_exception {
+                skip_exception = false;
+                continue;
+            }
+            if tok.eq_ignore_ascii_case("with") {
+                skip_exception = true;
+                continue;
+            }
+            if tok == "("
+                || tok == ")"
+                || tok.eq_ignore_ascii_case("and")
+                || tok.eq_ignore_ascii_case("or")
+            {
+                continue;
+            }
+            raws.push(tok);
+        }
+    }
+    raws.iter().map(|r| canonical_license_id(r)).collect()
+}
+
+fn render_license_expr(expr: &LicenseExpr) -> String {
+    match expr {
+        LicenseExpr::Leaf(raw) => raw.clone(),
+        LicenseExpr::And(arms) => arms
+            .iter()
+            .map(render_license_expr)
+            .collect::<Vec<_>>()
+            .join(" AND "),
+        LicenseExpr::Or(arms) => arms
+            .iter()
+            .map(render_license_expr)
+            .collect::<Vec<_>>()
+            .join(" OR "),
+    }
+}
+
+/// Whether one declared leaf is satisfied by the tag: an identifier
+/// absent from the openSUSE license list counts as satisfied, so
+/// `LicenseRef-…` and unlisted ids never fire.
+fn license_leaf_satisfied(raw: &str, tag_ids: &[LicenseId], valid_keys: &HashSet<String>) -> bool {
+    let id = canonical_license_id(raw);
+    !valid_keys.contains(&id.key) || license_id_covered(&id, tag_ids)
+}
+
+fn license_expr_satisfied(
+    expr: &LicenseExpr,
+    tag_ids: &[LicenseId],
+    valid_keys: &HashSet<String>,
+) -> bool {
+    match expr {
+        LicenseExpr::Leaf(raw) => license_leaf_satisfied(raw, tag_ids, valid_keys),
+        LicenseExpr::And(arms) => arms
+            .iter()
+            .all(|a| license_expr_satisfied(a, tag_ids, valid_keys)),
+        LicenseExpr::Or(arms) => arms
+            .iter()
+            .any(|a| license_expr_satisfied(a, tag_ids, valid_keys)),
+    }
+}
+
+/// The declaration units one finding is emitted per: the top-level
+/// `AND` conjuncts, where a leaf is its own unit and an `OR` group is
+/// one unit (satisfied when any arm is satisfied).
+enum LicenseUnit {
+    Leaf(String),
+    OrGroup(Vec<LicenseExpr>),
+}
+
+fn collect_license_units(expr: &LicenseExpr, units: &mut Vec<LicenseUnit>) {
+    match expr {
+        LicenseExpr::And(arms) => {
+            for arm in arms {
+                collect_license_units(arm, units);
+            }
+        }
+        LicenseExpr::Or(arms) => units.push(LicenseUnit::OrGroup(arms.clone())),
+        LicenseExpr::Leaf(raw) => units.push(LicenseUnit::Leaf(raw.clone())),
+    }
+}
+
+/// The unsatisfied units of one parsed SPDX declaration, as
+/// (display, aggregation key) pairs.
+fn unsatisfied_spdx_units(
+    expr: &LicenseExpr,
+    tag_ids: &[LicenseId],
+    valid_keys: &HashSet<String>,
+) -> Vec<(String, String)> {
+    let mut units = Vec::new();
+    collect_license_units(expr, &mut units);
+    let mut out = Vec::new();
+    for unit in units {
+        match &unit {
+            LicenseUnit::Leaf(raw) => {
+                if !license_leaf_satisfied(raw, tag_ids, valid_keys) {
+                    out.push((raw.clone(), canonical_license_id(raw).key));
+                }
+            }
+            LicenseUnit::OrGroup(arms) => {
+                if !arms
+                    .iter()
+                    .any(|a| license_expr_satisfied(a, tag_ids, valid_keys))
+                {
+                    let display = arms
+                        .iter()
+                        .map(render_license_expr)
+                        .collect::<Vec<_>>()
+                        .join(" OR ");
+                    let key = format!("or:{}", display.to_lowercase());
+                    out.push((display, key));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The `SPDX-License-Identifier:` declarations of a peek window, one
+/// expression per line. Trailing comment decoration is stripped
+/// (`*/`, `-->`, LLVM's `*|`).
+fn spdx_expressions_in_window(text: &str) -> Vec<LicenseExpr> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(pos) = line.find("SPDX-License-Identifier:") else {
+            continue;
+        };
+        let mut rest = &line[pos + "SPDX-License-Identifier:".len()..];
+        loop {
+            let trimmed = rest.trim();
+            match ["*/", "-->", "*|"]
+                .iter()
+                .find_map(|d| trimmed.strip_suffix(d))
+            {
+                Some(stripped) => rest = stripped,
+                None => {
+                    rest = trimmed;
+                    break;
+                }
+            }
+        }
+        if rest.is_empty() {
+            continue;
+        }
+        if let Some(expr) = parse_license_expr(rest) {
+            out.push(expr);
+        }
+    }
+    out
+}
+
+/// The normalisation the grant grammar reads (issue #1033): each line
+/// loses one comment leader (`#`, `//`, `/*`, `*`, `;`, `--`, `dnl`,
+/// `%`, `!`, `"`, `REM`) and whitespace collapses to single spaces.
+fn normalize_grant_text(text: &str) -> String {
+    let mut joined = String::new();
+    for line in text.lines() {
+        let mut l = line.trim_start();
+        let mut stripped = false;
+        for leader in ["/*", "//", "--", "#", "*", ";", "%", "!", "\""] {
+            if let Some(rest) = l.strip_prefix(leader) {
+                l = rest;
+                stripped = true;
+                break;
+            }
+        }
+        if !stripped {
+            for word in ["dnl", "REM"] {
+                if let Some(rest) = l.strip_prefix(word)
+                    && (rest.is_empty() || rest.starts_with([' ', '\t']))
+                {
+                    l = rest;
+                    break;
+                }
+            }
+        }
+        joined.push(' ');
+        joined.push_str(l);
+    }
+    joined.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Scan a grant version (`N` or `N.M`) at the start of `s`.
+fn scan_grant_version(s: &str) -> Option<(String, &str)> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 0 {
+        return None;
+    }
+    if i < bytes.len() && bytes[i] == b'.' {
+        let mut j = i + 1;
+        while j < bytes.len() && bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j > i + 1 {
+            i = j;
+        }
+    }
+    Some((s[..i].to_string(), &s[i..]))
+}
+
+fn gnu_family_prefix(rest: &str) -> (&'static str, &str) {
+    if let Some(r) = rest.strip_prefix("Lesser ") {
+        ("LGPL", r)
+    } else if let Some(r) = rest.strip_prefix("Library ") {
+        ("LGPL", r)
+    } else if let Some(r) = rest.strip_prefix("Affero ") {
+        ("AGPL", r)
+    } else {
+        ("GPL", rest)
+    }
+}
+
+/// The (display, canonical id) of a GNU-family grant: an integer
+/// version `N` maps to `N.0`.
+fn grant_license_id(family: &str, version: &str, or_later: bool) -> (String, LicenseId) {
+    let v = if version.contains('.') {
+        version.to_string()
+    } else {
+        format!("{version}.0")
+    };
+    let display = format!(
+        "{family}-{v}-{}",
+        if or_later { "or-later" } else { "only" }
+    );
+    let id = canonical_license_id(&display);
+    (display, id)
+}
+
+/// Grant form A, read at the text right after `terms of the GNU `:
+/// `[Lesser |Library |Affero ]General Public License[ as published by
+/// the Free Software Foundation][;|,] either version N[ of the
+/// License]`, then exactly `[,] or (at your option) any later version`
+/// plus `.`/`;` for `-or-later`, or directly `.`/`;` for `-only`. Any
+/// other tail is unknown and reads as no grant.
+fn gnu_grant_a(rest: &str) -> Option<(String, LicenseId)> {
+    let (family, rest) = gnu_family_prefix(rest);
+    let rest = rest.strip_prefix("General Public License")?;
+    let rest = rest
+        .strip_prefix(" as published by the Free Software Foundation")
+        .unwrap_or(rest);
+    let rest = match rest.chars().next() {
+        Some(';' | '|' | ',') => &rest[1..],
+        _ => rest,
+    };
+    let rest = rest.strip_prefix(" either version ")?;
+    let (version, rest) = scan_grant_version(rest)?;
+    let rest = rest.strip_prefix(" of the License").unwrap_or(rest);
+    for (tail, or_later) in [
+        (", or (at your option) any later version.", true),
+        (", or (at your option) any later version;", true),
+        (" or (at your option) any later version.", true),
+        (" or (at your option) any later version;", true),
+        (".", false),
+        (";", false),
+    ] {
+        if rest.starts_with(tail) {
+            return Some(grant_license_id(family, &version, or_later));
+        }
+    }
+    None
+}
+
+/// Grant form B, read at an occurrence of `General Public License`
+/// (its index in `t`): `[GNU ][Lesser |Library |Affero ]General Public
+/// License[,] version N[,] as published by the Free Software
+/// Foundation.`, which gives `-only`.
+fn gnu_grant_b(t: &str, at: usize) -> Option<(String, LicenseId)> {
+    let before = &t[..at];
+    let family = if before.ends_with("GNU Lesser ") || before.ends_with("GNU Library ") {
+        "LGPL"
+    } else if before.ends_with("GNU Affero ") {
+        "AGPL"
+    } else if before.ends_with("GNU ") {
+        "GPL"
+    } else {
+        return None;
+    };
+    let rest = &t[at + "General Public License".len()..];
+    let rest = rest.strip_prefix(',').unwrap_or(rest);
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    let rest = rest.strip_prefix("version ")?;
+    let (version, rest) = scan_grant_version(rest)?;
+    let rest = rest.strip_prefix(',').unwrap_or(rest);
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    let rest = rest.strip_prefix("as published by the Free Software Foundation")?;
+    rest.strip_prefix('.')?;
+    Some(grant_license_id(family, &version, false))
+}
+
+fn push_grant(out: &mut Vec<(String, LicenseId)>, grant: (String, LicenseId)) {
+    if !out.iter().any(|(_, id)| id.key == grant.1.key) {
+        out.push(grant);
+    }
+}
+
+/// The license grants of a peek window (issue #1033): the exact GNU
+/// forms and the Apache / Mozilla / WTFPL grant strings, read over the
+/// normalised text. A window containing `special exception` or
+/// `Alternatively` is skipped whole: those grants cannot be read
+/// plainly.
+fn license_grants_in_window(text: &str) -> Vec<(String, LicenseId)> {
+    let t = normalize_grant_text(text);
+    if t.contains("special exception") || t.contains("Alternatively") {
+        return Vec::new();
+    }
+    let mut out: Vec<(String, LicenseId)> = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = t[from..].find("terms of the GNU ") {
+        let start = from + rel + "terms of the GNU ".len();
+        if let Some(grant) = gnu_grant_a(&t[start..]) {
+            push_grant(&mut out, grant);
+        }
+        from = start;
+    }
+    let mut from = 0;
+    while let Some(rel) = t[from..].find("General Public License") {
+        let at = from + rel;
+        if let Some(grant) = gnu_grant_b(&t, at) {
+            push_grant(&mut out, grant);
+        }
+        from = at + 1;
+    }
+    if t.contains("Licensed under the Apache License, Version 2.0 (the \"License\")") {
+        push_grant(
+            &mut out,
+            ("Apache-2.0".to_string(), canonical_license_id("Apache-2.0")),
+        );
+    }
+    if t.contains(
+        "This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0",
+    ) {
+        push_grant(
+            &mut out,
+            ("MPL-2.0".to_string(), canonical_license_id("MPL-2.0")),
+        );
+    }
+    if t.contains("Do What The Fuck You Want To Public License, Version 2") {
+        push_grant(
+            &mut out,
+            ("WTFPL".to_string(), canonical_license_id("WTFPL")),
+        );
+    }
+    out
+}
+
+/// Which of the two coverage tags a declaration unit belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LicenseUnitKind {
+    Spdx,
+    Grant,
+}
+
+impl LicenseUnitKind {
+    fn tag_name(self) -> &'static str {
+        match self {
+            LicenseUnitKind::Spdx => "spdx-license-not-in-license-tag",
+            LicenseUnitKind::Grant => "license-grant-not-in-license-tag",
+        }
+    }
+}
+
+/// The unsatisfied declaration units of one file's peek window, as
+/// (kind, display, aggregation key) triples, deduplicated per file.
+/// An SPDX declaration is the file's machine-readable license, so a
+/// file carrying one is not also read for grants.
+fn license_units_in_window(
+    text: &str,
+    tag_ids: &[LicenseId],
+    valid_keys: &HashSet<String>,
+) -> Vec<(LicenseUnitKind, String, String)> {
+    let exprs = spdx_expressions_in_window(text);
+    if !exprs.is_empty() {
+        let mut out: Vec<(LicenseUnitKind, String, String)> = Vec::new();
+        for expr in &exprs {
+            for (display, key) in unsatisfied_spdx_units(expr, tag_ids, valid_keys) {
+                if !out.iter().any(|(_, _, k)| *k == key) {
+                    out.push((LicenseUnitKind::Spdx, display, key));
+                }
+            }
+        }
+        return out;
+    }
+    license_grants_in_window(text)
+        .into_iter()
+        .filter(|(_, id)| valid_keys.contains(&id.key) && !license_id_covered(id, tag_ids))
+        .map(|(display, id)| (LicenseUnitKind::Grant, display, id.key))
+        .collect()
+}
+
+/// One aggregated unsatisfied declaration of a package (issue #1033):
+/// the first file declaring it and how many files declare it.
+struct LicenseUnitAgg {
+    kind: LicenseUnitKind,
+    display: String,
+    first_path: String,
+    count: usize,
+}
+
 #[derive(Default)]
 struct FileData {
     chunk: Vec<u8>,
@@ -3948,6 +4620,76 @@ impl FilesCheck {
             }
         }
         found_license && found_address
+    }
+
+    /// The license-coverage scan of one regular file (issue #1033):
+    /// read the peek window of a text file that is not itself marked
+    /// `%license` and does not live under `/usr/src/`, and aggregate
+    /// its unsatisfied license declarations into the package state.
+    /// The findings are emitted once per package by
+    /// `check_license_coverage`.
+    fn check_normal_license_coverage(
+        &self,
+        fname: &str,
+        pkgfile: &PkgFile,
+        st: &mut PkgState,
+        fd: &FileData,
+    ) {
+        if !fd.istext || st.license_tag_ids.is_empty() {
+            return;
+        }
+        if pkgfile.flags & pkgfile::RPMFILE_LICENSE != 0 {
+            return;
+        }
+        if fname.starts_with("/usr/src/") {
+            return;
+        }
+        let text = String::from_utf8_lossy(&fd.chunk);
+        for (kind, display, key) in
+            license_units_in_window(&text, &st.license_tag_ids, &self.valid_license_keys)
+        {
+            let agg_key = format!("{}:{key}", kind.tag_name());
+            match st.license_units.get_mut(&agg_key) {
+                Some(agg) => agg.count += 1,
+                None => {
+                    st.license_units.insert(
+                        agg_key,
+                        LicenseUnitAgg {
+                            kind,
+                            display,
+                            first_path: fname.to_string(),
+                            count: 1,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    /// Emit the license-coverage findings of one package (issue
+    /// #1033): one finding per unsatisfied declared license, with the
+    /// license, the first file declaring it and the file count as
+    /// detail.
+    fn check_license_coverage(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
+        for agg in st.license_units.values() {
+            let count = agg.count.to_string();
+            match agg.kind {
+                LicenseUnitKind::Spdx => add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "spdx-license-not-in-license-tag",
+                    &[&agg.display, &agg.first_path, &count],
+                ),
+                LicenseUnitKind::Grant => add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "license-grant-not-in-license-tag",
+                    &[&agg.display, &agg.first_path, &count],
+                ),
+            }
+        }
     }
 }
 
@@ -5568,6 +6310,7 @@ impl FilesCheck {
         let mut fd = FileData::default();
         self.check_normal_logfile(pkg, fname, pkgfile, &mut fd, out);
         self.check_normal_getdata(pkg, fname, pkgfile, &mut fd, out);
+        self.check_normal_license_coverage(fname, pkgfile, st, &fd);
         self.check_normal_doc(pkg, fname, &mut fd, out);
         self.check_normal_non_devel(pkg, fname, st, out);
         self.check_normal_lib(pkg, fname, pkgfile, st, out);
@@ -18528,5 +19271,347 @@ x /etc/sysconfig/f - - - -
             Vec::<&str>::new(),
             "no wrong-script-end-of-line-encoding for non-scripts or batch files: {lines:?}"
         );
+    }
+
+    // ---- license coverage (issue #1033) ----
+
+    const TEST_LICENSES: &[&str] = &[
+        "0BSD",
+        "Apache-2.0",
+        "BSD-2-Clause",
+        "BSD-3-Clause",
+        "CC0-1.0",
+        "GFDL-1.3-only",
+        "GPL-2.0",
+        "GPL-2.0-only",
+        "GPL-2.0-or-later",
+        "GPL-3.0-only",
+        "GPL-3.0-or-later",
+        "LGPL-2.1",
+        "LGPL-2.1-only",
+        "LGPL-2.1-or-later",
+        "LGPL-3.0-only",
+        "LGPL-3.0-or-later",
+        "MIT",
+        "MIT-0",
+        "MPL-2.0",
+        "PSF-2.0",
+        "WTFPL",
+    ];
+
+    fn test_valid_license_keys() -> HashSet<String> {
+        TEST_LICENSES
+            .iter()
+            .map(|s| canonical_license_id(s).key)
+            .collect()
+    }
+
+    fn license_displays(text: &str, tag: &str) -> Vec<(LicenseUnitKind, String)> {
+        license_units_in_window(text, &parse_license_tag(tag), &test_valid_license_keys())
+            .into_iter()
+            .map(|(kind, display, _)| (kind, display))
+            .collect()
+    }
+
+    #[test]
+    fn license_id_canonical_forms() {
+        assert_eq!(canonical_license_id("GPL-2.0+").key, "gpl-2.0-or-later");
+        assert_eq!(canonical_license_id("GPL-2.0-only+").key, "gpl-2.0-only");
+        assert_eq!(
+            canonical_license_id("GPL-2.0-with-classpath-exception").key,
+            "gpl-2.0"
+        );
+        assert_eq!(canonical_license_id(" gpl-2.0-ONLY ").key, "gpl-2.0-only");
+        assert_eq!(canonical_license_id("MIT").key, "mit");
+        let id = canonical_license_id("LGPL-2.1-or-later");
+        assert_eq!(id.family, "lgpl");
+        assert_eq!(id.version, Some(vec![2, 1]));
+        // A name-shaped tail is not a version: the whole stem is the family.
+        let id = canonical_license_id("BSD-2-Clause");
+        assert_eq!(id.family, "bsd-2-clause");
+        assert_eq!(id.version, None);
+    }
+
+    #[test]
+    fn license_coverage_spdx_fires() {
+        // python313-asyncpg shape: a PSF-2.0 file under an Apache tag.
+        assert_eq!(
+            license_displays("# SPDX-License-Identifier: PSF-2.0\n", "Apache-2.0"),
+            [(LicenseUnitKind::Spdx, "PSF-2.0".to_string())]
+        );
+        // tree-sitter shape: a bare GPL-2.0 declaration under an MIT tag.
+        assert_eq!(
+            license_displays("// SPDX-License-Identifier: GPL-2.0\n", "MIT"),
+            [(LicenseUnitKind::Spdx, "GPL-2.0".to_string())]
+        );
+        // libxdp shape: the whole unsatisfied OR group is one unit.
+        assert_eq!(
+            license_displays(
+                "// SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)\n",
+                "GPL-2.0-only"
+            ),
+            [(
+                LicenseUnitKind::Spdx,
+                "LGPL-2.1 OR BSD-2-Clause".to_string()
+            )]
+        );
+        // libspelling shapes.
+        assert_eq!(
+            license_displays(
+                "/* SPDX-License-Identifier: Apache-2.0 OR GPL-3.0-or-later */\n",
+                "LGPL-2.1-or-later"
+            ),
+            [(
+                LicenseUnitKind::Spdx,
+                "Apache-2.0 OR GPL-3.0-or-later".to_string()
+            )]
+        );
+        assert_eq!(
+            license_displays("// SPDX-License-Identifier: MIT\n", "LGPL-2.1-or-later"),
+            [(LicenseUnitKind::Spdx, "MIT".to_string())]
+        );
+        // An AND declaration reports only its unsatisfied conjunct.
+        assert_eq!(
+            license_displays("// SPDX-License-Identifier: MIT AND GPL-2.0-only\n", "MIT"),
+            [(LicenseUnitKind::Spdx, "GPL-2.0-only".to_string())]
+        );
+        // An -only declaration is not covered by a later -only.
+        assert_eq!(
+            license_displays("// SPDX-License-Identifier: GPL-2.0-only\n", "GPL-3.0-only"),
+            [(LicenseUnitKind::Spdx, "GPL-2.0-only".to_string())]
+        );
+    }
+
+    #[test]
+    fn license_coverage_spdx_quiet() {
+        // One satisfied arm satisfies the whole OR group.
+        assert!(
+            license_displays(
+                "// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)\n",
+                "GPL-2.0-only"
+            )
+            .is_empty()
+        );
+        // `GPL-2.0+ WITH Linux-syscall-note` under GPL-2.0-only: the
+        // +-form is an -or-later declaration met by the same version,
+        // and the exception is ignored.
+        assert!(
+            license_displays(
+                "// SPDX-License-Identifier: GPL-2.0+ WITH Linux-syscall-note\n",
+                "GPL-2.0-only"
+            )
+            .is_empty()
+        );
+        // An unlisted arm (a LicenseRef) satisfies the OR group.
+        assert!(license_displays(
+            "// SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL\n",
+            "MIT"
+        )
+        .is_empty());
+        // LLVM's banner: the trailing `*|` decoration is stripped and
+        // the WITH exception ignored.
+        assert!(
+            license_displays(
+                "// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception *|\n",
+                "Apache-2.0"
+            )
+            .is_empty()
+        );
+        // An -or-later declaration is met by any later version.
+        assert!(
+            license_displays(
+                "// SPDX-License-Identifier: GPL-2.0-or-later\n",
+                "GPL-3.0-only"
+            )
+            .is_empty()
+        );
+        // The declared license in the tag, plainly.
+        assert!(
+            license_displays("// SPDX-License-Identifier: MIT\n", "MIT AND Apache-2.0").is_empty()
+        );
+    }
+
+    #[test]
+    fn license_coverage_grants_fire() {
+        // The standard GPL header, C comment form.
+        let gpl = "/*\n * This program is free software; you can redistribute it and/or\n * modify it under the terms of the GNU General Public License\n * as published by the Free Software Foundation; either version 2\n * of the License, or (at your option) any later version.\n */\n";
+        assert_eq!(
+            license_displays(gpl, "MIT"),
+            [(LicenseUnitKind::Grant, "GPL-2.0-or-later".to_string())]
+        );
+        assert!(license_displays(gpl, "GPL-2.0-or-later").is_empty());
+        // geolite2legacy shape: LGPL-3.0-or-later grant, MIT tag.
+        let geolite = "# This library is free software; you can redistribute it and/or\n# modify it under the terms of the GNU Lesser General Public\n# License as published by the Free Software Foundation; either\n# version 3 of the License, or (at your option) any later version.\n";
+        assert_eq!(
+            license_displays(geolite, "MIT"),
+            [(LicenseUnitKind::Grant, "LGPL-3.0-or-later".to_string())]
+        );
+        // An LGPL notice under a GPL tag fires (its own class): the
+        // -only tail is a bare period after `of the License`.
+        let lgpl_only = "This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser General Public License as published by the Free Software Foundation; either version 2.1 of the License.\n";
+        assert_eq!(
+            license_displays(lgpl_only, "GPL-2.1-only"),
+            [(LicenseUnitKind::Grant, "LGPL-2.1-only".to_string())]
+        );
+        assert!(license_displays(lgpl_only, "LGPL-2.1-only").is_empty());
+        // Form B: `version N` right after the license name gives -only.
+        let form_b = "This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License version 2 as published by the Free Software Foundation.\n";
+        assert_eq!(
+            license_displays(form_b, "GPL-3.0-only"),
+            [(LicenseUnitKind::Grant, "GPL-2.0-only".to_string())]
+        );
+        assert!(license_displays(form_b, "GPL-2.0-or-later").is_empty());
+        // The Apache grant string.
+        let apache = "Licensed under the Apache License, Version 2.0 (the \"License\");\nyou may not use this file except in compliance with the License.\n";
+        assert_eq!(
+            license_displays(apache, "MIT"),
+            [(LicenseUnitKind::Grant, "Apache-2.0".to_string())]
+        );
+        // The Mozilla grant string.
+        let mpl = "/* This Source Code Form is subject to the terms of the Mozilla Public\n * License, v. 2.0. If a copy of the MPL was not distributed with this\n * file, You can obtain one at http://mozilla.org/MPL/2.0/. */\n";
+        assert_eq!(
+            license_displays(mpl, "MIT"),
+            [(LicenseUnitKind::Grant, "MPL-2.0".to_string())]
+        );
+        // vapoursynth shape: the WTFPL grant behind `*` comment leaders.
+        let wtfpl = "/*\n * Do What The Fuck You Want To Public License, Version 2\n */\n";
+        assert_eq!(
+            license_displays(wtfpl, "LGPL-2.1-or-later"),
+            [(LicenseUnitKind::Grant, "WTFPL".to_string())]
+        );
+    }
+
+    #[test]
+    fn license_coverage_grants_quiet() {
+        // kernel sign-file.c shape: the British `of the Licence` tail
+        // is unknown -- it is not read as either grant form.
+        let sign_file = "/*\n * This program is free software; you can redistribute it and/or\n * modify it under the terms of the GNU General Public License\n * as published by the Free Software Foundation; either version 2\n * of the Licence, or (at your option) any later version.\n */\n";
+        assert!(license_displays(sign_file, "MIT").is_empty());
+        // libyui shape: `or (at your option) version 3.0` is not the
+        // exact -or-later tail.
+        let libyui = "This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) version 3.0 of the License.\n";
+        assert!(license_displays(libyui, "MIT").is_empty());
+        // A missing parenthesis makes the tail unknown, never -only.
+        let sloppy = "This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or at your option any later version.\n";
+        assert!(license_displays(sloppy, "MIT").is_empty());
+        // A case variant of the prefix is unknown.
+        let capitalised = "This program is free software; you can redistribute it and/or modify it under the Terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version.\n";
+        assert!(license_displays(capitalised, "MIT").is_empty());
+        // Windows naming a special exception are skipped whole.
+        let exception = "This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version. As a special exception, the copyright holders give you permission to link this program with the OpenSSL library.\n";
+        assert!(license_displays(exception, "MIT").is_empty());
+        // An Alternatively dual grant is skipped whole.
+        let alternatively = "Alternatively, this file may be used under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version.\n";
+        assert!(license_displays(alternatively, "MIT").is_empty());
+    }
+
+    #[test]
+    fn license_coverage_spdx_wins_over_grant() {
+        // A file with an SPDX declaration is not also read for grants:
+        // under an MIT tag the GPL grant text stays silent, and under a
+        // GPL tag only the SPDX unit reports.
+        let text = "// SPDX-License-Identifier: MIT\n//\n// This program is free software; you can redistribute it and/or\n// modify it under the terms of the GNU General Public License\n// as published by the Free Software Foundation; either version 2\n// of the License, or (at your option) any later version.\n";
+        assert!(license_displays(text, "MIT").is_empty());
+        assert_eq!(
+            license_displays(text, "GPL-2.0-or-later"),
+            [(LicenseUnitKind::Spdx, "MIT".to_string())]
+        );
+    }
+
+    #[test]
+    fn license_coverage_aggregates_per_package() {
+        let config = license_test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let pkg = Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = FilesCheck::new(&config);
+        let mut st = PkgState {
+            license_tag_ids: parse_license_tag("MIT"),
+            ..Default::default()
+        };
+        let grant_file = PkgFile {
+            mode: 0o100644,
+            ..Default::default()
+        };
+        for (fname, content) in [
+            (
+                "/usr/share/demo/a.py",
+                "# SPDX-License-Identifier: GPL-2.0\n",
+            ),
+            (
+                "/usr/share/demo/b.py",
+                "# SPDX-License-Identifier: GPL-2.0\n",
+            ),
+            ("/usr/share/demo/c.py", "# SPDX-License-Identifier: MIT\n"),
+        ] {
+            let fd = FileData {
+                chunk: content.as_bytes().to_vec(),
+                istext: true,
+                ..Default::default()
+            };
+            check.check_normal_license_coverage(fname, &grant_file, &mut st, &fd);
+        }
+        check.check_license_coverage(&pkg, &st, &mut out);
+        let lines: Vec<&str> = out
+            .results()
+            .iter()
+            .filter(|(name, _)| name == "spdx-license-not-in-license-tag")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(lines.len(), 1, "one aggregated finding: {lines:?}");
+        assert!(
+            lines[0].contains("GPL-2.0 /usr/share/demo/a.py 2"),
+            "license, first path and count: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn license_coverage_scopes_out_license_files_and_usr_src() {
+        let config = license_test_config();
+        let check = FilesCheck::new(&config);
+        let mut st = PkgState {
+            license_tag_ids: parse_license_tag("MIT"),
+            ..Default::default()
+        };
+        let fd = FileData {
+            chunk: b"# SPDX-License-Identifier: GPL-2.0\n".to_vec(),
+            istext: true,
+            ..Default::default()
+        };
+        // A %license file is the license text itself: out of scope.
+        let license_file = PkgFile {
+            mode: 0o100644,
+            flags: crate::pkg::pkgfile::RPMFILE_LICENSE,
+            ..Default::default()
+        };
+        check.check_normal_license_coverage(
+            "/usr/share/licenses/demo/COPYING",
+            &license_file,
+            &mut st,
+            &fd,
+        );
+        // /usr/src/ is out of scope.
+        let plain_file = PkgFile {
+            mode: 0o100644,
+            ..Default::default()
+        };
+        check.check_normal_license_coverage("/usr/src/debug/demo/a.py", &plain_file, &mut st, &fd);
+        assert!(st.license_units.is_empty());
+    }
+
+    fn license_test_config() -> Config {
+        let mut config = test_config();
+        config.configuration.insert(
+            "ValidLicenses".to_string(),
+            toml::Value::Array(
+                TEST_LICENSES
+                    .iter()
+                    .map(|s| toml::Value::String(s.to_string()))
+                    .collect(),
+            ),
+        );
+        config
     }
 }
