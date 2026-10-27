@@ -32,7 +32,7 @@
 #   SystemdPresetPackages: added 'systemd-presets-branding-SLE-SAP_immutable'
 #
 # FileGrants appended (not from upstream; see FILE_GRANTS):
-#   FileGrants: added 'rpm' for postin-without-ldconfig, library-without-ldconfig-postun (the package ships no ldconfig scriptlets by design; the platform maintains the ldconfig cache via glibc file triggers, so per-package scriptlets are the pre-trigger mechanism)
+#   FileGrants: added 'rpm' for postin-without-ldconfig, library-without-ldconfig-postun (the package ships no ldconfig scriptlets by design; openSUSE has no ldconfig file triggers (#569), so no platform mechanism maintains the cache in their place)
 #   FileGrants: added 'systemd' for postun-without-ldconfig (%post runs ldconfig, under the spec's comment 'Run ldconfig for nss-systemd and nss-myhostname NSS modules'; the %postun omission is the package's evidenced design)
 #   FileGrants: added 'smartmontools' for executable-marked-as-config-file (smartd's warning hook: it must be executable to run and is marked %config because admins edit it)
 #   FileGrants: added 'tuned' for executable-marked-as-config-file (grub.d scripts are executables by construction (grub-mkconfig runs them); the %config marking is deliberate)

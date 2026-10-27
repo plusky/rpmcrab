@@ -290,7 +290,7 @@ findings = [
     "postin-without-ldconfig",
     "library-without-ldconfig-postun",
 ]
-reason = "the package ships no ldconfig scriptlets by design; the platform maintains the ldconfig cache via glibc file triggers, so per-package scriptlets are the pre-trigger mechanism"
+reason = "the package ships no ldconfig scriptlets by design; openSUSE has no ldconfig file triggers (#569), so no platform mechanism maintains the cache in their place"
 
 [[FileGrants]]
 package = "systemd"
