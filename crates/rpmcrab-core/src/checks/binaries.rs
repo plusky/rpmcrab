@@ -822,11 +822,16 @@ impl ReadelfInfo {
         // OR across archive members: any Rust member marks the whole file.
         self.is_rust = self.is_rust || detect_rust_binary(elf, data, &self.functions);
         self.is_zig = self.is_zig || detect_zig_binary(elf, data);
-        // First member wins: an archive's members are one build's
-        // objects, so any member's recorded toolchain stands for the
-        // file, and a later member never overwrites it.
-        if self.go_toolchain.is_none() {
-            self.go_toolchain = detect_go_toolchain(elf, data);
+        // Minimum across members: an archive's members are normally
+        // one build's objects, but the floor judges the oldest
+        // toolchain in the file -- a member built by an outdated
+        // toolchain carries its standard library with it, so the
+        // minimum, not the first member seen, stands for the file.
+        if let Some(found) = detect_go_toolchain(elf, data) {
+            self.go_toolchain = Some(match self.go_toolchain {
+                Some(current) => current.min(found),
+                None => found,
+            });
         }
         self.go_buildinfo = self.go_buildinfo || has_go_buildinfo_magic(data);
     }
@@ -1205,11 +1210,14 @@ fn parse_go_buildinfo(section: &[u8], data: &[u8], elf: &goblin::elf::Elf) -> Op
     let flags = section[15];
     if flags & 2 != 0 {
         let (version, _) = read_go_buildinfo_string(section.get(HEADER_LEN..)?)?;
+        if version.len() > 256 {
+            return None;
+        }
         return Some(version);
     }
     let big_endian = flags & 1 != 0;
     let read_word = |bytes: &[u8], offset: usize| -> Option<u64> {
-        let raw = bytes.get(offset..offset + ptr_size)?;
+        let raw = bytes.get(offset..offset.checked_add(ptr_size)?)?;
         let mut value = 0u64;
         if big_endian {
             for byte in raw {
@@ -1235,12 +1243,12 @@ fn parse_go_buildinfo(section: &[u8], data: &[u8], elf: &goblin::elf::Elf) -> Op
     };
     let header_offset = resolve(read_word(section, 16)?)?;
     let address = read_word(data, header_offset)?;
-    let length = usize::try_from(read_word(data, header_offset + ptr_size)?).ok()?;
+    let length = usize::try_from(read_word(data, header_offset.checked_add(ptr_size)?)?).ok()?;
     if length == 0 || length > 256 {
         return None;
     }
     let offset = resolve(address)?;
-    let bytes = data.get(offset..offset + length)?;
+    let bytes = data.get(offset..offset.checked_add(length)?)?;
     Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
@@ -1276,12 +1284,23 @@ fn detect_go_toolchain(elf: &goblin::elf::Elf, data: &[u8]) -> Option<GoVersion>
         if elf.shdr_strtab.get_at(sh.sh_name) != Some(".go.buildinfo") {
             continue;
         }
-        let start = usize::try_from(sh.sh_offset).ok()?;
-        let end = start
-            .saturating_add(usize::try_from(sh.sh_size).ok()?)
-            .min(data.len());
-        let section = data.get(start..end)?;
-        return parse_go_buildinfo(section, data, elf).and_then(|raw| GoVersion::parse(&raw));
+        // A malformed section must not abort the scan: a later
+        // `.go.buildinfo` section may still parse.
+        let Ok(start) = usize::try_from(sh.sh_offset) else {
+            continue;
+        };
+        let Ok(size) = usize::try_from(sh.sh_size) else {
+            continue;
+        };
+        let end = start.saturating_add(size).min(data.len());
+        let Some(section) = data.get(start..end) else {
+            continue;
+        };
+        if let Some(version) =
+            parse_go_buildinfo(section, data, elf).and_then(|raw| GoVersion::parse(&raw))
+        {
+            return Some(version);
+        }
     }
     None
 }
@@ -1337,6 +1356,10 @@ fn parse_go_toolchain_floor(raw: &str) -> Vec<(GoVersion, GoVersion)> {
     floor.sort();
     floor.dedup();
     assert!(
+        !floor.is_empty(),
+        "go toolchain floor lists at least one line"
+    );
+    assert!(
         floor.windows(2).all(|pair| pair[0].0 < pair[1].0),
         "go toolchain floor lines are strictly ascending"
     );
@@ -1356,7 +1379,11 @@ fn go_toolchain_below_floor(version: GoVersion, floor: &[(GoVersion, GoVersion)]
             return version < *minimum;
         }
     }
-    floor.first().is_some_and(|(lowest, _)| line < *lowest)
+    floor
+        .iter()
+        .map(|(listed, _)| *listed)
+        .min()
+        .is_some_and(|lowest| line < lowest)
 }
 
 struct LddInfo {
@@ -15629,6 +15656,12 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(!go_toolchain_below_floor(v(1, 25, 0), &floor));
         assert!(!go_toolchain_below_floor(v(1, 27, 0), &floor));
         assert!(!go_toolchain_below_floor(v(2, 0, 0), &floor));
+        // The comparison does not depend on the table's order.
+        let reversed = [floor[1], floor[0]];
+        assert!(go_toolchain_below_floor(v(1, 23, 5), &reversed));
+        assert!(!go_toolchain_below_floor(v(1, 23, 8), &reversed));
+        assert!(go_toolchain_below_floor(v(1, 22, 4), &reversed));
+        assert!(!go_toolchain_below_floor(v(1, 25, 0), &reversed));
     }
 
     #[test]

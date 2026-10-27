@@ -233,11 +233,13 @@ replace it in the upstream source.
 """
 go-toolchain-outdated="""
 The binary was built with the Go toolchain named in the detail, which
-predates the oldest release carrying fixes for known standard-library
-defects (CVE-2025-22871, fixed in go1.23.8 and go1.24.2). A Go binary
-keeps the standard library it was built with, so the defects stay in
-the shipped binary until the package is rebuilt. Please rebuild the
-package with a Go toolchain at or above the recorded floor.
+is below the minimum release of its own release line carrying fixes
+for known standard-library defects (CVE-2025-22871: fixed in go1.23.8
+on the 1.23 line and go1.24.2 on the 1.24 line; the floor is a
+per-line minimum). A Go binary keeps the standard library it was
+built with, so the defects stay in the shipped binary until the
+package is rebuilt. Please rebuild the package with a Go toolchain
+at or above its release line's minimum.
 """
 binary-or-shlib-calls-weak-prng="""
 The binary calls the predictable libc random functions (rand,
