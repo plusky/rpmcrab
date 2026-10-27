@@ -122,6 +122,7 @@
 #   Filters: retargeted '^filesystem\\..*: hidden-file-or-dir /etc/skel/.local' to '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.local' (skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538))
 #   Filters: retargeted '^filesystem\\..*: hidden-file-or-dir /etc/skel/.fonts' to '^filesystem\\..*: hidden-file-or-dir /usr/etc/skel/.fonts' (skeleton dotdirs moved to /usr/etc/skel; the check excludes the /etc/skel/ prefix in code, so the old pattern could never match (issue #538))
 #   Filters: retargeted '^filesystem\\..*: missing-dependency-to-cron' to '^filesystem\\..*: missing-dependency-to-crontabs' (the emitted tag is missing-dependency-to-crontabs (plural); the singular matched only as a substring prefix of the tag (issue #538))
+#   Filters: retargeted '^qa\\S+: [EWI]:' to '^qa[-_]\\S+: [EWI]:' (blanket internal-packages filter narrowed to the separator-shaped internal QA names (qa-/qa_); the upstream anchor also suppresses every public package whose name starts with qa (qarma, qalculate, the QAT libraries))
 #   Filters: retargeted '.* statically-linked-binary /sbin/ldconfig' to '.* statically-linked-binary /usr/sbin/ldconfig' (usr-merge: ldconfig ships as /usr/sbin/ldconfig, so the /sbin/ anchor could never match (issue #538))
 #
 # Added Filters entries (exemption upstream does not
@@ -283,5 +284,5 @@
 #
 # Kept Filters entries (whole-finding suppressions kept
 # as rpmcrab's recorded decision; see KEEP_FILTERS):
-#   Filters: kept '^qa\\S+: [EWI]:' (blanket package-class filter: OBS QA-script packages are build-service internals, not shipped product)
+#   Filters: kept '^qa[-_]\\S+: [EWI]:' (blanket package-class filter, narrowed to the separator-shaped names (see RETARGET_FILTERS): SUSE-internal QA packages are build-service internals, not shipped product)
 #   Filters: kept '^\\S*(?:INTERNAL|internal)\\.\\S+: [EWI]:' (blanket package-class filter: OBS-internal packages are build-service internals, not shipped product)

@@ -1197,7 +1197,7 @@ def _kept_config_text():
 def test_keep_filters_table_is_the_ratified_set():
     """KEEP_FILTERS carries exactly the 2 package-class filters."""
     assert set(gen.KEEP_FILTERS) == {
-        r"^qa\S+: [EWI]:",
+        r"^qa[-_]\S+: [EWI]:",
         r"^\S*(?:INTERNAL|internal)\.\S+: [EWI]:",
     }
 
@@ -1210,11 +1210,11 @@ def test_assert_kept_filters_logs_every_survivor():
 
 
 def test_assert_kept_filters_raises_and_names_the_missing():
-    text = _kept_config_text().replace("    '^qa\\S+: [EWI]:',\n", "")
+    text = _kept_config_text().replace("    '^qa[-_]\\S+: [EWI]:',\n", "")
     try:
         gen.assert_kept_filters(text)
     except AssertionError as exc:
-        assert r"^qa\S+: [EWI]:" in str(exc), exc
+        assert r"^qa[-_]\S+: [EWI]:" in str(exc), exc
     else:
         raise AssertionError("a missing kept pattern must raise")
 
@@ -1222,8 +1222,8 @@ def test_assert_kept_filters_raises_and_names_the_missing():
 def test_assert_kept_filters_substring_survival():
     """A kept pattern survives inside a broader scoped entry."""
     text = _kept_config_text().replace(
-        "    '^qa\\S+: [EWI]:',\n",
-        "    'somepkg ^qa\\S+: [EWI]: scoped',\n",
+        "    '^qa[-_]\\S+: [EWI]:',\n",
+        "    'somepkg ^qa[-_]\\S+: [EWI]: scoped',\n",
     )
     kept = gen.assert_kept_filters(text)
     assert any("^qa" in e for e in kept), kept

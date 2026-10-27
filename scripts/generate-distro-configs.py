@@ -791,7 +791,7 @@ PRUNE_RAW = {
 # spaces around the finding name).
 KEEP_FILTERS = {
     # pattern: reason
-    r"^qa\S+: [EWI]:": "blanket package-class filter: OBS QA-script packages are build-service internals, not shipped product",
+    r"^qa[-_]\S+: [EWI]:": "blanket package-class filter, narrowed to the separator-shaped names (see RETARGET_FILTERS): SUSE-internal QA packages are build-service internals, not shipped product",
     r"^\S*(?:INTERNAL|internal)\.\S+: [EWI]:": "blanket package-class filter: OBS-internal packages are build-service internals, not shipped product",
 }
 
@@ -840,6 +840,24 @@ RETARGET_FILTERS = {
     r"^filesystem\..*: missing-dependency-to-cron": (
         r"^filesystem\..*: missing-dependency-to-crontabs",
         "the emitted tag is missing-dependency-to-crontabs (plural); the singular matched only as a substring prefix of the tag (issue #538)",
+    ),
+    # The blanket internal-packages filter. Its own comment states
+    # the intent -- "Suppress any errors about internal packages" --
+    # and the line predates OBS (present verbatim in the 2008 Factory
+    # rpmlint config, carried in from SUSE's internal build system).
+    # The anchor matches every package whose name merely starts with
+    # "qa", which in the shipped distro is a dozen public packages --
+    # qarma, the qalculate family, the Intel QAT libraries (qatlib,
+    # qatzip), the qactus openQA client -- whose findings it silently
+    # swallows, qarma's 'GPL-2.0-Only' licence typo among them. The
+    # internal QA packages never ship in the distro and no public
+    # source records their names; the only attested SUSE QA naming
+    # shape is separator-based (payload paths like
+    # /usr/share/qa/qa_test_php53), so the anchor is narrowed to the
+    # separator forms, qa-/qa_.
+    r"^qa\S+: [EWI]:": (
+        r"^qa[-_]\S+: [EWI]:",
+        "blanket internal-packages filter narrowed to the separator-shaped internal QA names (qa-/qa_); the upstream anchor also suppresses every public package whose name starts with qa (qarma, qalculate, the QAT libraries)",
     ),
 }
 

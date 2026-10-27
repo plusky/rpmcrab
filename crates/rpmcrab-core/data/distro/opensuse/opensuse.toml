@@ -100,7 +100,7 @@ Filters = [
     '^filesystem\..*: no-binary',
 
 # Suppress any errors about internal packages
-    '^qa\S+: [EWI]:',
+    '^qa[-_]\S+: [EWI]:',
     '^\S*(?:INTERNAL|internal)\.\S+: [EWI]:',
 
 # Exceptions for devel-files
