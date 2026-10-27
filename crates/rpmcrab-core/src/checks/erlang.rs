@@ -379,11 +379,10 @@ fn read_compile_info(path: &str) -> Result<Option<CompileInfo>, String> {
     Ok(Some(CompileInfo { options, source }))
 }
 
-/// The payload of the first chunk named `name` in the BEAM file at
-/// `path`, or `None` when the file is unreadable, too short to hold
-/// the `FOR1` header, or has no such chunk.
-fn chunk_payload(path: &str, name: &[u8; 4]) -> Option<Vec<u8>> {
-    let data = std::fs::read(path).ok()?;
+/// The payload byte range of the first chunk named `name` in an
+/// already-read BEAM file, or `None` when the file is too short to
+/// hold the `FOR1` header or has no such chunk.
+fn chunk_range(data: &[u8], name: &[u8; 4]) -> Option<(usize, usize)> {
     // FOR1 header: "FOR1" + u32 size + "BEAM" (the same gate
     // `read_compile_info` enforces; callers used to gate on it first,
     // but the reader does not rely on them doing so).
@@ -398,16 +397,33 @@ fn chunk_payload(path: &str, name: &[u8; 4]) -> Option<Vec<u8>> {
         pos += 8;
         let end = pos.saturating_add(size).min(data.len());
         if cname == name {
-            return Some(data[pos..end].to_vec());
+            return Some((pos, end));
         }
         pos = end + (4 - end % 4) % 4;
     }
     None
 }
 
+/// The payload of the first chunk named `name` in the BEAM file at
+/// `path`, or `None` when the file is unreadable or has no such
+/// chunk.
+fn chunk_payload(path: &str, name: &[u8; 4]) -> Option<Vec<u8>> {
+    let data = std::fs::read(path).ok()?;
+    chunk_range(&data, name).map(|(start, end)| data[start..end].to_vec())
+}
+
+/// True when the BEAM file has a chunk named `name`, without
+/// copying its payload out (`Dbgi` payloads can be very large).
+fn has_chunk(path: &str, name: &[u8; 4]) -> bool {
+    let Ok(data) = std::fs::read(path) else {
+        return false;
+    };
+    chunk_range(&data, name).is_some()
+}
+
 /// True when the BEAM file has a `Dbgi` (debug info) chunk.
 fn has_dbgi_chunk(path: &str) -> bool {
-    chunk_payload(path, b"Dbgi").is_some()
+    has_chunk(path, b"Dbgi")
 }
 
 /// How much of a compressed `Dbgi` term is inflated to classify its
@@ -420,25 +436,20 @@ fn has_dbgi_chunk(path: &str) -> bool {
 const MAX_DBGI_INFLATE: u64 = 64 * 1024;
 
 /// True when `bytes` (starting at a term tag) holds the full header
-/// of a non-atom, non-tuple term head [`TermParser`] accepts. The
-/// minimal lengths keep a truncated header (a tag byte with some or
-/// all of its length/count bytes missing) from earning credit.
+/// of one of the `Data` heads a backend emits for a real payload:
+/// NIL_EXT (the empty list of forms), LIST_EXT (the abstract-forms
+/// list) or MAP_EXT. No scalar, string, binary or float head is
+/// observed as a payload head across the Factory corpus, so those
+/// tags fail closed here even though [`TermParser`] accepts them as
+/// terms. The minimal lengths keep a truncated header (a tag byte
+/// with some or all of its length bytes missing) from earning
+/// credit.
 fn data_head_has_full_header(bytes: &[u8]) -> bool {
     let need = match bytes.first() {
-        // SMALL_INTEGER_EXT: one payload byte.
-        Some(97) => 2,
-        // INTEGER_EXT: four payload bytes.
-        Some(98) => 5,
         // NIL_EXT: the tag alone is the whole (empty-list) term.
         Some(106) => 1,
-        // STRING_EXT: a u16 length.
-        Some(107) => 3,
-        // LIST_EXT, BINARY_EXT, MAP_EXT: a u32 length/arity.
-        Some(108 | 109 | 116) => 5,
-        // FLOAT_EXT: 31 payload bytes.
-        Some(70) => 32,
-        // NEW_FLOAT_EXT: eight payload bytes.
-        Some(99) => 9,
+        // LIST_EXT, MAP_EXT: a u32 length/arity.
+        Some(108 | 116) => 5,
         _ => return false,
     };
     bytes.len() >= need
@@ -1542,6 +1553,78 @@ mod tests {
         let bare_map = dbgi_with_raw_data(&[116, 0, 0, 0, 0]);
         let path = tmp.path().join("x.beam");
         std::fs::write(&path, beam_with_chunks(&[(b"Dbgi", &bare_map)])).unwrap();
+        assert!(has_real_dbgi_payload(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn dbgi_scalar_data_heads_earn_no_credit() {
+        // Full headers, well-formed terms -- but no backend emits a
+        // scalar, string, binary or float as the debug-info payload,
+        // so none of these heads earns credit.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut float70 = vec![70u8];
+        float70.extend_from_slice(&[b'0'; 31]);
+        let mut float99 = vec![99u8];
+        float99.extend_from_slice(&[0u8; 8]);
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("small integer", vec![97, 42]),
+            ("integer", vec![98, 0, 0, 0, 42]),
+            ("string", vec![107, 0, 3, b'a', b'b', b'c']),
+            ("binary", vec![109, 0, 0, 0, 1, b'x']),
+            ("float", float70),
+            ("new float", float99),
+        ];
+        for (name, data) in cases {
+            let path = tmp.path().join("x.beam");
+            std::fs::write(
+                &path,
+                beam_with_chunks(&[(b"Dbgi", &dbgi_with_raw_data(&data))]),
+            )
+            .unwrap();
+            assert!(
+                !has_real_dbgi_payload(path.to_str().unwrap()),
+                "{name} head must not count as debug info"
+            );
+        }
+    }
+
+    #[test]
+    fn dbgi_large_tuple_envelope_shapes() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        // Envelope as LARGE_TUPLE_EXT with arity 0: not the 3-tuple,
+        // earns no credit.
+        let arity_zero = vec![131, 105, 0, 0, 0, 0];
+        let path = tmp.path().join("x.beam");
+        std::fs::write(&path, beam_with_chunks(&[(b"Dbgi", &arity_zero)])).unwrap();
+        assert!(!has_real_dbgi_payload(path.to_str().unwrap()));
+        // Envelope as LARGE_TUPLE_EXT with arity 3 around the real
+        // Erlang payload: earns credit, like the SMALL_TUPLE form.
+        let large_envelope = {
+            let mut t = vec![131, 105, 0, 0, 0, 3];
+            push_atom(&mut t, 119, b"debug_info_v1");
+            push_atom(&mut t, 119, b"erl_abstract_code");
+            t.extend_from_slice(&[108, 0, 0, 0, 1]);
+            t.extend_from_slice(&[104, 4]);
+            push_atom(&mut t, 119, b"attribute");
+            t.extend_from_slice(&[97, 1]);
+            push_atom(&mut t, 119, b"module");
+            push_atom(&mut t, 119, b"foo");
+            t.push(106);
+            t
+        };
+        let path = tmp.path().join("x.beam");
+        std::fs::write(&path, beam_with_chunks(&[(b"Dbgi", &large_envelope)])).unwrap();
+        assert!(has_real_dbgi_payload(path.to_str().unwrap()));
+        // The Elixir payload tuple itself as LARGE_TUPLE_EXT:
+        // {elixir_v1, #{}} earns credit.
+        let large_elixir = {
+            let mut d = vec![105, 0, 0, 0, 2];
+            push_atom(&mut d, 119, b"elixir_v1");
+            d.extend_from_slice(&[116, 0, 0, 0, 0]);
+            dbgi_with_raw_data(&d)
+        };
+        let path = tmp.path().join("x.beam");
+        std::fs::write(&path, beam_with_chunks(&[(b"Dbgi", &large_elixir)])).unwrap();
         assert!(has_real_dbgi_payload(path.to_str().unwrap()));
     }
 
