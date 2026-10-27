@@ -1135,8 +1135,20 @@ impl ReadelfInfo {
             {
                 Some(existing) => {
                     existing.witness_present |= vc.witness_present;
-                    if existing.c_version.is_none() {
-                        existing.c_version = vc.c_version;
+                    // The version is named only while every member
+                    // that names one agrees on it -- the unanimity
+                    // rule of the embedded-string reader, one level
+                    // up. A disagreement names no version, and a
+                    // later agreeing member does not resurrect one.
+                    match (&existing.c_version, &vc.c_version) {
+                        (None, Some(_)) if !existing.c_version_conflict => {
+                            existing.c_version = vc.c_version;
+                        }
+                        (Some(a), Some(b)) if a != b => {
+                            existing.c_version = None;
+                            existing.c_version_conflict = true;
+                        }
+                        _ => {}
                     }
                 }
                 None => self.vendored_crates.push(vc),
@@ -1669,6 +1681,10 @@ struct VendoredCrate {
     /// linked into this binary, not merely resolved in its crate
     /// graph.
     witness_present: bool,
+    /// A cross-member merge saw two members name different C
+    /// versions: the merged entry names none, and a later agreeing
+    /// member does not resurrect one.
+    c_version_conflict: bool,
 }
 
 /// Where a vendored C library's version is read from.
@@ -1762,6 +1778,12 @@ fn parse_vendored_c_crates(raw: &str) -> Vec<VendoredCCrate> {
                 })
                 .collect();
             let srpm = field("srpm");
+            let name = field("name");
+            assert!(!name.is_empty(), "vendored C crate name is non-empty");
+            assert!(
+                accepted_names.iter().all(|a| !a.is_empty()),
+                "vendored C crate accepted names are non-empty"
+            );
             assert!(
                 accepted_names.contains(&srpm),
                 "vendored C crate accepted_names includes its srpm"
@@ -1779,6 +1801,18 @@ fn parse_vendored_c_crates(raw: &str) -> Vec<VendoredCCrate> {
                 link_soname.is_some(),
                 "vendored C crate soname prefix and link soname come as a pair"
             );
+            if let Some(prefix) = &system_soname_prefix {
+                assert!(
+                    !prefix.is_empty(),
+                    "vendored C crate soname prefix is non-empty"
+                );
+            }
+            if let (Some(prefix), Some(link)) = (&system_soname_prefix, &link_soname) {
+                assert!(
+                    link.starts_with(prefix.as_str()),
+                    "vendored C crate link soname starts with the soname prefix"
+                );
+            }
             let c_version_source = match opt_field("c_version_source").as_deref() {
                 None => None,
                 Some("embedded-version-string") => Some(CVersionSource::EmbeddedVersionString),
@@ -1792,7 +1826,7 @@ fn parse_vendored_c_crates(raw: &str) -> Vec<VendoredCCrate> {
                 "vendored C crate embedded version major comes exactly with the embedded source"
             );
             VendoredCCrate {
-                name: field("name"),
+                name,
                 srpm,
                 accepted_names,
                 system_soname_prefix,
@@ -1815,6 +1849,14 @@ fn parse_vendored_c_crates(raw: &str) -> Vec<VendoredCCrate> {
     map
 }
 
+/// The largest `.dep-v0` payload the finder inflates: a crate
+/// graph is a few hundred KiB of JSON in practice, and the bound
+/// exists so a corrupt section cannot inflate without limit (the
+/// posture of the DWARF reader's bound in `erlang.rs`). A section
+/// that inflates past it fails to parse and stays silent, like a
+/// section of bad zlib.
+const MAX_DEP_V0_INFLATE: u64 = 16 * 1024 * 1024;
+
 /// Read one ELF's `.dep-v0` section: zlib-compressed JSON whose
 /// `packages` array lists the crate graph (`{"name", "version", ...}`
 /// per crate, the version carrying any `+build` metadata). Returns
@@ -1832,19 +1874,34 @@ fn detect_vendored_c_crates(elf: &goblin::elf::Elf, data: &[u8]) -> Vec<Vendored
     else {
         return Vec::new();
     };
-    let start = sh.sh_offset as usize;
-    let end = start.saturating_add(sh.sh_size as usize);
+    let Some((start, end)) = section_range(sh) else {
+        return Vec::new();
+    };
     let Some(raw) = data.get(start..end) else {
         return Vec::new();
     };
     use std::io::Read;
     let mut json = Vec::new();
     if flate2::read::ZlibDecoder::new(raw)
+        .take(MAX_DEP_V0_INFLATE)
         .read_to_end(&mut json)
         .is_err()
     {
         return Vec::new();
     }
+    // The witness and version scans read the library's constants,
+    // which live in read-only data sections: the same bytes in a
+    // writable section are runtime data and prove nothing.
+    let readonly_ranges: Vec<&[u8]> = elf
+        .section_headers
+        .iter()
+        .filter(|sh| {
+            sh.sh_type == goblin::elf::section_header::SHT_PROGBITS
+                && sh.sh_flags & u64::from(goblin::elf::section_header::SHF_WRITE) == 0
+        })
+        .filter_map(section_range)
+        .filter_map(|(start, end)| data.get(start..end))
+        .collect();
     let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&json) else {
         return Vec::new();
     };
@@ -1862,17 +1919,20 @@ fn detect_vendored_c_crates(elf: &goblin::elf::Elf, data: &[u8]) -> Vec<Vendored
         let Some(entry) = map.iter().find(|e| e.name == name) else {
             continue;
         };
-        let witness_present = data
-            .windows(entry.witness.len())
-            .any(|w| w == entry.witness.as_bytes());
+        let witness_present = readonly_ranges.iter().any(|range| {
+            range
+                .windows(entry.witness.len())
+                .any(|w| w == entry.witness.as_bytes())
+        });
         // The C version is only worth reading when the code is
         // actually here; a resolved-but-unlinked crate reports none.
         let c_version = if witness_present {
             match entry.c_version_source {
-                Some(CVersionSource::EmbeddedVersionString) => {
-                    embedded_version_string(data, entry.embedded_version_major.as_deref())
-                        .map(str::to_string)
-                }
+                Some(CVersionSource::EmbeddedVersionString) => embedded_version_string(
+                    &readonly_ranges,
+                    entry.embedded_version_major.as_deref(),
+                )
+                .map(str::to_string),
                 Some(CVersionSource::CrateBuildMetadata) => crate_build_metadata_version(version),
                 None => None,
             }
@@ -1884,6 +1944,7 @@ fn detect_vendored_c_crates(elf: &goblin::elf::Elf, data: &[u8]) -> Vec<Vendored
             crate_version: version.to_string(),
             c_version,
             witness_present,
+            c_version_conflict: false,
         };
         if !found.contains(&vc) {
             found.push(vc);
@@ -1892,7 +1953,8 @@ fn detect_vendored_c_crates(elf: &goblin::elf::Elf, data: &[u8]) -> Vec<Vendored
     found
 }
 
-/// The standalone dotted version string in `data`: a maximal
+/// The standalone dotted version string in the read-only data
+/// sections: a maximal
 /// `N.N.N` token bounded on both sides by a non-printable byte or a
 /// data edge. That is how a C string constant sits in `.rodata`:
 /// the sqlite amalgamation's version (its `sqlite3_version[]`) is
@@ -1908,32 +1970,34 @@ fn detect_vendored_c_crates(elf: &goblin::elf::Elf, data: &[u8]) -> Vec<Vendored
 /// sqlite's 3.46.0, and between two disagreeing candidates there
 /// is no decidable way to tell which is the library's, so the
 /// finding then prescribes no version.
-fn embedded_version_string<'a>(data: &'a [u8], major: Option<&str>) -> Option<&'a str> {
+fn embedded_version_string<'a>(ranges: &[&'a [u8]], major: Option<&str>) -> Option<&'a str> {
     let printable = |b: u8| (0x20..0x7f).contains(&b);
     let mut found: Option<&'a str> = None;
-    let mut i = 0;
-    while i < data.len() {
-        // A candidate starts at a digit whose predecessor is
-        // neither a digit nor a dot (not the tail of a longer
-        // dotted run).
-        if data[i].is_ascii_digit()
-            && (i == 0 || !(data[i - 1].is_ascii_digit() || data[i - 1] == b'.'))
-            && let Some((text, len)) = dotted_version_at(data, i)
-        {
-            let end = i + len;
-            let bounded =
-                (i == 0 || !printable(data[i - 1])) && (end == data.len() || !printable(data[end]));
-            if bounded && major.is_none_or(|m| text.split('.').next() == Some(m)) {
-                match found {
-                    None => found = Some(text),
-                    Some(prev) if prev != text => return None,
-                    _ => {}
+    for data in ranges {
+        let mut i = 0;
+        while i < data.len() {
+            // A candidate starts at a digit whose predecessor is
+            // neither a digit nor a dot (not the tail of a longer
+            // dotted run).
+            if data[i].is_ascii_digit()
+                && (i == 0 || !(data[i - 1].is_ascii_digit() || data[i - 1] == b'.'))
+                && let Some((text, len)) = dotted_version_at(data, i)
+            {
+                let end = i + len;
+                let bounded = (i == 0 || !printable(data[i - 1]))
+                    && (end == data.len() || !printable(data[end]));
+                if bounded && major.is_none_or(|m| text.split('.').next() == Some(m)) {
+                    match found {
+                        None => found = Some(text),
+                        Some(prev) if prev != text => return None,
+                        _ => {}
+                    }
                 }
+                i = end;
+                continue;
             }
-            i = end;
-            continue;
+            i += 1;
         }
-        i += 1;
     }
     found
 }
@@ -5036,8 +5100,7 @@ impl BinariesCheck {
         // table. The debuglink arm stays name-based -- the section
         // has no dedicated type.
         let has_symtab_or_debuglink = info.sections.iter().flatten().any(|sec| {
-            sec.sh_type == goblin::elf::section_header::SHT_SYMTAB
-                || sec.name == ".gnu_debuglink"
+            sec.sh_type == goblin::elf::section_header::SHT_SYMTAB || sec.name == ".gnu_debuglink"
         });
         if has_symtab_or_debuglink {
             return;
@@ -6449,6 +6512,19 @@ impl BinariesCheck {
             return;
         }
         let map = vendored_c_crates();
+        // The package's declared bundled() names, collected once
+        // for every (file, crate) pair: a versioned provide's name
+        // is the same `bundled(<name>)` string, its version a
+        // separate field.
+        let declared_names: std::collections::HashSet<&str> = pkg
+            .provides
+            .iter()
+            .filter_map(|p| {
+                p.name
+                    .strip_prefix("bundled(")
+                    .and_then(|rest| rest.strip_suffix(')'))
+            })
+            .collect();
         for vc in &info.vendored_crates {
             let Some(entry) = map.iter().find(|e| e.name == vc.name) else {
                 continue;
@@ -6467,12 +6543,10 @@ impl BinariesCheck {
                     continue;
                 }
             }
-            let declared = pkg.provides.iter().any(|p| {
-                entry
-                    .accepted_names
-                    .iter()
-                    .any(|accepted| p.name == format!("bundled({accepted})"))
-            });
+            let declared = entry
+                .accepted_names
+                .iter()
+                .any(|accepted| declared_names.contains(accepted.as_str()));
             if declared {
                 continue;
             }
@@ -14734,7 +14808,12 @@ description = "explicit priority string bypasses the system crypto policy"
         // Foreign-machine payload belongs to the foreign target.
         let mut info = stripped(vec![vec![sec(".text")]]);
         info.elf_machine = goblin::elf::header::EM_S390;
-        let results = run("x86_64", "/usr/share/misc/foreign-code.img", 0o100755, &info);
+        let results = run(
+            "x86_64",
+            "/usr/share/misc/foreign-code.img",
+            0o100755,
+            &info,
+        );
         assert!(
             results.is_empty(),
             "foreign machine must be quiet: {results:?}"
@@ -14827,7 +14906,10 @@ description = "explicit priority string bypasses the system crypto policy"
             "ghcembedded",
             &[(".comment", b"XGHC 9.12.4\0"), (".text", b"\x90")],
         );
-        assert!(!info.ghc_comment, "an embedded GHC word is not a version stamp");
+        assert!(
+            !info.ghc_comment,
+            "an embedded GHC word is not a version stamp"
+        );
     }
 
     #[test]
@@ -20377,6 +20459,7 @@ description = "explicit priority string bypasses the system crypto policy"
             crate_version: version.to_string(),
             c_version: c_version.map(str::to_string),
             witness_present: witness,
+            c_version_conflict: false,
         }
     }
 
@@ -20659,52 +20742,173 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn dep_v0_scans_readonly_sections_only() {
+        // The witness and the embedded version are the library's
+        // constants, read from read-only data sections: the same
+        // bytes in a writable section are runtime data and prove
+        // nothing.
+        let writable_info = |tag: &str, sections: &[(&str, &[u8])], writable: usize| {
+            let mut bytes = craft_elf_sections(sections);
+            // SHF_WRITE on the chosen section (header entry
+            // index + 1, after the NULL entry; flags at +8).
+            let shoff = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
+            let flags_at = shoff + (writable + 1) * 64 + 8;
+            bytes[flags_at..flags_at + 8].copy_from_slice(&1u64.to_le_bytes());
+            parse_elf_bytes(tag, &bytes)
+        };
+        let dep = dep_v0_bytes(&[("libsqlite3-sys", "0.35.0")]);
+        // Witness only in a writable section: not linked, here.
+        let info = writable_info(
+            "depv0-writable-witness",
+            &[(".data", b"SQLite format 3\0"), (".dep-v0", &dep)],
+            0,
+        );
+        assert_eq!(info.vendored_crates.len(), 1);
+        assert!(!info.vendored_crates[0].witness_present);
+        // Witness read-only, the only standalone version string in
+        // a writable section: linked, but no version is named.
+        let info = writable_info(
+            "depv0-writable-version",
+            &[
+                (".rodata", b"SQLite format 3\0"),
+                (".data", b"\x003.50.2\x00"),
+                (".dep-v0", &dep),
+            ],
+            1,
+        );
+        assert_eq!(info.vendored_crates.len(), 1);
+        assert!(info.vendored_crates[0].witness_present);
+        assert_eq!(info.vendored_crates[0].c_version, None);
+    }
+
+    #[test]
+    fn vendored_crate_version_merge_needs_member_agreement() {
+        // Archive members linking the same vendored crate: the C
+        // version is named only while every member that names one
+        // agrees on it -- the embedded-string unanimity rule, one
+        // level up.
+        let member = |version: &str| {
+            let dep = dep_v0_bytes(&[("libsqlite3-sys", "0.35.0")]);
+            let rodata = format!("SQLite format 3\0{version}\0");
+            craft_elf_sections(&[(".rodata", rodata.as_bytes()), (".dep-v0", &dep)])
+        };
+        let merged = |tag: &str, members: &[Vec<u8>]| {
+            let mut info = parse_elf_bytes(tag, &craft_elf_sections(&[(".rodata", b"")]));
+            for bytes in members {
+                let elf = goblin::elf::Elf::parse(bytes).expect("crafted member parses");
+                info.fill_from_elf(&elf, bytes);
+            }
+            info.vendored_crates
+        };
+        let agreeing = merged("merge-agree", &[member("3.50.2"), member("3.50.2")]);
+        assert_eq!(agreeing.len(), 1);
+        assert!(agreeing[0].witness_present);
+        assert_eq!(agreeing[0].c_version.as_deref(), Some("3.50.2"));
+        let conflicting = merged("merge-conflict", &[member("3.50.2"), member("3.46.0")]);
+        assert_eq!(conflicting.len(), 1);
+        assert_eq!(conflicting[0].c_version, None);
+        // A later agreeing member does not resurrect a version the
+        // disagreement already killed.
+        let resurrected = merged(
+            "merge-resurrect",
+            &[member("3.50.2"), member("3.46.0"), member("3.50.2")],
+        );
+        assert_eq!(resurrected[0].c_version, None);
+    }
+
+    fn vendored_table(crate_fields: &str) -> String {
+        format!("as_of = \"2026-01-01\"\n\n[[crate]]\n{crate_fields}")
+    }
+
+    #[test]
+    #[should_panic(expected = "vendored C crate name is non-empty")]
+    fn vendored_map_rejects_an_empty_crate_name() {
+        parse_vendored_c_crates(&vendored_table(
+            "name = \"\"\nsrpm = \"x\"\naccepted_names = [\"x\"]\nwitness = \"w\"\n",
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "vendored C crate accepted names are non-empty")]
+    fn vendored_map_rejects_an_empty_accepted_name() {
+        parse_vendored_c_crates(&vendored_table(
+            "name = \"x-sys\"\nsrpm = \"x\"\naccepted_names = [\"x\", \"\"]\nwitness = \"w\"\n",
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "vendored C crate soname prefix is non-empty")]
+    fn vendored_map_rejects_an_empty_soname_prefix() {
+        // An empty prefix matches every DT_NEEDED in the file.
+        parse_vendored_c_crates(&vendored_table(
+            "name = \"x-sys\"\nsrpm = \"x\"\naccepted_names = [\"x\"]\nwitness = \"w\"\nsystem_soname_prefix = \"\"\nlink_soname = \"libx.so.1\"\n",
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "vendored C crate link soname starts with the soname prefix")]
+    fn vendored_map_rejects_a_link_soname_outside_the_prefix() {
+        parse_vendored_c_crates(&vendored_table(
+            "name = \"x-sys\"\nsrpm = \"x\"\naccepted_names = [\"x\"]\nwitness = \"w\"\nsystem_soname_prefix = \"libx.so.\"\nlink_soname = \"liby.so.1\"\n",
+        ));
+    }
+
+    #[test]
     fn embedded_version_string_shapes() {
         assert_eq!(
-            embedded_version_string(b"\x003.50.2\x00", None),
+            embedded_version_string(&[b"\x003.50.2\x00"], None),
             Some("3.50.2")
         );
         // Inside a longer string: not standalone.
         assert_eq!(
-            embedded_version_string(b"rustc version 1.90.0\x00", None),
+            embedded_version_string(&[b"rustc version 1.90.0\x00"], None),
             None
         );
-        assert_eq!(embedded_version_string(b"v3.50.2\x00", None), None);
-        assert_eq!(embedded_version_string(b"3.50.2.1\x00", None), None);
-        assert_eq!(embedded_version_string(b"3.50\x00", None), None);
+        assert_eq!(embedded_version_string(&[b"v3.50.2\x00"], None), None);
+        assert_eq!(embedded_version_string(&[b"3.50.2.1\x00"], None), None);
+        assert_eq!(embedded_version_string(&[b"3.50\x00"], None), None);
         // Disagreeing standalone strings name no version; the
         // same string twice is one candidate, not two.
         assert_eq!(
-            embedded_version_string(b"gcc 15.2\x001.2.3\x009.9.9\x00", None),
+            embedded_version_string(&[b"gcc 15.2\x001.2.3\x009.9.9\x00"], None),
             None
         );
         assert_eq!(
-            embedded_version_string(b"\x001.2.3\x001.2.3\x00", None),
+            embedded_version_string(&[b"\x001.2.3\x001.2.3\x00"], None),
             Some("1.2.3")
         );
         // The atuin shape: two components share a major (lsm-tree
         // 3.1.10 next to sqlite 3.46.0); the version is undecidable.
         assert_eq!(
-            embedded_version_string(b"\x003.1.10\x003.46.0\x00", Some("3")),
+            embedded_version_string(&[b"\x003.1.10\x003.46.0\x00"], Some("3")),
             None
         );
         // With a major filter, another component's string (grok
         // carries a standalone 1.3.1 ahead of sqlite's 3.50.2) is
         // skipped.
         assert_eq!(
-            embedded_version_string(b"\x001.3.1\x003.50.2\x00", Some("3")),
+            embedded_version_string(&[b"\x001.3.1\x003.50.2\x00"], Some("3")),
             Some("3.50.2")
         );
-        assert_eq!(embedded_version_string(b"\x001.3.1\x00", Some("3")), None);
+        assert_eq!(
+            embedded_version_string(&[b"\x001.3.1\x00"], Some("3")),
+            None
+        );
         // Suffix-merged into a binary blob (the grok/goose shape):
         // non-printable neighbours, not NULs, bound the string.
         assert_eq!(
-            embedded_version_string(b"\x01\x013.50.2\x00\x00", Some("3")),
+            embedded_version_string(&[b"\x01\x013.50.2\x00\x00"], Some("3")),
             Some("3.50.2")
         );
         // A printable neighbour makes it a mention, not a constant.
-        assert_eq!(embedded_version_string(b"lib-3.4.0\x00", Some("3")), None);
-        assert_eq!(embedded_version_string(b"see 3.50.2\x00", Some("3")), None);
+        assert_eq!(
+            embedded_version_string(&[b"lib-3.4.0\x00"], Some("3")),
+            None
+        );
+        assert_eq!(
+            embedded_version_string(&[b"see 3.50.2\x00"], Some("3")),
+            None
+        );
     }
 
     #[test]
