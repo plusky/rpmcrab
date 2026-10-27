@@ -1872,6 +1872,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/813"
 
 [[divergence]]
 case = "global"
+check = "symlink-contains-up-and-down-segments"
+kind = "behaviour"
+reason = "Fix-and-diverge: the finding does not fire when the link target consists only of .. segments. The reference scan consumes leading ../ prefixes, so the final .. of a pure-up target (which carries no trailing slash) survives as the remainder and is counted as an interior up-and-down segment, although the link contains no down segment at all and is already in its shortest relative form. The motivating instance is ntp's chroot mirror link /var/lib/ntp/var/lib/ntp -> ../.., which resolves to the jail root /var/lib/ntp and whose shortest relative form is the shipped target itself; both distro configs already carry a path filter for the same mirror shape in bind (/var/lib/named). Measured on the current TW snapshot (header census over all 52,984 packages, 439,915 symlinks, exact predicate port): 1 E corpus-wide before, 0 after; the scoped delta over the firing package plus 17 dotdot-carrying controls is 6,098 to 6,097 findings, the removed set exactly that one finding and no other movement. Targets with a named segment before an interior .. (../foo/../bar) still fire. Pinned by symlink_up_and_down_segments in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
