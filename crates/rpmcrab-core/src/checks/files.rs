@@ -841,17 +841,22 @@ fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
 /// installed entry point's defect there. Every fact is decidable
 /// from the binary package's name and the file's path alone:
 ///
-/// - the package's name carries a `src` or `source` hyphen
-///   component -- the package exists to carry a source tree
-///   (the rust*-src standard-library trees, the bazel, kafka,
-///   boringssl and other -source packages, fpc-src), wherever in
-///   the tree the payload sits (the rust trees live under
-///   /usr/lib/rustlib/src/, fpc's under /usr/share/fpcsrc/);
+/// - the package's name ends in a `src` or `source` hyphen
+///   component (a bare `src` or `source` name included, matched
+///   case-insensitively) -- the package exists to carry a source
+///   tree (the rust*-src standard-library trees, the bazel,
+///   kafka, boringssl and other -source packages, fpc-src),
+///   wherever in the tree the payload sits (the rust trees live
+///   under /usr/lib/rustlib/src/, fpc's under
+///   /usr/share/fpcsrc/). A `src` or `source` component in any
+///   other position carries no such fact: `source-highlight` is
+///   a regular tool package and `my-source-tools` a tool
+///   collection, so their scripts keep firing;
 /// - or the file sits in the Go source tree
-///   /usr/share/go/<version>/src/ -- the go1.* packages are not
-///   source-named (their payload is the toolchain), but that one
-///   directory is Go's own shipped source tree, build scripts
-///   included.
+///   /usr/share/go/<version>/src/, with a digit-led version
+///   component -- the go1.* packages are not source-named
+///   (their payload is the toolchain), but that one directory
+///   is Go's own shipped source tree, build scripts included.
 ///
 /// The bounds of the test gate apply the same way. A file
 /// installed directly in a script directory (/bin, /sbin,
@@ -876,19 +881,20 @@ fn script_is_source_data(pkg_name: &str, fname: &str) -> bool {
         return false;
     }
     if pkg_name
-        .to_lowercase()
-        .split('-')
-        .any(|c| matches!(c, "src" | "source"))
+        .rsplit('-')
+        .next()
+        .is_some_and(|c| c.eq_ignore_ascii_case("src") || c.eq_ignore_ascii_case("source"))
     {
         return true;
     }
     // /usr/share/go/<version>/src/... -- the version component is
-    // a single directory between `go` and `src`.
+    // a single digit-led directory between `go` and `src`.
     let comps: Vec<&str> = fname.split('/').filter(|c| !c.is_empty()).collect();
     comps.len() >= 6
         && comps[0] == "usr"
         && comps[1] == "share"
         && comps[2] == "go"
+        && comps[3].starts_with(|c: char| c.is_ascii_digit())
         && comps[4] == "src"
 }
 
@@ -15639,6 +15645,30 @@ reason = "warning hook: executable and %config by design"
             ),
             "no env-script-interpreter for rust source payload: {lines:?}"
         );
+        // A bare `src` name is the suffix arm with no hyphen at
+        // all, and the component match folds case.
+        for name in ["src", "widget-Source"] {
+            let dir3 = tempfile::TempDir::new().expect("tmpdir");
+            let mut pkg = script_mode_pkg(
+                &dir3,
+                &[(
+                    "/usr/share/widget/data/tool.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                )],
+            );
+            pkg.name = name.to_string();
+            let lines = script_finding_lines(&pkg, &config);
+            assert!(
+                !flagged(
+                    &lines,
+                    "env-script-interpreter",
+                    "/usr/share/widget/data/tool.sh"
+                ),
+                "no env-script-interpreter for bare/case-folded suffix {name}: {lines:?}"
+            );
+        }
     }
 
     /// The Go source tree is source payload the same way: the
@@ -15684,8 +15714,11 @@ reason = "warning hook: executable and %config by design"
     /// %doc row in a source package keeps firing; the Go arm
     /// needs the version component and the `src` directory (the
     /// wasm helpers under misc/ are executed payload, not source);
-    /// fused names (resource) carry no source fact; an ordinary
-    /// package's /usr/src payload is not covered; and the gate
+    /// fused names (resource) carry no source fact; a `src` or
+    /// `source` component in prefix or middle position
+    /// (source-highlight, my-source-tools) carries no source
+    /// fact either; an ordinary package's /usr/src payload is
+    /// not covered; and the gate
     /// does not reach `non-executable-script` -- a source tree's
     /// non-executable script keeps that finding.
     #[test]
@@ -15761,6 +15794,12 @@ reason = "warning hook: executable and %config by design"
                     b"#!/usr/bin/env bash\n",
                 ),
                 (
+                    "/usr/share/go/latest/src/make.bash",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
                     "/usr/src/myapp/tool.sh",
                     0o100755,
                     "Bourne-Again shell script, ASCII text executable",
@@ -15773,6 +15812,7 @@ reason = "warning hook: executable and %config by design"
         for path in [
             "/usr/share/go/1.24/misc/wasm/run.sh",
             "/usr/share/go/src/make.bash",
+            "/usr/share/go/latest/src/make.bash",
         ] {
             assert!(
                 flagged(&lines, "env-script-interpreter", path),
@@ -15785,6 +15825,32 @@ reason = "warning hook: executable and %config by design"
             flagged(&lines, "env-script-interpreter", "/usr/src/myapp/tool.sh"),
             "env-script-interpreter must fire for a plain package's /usr/src payload: {lines:?}"
         );
+        // A `source` component in prefix or middle position is
+        // not a source-tree carrier: source-highlight is a
+        // regular tool package and my-source-tools a tool
+        // collection, so their scripts keep firing.
+        for name in ["source-highlight", "my-source-tools"] {
+            let dir5 = tempfile::TempDir::new().expect("tmpdir");
+            let mut pkg = script_mode_pkg(
+                &dir5,
+                &[(
+                    "/usr/share/tools/data/tool.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                )],
+            );
+            pkg.name = name.to_string();
+            let lines = script_finding_lines(&pkg, &config);
+            assert!(
+                flagged(
+                    &lines,
+                    "env-script-interpreter",
+                    "/usr/share/tools/data/tool.sh"
+                ),
+                "env-script-interpreter must fire for prefix/middle name {name}: {lines:?}"
+            );
+        }
         let dir3 = tempfile::TempDir::new().expect("tmpdir");
         let mut pkg = script_mode_pkg(
             &dir3,
