@@ -803,6 +803,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "missing-dependency-to-crontabs"
+kind = "detail"
+reason = "The staged `--explain` text prescribed requiring `crontabs`, but that provider was renamed and the name exists nowhere in the distribution (no package named, providing, requiring or recommending it): the cron.* directories are shipped by `cron`, the daemon is `cronie`, and the check credits a dependency on any of `crontabs`, `cron` or `cronie` (see the behaviour divergence for this check). The text now names the credited set instead of prescribing the one name no package can satisfy."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "htaccess-file"
 kind = "severity"
 reason = "Deliberate severity recalibration: the port reports W where the reference reports E for a .htaccess file that is %doc-flagged and shipped under /usr/share/doc/packages/ -- documentation-tree website artefacts (lensfun-doc's DirectoryIndex for its shipped website source; the OpenStack Sphinx doc packages' RedirectMatch maps written for the upstream docs website's URL space), inert unless an admin serves the doc tree. Both conditions are required: an unflagged .htaccess inside the doc tree and a %doc-flagged one outside it keep the reference's E, as do all web-root and application payloads. Measured over the Factory corpus firing set (11 packages, header-validated: the four W files carry FILEFLAGS=2, the eleven E files flags 0): 15 findings stay 15, with 4 moving from E to W and 11 staying E. The reference (FilesCheck.py:741-742) fires flat E on the bare name with no flag or location qualification."
@@ -820,4 +827,11 @@ case = "global"
 check = "non-root-group-log-file"
 kind = "severity"
 reason = "Deliberate severity recalibration (the group arm of the non-root-user-log-file split recorded above): the port reports W where the reference reports E when the charged group is declared by a sysusers.d snippet the same package ships. Per sysusers.d semantics a `u` line credits the user and the like-named primary group it creates, a `g` line the group only, so fapolicyd's single `u fapolicyd` line declares both its charged user and its charged group. Only the package's own snippets credit: a group carried only by a group() Requires, declared by a sibling package, or named by an `m` membership line keeps E. Measured over the complete gate universe (the 24 packages shipping a flat /var/log entry, restated exactly on current main): the tag's sole live finding (fapolicyd) moves 1 E to 1 W, no finding removed; the reference fires it at E (rpmlint 2.10.0, verified on the identical set)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "tcl-extension-file"
+kind = "detail"
+reason = "The staged `--explain` text prescribed /usr/share/tcl as the home for Tcl extensions. That is only the script-only home: the distribution's tcl_pkgPath is /usr/lib64/tcl:/usr/share/tcl, extensions that load shared libraries live under /usr/lib64/tcl (expect, itk, sqlite3-tcl), and prescribing /usr/share/tcl for them would trade this finding for arch-dependent-file-in-usr-share. The text now prescribes /usr/lib64/tcl for extensions that load shared libraries and /usr/share/tcl for script-only extensions."
 since = "0.4.1"
