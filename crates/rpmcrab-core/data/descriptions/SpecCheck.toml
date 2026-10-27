@@ -218,3 +218,52 @@ licence text with the package and marking it with %license installs
 it into the package's licence directory and records it as a licence
 file in the package metadata.
 """
+check-exit-status-masked="""
+A test command in %check cannot fail the build: its exit status is
+absorbed by a '||' fallback that itself cannot fail, or by an
+'&& exit 0' (or '&& echo', '&& :' or '&& true') away from the end
+of the section. rpm runs the build sections with bash -e and a
+section's status is the status of its last command, so the masked
+failure is discarded and the build goes green even when the
+testsuite fails or never starts. Remove the mask so the testsuite
+gates the build; deselect the failing tests, or move an unreliable
+suite to its own flavour. A deliberate mask belongs in an
+rpmlintrc filter with the reason, not in a comment.
+"""
+check-pipeline-status-masked="""
+A test command in %check is piped into a pass-through command
+(such as tee, cat, head, tail, sed or sort). A pipeline's exit
+status is the status of its last element, so without a preceding
+'set -o pipefail' or a read of PIPESTATUS after the pipeline, the
+test command's failure is lost and the build goes green even when
+the testsuite crashes before reporting any result. Add
+'set -o pipefail' before the pipeline or check PIPESTATUS
+after it.
+"""
+negated-command-not-last="""
+A '!'-negated command in %prep, %build, %install or %check is not
+the last command that runs in its section, so its inverted status
+is discarded: under bash -e a negated command never stops the
+build, and the section's status comes from a later command. The
+assertion is dead - the build passes whether it holds or not.
+Capture the status with 'rc=$?' directly after the command, or
+turn it into a condition ('if ! cmd; then ... exit 1; fi').
+"""
+with-macro-expands-empty="""
+The spec uses one of the conditional forms %{?with name},
+%{!?with name}, %{?without name} or %{!?without name}. In the
+%{?name args} form rpm drops the argument, so these expansions
+are always empty: the value never depends on the name being
+tested, and a condition such as %if 0%{?with test} is always
+false, silently disabling whatever it guards. Use %{with name}
+or %{without name} instead.
+"""
+ctest-with-testing-disabled="""
+The spec runs ctest in %check, but %cmake_kf5 or %cmake_kf6 passes
+-DBUILD_TESTING:BOOL=FALSE and nothing in the spec sets
+BUILD_TESTING to a true value. Projects that only add their tests
+when BUILD_TESTING is on then register no tests at all: ctest
+reports that no tests were found and the build still succeeds, so
+the %check run proves nothing. Pass -DBUILD_TESTING:BOOL=ON to the
+cmake macro to actually run the tests.
+"""

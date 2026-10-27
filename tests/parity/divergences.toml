@@ -3226,6 +3226,41 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "check-exit-status-masked"
+kind = "behaviour"
+reason = "New `check-exit-status-masked` warning with no reference counterpart (rpmcrab#1019): in %check, a test runner from a closed list (make/ninja check or test, ctest, pytest, pyunittest, meson test, cargo or go test, prove, runtest) followed by `||` whose fallback neither fails (an exit with a non-zero or bare argument, or a trailing false), re-runs a runner, nor assigns a variable; or a runner followed by `&& exit 0`, `&& echo`, `&& :` or `&& true` when its command is not the section's last (a %ctest line never is, because the macro appends its own commands after it). rpm runs build sections under bash -e, where a non-final element of an && or || list is exempt from errexit, so such a runner cannot fail the build. A `||` chain is judged at its first runner; a group fallback is read across the lines it spans; a runner that also runs unmasked in the same %check stays silent, because the plain run still gates. Measured over the full Factory spec corpus (16,501 spec files in the factory-full snapshot): 45 findings in 40 spec files, every one read - deliberate masks (|| :, || true, || /bin/true) dominate, then log-dump-only fallbacks, the binutils spec-defined macro fallback and gsl's single-arch exit 0 arm, and gdal's masked pytest beside a gating %ctest. The false-positive shapes a first pass produced (subshell and brace-group fallbacks ending in false or an exit, export-assignment deferrals, retry chains) are excluded by construction and pinned by unit tests in spec.rs. A deliberate mask is dispositioned per package with an rpmlintrc filter, not a comment. Its staged description lives in crates/rpmcrab-core/data/descriptions/SpecCheck.toml."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "check-pipeline-status-masked"
+kind = "behaviour"
+reason = "New `check-pipeline-status-masked` warning with no reference counterpart (rpmcrab#1019): in %check, a pipeline from a test runner into a pass-through command (tee, cat, head, tail, sed, sort) fires, unless `set -o pipefail` precedes it in the section or PIPESTATUS is read after it. A pipeline's status is its last element's, and under bash -e only that element can stop the build, so the runner's failure is invisible. A pipe into a checker (grep -q and friends) does not fire, because the checker reads the runner's output and its own status gates. Measured over the full Factory spec corpus (16,501 spec files in the factory-full snapshot): no findings; the issue's motivating revision (tcl r74, `make test 2>&1 | tee testresults`) is fixed in the snapshot and the predicate is pinned by unit tests in spec.rs. Its staged description lives in crates/rpmcrab-core/data/descriptions/SpecCheck.toml."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "negated-command-not-last"
+kind = "behaviour"
+reason = "New `negated-command-not-last` warning with no reference counterpart (rpmcrab#1019): in %prep, %build, %install or %check, a bare `! ` statement with no `||`, `&&` or `;` after it on the logical line, whose next command does not read $?, which is not the last command of a function body or a subshell, and after which a later command may run (any command outside a sibling %else or %elif arm, including after %endif; in %install a later command always runs, because %__spec_install_post runs after the body, unless the spec redefines it as %{nil}). Under bash -e a negated command is exempt from errexit: its inverted status is discarded, so the assertion gates only as the section's last command. Brace groups and if/for bodies do not rescue it. Measured over the full Factory spec corpus (16,501 spec files in the factory-full snapshot): 11 findings in 7 spec files, every one read and every one a genuine dead assertion (elilo, gdb twice, icu, livekit-libwebrtc four times, procinfo, python-pyright, x11docker). The text lookalikes a first pass produced - find primaries inside a backslash-continued command split by a conditional directive (the kernel-source flavours), here-document content (frr), a multi-line quoted awk program (inn), and a `||` chain continued over plain newlines (rpmlint-mini) - are excluded by construction and pinned by unit tests in spec.rs. Its staged description lives in crates/rpmcrab-core/data/descriptions/SpecCheck.toml."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "with-macro-expands-empty"
+kind = "behaviour"
+reason = "New `with-macro-expands-empty` error with no reference counterpart (rpmcrab#1019): `%{?with N...}`, `%{!?with N...}`, `%{?without N...}` or `%{!?without N...}` anywhere in a spec, except %%-escaped text. In the conditional form rpm drops the argument, so all eight forms expand to nothing whatever the bcond state: verified with rpmspec -P on rpm 4.20 with the bcond on and off, where `%if 0%{?with test}` reduces to the constant 0 and `%{?with static_lib:ON}%{!?with static_lib:OFF}` used as a value reduces to the empty string. The form has no safe use, because its value never depends on N; the plain `%{with X}` and `%{?with_X}` forms do not fire. Measured over the full Factory spec corpus (16,501 spec files in the factory-full snapshot): 14 findings in 7 spec files (aircrack-ng, gmsh, hypre, nodejs24, nodejs26, rspamd, zig0.14), every one read and every one a constant condition or an empty value; the zig pair that motivated the check is already fixed in the snapshot and stays silent. Error, because no legitimate use exists. Pinned by unit tests in spec.rs. Its staged description lives in crates/rpmcrab-core/data/descriptions/SpecCheck.toml."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "ctest-with-testing-disabled"
+kind = "behaviour"
+reason = "New `ctest-with-testing-disabled` warning with no reference counterpart (rpmcrab#1019): %cmake_kf5 or %cmake_kf6 in the spec, a ctest runner in %check, and no -DBUILD_TESTING set to a CMake true value (1, ON, YES, TRUE, Y or a non-zero number, case-insensitive). The KDE cmake macros pass -DBUILD_TESTING:BOOL=FALSE, so the %check ctest run finds no tests unless the spec turns testing on. Measured over the full Factory spec corpus (16,501 spec files in the factory-full snapshot): 3 findings in 3 spec files, every one read - rkward, whose upstream adds its tests only under BUILD_TESTING, is a genuine no-op suite; owncloud-dolphin and opencloud-dolphin have no upstream tests, so the run is a no-op either way. Warning, because the check cannot see whether upstream gates its tests on BUILD_TESTING. Pinned by unit tests in spec.rs. Its staged description lives in crates/rpmcrab-core/data/descriptions/SpecCheck.toml."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "SysVInitOnSystemdCheck"
 kind = "behaviour"
 reason = "The reference accumulates basenames in sets (SysVInitOnSystemdCheck.py:11-13), so a basename reachable by two init scripts yields one finding; the port sorts and dedups explicitly, giving the same single finding in sorted order rather than set order."
