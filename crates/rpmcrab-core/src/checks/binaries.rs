@@ -3495,6 +3495,55 @@ fn usr_share_binary_is_foreign_target(pkgfile: &PkgFile, arch: &str) -> bool {
     }
 }
 
+/// Whether a binary-class file in a noarch package is a GRUB module
+/// (Tom's ruling, 2026-10-27): an `ET_REL` object for a host machine
+/// carrying GRUB's `.module_license` ABI section and not defining
+/// the `grub_main` entry point. A GRUB module is loadable only
+/// inside GRUB itself -- it is the bootloader's payload, not host
+/// code -- so the foreign-target gate's host-machine rule (#848),
+/// which guards runnable and linkable host binaries, does not reach
+/// it: a module is neither. The signature is the measured one over
+/// the grub2 family's 2,682 module files in the Factory corpus:
+/// every module, the final `.mod` files and the debug packages'
+/// `.module` intermediates alike, is a host-machine relocatable
+/// carrying `.module_license`, the ABI section GRUB's build stamps
+/// into each module object. The sibling ABI sections cannot serve:
+/// `.modname` and `.moddeps` are added only when a module is
+/// finalised (the debug intermediates carry neither), and
+/// `.moddeps` is present only on modules that have dependencies.
+/// GRUB's linked kernel images are the one other relocatable
+/// output carrying the section -- the EFI platform kernels are
+/// ET_REL -- and they define `grub_main`, which no module defines,
+/// so a file defining it keeps firing; so do the ET_EXEC core
+/// images, the section-less intermediate objects (efiemu's) and an
+/// ordinary host `.o`, which carries no GRUB section at all. The
+/// exemption takes the full signature from the payload bytes; a
+/// file that cannot be read or parsed keeps firing.
+fn noarch_binary_is_grub_module(pkgfile: &PkgFile) -> bool {
+    let Ok(data) = std::fs::read(&pkgfile.path) else {
+        return false;
+    };
+    let Ok(elf) = parse_elf(&data) else {
+        return false;
+    };
+    if elf.header.e_type != goblin::elf::header::ET_REL
+        || !is_host_elf_machine(elf.header.e_machine)
+    {
+        return false;
+    }
+    if !elf
+        .section_headers
+        .iter()
+        .any(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(".module_license"))
+    {
+        return false;
+    }
+    !elf.syms.iter().any(|sym| {
+        sym.st_shndx != goblin::elf::section_header::SHN_UNDEF as usize
+            && elf.strtab.get_at(sym.st_name) == Some("grub_main")
+    })
+}
+
 /// Collect the forbidden-function calls one file makes: for every
 /// `WarnOnFunction` config entry whose function pattern matches the
 /// file's symbols, the finding name, the function name and the
@@ -3901,7 +3950,10 @@ impl BinariesCheck {
     }
 
     fn check_binary_in_noarch(&self, pkg: &Pkg, pkgfile: &PkgFile, out: &mut Filter) {
-        if pkg.arch == "noarch" && !noarch_binary_is_foreign_target(pkgfile) {
+        if pkg.arch == "noarch"
+            && !noarch_binary_is_foreign_target(pkgfile)
+            && !noarch_binary_is_grub_module(pkgfile)
+        {
             add_info(
                 out,
                 Level::Error,
@@ -10001,6 +10053,239 @@ description = "explicit priority string bypasses the system crypto policy"
         elf
     }
 
+    /// Craft a minimal ELF object (32- or 64-bit) with the given
+    /// `e_type` and `e_machine`, the named SHT_PROGBITS sections and
+    /// a `.symtab` defining `defined_syms` in section 1. Enough
+    /// structure for goblin to expose the header, the section names
+    /// and the defined symbols -- the three things the GRUB-module
+    /// classification reads.
+    fn elf_object(
+        is_64: bool,
+        machine: u16,
+        elf_type: u16,
+        sections: &[&str],
+        defined_syms: &[&str],
+    ) -> Vec<u8> {
+        // String tables first: their offsets drive the headers.
+        let mut strtab: Vec<u8> = vec![0];
+        let mut sym_name_offs: Vec<u32> = Vec::new();
+        for s in defined_syms {
+            sym_name_offs.push(u32::try_from(strtab.len()).unwrap());
+            strtab.extend_from_slice(s.as_bytes());
+            strtab.push(0);
+        }
+        let all_names: Vec<&str> = sections
+            .iter()
+            .copied()
+            .chain([".symtab", ".strtab", ".shstrtab"])
+            .collect();
+        let mut shstrtab: Vec<u8> = vec![0];
+        let mut sec_name_offs: Vec<u32> = Vec::new();
+        for s in &all_names {
+            sec_name_offs.push(u32::try_from(shstrtab.len()).unwrap());
+            shstrtab.extend_from_slice(s.as_bytes());
+            shstrtab.push(0);
+        }
+
+        let ehsize: usize = if is_64 { 64 } else { 52 };
+        let shentsize: usize = if is_64 { 64 } else { 40 };
+        let syment: usize = if is_64 { 24 } else { 16 };
+        let nsec = sections.len();
+        let strtab_idx = nsec + 2;
+        let shstrtab_idx = nsec + 3;
+        let shnum = nsec + 4;
+
+        // The symbol table: a null entry, then one defined
+        // GLOBAL FUNC symbol per name, all in section 1.
+        let mut symtab: Vec<u8> = vec![0; syment];
+        for off in &sym_name_offs {
+            if is_64 {
+                symtab.extend_from_slice(&off.to_le_bytes());
+                symtab.push(0x12); // STB_GLOBAL | STT_FUNC
+                symtab.push(0);
+                symtab.extend_from_slice(&1u16.to_le_bytes());
+                symtab.extend_from_slice(&0u64.to_le_bytes());
+                symtab.extend_from_slice(&0u64.to_le_bytes());
+            } else {
+                symtab.extend_from_slice(&off.to_le_bytes());
+                symtab.extend_from_slice(&0u32.to_le_bytes());
+                symtab.extend_from_slice(&0u32.to_le_bytes());
+                symtab.push(0x12);
+                symtab.push(0);
+                symtab.extend_from_slice(&1u16.to_le_bytes());
+            }
+        }
+
+        // Section contents sit right after the ELF header: one byte
+        // per named section, then symtab, strtab, shstrtab.
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut cursor = ehsize;
+        for _ in sections {
+            offsets.push(cursor);
+            cursor += 1;
+        }
+        let symtab_off = cursor;
+        cursor += symtab.len();
+        let strtab_off = cursor;
+        cursor += strtab.len();
+        let shstrtab_off = cursor;
+        cursor += shstrtab.len();
+        let shoff = cursor;
+
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(ELF_MAGIC);
+        out.push(if is_64 { 2 } else { 1 }); // EI_CLASS
+        out.push(1); // EI_DATA: little-endian
+        out.push(1); // EI_VERSION
+        out.extend_from_slice(&[0; 9]); // EI_OSABI + padding
+        out.extend_from_slice(&elf_type.to_le_bytes());
+        out.extend_from_slice(&machine.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes()); // e_version
+        if is_64 {
+            out.extend_from_slice(&0u64.to_le_bytes()); // e_entry
+            out.extend_from_slice(&0u64.to_le_bytes()); // e_phoff
+            out.extend_from_slice(&(shoff as u64).to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+            out.extend_from_slice(&(ehsize as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // e_phentsize
+            out.extend_from_slice(&0u16.to_le_bytes()); // e_phnum
+            out.extend_from_slice(&(shentsize as u16).to_le_bytes());
+            out.extend_from_slice(&(shnum as u16).to_le_bytes());
+            out.extend_from_slice(&(shstrtab_idx as u16).to_le_bytes());
+        } else {
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&(shoff as u32).to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&(ehsize as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&(shentsize as u16).to_le_bytes());
+            out.extend_from_slice(&(shnum as u16).to_le_bytes());
+            out.extend_from_slice(&(shstrtab_idx as u16).to_le_bytes());
+        }
+        debug_assert_eq!(out.len(), ehsize);
+        out.resize(out.len() + sections.len(), b'X');
+        out.extend_from_slice(&symtab);
+        out.extend_from_slice(&strtab);
+        out.extend_from_slice(&shstrtab);
+        debug_assert_eq!(out.len(), shoff);
+
+        struct Shdr {
+            name: u32,
+            stype: u32,
+            flags: u64,
+            off: usize,
+            size: usize,
+            link: u32,
+            info: u32,
+            align: u64,
+            entsize: u64,
+        }
+        fn push_sh(out: &mut Vec<u8>, is_64: bool, sh: &Shdr) {
+            out.extend_from_slice(&sh.name.to_le_bytes());
+            out.extend_from_slice(&sh.stype.to_le_bytes());
+            if is_64 {
+                out.extend_from_slice(&sh.flags.to_le_bytes());
+                out.extend_from_slice(&0u64.to_le_bytes()); // sh_addr
+                out.extend_from_slice(&(sh.off as u64).to_le_bytes());
+                out.extend_from_slice(&(sh.size as u64).to_le_bytes());
+                out.extend_from_slice(&sh.link.to_le_bytes());
+                out.extend_from_slice(&sh.info.to_le_bytes());
+                out.extend_from_slice(&sh.align.to_le_bytes());
+                out.extend_from_slice(&sh.entsize.to_le_bytes());
+            } else {
+                out.extend_from_slice(&(sh.flags as u32).to_le_bytes());
+                out.extend_from_slice(&0u32.to_le_bytes());
+                out.extend_from_slice(&(sh.off as u32).to_le_bytes());
+                out.extend_from_slice(&(sh.size as u32).to_le_bytes());
+                out.extend_from_slice(&sh.link.to_le_bytes());
+                out.extend_from_slice(&sh.info.to_le_bytes());
+                out.extend_from_slice(&(sh.align as u32).to_le_bytes());
+                out.extend_from_slice(&(sh.entsize as u32).to_le_bytes());
+            }
+        }
+        // The NULL section header.
+        push_sh(
+            &mut out,
+            is_64,
+            &Shdr {
+                name: 0,
+                stype: 0,
+                flags: 0,
+                off: 0,
+                size: 0,
+                link: 0,
+                info: 0,
+                align: 0,
+                entsize: 0,
+            },
+        );
+        for (i, _) in sections.iter().enumerate() {
+            push_sh(
+                &mut out,
+                is_64,
+                &Shdr {
+                    name: sec_name_offs[i],
+                    stype: 1,   // SHT_PROGBITS
+                    flags: 0x2, // SHF_ALLOC
+                    off: offsets[i],
+                    size: 1,
+                    link: 0,
+                    info: 0,
+                    align: 1,
+                    entsize: 0,
+                },
+            );
+        }
+        push_sh(
+            &mut out,
+            is_64,
+            &Shdr {
+                name: sec_name_offs[nsec],
+                stype: 2, // SHT_SYMTAB
+                flags: 0,
+                off: symtab_off,
+                size: symtab.len(),
+                link: u32::try_from(strtab_idx).unwrap(),
+                info: 1, // one local symbol: the null entry
+                align: 8,
+                entsize: syment as u64,
+            },
+        );
+        push_sh(
+            &mut out,
+            is_64,
+            &Shdr {
+                name: sec_name_offs[nsec + 1],
+                stype: 3, // SHT_STRTAB
+                flags: 0,
+                off: strtab_off,
+                size: strtab.len(),
+                link: 0,
+                info: 0,
+                align: 1,
+                entsize: 0,
+            },
+        );
+        push_sh(
+            &mut out,
+            is_64,
+            &Shdr {
+                name: sec_name_offs[nsec + 2],
+                stype: 3,
+                flags: 0,
+                off: shstrtab_off,
+                size: shstrtab.len(),
+                link: 0,
+                info: 0,
+                align: 1,
+                entsize: 0,
+            },
+        );
+        out
+    }
+
     /// A `PkgFile` backed by a real temp file holding `bytes`, so the
     /// classification reads the payload header and archive members
     /// instead of the magic string.
@@ -10394,6 +10679,272 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_lacks(
             &results,
             "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_grub_module_is_quiet() {
+        // Tom's ruling (2026-10-27): a GRUB module in a noarch
+        // package is the bootloader's own payload, not host code --
+        // a host-machine ET_REL carrying GRUB's ABI sections.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let bytes = elf_object(
+            true,
+            goblin::elf::header::EM_X86_64,
+            goblin::elf::header::ET_REL,
+            &[".text", ".module_license", ".moddeps", ".modname"],
+            &["grub_mod_init", "grub_mod_fini"],
+        );
+        let file = real_file_pkgfile(
+            &dir,
+            "normal.mod",
+            "/usr/share/grub2/x86_64-efi/normal.mod",
+            "ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped",
+            &bytes,
+        );
+        let pkg = synthetic_pkg("grub2-x86_64-efi", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_grub_debug_module_is_quiet() {
+        // The debug packages' `.module` intermediates are the same
+        // modules before finalisation: they carry `.module_license`
+        // but neither `.modname` nor `.moddeps`, so the signature
+        // must not require the finalisation sections.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let bytes = elf_object(
+            false,
+            goblin::elf::header::EM_386,
+            goblin::elf::header::ET_REL,
+            &[".text", ".module_license"],
+            &["grub_mod_init", "grub_mod_fini"],
+        );
+        let file = real_file_pkgfile(
+            &dir,
+            "acpi.module",
+            "/usr/share/grub2/i386-pc/acpi.module",
+            "ELF 32-bit LSB relocatable, Intel 80386, version 1 (SYSV), not stripped",
+            &bytes,
+        );
+        let pkg = synthetic_pkg("grub2-i386-pc-debug", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+    }
+
+    #[test]
+    fn noarch_plain_relocatable_object_still_fires() {
+        // Near-miss, #848's core case: an ordinary host `.o` in a
+        // noarch package -- ET_REL and host-machine like a module,
+        // but no GRUB ABI section. It keeps firing.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let bytes = elf_object(
+            true,
+            goblin::elf::header::EM_X86_64,
+            goblin::elf::header::ET_REL,
+            &[".text"],
+            &[],
+        );
+        let file = real_file_pkgfile(
+            &dir,
+            "efiemu64.o",
+            "/usr/share/grub2/i386-pc/efiemu64.o",
+            "ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped",
+            &bytes,
+        );
+        let pkg = synthetic_pkg("grub2-i386-pc", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "a plain object fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_grub_kernel_image_still_fires() {
+        // Near-miss: GRUB's linked kernel image for the EFI
+        // platforms is itself an ET_REL carrying `.module_license`
+        // (the license objects of the statically linked modules),
+        // but it defines the `grub_main` entry point, which no
+        // module defines. It keeps firing.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let bytes = elf_object(
+            false,
+            goblin::elf::header::EM_386,
+            goblin::elf::header::ET_REL,
+            &[".text", ".module_license"],
+            &["grub_main"],
+        );
+        let file = real_file_pkgfile(
+            &dir,
+            "kernel.img",
+            "/usr/share/grub2/i386-efi/kernel.img",
+            "ELF 32-bit LSB relocatable, Intel 80386, version 1 (SYSV), not stripped",
+            &bytes,
+        );
+        let pkg = synthetic_pkg("grub2-i386-efi", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "the kernel image fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_grub_sectioned_exec_still_fires() {
+        // Near-miss: the PC platforms' kernel images are ET_EXEC
+        // and carry `.module_license` too; the signature requires
+        // ET_REL, so they keep firing.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let bytes = elf_object(
+            true,
+            goblin::elf::header::EM_X86_64,
+            goblin::elf::header::ET_EXEC,
+            &[".text", ".module_license"],
+            &["grub_main"],
+        );
+        let file = real_file_pkgfile(
+            &dir,
+            "kernel.img",
+            "/usr/share/grub2/i386-pc/kernel.img",
+            "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), not stripped",
+            &bytes,
+        );
+        let pkg = synthetic_pkg("grub2-i386-pc", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "an ET_EXEC image fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_grub_sectioned_exec_without_entry_still_fires() {
+        // The type arm isolated: an ET_EXEC carrying the ABI
+        // sections and a module entry symbol, but not `grub_main`.
+        // Only the ET_REL requirement keeps this firing -- a linked
+        // image is a runnable host binary whatever sections it
+        // carries.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let bytes = elf_object(
+            true,
+            goblin::elf::header::EM_X86_64,
+            goblin::elf::header::ET_EXEC,
+            &[".text", ".module_license", ".modname"],
+            &["grub_mod_init"],
+        );
+        let file = real_file_pkgfile(
+            &dir,
+            "linked.img",
+            "/usr/share/grub2/x86_64-efi/linked.img",
+            "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), not stripped",
+            &bytes,
+        );
+        let pkg = synthetic_pkg("grub2-x86_64-efi", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "a linked image fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_grub_module_in_archive_still_fires() {
+        // The GRUB arm reads plain files only: an archive member
+        // with the module signature is classified by the archive
+        // rules as before (a host ELF member keeps the archive
+        // firing outside the foreign-target exemption).
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let module = elf_object(
+            true,
+            goblin::elf::header::EM_X86_64,
+            goblin::elf::header::ET_REL,
+            &[".text", ".module_license", ".modname"],
+            &["grub_mod_init"],
+        );
+        let archive = craft_ar_archive(&[("normal.o", &module)]);
+        let file = real_file_pkgfile(
+            &dir,
+            "libmodules.a",
+            "/usr/lib/libmodules.a",
+            "current ar archive",
+            &archive,
+        );
+        assert!(!noarch_binary_is_grub_module(&file));
+        let pkg = synthetic_pkg("noarchpkg", "noarch", vec![file]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(lines.len(), 1, "an archived module fires: {results:?}");
+    }
+
+    #[test]
+    fn noarch_foreign_grub_shaped_payload_boundaries() {
+        // The GRUB arm is scoped to host machines (the ruled
+        // class). A foreign-machine module-shaped object is the
+        // foreign-target gate's business, unchanged: quiet in a
+        // target-payload location, firing outside one.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let bytes = elf_object(
+            true,
+            goblin::elf::header::EM_AARCH64,
+            goblin::elf::header::ET_REL,
+            &[".text", ".module_license", ".modname"],
+            &["grub_mod_init"],
+        );
+        let in_sysroot = real_file_pkgfile(
+            &dir,
+            "in.mod",
+            "/usr/aarch64-suse-linux/sys-root/usr/lib/in.mod",
+            "ELF 64-bit LSB relocatable, ARM aarch64, version 1 (SYSV), not stripped",
+            &bytes,
+        );
+        assert!(!noarch_binary_is_grub_module(&in_sysroot));
+        let pkg = synthetic_pkg("cross-pkg", "noarch", vec![in_sysroot]);
+        let results = driver_results(&pkg, &config);
+        assert_lacks(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+
+        let outside = real_file_pkgfile(
+            &dir,
+            "out.mod",
+            "/usr/share/grub2/arm64-efi/out.mod",
+            "ELF 64-bit LSB relocatable, ARM aarch64, version 1 (SYSV), not stripped",
+            &bytes,
+        );
+        let pkg = synthetic_pkg("grub2-arm64-efi", "noarch", vec![outside]);
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(
+            &results,
+            "arch-independent-package-contains-binary-or-object",
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "a foreign object outside the target locations fires: {results:?}"
         );
     }
 
