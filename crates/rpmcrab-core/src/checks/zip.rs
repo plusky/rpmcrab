@@ -90,8 +90,8 @@ fn first_bad_crc(archive: &mut ZipArchive<File>) -> CrcOutcome {
     CrcOutcome::Ok
 }
 
-/// Approximation of CPython's `zipfile.is_zipfile`: scan the tail for the
-/// end-of-central-directory signature. Anything else is silently skipped,
+/// Approximation of CPython's `zipfile.is_zipfile`: the tail must hold
+/// an end-of-central-directory record. Anything else is silently skipped,
 /// exactly like the reference.
 fn has_end_of_central_dir(path: &Path) -> bool {
     const EOCD: &[u8] = b"PK\x05\x06";
@@ -113,7 +113,14 @@ fn has_end_of_central_dir(path: &Path) -> bool {
     if file.read_exact(&mut buf).is_err() {
         return false;
     }
-    buf.windows(EOCD.len()).any(|w| w == EOCD)
+    // `_EndRecData` works from the LAST signature occurrence in the
+    // tail and requires the complete 22-byte record to start there:
+    // signature bytes with a truncated record after them (the shape of
+    // deliberately corrupted test fixtures) do not make a zipfile.
+    let Some(pos) = buf.windows(EOCD.len()).rposition(|w| w == EOCD) else {
+        return false;
+    };
+    pos + 22 <= buf.len()
 }
 
 /// The jar manifest, decoded lossily like the reference's
@@ -344,6 +351,60 @@ mod tests {
         let path = write_fixture(dir.path(), "a.zip", &bytes);
         // Empty archives are valid: no finding.
         assert!(ZipCheck::inspect(&path, "a.zip").is_empty());
+    }
+
+    #[test]
+    fn signature_without_complete_eocd_record_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        // The busybox-testsuite shape: a mangled local header and EOCD
+        // signature bytes near EOF (offsets 83 and 91 in the real 96-byte
+        // fixture), but no complete 22-byte EOCD record anywhere.
+        // `is_zipfile()` is false, so the reference skips the file; the
+        // signature-only gate used to pass it on to the reader, whose
+        // open failure became an unable-to-read-zip error.
+        let mut bytes = b"PK\x03\x00".to_vec();
+        bytes.resize(83, 0x00);
+        bytes.extend_from_slice(b"PK\x05\x06");
+        bytes.extend_from_slice(&[0x00; 4]);
+        bytes.extend_from_slice(b"PK\x05\x06");
+        bytes.push(0x00);
+        let path = write_fixture(dir.path(), "a.zip", &bytes);
+        assert!(ZipCheck::inspect(&path, "a.zip").is_empty());
+    }
+
+    #[test]
+    fn truncated_last_eocd_occurrence_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        // A complete EOCD record early in the tail does not rescue the
+        // file when the LAST signature occurrence starts a truncated
+        // record: `_EndRecData` reads from the last occurrence only.
+        let mut bytes = b"PK\x05\x06".to_vec();
+        bytes.extend_from_slice(&[0x00; 18]);
+        bytes.extend_from_slice(b"junkjunk");
+        bytes.extend_from_slice(b"PK\x05\x06");
+        bytes.extend_from_slice(&[0x00; 9]);
+        let path = write_fixture(dir.path(), "a.zip", &bytes);
+        assert!(ZipCheck::inspect(&path, "a.zip").is_empty());
+    }
+
+    #[test]
+    fn complete_eocd_record_with_comment_is_still_judged() {
+        let dir = tempfile::tempdir().unwrap();
+        // Near-miss: a complete EOCD record (here with a comment) passes
+        // the gate, and the check goes on to judge the archive: the
+        // claimed central directory is past EOF, so it is unreadable.
+        let mut bytes = b"PK\x05\x06".to_vec();
+        bytes.extend_from_slice(&[0x00, 0x00]); // disk number
+        bytes.extend_from_slice(&[0x00, 0x00]); // cd disk
+        bytes.extend_from_slice(&[0x01, 0x00]); // disk entries
+        bytes.extend_from_slice(&[0x01, 0x00]); // total entries
+        bytes.extend_from_slice(&[0x2e, 0x00, 0x00, 0x00]); // cd size
+        bytes.extend_from_slice(&[0x64, 0x00, 0x00, 0x00]); // cd offset (past EOF)
+        bytes.extend_from_slice(&[0x05, 0x00]); // comment length
+        bytes.extend_from_slice(b"hello");
+        let path = write_fixture(dir.path(), "a.zip", &bytes);
+        let findings = ZipCheck::inspect(&path, "a.zip");
+        assert_eq!(fixture_names(&findings), vec!["unable-to-read-zip"]);
     }
 
     #[test]
