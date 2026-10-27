@@ -3295,7 +3295,29 @@ impl FilesCheck {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let abslink = crate::pkg::normalize_path(&format!("{parent}/{link}"));
-            if !pkg.files.iter().any(|f| f.name == abslink) && !pkg.req_names.contains(&abslink) {
+            // A target naming a directory this package itself populates
+            // is not dangling: installing the package creates the target
+            // directory as a leading directory of its own payload, so the
+            // link resolves even though no header entry names the target
+            // itself (a link to `.` or `../..`, a JDK tree link whose
+            // directory carries the package's own headers). The evidence
+            // must be a non-%ghost entry strictly below the target --
+            // a %ghost entry installs no payload, so it creates no
+            // directory -- and the prefix carries a trailing slash, so a
+            // sibling path that merely shares a string prefix does not
+            // credit. The test runs on the verbatim normalised target:
+            // a root-level link's `//usr/...` form matches no shipped
+            // path, so the class-F parity shape (filesystem's own root
+            // links) keeps firing, as the #547 ledger entry pins. The
+            // reference has no such credit; the divergence is ledgered.
+            let populated_dir = pkg
+                .files
+                .iter()
+                .any(|f| !f.is_ghost() && f.name.starts_with(&format!("{abslink}/")));
+            if !populated_dir
+                && !pkg.files.iter().any(|f| f.name == abslink)
+                && !pkg.req_names.contains(&abslink)
+            {
                 // Session-aware decision (issue #547): record the link
                 // and decide in `after_checks`, when the file sets of
                 // the whole run are known — a sibling package in the
@@ -8146,6 +8168,86 @@ mod tests {
             lines.iter().any(|l| l.contains("lone-root-link")),
             "got: {lines:?}"
         );
+    }
+
+    /// Build one package from `files` (fcprobe header) and return the
+    /// names of the findings the full session-aware FilesCheck emits.
+    fn dangling_names_for_files(files: Vec<PkgFile>) -> Vec<String> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.ghost_files = files
+            .iter()
+            .filter(|f| f.is_ghost())
+            .map(|f| f.name.clone())
+            .collect();
+        pkg.files = files;
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &test_config());
+        results.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    #[test]
+    fn dangling_relative_populated_dir_target_stays_silent() {
+        // The link's target is a directory no header entry names, but
+        // the package ships payload below it, so installing the package
+        // creates the directory and the link resolves (gajim-lang's
+        // locale link shape). The reference fires here; the divergence
+        // is ledgered.
+        let names = dangling_names_for_files(vec![
+            symlink("/usr/share/foo/locale", "../locale"),
+            plain_file("/usr/share/locale/en/LC_MESSAGES/foo.mo"),
+        ]);
+        assert_lacks(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_ancestor_and_dot_targets_stay_silent() {
+        // A link to an ancestor of its own tree (`../..`, the ntp
+        // chroot-mirror shape) and a link to `.` (the onednn / X11
+        // shape) name directories the package's own payload creates as
+        // leading directories.
+        let names = dangling_names_for_files(vec![
+            symlink("/var/lib/foo/var/lib/foo", "../.."),
+            plain_file("/var/lib/foo/drift"),
+            symlink("/usr/include/mkl-foo", "."),
+            plain_file("/usr/include/foo.h"),
+        ]);
+        assert_lacks(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_ghost_only_population_fires() {
+        // A %ghost entry below the target installs no payload, so it
+        // creates no directory: the target stays dangling.
+        let mut ghost = plain_file("/usr/share/locale/en/LC_MESSAGES/foo.mo");
+        ghost.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        let names =
+            dangling_names_for_files(vec![symlink("/usr/share/foo/locale", "../locale"), ghost]);
+        assert_has(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_string_prefix_lookalike_fires() {
+        // `/usr/share/locale2/...` shares a string prefix with the
+        // target `/usr/share/locale` but is not below it: no credit.
+        let names = dangling_names_for_files(vec![
+            symlink("/usr/share/foo/locale", "../locale"),
+            plain_file("/usr/share/locale2/en/LC_MESSAGES/foo.mo"),
+        ]);
+        assert_has(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_root_link_populated_target_still_fires() {
+        // Class-F parity (issue #547): a root-level link's normalised
+        // target keeps the double leading slash (`//usr/...`), which no
+        // shipped path starts with, so the populated-directory credit
+        // does not rescue it -- the reference fires identically.
+        let names = dangling_names_for_files(vec![
+            symlink("/lone-root-link", "usr/share/foo/sub"),
+            plain_file("/usr/share/foo/sub/data.txt"),
+        ]);
+        assert_has(&names, "dangling-relative-symlink");
     }
 
     #[test]
