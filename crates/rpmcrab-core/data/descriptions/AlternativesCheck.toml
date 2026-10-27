@@ -20,13 +20,12 @@ The package does not have update-alternatives in Requires(post) or
 Requires(postun). This is needed for the proper scriptlet execution.
 """
 update-alternatives-post-call-missing="""
-The package does not call update-alternatives --install in post phase to
-install all the configuration.
+The package does not call update-alternatives --install in the %post
+phase to register its alternatives.
 """
 update-alternatives-postun-call-missing="""
-The package does not call update-alternatives --remove in postun phase to
-remove all the configuration for each individual --install binary that
-was done in post.
+The package does not call update-alternatives --remove in the %postun
+phase for each --install that was done in %post.
 """
 alts-requirement-missed="""
 The package does not require package alts, needed for libalternatives.

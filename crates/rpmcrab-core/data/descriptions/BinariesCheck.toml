@@ -147,6 +147,22 @@ call-to-mktemp="""
 This executable calls mktemp. As advised by the manpage (mktemp(3)), this
 function should be avoided.
 """
+call-to-gets="""
+This file references gets. gets reads a line into a caller-supplied
+buffer with no length bound, so any input longer than the buffer
+overwrites memory; it was removed from the C standard and from
+POSIX because no call to it can be made safe. The code should read
+input with fgets(3) or getline(3) instead; the fix belongs in the
+upstream project that ships the code.
+"""
+call-to-tmpnam="""
+This file references tmpnam, tmpnam_r or tempnam. These functions
+return a file name rather than an open file, so between the name
+being chosen and the caller opening it, an attacker can plant a
+symlink at that name and redirect the caller's write. The code
+should use mkstemp(3), which creates and opens the file atomically;
+the fix belongs in the upstream project that ships the code.
+"""
 unstripped-binary-or-object="""
 This executable should be stripped of debugging symbols, in order to take
 less space and be loaded faster. This is usually done automatically at
@@ -173,6 +189,73 @@ against. This may indicate a stripped archive.
 """
 binary-or-shlib-calls-gethostbyname="""
 The binary calls gethostbyname. Please port the code to use getaddrinfo.
+The finding is an error when the calling file is setuid/setgid or carries
+file capabilities, or when its package ships systemd service or socket
+units.
+"""
+binary-or-shlib-calls-md5="""
+The binary calls the low-level MD5 functions (MD5, MD5_Init,
+MD5_Update, MD5_Final). MD5 is broken as a cryptographic hash --
+collisions are cheap -- so it must not protect integrity,
+authenticity or credentials. A checksum over public, non-adversarial
+data is a legitimate use that the binary alone cannot rule out,
+which is why this finding is a warning: symbol presence is not
+proof of misuse. Where MD5 carries a security decision, replace it
+in the upstream source (SHA-256, or a keyed construction where the
+use requires one).
+"""
+binary-or-shlib-calls-des="""
+The binary calls the low-level DES functions (the DES_* entry
+points, including the triple-DES DES_ede forms). Single DES has a
+56-bit key and is brute-forced routinely, and triple-DES is
+disallowed for new protection (NIST SP 800-131A); both survive
+legitimately as compatibility relics, in legacy protocols and file
+formats. Where DES protects anything current, replace it in the
+upstream source; where it is a compatibility surface, the finding
+records that the surface exists.
+"""
+binary-or-shlib-calls-rc4="""
+The binary calls RC4 (RC4, RC4_set_key). RC4's keystream biases
+make it unsuitable for confidentiality or integrity -- it is
+prohibited in TLS by RFC 7465 -- and it survives legitimately only
+as a compatibility relic. Where RC4 protects anything current,
+replace it in the upstream source.
+"""
+go-toolchain-outdated="""
+The binary was built with the Go toolchain named in the detail, which
+predates the oldest release carrying fixes for known standard-library
+defects (CVE-2025-22871, fixed in go1.23.8 and go1.24.2). A Go binary
+keeps the standard library it was built with, so the defects stay in
+the shipped binary until the package is rebuilt. Please rebuild the
+package with a Go toolchain at or above the recorded floor.
+"""
+binary-or-shlib-calls-weak-prng="""
+The binary calls the predictable libc random functions (rand,
+random, srand, srandom, initstate, setstate, the *48 family or
+their reentrant *_r forms) and runs in a privileged
+or exposed context: the file is setuid, setgid or carries file
+capabilities, or the package ships a systemd service or socket.
+Values from these generators are predictable to anyone who can
+guess the seed -- typically the current time or the process id --
+so they must not become session identifiers, tokens, password
+salts, challenges or key material. The same calls are unremarkable
+for jitter, sampling and load spreading, which is why this finding
+is a warning scoped to privileged and daemon-shipped binaries.
+Where a generated value is security-relevant, take it from
+getrandom(2), arc4random(3) or /dev/urandom in the upstream source
+instead.
+"""
+binary-or-shlib-calls-unbounded-copy="""
+The binary calls strcpy, strcat, sprintf or vsprintf. None of these
+functions knows the size of the destination, so an input longer than
+the destination buffer overflows it (CWE-120). Whether a given call
+can actually overflow depends on the call site, which the binary
+alone cannot decide. Treat the finding as a prompt to audit the call
+sites and switch to a bounded form (strlcpy for strcpy, strlcat
+for strcat, snprintf for sprintf, vsnprintf for vsprintf, or the
+fortified __*_chk variants the compiler selects under
+_FORTIFY_SOURCE); the fix belongs in the upstream source, not in
+the package.
 """
 static-library-without-debuginfo="""
 The static library doesn't contain any debuginfo. Binaries linking against

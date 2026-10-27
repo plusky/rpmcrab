@@ -18,6 +18,22 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "call-to-gets"
+kind = "behaviour"
+reason = "New `call-to-gets` error with no reference counterpart (rpmcrab#972): an undefined reference to gets charges the defining call of CWE-242 \u2014 gets reads a line into a caller buffer with no length bound, was removed from C11 and POSIX.1-2024, and survives in glibc only as a binary-compatibility symbol. The predicate charges undefined references only, in archives and linked objects alike, and never definitions: glibc's libc defines gets and stays silent, because the provider is not a caller \u2014 the definition-is-not-a-call line of the #852 mktemp scoping, applied to every object kind. The anchored pattern keeps the bounded neighbours silent (fgets, gets_s, getline), and the fortified __gets_chk, whose bound is checked at the call, is a different symbol and does not match. Measured over the full Factory corpus (51,586 binary RPMs): zero findings, and an independent readelf census (8,776 ELF files across a stratified sample of 3,969 RPMs plus every libc-bearing package) found no undefined gets reference anywhere, and gets definitions only in glibc's own libc.so.6, host and cross sys-roots alike; the population is empty today and the finder ships as a tripwire at the family's no-safe-use error, since no safe use of gets exists. Its staged description lives in crates/rpmcrab-core/data/descriptions/BinariesCheck.toml."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/972"
+
+[[divergence]]
+case = "global"
+check = "call-to-tmpnam"
+kind = "behaviour"
+reason = "New `call-to-tmpnam` error with no reference counterpart (rpmcrab#972): an undefined reference to tmpnam, tmpnam_r or tempnam charges the CWE-377 name-to-open race the sibling call-to-mktemp charges for mktemp — the names hand back a path a later open follows, so the file a caller ends up with is never provably the file the name was minted for, and glibc's linker warns the family is dangerous whenever a link unit references it. The predicate charges references only, in archives and linked objects alike, and never definitions: the library implementing the family is the provider, not a caller (glibc's libc.so.6 defines all three names and stays silent) — the definition-is-not-a-call line of the #852 mktemp scoping, applied to every object kind, so family completion does not import the defined-match charge the mktemp tightening removes. Measured over the full Factory corpus (51,586 binary RPMs): 38 findings in 33 binary packages from 28 source packages, every firing file independently classified with readelf — each carries an undefined reference to a family name with a call relocation (36 PLT jump slots; clisp's two files bind the names by address for their foreign-function interface), no definition site fires, and the family has no safe-use shape (the functions return a name, never a descriptor). Error, ungated, like mktemp. Its staged description lives in crates/rpmcrab-core/data/descriptions/BinariesCheck.toml."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/972"
+
+[[divergence]]
+case = "global"
 check = "executable-stack"
 kind = "behaviour"
 reason = "Fixed behaviour: the executable-stack arch list also matches aarch64. The reference's `arm.*` does not match the string 'aarch64', so the reference skips the check on ARM64; rpmcrab includes it."
@@ -44,6 +60,14 @@ check = "shared-library-without-dependency-information"
 kind = "behaviour"
 reason = "Upstream rpmlint#598: the pinned reference deleted the `shared-library-without-dependency-information` error after Go PIE false positives (Go executables are ET_DYN with no DT_NEEDED); the port restores the check scoped to non-Go shared objects, exempting ELFs that carry a `.note.go.buildid` section. Per plusky/rpmcrab#359 the port additionally exempts plugin-like objects for which an empty DT_NEEDED is legitimate: dlopen-only plugins (no DT_SONAME), fully self-contained objects (no non-weak undefined symbols), and executable-entry shims (define `main`)."
 since = "0.1.0"
+upstream = "https://github.com/rpm-software-management/rpmlint/issues/598"
+
+[[divergence]]
+case = "global"
+check = "shared-library-without-dependency-information"
+kind = "behaviour"
+reason = "Extension of the #359 plugin-like scope: a shared object whose DT_SONAME is exactly its own file name with no version component (`certmgr_script.so`, `VMMR0.r0`) is a module built to be loaded by path -- application plugins, interpreter extension modules, hypervisor payloads -- whose build stamps the module's own name as its SONAME; it resolves its undefined symbols against the host process, so an empty DT_NEEDED states nothing. Measured over the Factory corpus (51,589 RPMs): the restored check fired 53 times; 50 are this shape and no package in the corpus records a DT_NEEDED on any of those names, while the only two corpus DT_NEEDED consumers of a firing SONAME are genuine versioned library names (`libfrrfpm_pb.so.0`, `libmlag_pb.so.0`, linked by the frr package) -- those keep firing, as does a versioned SONAME carried by a longer file name and a versioned SONAME equal to the file name. Corpus 53 -> 3."
+since = "0.4.1"
 upstream = "https://github.com/rpm-software-management/rpmlint/issues/598"
 
 [[divergence]]
@@ -231,6 +255,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/847"
 
 [[divergence]]
 case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "Deliberate fix: static-library-without-symtab is not charged on an archive with no members at all (recorded while parsing as no_members: the file is exactly the ar magic). A zero-member archive has nothing an index could index and nothing a symtab could describe: glibc's post-2.34 merged-library stubs are empty placeholder archives shipped so the old -l names keep resolving to libc, and they link vacuously, dynamically and with -static. The reference charges them, because its predicate asks only whether any member carries a .symtab, which a memberless archive fails trivially. The sibling debuginfo finding already stays quiet on this shape through its no-code-carrying-member gate (plusky/rpmcrab#847); the symtab finding now reads the same parse-time fact. Verified over the factory-full corpus (the 1,503 RPMs whose payloads carry an archive; 16,146 distinct findings before, 16,136 after): the finding's 18 E classify as the 10 glibc zero-member archives -- libdl.a, libpthread.a, librt.a and libutil.a in glibc-devel, libanl.a in glibc-devel-static, and the five _p profile variants in glibc-profile -- and 8 wine-family import libraries whose members carry no .symtab. After the fix exactly the 8 wine findings remain and no other finding in the scanned set changes."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "missing-PT_GNU_STACK-section"
 kind = "behaviour"
 reason = "Deliberate fix (issue #850): missing-PT_GNU_STACK-section is charged only where the absence states something about how the file was linked: the file is ET_EXEC or ET_DYN, it carries a programme header table for the header to be absent from, and it is not separate debuginfo (a `.debug` name suffix, or a path under /usr/lib/debug/ -- the treatment check_hardening already applies to its findings). The reference charges every file whose readelf programme headers carry no GNU_STACK entry. Measured on the Factory corpus (sweep run-20261022-857d5ece; every binary RPM of the 17 affected source packages re-measured before and after the fix): the finding's 594 E classify as 568 EDK2 debuginfo artefacts in qemu-ovmf-x86_64-debug (ET_EXEC companions with LOAD/LOAD/DYNAMIC programme headers under /usr/lib/debug/ovmf-*/, stored for the debugger and never loaded by the dynamic linker), 14 relocatable objects, which carry no programme headers by construction (the Go race-runtime .syso files of go1.21 through go1.27, aws-nitro-enclaves-cli's nsm.ko, glibc-devel's libmcheck.a and lazarus' FPC .or files), and a 12-file residue that keeps firing -- linked images with a programme header table and no PT_GNU_STACK: e3's /usr/bin/e3, rr's librrpage.so and librrpage_32.so, hibiscus' libhbci4java-card-freebsd-64.so and libtowitoko-2.0.7.so, xen's three hypervisor images, qemu's openbios-sparc32, openbios-sparc64 and u-boot.e500 ROMs, and picotool's xip_ram_perms.elf. Pinned by the executable-stack gate tests in binaries.rs."
@@ -241,7 +272,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/850"
 case = "global"
 check = "call-to-mktemp"
 kind = "behaviour"
-reason = "Fix-and-diverge (plusky/rpmcrab#852): call-to-mktemp charges only an undefined reference in an archive \u2014 a FUNC symbol a member carries as SHN_UNDEF in .symtab or .dynsym, collected while parsing as undefined_function_refs. An archive's members are separate objects, so the member that implements mktemp is not a caller: newlib's libc.a carries mktemp as a definition in libc_a-mktemp.o (a real section index) and no undefined reference anywhere in the archive, and a definition site is not a call site \u2014 the finding's rationale is the caller's exposure to the mktemp race. Linked objects charge any FUNC match, defined or not, as the reference does: a statically linked executable bundling mktemp and a wrapper library that defines and calls its own variant both carry the definition with no undefined reference, and they fire. Measured on the Factory sweep run-20261022-857d5ece population over the same 52 source packages: 460 E in 52 source packages before, 74 E in 41 after, with no new firings; all 460 files were independently classified with readelf and by file kind \u2014 every silenced file is an archive carrying no undefined reference matching the pattern, and every remaining file carries an undefined reference or is a linked object carrying a defined match. Silenced: 386 archives \u2014 the cross newlib packages (360: cross-arm-none-newlib-devel 156, cross-rx-newlib-devel 128, cross-amdgcn-gcc13/14/15/16 64, cross-pru-newlib-devel 8, cross-riscv64-newlib-devel 4), Wine's C-runtime archives (21), glibc's libc.a and libc_p.a (2, the C library itself), ksh's archives (2) and one libguestfs archive (1). The 74 remaining findings are host executables and shared libraries: the 46 that carry an undefined reference (23 name mktemp itself, plain or versioned, and 23 name a project-private wrapper the pattern also matches \u2014 apr_file_mktemp, GNUNET_DISK_mktemp, gretl_mktemp, netsnmp_mktemp, e_mktemp, b_mktemp, r_syscmd_mktemp) plus 28 linked objects carrying a defined match only (the statically linked libguestfs family of guestfs-tools, virt-v2v and libguestfs binaries and libraries 16, ksh's libast/libcmd shared objects 2, net-snmp's shared objects 2, glibc's libc.so.6 1, and singletons in apr, evolution, fakechroot, gnunet, grass, gretl and radare2) \u2014 the pattern's reach is the reference's own searched regexp, unchanged here."
+reason = "Fix-and-diverge (plusky/rpmcrab#852): call-to-mktemp charges only an undefined reference in an archive — a FUNC symbol a member carries as SHN_UNDEF in .symtab or .dynsym, collected while parsing as undefined_function_refs. An archive's members are separate objects, so the member that implements mktemp is not a caller: newlib's libc.a carries mktemp as a definition in libc_a-mktemp.o (a real section index) and no undefined reference anywhere in the archive, and a definition site is not a call site — the finding's rationale is the caller's exposure to the mktemp race. Linked objects charge any FUNC match, defined or not, as the reference does: a statically linked executable bundling mktemp and a wrapper library that defines and calls its own variant both carry the definition with no undefined reference, and they fire. Measured on the Factory sweep run-20261022-857d5ece population over the same 52 source packages: 460 E in 52 source packages before, 74 E in 41 after, with no new firings; all 460 files were independently classified with readelf and by file kind — every silenced file is an archive carrying no undefined reference matching the pattern, and every remaining file carries an undefined reference or is a linked object carrying a defined match. Silenced: 386 archives — the cross newlib packages (360: cross-arm-none-newlib-devel 156, cross-rx-newlib-devel 128, cross-amdgcn-gcc13/14/15/16 64, cross-pru-newlib-devel 8, cross-riscv64-newlib-devel 4), Wine's C-runtime archives (21), glibc's libc.a and libc_p.a (2, the C library itself), ksh's archives (2) and one libguestfs archive (1). The 74 remaining findings are host executables and shared libraries: the 46 that carry an undefined reference (23 name mktemp itself, plain or versioned, and 23 name a project-private wrapper the pattern also matches — apr_file_mktemp, GNUNET_DISK_mktemp, gretl_mktemp, netsnmp_mktemp, e_mktemp, b_mktemp, r_syscmd_mktemp) plus 28 linked objects carrying a defined match only (the statically linked libguestfs family of guestfs-tools, virt-v2v and libguestfs binaries and libraries 16, ksh's libast/libcmd shared objects 2, net-snmp's shared objects 2, glibc's libc.so.6 1, and singletons in apr, evolution, fakechroot, gnunet, grass, gretl and radare2) — the pattern's reach is the reference's own searched regexp, unchanged here."
 since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/852"
 
@@ -282,3 +313,74 @@ check = "non-versioned-file-in-library-package"
 kind = "missing"
 reason = "Deliberate removal: the port does not emit this finding -- it is suppressed by both the openSUSE and Fedora distro configs (Fedora enables SharedLibraryPolicyCheck but filters this diagnostic, enforcing the policy in the build pipeline instead). The supported flavors are SUSE (openSUSE/SLFO, P1) and Fedora (P2); the generic/no-overlay flavor is not a supported use case, so its continued emission there is not a reason to keep the finding. The emission, its staged `--explain` entry, and the dedicated tests are removed; a negative pin in the BinariesCheck tests keeps the absence pinned under `cargo test`. The reference still emits it."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "no-binary"
+kind = "behaviour"
+reason = "rpmcrab stays silent when a payload file is data in a known native-layout format (data/arch-format-magics.toml: XimC compose caches, GDBM databases), whose byte layout is bound to the architecture that wrote it, so the arch marking is deliberate; the reference reports such packages (instance: xorg-x11-libX11-ccache, boo#1110020). Corpus 2026-10-26: 1,757 arch packages report no-binary; exactly one carries such payload."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "binary-or-shlib-calls-md5"
+kind = "behaviour"
+reason = "rpmcrab reports undefined references to the low-level MD5 entry points as the Warning binary-or-shlib-calls-md5 (rpmcrab#972); the reference has no such call finding. Full Factory snapshot measurement: 98 files in 52 binary packages (48 source packages) reference the set, each classified by hand -- protocol-mandated digest compatibility, content/format checksums, cracking workloads and binding surface dominate, and the few security-context uses are not separable by package facts, so the level is Warning."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "binary-or-shlib-calls-des"
+kind = "behaviour"
+reason = "rpmcrab reports undefined references to the low-level DES entry points (the DES_* family, including the triple-DES forms) as the Warning binary-or-shlib-calls-des (rpmcrab#972); the reference has no such call finding. Full Factory snapshot measurement: 42 files in 31 binary packages (23 source packages) reference the set, each classified by hand -- NTLM/DIGEST-MD5 compatibility, card and TPM protocol surfaces and legacy SQL functions dominate; one verified security-context use (grisbi account-file encryption) is not separable by package facts, so the level is Warning."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "binary-or-shlib-calls-rc4"
+kind = "behaviour"
+reason = "rpmcrab reports undefined references to the RC4 entry points as the Warning binary-or-shlib-calls-rc4 (rpmcrab#972); the reference has no such call finding. Full Factory snapshot measurement: 7 files in 6 binary packages (5 source packages) reference the set, each classified by hand -- all protocol compatibility or binding surface, so the level is Warning."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "go-toolchain-outdated"
+kind = "behaviour"
+reason = "New warning with no reference counterpart (issue #972): the reference has no Go toolchain finder. rpmcrab reads the toolchain version a Go binary's .go.buildinfo section records and warns when it is below the floor in data/go-toolchain-floor.toml (as of 2026-10-26: go1.23.8 on the 1.23 line, go1.24.2 on the 1.24 line, anchored on CVE-2025-22871). A version on an unlisted older line fires; a version on an unlisted newer line stays silent, so a stale floor under-fires and never false-fires. Factory corpus: 874 Go binaries in 613 binary packages record a parseable toolchain version, 44 files in 4 binary packages fire."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "binary-or-shlib-calls-weak-prng"
+kind = "behaviour"
+reason = "rpmcrab reports undefined references to the libc predictable-random family (rand, random, srand, srandom, initstate, setstate, the *48 generators and their reentrant *_r forms) as the Warning binary-or-shlib-calls-weak-prng when the firing file is privileged (setuid/setgid bits or file capabilities) or its package ships a systemd service/socket unit (rpmcrab#972); the reference has no such finder. Full Factory snapshot measurement: 3,251 files in 1,765 binary packages reference the family and 332 files in 185 packages sit inside the gate; the bare population emits nothing, and the gated level is Warning because the gated population's dominant uses are jitter, backoff and identifier uniqueness rather than security values."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "binary-or-shlib-calls-gethostbyname"
+kind = "severity"
+reason = "Fix-and-diverge (plusky/rpmcrab#967, the defect-pattern pilot of #959): the reference reports this tag at Warning unconditionally; rpmcrab splits the level on the registry's privilege-or-exposure gate. The gated form reports at Error: the firing file carries an undefined reference to the gethostbyname family (a call, not a definition) and either the file itself is privileged (setuid/setgid bits or file capabilities) or its package ships systemd service or socket units. Measured on the factory-full corpus (51,586 binary RPMs, every package covered): 986 warnings in 630 binary packages before. The firing population was classified from the RPM headers and readelf, independently of the port's own parse: 127 files sit in the gated context (3 privileged \u2014 exim, sendmail and uucp's uucico, all three also daemon-shipped; 127 daemon-shipped), 120 of the 127 carry an undefined reference, and readelf confirms the family symbol in all 127. The 7 definition-only files stay warnings: systemd's libnss_myhostname, libnss_mymachines and libnss_resolve, sssd's libnss_sss and libsss_util and nss-pam-ldapd's libnss_ldap implement the legacy entry points rather than call them, and dante's sockd defines its own replacement \u2014 the same definition/call split the call-to-mktemp archive scoping uses (#852). After: 120 errors in 76 binary packages (71 source packages) and 866 warnings, and the before/after runs agree finding-for-finding over the 630 firing packages. The worked case is rsync: /usr/bin/rsync calls gethostbyname in the daemon's hosts allow/deny matching (RsyncProject/rsync#563) and its package ships rsyncd.service and rsyncd.socket, so it reports at Error. One measured boundary: vino's vino-server ships only user units and stays a warning; the exposure gate counts system units."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "binary-or-shlib-calls-unbounded-copy"
+kind = "behaviour"
+reason = "rpmcrab reports undefined references to the unbounded string copy/format functions (strcpy, strcat, sprintf, vsprintf) as the Warning binary-or-shlib-calls-unbounded-copy (rpmcrab#972); the reference has no such call finding -- the names exist in its data only as fortify applicability markers. Full Factory snapshot measurement: 8,856 files in 2,866 binary packages (2,010 source packages) reference the family, and the privilege-or-exposure population is 508 files in 198 packages; the level is Warning in both populations because a call's reach depends on the call-site destination size, which the artefact does not carry."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "ar-failed"
+kind = "behaviour"
+reason = "The reference charges ar-failed on any archive GNU `ar` cannot list. Archives in the gplib dialect (the MPLIB-compatible format gputils' gplib writes for SDCC's pic14/pic16 targets) are valid libraries for their toolchain but unreadable by GNU binutils: all 406 corpus findings are sdcc libraries of that shape, and every one passes a strict structural parse (256-byte '/'-terminated member names, fixed-width numeric fields, member sizes chaining exactly to EOF, PIC COFF object members). rpmcrab treats a structurally valid gplib archive as a non-standard archive instead of charging ar-failed; archives that parse neither way are still charged."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "call-to-mktemp"
+kind = "behaviour"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/BinariesCheck.py"
+since = "0.4.1"
+reason = "Fix-and-diverge: the call pattern is anchored at the start, so the charged symbol must BE mktemp (optionally @GLIBC-versioned), not merely end with it. The reference builds the pattern with create_regexp_call('mktemp') and searches it over symbol names (BinariesCheck.py at the pinned reference commit), so every symbol ending in mktemp matches: project-private wrappers are charged as calls to the libc mktemp they are not. Measured A/B over the net-snmp binary family plus apr, gretl, gnunet, radare2, ksh and glibc corpus RPMs (11 RPMs, isolated config): call-to-mktemp 16 -> 2, zero findings added, all other findings identical; every removed row's trigger symbol was readelf-verified as a wrapper name -- netsnmp_mktemp (libsnmp45, 4 files), apr_file_mktemp, gretl_mktemp (4 files), GNUNET_DISK_mktemp, r_syscmd_mktemp (2 files), b_mktemp (ksh libcmd/libshell). The survivors are genuine: glibc's libc.so.6 defining mktemp@@GLIBC_2.2.5 and ksh's libast carrying mktemp. The wrapper population is the one the #852 entry counted inside its remaining 74 (23 undefined-reference files naming a wrapper, plus defined-match wrapper files among the 28 linked objects); those no longer fire."

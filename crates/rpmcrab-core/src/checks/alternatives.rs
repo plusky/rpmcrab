@@ -110,6 +110,17 @@ impl AlternativesCheck {
         (install, slaves)
     }
 
+    /// Whether an extracted alternative link still carries a shell
+    /// variable reference (`$i`, `${lib}`, `$bin`): the `--install` /
+    /// `--slave` line sits inside a shell loop, so the link is a
+    /// template, not a literal path -- no shipped file can carry that
+    /// name. The file-list validation below looks links up in the
+    /// package's file list literally, so it cannot judge a template;
+    /// the phase checks keep using the install set unchanged.
+    fn link_is_template(link: &str) -> bool {
+        link.contains('$')
+    }
+
     /// Validate the `%post` phase. Returns the install binaries found.
     fn check_post_phase(lines: &[String]) -> Result<Vec<(String, String)>, &'static str> {
         if lines.is_empty() {
@@ -129,13 +140,56 @@ impl AlternativesCheck {
         }
         let mut missing: Vec<String> = install.iter().map(|(_, n)| n.clone()).collect();
         for binary in missing.clone() {
-            let re = Regex::new(&format!(r"--remove\s+{}\b", fancy_regex::escape(&binary)))
-                .expect("remove pattern");
+            // The terminator cannot be `\b`: a name ending in a non-word
+            // character (tolua++) has no word boundary before the
+            // whitespace that follows it, so the reference's pattern
+            // never credits its --remove line. Require the name to end
+            // the token instead — whitespace, a command separator, or
+            // end of line — which also refuses the reference's false
+            // credit for a name that is a proper prefix of the removed
+            // one (tolua+ is not removed by a tolua++ line).
+            let name = fancy_regex::escape(&binary);
+            let re =
+                Regex::new(&format!(r"--remove\s+{}(?=\s|$|[;|&])", name)).expect("remove pattern");
             if lines.iter().any(|l| is_match(&re, l)) {
                 missing.retain(|b| b != &binary);
             }
         }
         missing
+    }
+
+    /// The `%postun` phase: report what `%post` installed that `%postun`
+    /// never removes (the bare package-level finding when `%postun` has
+    /// no update-alternatives line at all). An empty install set stays
+    /// silent: there is no removal for `%postun` to owe, where the
+    /// reference reports the bare finding unconditionally — vacuous for
+    /// packages whose `%post` only cleans up legacy registrations and
+    /// for packages present only through shipped `/etc/alternatives`
+    /// files.
+    fn check_postun(pkg: &Pkg, postun: &str, install: &[(String, String)], out: &mut Filter) {
+        if install.is_empty() {
+            return;
+        }
+        let postun_lines = Self::normalize_script(postun);
+        if postun_lines.is_empty() {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "update-alternatives-postun-call-missing",
+                &[],
+            );
+            return;
+        }
+        for binary in Self::check_postun_phase(&postun_lines, install) {
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "update-alternatives-postun-call-missing",
+                &[&binary],
+            );
+        }
     }
 
     /// The libalternatives file-list checks (directory presence, conf content).
@@ -490,34 +544,20 @@ impl Check for AlternativesCheck {
             }
         };
 
-        let postun_lines = Self::normalize_script(&postun);
-        if postun_lines.is_empty() {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "update-alternatives-postun-call-missing",
-                &[],
-            );
-        } else {
-            for binary in Self::check_postun_phase(&postun_lines, &install) {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "update-alternatives-postun-call-missing",
-                    &[&binary],
-                );
-            }
-        }
+        Self::check_postun(pkg, &postun, &install, out);
 
         // File list validation: the reference walks slaves before installs.
+        // Template links (shell loops) name no literal path, so the
+        // literal file-list lookups skip them; their concrete expansions
+        // are the package's own shipped files, judged when a literal
+        // --install line names them.
         let (_, slaves) = Self::find_binaries(&post_lines);
         let file_names: Vec<&str> = pkg.files.iter().map(|f| f.name.as_str()).collect();
         for binary in slaves
             .iter()
             .map(String::as_str)
             .chain(install.iter().map(|(l, _)| l.as_str()))
+            .filter(|link| !Self::link_is_template(link))
         {
             let etc_alt = format!(
                 "/etc/alternatives/{}",
@@ -591,6 +631,34 @@ mod tests {
     }
 
     #[test]
+    fn template_link_is_detected() {
+        // Loop-carried spellings seen in the corpus: db48-utils ($i),
+        // compatlibopenblas (${lib}), python-ctranslate2 ($bin).
+        assert!(AlternativesCheck::link_is_template("/usr/bin/db_$i"));
+        assert!(AlternativesCheck::link_is_template("/usr/lib64/${lib}"));
+        assert!(AlternativesCheck::link_is_template("/usr/bin/$bin"));
+        assert!(!AlternativesCheck::link_is_template("/usr/bin/foo"));
+        assert!(!AlternativesCheck::link_is_template(
+            "/usr/share/man/man1/foo.1.gz"
+        ));
+    }
+
+    #[test]
+    fn template_install_line_extracts_template_link() {
+        // The extraction itself is unchanged (the phase checks judge the
+        // install set as before); only the file-list lookups skip it.
+        let lines = vec![
+            "update-alternatives --install /usr/bin/$bin $bin /usr/bin/$bin-3.13 1313".to_string(),
+        ];
+        let (install, slaves) = AlternativesCheck::find_binaries(&lines);
+        assert_eq!(
+            install,
+            vec![("/usr/bin/$bin".to_string(), "$bin".to_string())]
+        );
+        assert!(slaves.is_empty());
+    }
+
+    #[test]
     fn normalize_joins_continuations_and_strips_quotes() {
         let script = "update-alternatives \\\n  --install \"/usr/bin/foo\" foo /usr/bin/foo-1.0 10\necho done\n";
         let lines = AlternativesCheck::normalize_script(script);
@@ -623,6 +691,71 @@ mod tests {
         let lines = vec!["update-alternatives --remove foo /usr/bin/foo-1.0".to_string()];
         let missing = AlternativesCheck::check_postun_phase(&lines, &install);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn postun_remove_of_plus_suffixed_name_is_credited() {
+        let install = vec![("/usr/bin/tolua++".to_string(), "tolua++".to_string())];
+        let lines = vec!["update-alternatives --remove tolua++ /usr/bin/toluapp-5.1".to_string()];
+        let missing = AlternativesCheck::check_postun_phase(&lines, &install);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn postun_remove_of_longer_name_does_not_credit_prefix() {
+        let install = vec![("/usr/bin/tolua+".to_string(), "tolua+".to_string())];
+        let lines = vec!["update-alternatives --remove tolua++ /usr/bin/toluapp-5.1".to_string()];
+        let missing = AlternativesCheck::check_postun_phase(&lines, &install);
+        assert_eq!(missing, vec!["tolua+".to_string()]);
+    }
+
+    #[test]
+    fn postun_remove_of_suffixed_word_name_does_not_credit() {
+        let install = vec![("/usr/bin/foo".to_string(), "foo".to_string())];
+        let lines = vec!["update-alternatives --remove foo2 /usr/bin/foo2-1.0".to_string()];
+        let missing = AlternativesCheck::check_postun_phase(&lines, &install);
+        assert_eq!(missing, vec!["foo".to_string()]);
+    }
+
+    fn postun_results(postun: &str, install: &[(&str, &str)]) -> Vec<(String, String)> {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = libalternatives_pkg(dir.path(), &[]);
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let install: Vec<(String, String)> = install
+            .iter()
+            .map(|(l, n)| (l.to_string(), n.to_string()))
+            .collect();
+        AlternativesCheck::check_postun(&pkg, postun, &install, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn postun_phase_silent_when_post_installed_nothing() {
+        // Presence without an install (a cleanup-only %post, or only
+        // shipped /etc/alternatives files): no removal is owed however
+        // %postun looks.
+        let results = postun_results("", &[]);
+        assert!(!has(&results, "update-alternatives-postun-call-missing"));
+        let results = postun_results("update-alternatives --remove foo /usr/bin/foo-1.0", &[]);
+        assert!(!has(&results, "update-alternatives-postun-call-missing"));
+    }
+
+    #[test]
+    fn postun_phase_reports_when_install_is_never_removed() {
+        let results = postun_results("", &[("/usr/bin/foo", "foo")]);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(n, _)| n == "update-alternatives-postun-call-missing")
+                .count(),
+            1
+        );
+        let results = postun_results(
+            "update-alternatives --remove bar /usr/bin/bar-1.0",
+            &[("/usr/bin/foo", "foo")],
+        );
+        assert!(has(&results, "update-alternatives-postun-call-missing"));
     }
 
     fn libalternatives_pkg(dir: &std::path::Path, confs: &[(&str, &str)]) -> Pkg {

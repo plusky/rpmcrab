@@ -318,3 +318,42 @@ kind = "missing"
 reason = "Deliberate removal per triage: openSUSE's rpmlint config calls this 'Mandriva specific stuff that we don't want'. The port does not emit it. The reference still emits it."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "devel-dependency"
+kind = "behaviour"
+reason = "TagsCheck also recognises a requirer as a devel package when a patterns-* name carries the devel keyword as an underscore-flavoured component (patterns-kde-devel_qt5, patterns-kde-devel_qt6): pattern packages append the flavour to the component with an underscore instead of a hyphen. The reference matches only the suffix form and fires on the devel patterns' own devel requirements (2 packages in Tumbleweed). The underscore form is credited only for patterns-* names, because elsewhere a keyword-underscore component can be part of an ordinary word (ruby4.0-rubygem-debug_inspector)."
+since = "0.4.1"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "devel-dependency"
+kind = "behaviour"
+reason = "TagsCheck treats a *-jmods requirer as a devel package: jmods are the JDK's development modules (the input format of jlink), split out of the corresponding -devel package they require. The reference matches only the name suffix and fires on every versioned JDK's jmods package (9 in Tumbleweed: java 11/17/21/25/26, OpenJDK and OpenJ9)."
+since = "0.4.1"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "devel-dependency"
+kind = "behaviour"
+reason = "TagsCheck does not fire devel-dependency on a python3<NN>-*-headers leaf (the dependency-side class of issue #283, upstream rpmlint #1091): in the versioned-Python namespace such a name is a runtime Python module - python313-django-cors-headers ships only .py files - not a header package; the interpreter's headers live in python3<NN>-devel. The reference applies the suffix regex to the raw name and fires (2 packages in Tumbleweed: python313/314-sortinghat). The credit is per leaf and does not consume the latch."
+since = "0.4.1"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "devel-dependency"
+kind = "behaviour"
+reason = "TagsCheck does not fire devel-dependency when a *-rebuild package requires a -source package: the *-rebuild packages are empty anchors (0-2 files, licences only) whose single requirement exists to trigger rebuilds against that source tree - perf-rebuild, cpupower-rebuild and four siblings on kernel-source. The reference fires on all 6. The credit is per leaf and does not consume the latch."
+since = "0.4.1"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/TagsCheck.py"
+
+[[divergence]]
+case = "global"
+check = "explicit-lib-dependency"
+kind = "behaviour"
+reason = "Fix-and-diverge: a generated soname dependency whose raw name is among the package's own provides resolves against the package itself, so it never reaches the library package the shared-library naming mapping derives from it; an explicit requirement on that package is then the only expression of the requirement, not a duplicate of the generated one, and stays silent. The credit covers only names whose every deriving generated soname is self-provided; a name also derived from an external soname keeps firing. Measured on the Factory corpus (51,589 RPMs, 2026-10-26): 32 findings before, 28 after — the four libptscotch MPI flavour packages (libptscotch7_0-mpich, libptscotch7_0-mvapich2, libptscotch7_0-openmpi4, libptscotch7_0-openmpi5), which ship the serial libscotch.so.7.0 in their own MPI prefix and provide its soname, yet name libscotch7_0 for the system copy. The reference fires on all 32."
+since = "0.4.1"

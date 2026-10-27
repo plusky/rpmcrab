@@ -10,6 +10,15 @@
 //! they take effect immediately and vanish or turn inconsistent on a
 //! rollback; the packaging guidelines require them deferred to the
 //! first boot of the new snapshot instead.
+//!
+//! A write target the package itself declares `%ghost` is exempt: the
+//! declared ghost is the package's own runtime file, and the scriptlet
+//! is expected to create it -- the reference even warns
+//! (`ghost-files-without-postin`) when no `%post` creates a declared
+//! ghost, so for a ghost outside the snapshot the two rules would pull
+//! against each other. The exemption is decidable from the package's
+//! own header: the lexically normalised target must equal a declared
+//! ghost path of the same (binary) package.
 //! The reference docstring also states that (re)starting daemons is not
 //! possible during a transactional update, but the reference implements
 //! no such rule; `scriptlet-service-restart` (W) implements it here: a
@@ -17,7 +26,9 @@
 //! service directly, instead of going through the distribution macros
 //! (which defer via `systemd-update-helper`), silently does nothing on
 //! an atomic system, where scriptlets run inside the new snapshot with
-//! systemd offline.
+//! systemd offline. A `systemctl` invocation whose units are all
+//! `.timer` units stays quiet: a timer carries no daemon to (re)start,
+//! and starting it only schedules the oneshot it drives.
 //!
 //! Directory entries are exempt from the error: a shipped directory
 //! carries no payload that a snapshot switch could lose or leave
@@ -125,6 +136,21 @@ impl AtomicUpdateCheck {
         let disallowed = self.disallowed_subdirs.iter().any(|d| under(d));
         !(allowed && !disallowed)
     }
+}
+
+/// True when a scriptlet write target is a path the package itself
+/// declares `%ghost`. Both sides are judged lexically normalised, like
+/// [`AtomicUpdateCheck::scriptlet_target_outside`] judges the target:
+/// `/usr/../var/lib/x` is a write to the ghost `/var/lib/x`. Only an
+/// exact match exempts -- a write to the ghost's parent directory, or
+/// to a path a sibling subpackage declares, still fires, because the
+/// check runs per binary package and consults only that package's
+/// declared ghosts.
+fn target_declared_ghost(target: &str, ghost_files: &[String]) -> bool {
+    let target = crate::pkg::normalize_path(target);
+    ghost_files
+        .iter()
+        .any(|ghost| crate::pkg::normalize_path(ghost) == target)
 }
 
 /// The folder carrying `path`: everything before the final `/`.
@@ -378,7 +404,8 @@ fn segment_restarts(segment: &str) -> bool {
     let command = words[i];
     let args = &words[i + 1..];
     if command == "systemctl" || command.ends_with("/systemctl") {
-        return systemctl_verb(args).is_some_and(|v| RESTART_VERBS.contains(&v));
+        return systemctl_verb(args).is_some_and(|v| RESTART_VERBS.contains(&v))
+            && !systemctl_timer_only(args);
     }
     if command == "service" || command.ends_with("/service") {
         // `service NAME VERB`; the pair is positional.
@@ -429,6 +456,78 @@ fn systemctl_verb<'a>(args: &[&'a str]) -> Option<&'a str> {
             continue;
         }
         return Some(arg);
+    }
+    None
+}
+
+/// Whether a `systemctl` invocation's units are all `.timer` units:
+/// the verb is located the way `systemctl_verb` locates it, and
+/// every unit token after it (options and the values of options
+/// that take one stepped over, as in the verb scan; redirection
+/// tokens name no unit) ends in `.timer`, with at least one unit
+/// named. A timer (re)start reschedules the oneshot the timer
+/// drives; it (re)starts no daemon, so the invocation is outside
+/// this finding.
+fn systemctl_timer_only(args: &[&str]) -> bool {
+    let mut i = 0;
+    // Step over the leading options and the verb itself.
+    while i < args.len() {
+        let arg = args[i];
+        if arg.starts_with('-') {
+            i += if SYSTEMCTL_VALUE_OPTIONS.contains(&arg) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        i += 1;
+        break;
+    }
+    let mut units = 0;
+    while i < args.len() {
+        let arg = args[i];
+        if arg.starts_with('-') {
+            i += if SYSTEMCTL_VALUE_OPTIONS.contains(&arg) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        match redirection(arg) {
+            // A bare operator takes the next token as its file
+            // target; neither names a unit.
+            Some(true) => i += 2,
+            Some(false) => i += 1,
+            None => {
+                units += 1;
+                if !arg.ends_with(".timer") {
+                    return false;
+                }
+                i += 1;
+            }
+        }
+    }
+    units > 0
+}
+
+/// The redirection shape of a word in a `systemctl` invocation:
+/// `Some(true)` for a bare operator (`>`, `>>`, `2>`), whose file
+/// target is the following word; `Some(false)` for an operator
+/// with its target glued on (`>/dev/null`, `2>/dev/null`); `None`
+/// for any other word. Mirrors the argument-tail reading of
+/// `PostCheck`'s daemon-activation scan.
+fn redirection(token: &str) -> Option<bool> {
+    let digits = token
+        .len()
+        .saturating_sub(token.trim_start_matches(|c: char| c.is_ascii_digit()).len());
+    let rest = &token[digits..];
+    if matches!(rest, ">" | ">>" | "<" | "<<") {
+        return Some(true);
+    }
+    if rest.starts_with('>') || rest.starts_with('<') {
+        return Some(false);
     }
     None
 }
@@ -687,7 +786,9 @@ impl Check for AtomicUpdateCheck {
                 continue;
             }
             for target in scan_scriptlet(&slot.body) {
-                if self.scriptlet_target_outside(&target) {
+                if self.scriptlet_target_outside(&target)
+                    && !target_declared_ghost(&target, &pkg.ghost_files)
+                {
                     add_info(
                         out,
                         Level::Warning,
@@ -1390,6 +1491,66 @@ mod tests {
     }
 
     #[test]
+    fn systemctl_start_timer_is_quiet() {
+        // The openSUSE-build-key shape: starting the key-import timer
+        // schedules its oneshot; no service is (re)started.
+        assert!(
+            service_restarts_in_body("systemctl start openSUSE-build-key-import.timer").is_empty()
+        );
+    }
+
+    #[test]
+    fn systemctl_restart_timer_family_is_quiet() {
+        for body in [
+            "systemctl restart foo.timer",
+            "systemctl try-restart foo.timer",
+            "systemctl reload-or-restart foo.timer",
+            "systemctl start foo@.timer",
+            "systemctl --no-block start foo.timer",
+        ] {
+            assert!(
+                service_restarts_in_body(body).is_empty(),
+                "{body} must stay quiet"
+            );
+        }
+    }
+
+    #[test]
+    fn systemctl_timer_with_redirections_is_quiet() {
+        for body in [
+            "systemctl start foo.timer >/dev/null 2>&1",
+            "systemctl start foo.timer > /dev/null",
+            "systemctl restart foo.service >/dev/null 2>&1",
+        ] {
+            let expect = usize::from(body.contains(".service"));
+            assert_eq!(service_restarts_in_body(body).len(), expect, "{body}");
+        }
+    }
+
+    #[test]
+    fn systemctl_timer_and_service_units_in_one_invocation_fire() {
+        assert_eq!(
+            service_restarts_in_body("systemctl start foo.timer bar.service").len(),
+            1
+        );
+        assert_eq!(
+            service_restarts_in_body("systemctl restart foo.service bar.timer").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn systemctl_timer_segment_does_not_mask_service_segment() {
+        let body = "systemctl start foo.timer; systemctl restart bar.service";
+        assert_eq!(service_restarts_in_body(body).len(), 1);
+    }
+
+    #[test]
+    fn systemctl_restart_without_unit_still_fires() {
+        assert_eq!(service_restarts_in_body("systemctl restart").len(), 1);
+    }
+
+    #[test]
     fn restart_verb_family_fires() {
         for body in [
             "systemctl try-restart foo.service || :",
@@ -1823,6 +1984,58 @@ fi
             results[3].1.contains("/var/log/app (1 file)"),
             "{}",
             results[3].1
+        );
+    }
+
+    #[test]
+    fn srv_www_payload_is_quiet_under_the_flavour_allowed_dirs() {
+        // The vendored SUSE flavour config whitelists /srv/www/ in
+        // AtomicAllowedDirs (EXTRA_ATOMIC_ALLOWED_DIRS in the distro
+        // config generator; a whitelist with a known regression,
+        // ledgered as a config divergence): payload under the web
+        // root stays quiet, while the near-miss prefix, the rest of
+        // /srv and the /var tail keep firing.
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            regular("/srv/www/app/index.php"),
+            regular("/srv/www2/index.php"),
+            regular("/srv/ftp/pub/file"),
+            regular("/var/lib/app/a.db"),
+        ];
+        let mut check = check_with(
+            &[
+                "/etc/",
+                "/usr/",
+                "/bin/",
+                "/lib/",
+                "/lib64/",
+                "/sbin/",
+                "/boot/",
+                "/srv/www/",
+            ],
+            &["/usr/local/", "/boot/efi/"],
+            false,
+        );
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 3);
+        for (name, line) in &results {
+            assert_eq!(name, "dir-or-file-outside-snapshot");
+            assert!(line.contains(": E: "), "level: {line}");
+        }
+        assert!(
+            results[0].1.contains("/srv/www2 (1 file)"),
+            "{}",
+            results[0].1
+        );
+        assert!(
+            results[1].1.contains("/srv/ftp/pub (1 file)"),
+            "{}",
+            results[1].1
+        );
+        assert!(
+            results[2].1.contains("/var/lib/app (1 file)"),
+            "{}",
+            results[2].1
         );
     }
 
@@ -2454,6 +2667,75 @@ fi
         let pkg = fixture_pkg_named("atomic-scriptlet-clean-1.0-1.noarch.rpm");
         let mut check = shipped_check();
         assert!(run(&mut check, &pkg).is_empty());
+    }
+
+    #[test]
+    fn target_declared_ghost_verdicts() {
+        let ghosts = vec![
+            "/var/lib/foo/state".to_string(),
+            "/var/lib/foo/imported".to_string(),
+        ];
+        // Exact matches, judged on the lexically normalised target.
+        assert!(target_declared_ghost("/var/lib/foo/state", &ghosts));
+        assert!(target_declared_ghost("/var/lib/foo/../foo/state", &ghosts));
+        assert!(target_declared_ghost("/var/lib/foo/state/", &ghosts));
+        // Near misses: the ghost's parent directory, a sibling file in
+        // the same directory, and a path this package does not declare.
+        assert!(!target_declared_ghost("/var/lib/foo", &ghosts));
+        assert!(!target_declared_ghost("/var/lib/foo/other", &ghosts));
+        assert!(!target_declared_ghost("/var/lib/bar/state", &ghosts));
+        assert!(!target_declared_ghost("/var/lib/foo/state", &[]));
+    }
+
+    #[test]
+    fn scriptlet_write_to_own_ghost_is_exempt() {
+        let mut pkg = fixture_pkg_named("atomic-scriptlet-fires-1.0-1.noarch.rpm");
+        pkg.ghost_files = vec!["/var/lib/atomic-fixture/state".to_string()];
+        let mut check = shipped_check();
+        let results = run(&mut check, &pkg);
+        // The %postun removal of the declared ghost no longer fires;
+        // the five writes to undeclared paths still do.
+        assert_eq!(results.len(), 5, "results: {results:?}");
+        assert!(
+            results
+                .iter()
+                .all(|(_, line)| !line.contains("/var/lib/atomic-fixture/state")),
+            "results: {results:?}"
+        );
+    }
+
+    #[test]
+    fn scriptlet_writes_with_every_target_declared_ghost_are_quiet() {
+        let mut pkg = fixture_pkg_named("atomic-scriptlet-fires-1.0-1.noarch.rpm");
+        pkg.ghost_files = [
+            "/var/lib/atomic-fixture",
+            "/srv/atomic-fixture/seed.conf",
+            "/var/cache/atomic-fixture",
+            "/var/lib/atomic-fixture/quoted",
+            "/var/lib/atomic-fixture/state",
+            "/opt/atomic-fixture.conf",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let mut check = shipped_check();
+        assert!(run(&mut check, &pkg).is_empty());
+    }
+
+    #[test]
+    fn scriptlet_write_to_a_path_declared_by_another_package_still_fires() {
+        // The check runs per binary package and consults only that
+        // package's declared ghosts: a ghost set naming another
+        // package's paths (a sibling subpackage's declaration lives in
+        // the sibling's header, not this one's) exempts nothing here.
+        let mut pkg = fixture_pkg_named("atomic-scriptlet-fires-1.0-1.noarch.rpm");
+        pkg.ghost_files = vec![
+            "/var/lib/other-fixture/state".to_string(),
+            "/srv/other-fixture/seed.conf".to_string(),
+        ];
+        let mut check = shipped_check();
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 6, "results: {results:?}");
     }
 
     #[test]

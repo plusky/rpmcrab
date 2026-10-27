@@ -16,5 +16,5 @@ these paths have been passed to gcc, and fail with the following error:
 canonicalization unexpectedly shrank by one character.
 """
 pkgconfig-exception="""
-An exception during parsing of .pc file has occurred.
+An error occurred while reading or parsing the .pc file.
 """

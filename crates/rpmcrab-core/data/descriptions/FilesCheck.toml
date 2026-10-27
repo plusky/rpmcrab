@@ -153,7 +153,11 @@ executable-marked-as-config-file="""
 Executables must not be marked as config files because that may
 prevent upgrades from working correctly. If you need to be able to
 customize an executable, make it for example read a config file in
-/etc/sysconfig.
+/etc/sysconfig. A file marked %config(noreplace) only warns: the
+noreplace marking is deliberate, so the execution may be by design
+(hook scripts, for example) and the finding can be suppressed for
+the package if it is. A plain %config executable carries no such
+signal and stays an error.
 """
 sourced-script-with-shebang="""
 This text file contains a shebang, but is meant to be sourced, not
@@ -189,7 +193,12 @@ non-executable-script="""
 This text file contains a shebang or is located in a path dedicated for
 executables, but lacks the executable bits and cannot thus be executed. If
 the file is meant to be an executable script, add the executable bits,
-otherwise remove the shebang or move the file elsewhere.
+otherwise remove the shebang or move the file elsewhere. A shell script
+whose text carries a return statement outside any function definition is
+not reported: a top-level return marks a script written to be sourced by
+another script, where the missing executable bits are the correct state.
+A script written for both uses, sourced by one caller and executed
+directly by another, carries the same marker and is not reported either.
 """
 script-without-shebang="""
 This text file has executable bits set or is located in a path dedicated

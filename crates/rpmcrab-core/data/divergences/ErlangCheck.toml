@@ -21,7 +21,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/613"
 case = "global"
 check = "ErlangCheck"
 kind = "detail"
-reason = "Staged `--explain` text for `pybeam-failed` said the Python pybeam library was invoked; the port reads BEAM files with a native reader and the finding fires when a file cannot be parsed (verified in `checks/erlang.rs`). Reworded: the BEAM file could not be parsed, so it could not be checked."
+reason = "Staged `--explain` text for `pybeam-failed` said the Python pybeam library was invoked; the port reads BEAM files with a native reader and the finding fires when a file cannot be read or parsed (verified in `checks/erlang.rs`). Reworded: the beam file could not be read or parsed, so it could not be checked."
 since = "0.4.1"
 
 [[divergence]]
@@ -29,4 +29,11 @@ case = "global"
 check = "ErlangCheck"
 kind = "detail"
 reason = "Staged `--explain` text for `beam-compile-info-missed` was ungrammatical (`has missed compile info chunk`). Reworded: your beam file is missing the compile_info chunk."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "beam-compiled-without-debuginfo"
+kind = "behaviour"
+reason = "The reference decides debug info from the compile-info options alone whenever options are recorded (Dbgi presence is only a fallback for option-less compile info, the shape deterministic builds were observed to produce in the corpus): a file whose options omit the debug_info atom is reported even when its Dbgi chunk holds the actual debug-info payload. A compiler that generates debug info without passing an Erlang debug_info option — Elixir's, whose recorded options in the corpus are its Core Erlang set (from_core, no_core_prepare, no_auto_import, no_spawn_compiler_process) — is therefore reported on files that verifiably contain debug info. Factory corpus (51,589 RPMs; the 290 findings are scoped to the 31 beam-carrying packages, 4,894 beam files): 19 files carry a real payload and are silenced by this credit (rabbitmq-server 18 — csv 11, jose 7, all Elixir modules — and elixir-hex 1); the other 271 carry the compiler's no-debug-info placeholder and still report, as in the reference. rpmcrab credits a payload only under the outer envelope {debug_info_v1, Backend, Data} with an atom Backend, and only in the options-recorded branch: Data earns credit as a list of abstract forms, a map, or the Elixir tuple {elixir_v1, Map}. The placeholder — the atom none, or a tuple headed by none at any arity (denying every none-headed tuple is the safe direction: the finding fires) — earns none, and neither does any other bare atom, any other tuple shape, an unparsable head, or a truncated header; a payload that cannot be parsed earns no credit and the file is judged by its options alone, as in the reference."
 since = "0.4.1"

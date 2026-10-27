@@ -2,8 +2,8 @@
 # Upstream owns these configs until rpmlint is fully superseded;
 # the monthly distro-config-sync CI job refreshes them.
 # upstream_repo = https://github.com/rpm-software-management/rpmlint
-# opensuse: opensuse @ 513f17e8aad7d0bece1be4e46316dc8e97bd1d65 (2026-10-20)
-# opensuse-whitelists: opensuse @ 1f39d4f4597396217d9e5be783ae52622a2fcd53 (2026-10-23)
+# opensuse: opensuse @ 783e34a56e45a4da412ef4c2328656183e01c5b4 (2026-10-26)
+# opensuse-whitelists: opensuse @ 783e34a56e45a4da412ef4c2328656183e01c5b4 (2026-10-26)
 #
 # Extra Filters appended (not from upstream; see EXTRA_FILTERS):
 #   Filters: added '^mingw32-.*arch-independent-package-contains-binary-or-object.*\\.a$' (mingw -filesystem packages' rpmlintrc)
@@ -12,6 +12,9 @@
 # Extra Checks appended (not from upstream; see EXTRA_CHECKS):
 #   Checks: added 'XinetdDepCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)
 #   Checks: added 'PAMModulesCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)
+#
+# Extra AtomicAllowedDirs entries appended (not from upstream; see EXTRA_ATOMIC_ALLOWED_DIRS):
+#   AtomicAllowedDirs: added '/srv/www/' (whitelist with a known regression: the distro mandates /srv/www as the web root (apache_serverroot) while the atomic packaging guideline forbids applications outside the root subvolume, and no packaged web app complies -- genuine violations under /srv/www go unflagged while this stands; tightened when openSUSE settles web-app packaging under the atomic rules; ledgered in tests/parity/divergences.toml)
 #
 # SystemdPresetPackages appended (not from upstream; see SYSTEMD_PRESET_PACKAGES):
 #   SystemdPresetPackages: added 'systemd'
@@ -27,6 +30,12 @@
 #   SystemdPresetPackages: added 'systemd-presets-branding-Elemental'
 #   SystemdPresetPackages: added 'systemd-presets-branding-SLE-SAP'
 #   SystemdPresetPackages: added 'systemd-presets-branding-SLE-SAP_immutable'
+#
+# FileGrants appended (not from upstream; see FILE_GRANTS):
+#   FileGrants: added 'rpm' for postin-without-ldconfig, library-without-ldconfig-postun (the package ships no ldconfig scriptlets by design; the platform maintains the ldconfig cache via glibc file triggers, so per-package scriptlets are the pre-trigger mechanism)
+#   FileGrants: added 'systemd' for postun-without-ldconfig (%post runs ldconfig, under the spec's comment 'Run ldconfig for nss-systemd and nss-myhostname NSS modules'; the %postun omission is the package's evidenced design)
+#   FileGrants: added 'smartmontools' for executable-marked-as-config-file (smartd's warning hook: it must be executable to run and is marked %config because admins edit it)
+#   FileGrants: added 'tuned' for executable-marked-as-config-file (grub.d scripts are executables by construction (grub-mkconfig runs them); the %config marking is deliberate)
 #
 # Excluded Checks (removed from the flavor; see EXCLUDED_CHECKS):
 #

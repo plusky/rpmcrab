@@ -51,6 +51,11 @@ AtomicAllowedDirs = [
     "/lib64/",
     "/sbin/",
     "/boot/",
+
+    # Extra: added by rpmcrab (whitelist with a known regression);
+    # see EXTRA_ATOMIC_ALLOWED_DIRS in
+    # scripts/generate-distro-configs.py.
+    "/srv/www/",
 ]
 
 # List of subdirectories which are disallowed for atomic updates
@@ -269,6 +274,54 @@ paths = [
     # compatibility symlink towards /etc/sysctl.conf for systemd-sysctl
     "/usr/lib/sysctl.d/99-sysctl.conf"
 ]
+
+# Per-file grants for FilesCheck findings (not from upstream;
+# see FILE_GRANTS in scripts/generate-distro-configs.py). Each
+# grant names the package, the findings that stay quiet for its
+# files, and the reason the grant exists.
+[[FileGrants]]
+package = "rpm"
+paths = [
+    "/usr/lib64/librpm.so.10.2.1",
+    "/usr/lib64/librpmio.so.10.2.1",
+    "/usr/lib64/librpmsign.so.10.2.1",
+]
+findings = [
+    "postin-without-ldconfig",
+    "library-without-ldconfig-postun",
+]
+reason = "the package ships no ldconfig scriptlets by design; the platform maintains the ldconfig cache via glibc file triggers, so per-package scriptlets are the pre-trigger mechanism"
+
+[[FileGrants]]
+package = "systemd"
+paths = [
+    "/usr/lib64/libnss_myhostname.so.2",
+    "/usr/lib64/libnss_systemd.so.2",
+]
+findings = [
+    "postun-without-ldconfig",
+]
+reason = "%post runs ldconfig, under the spec's comment 'Run ldconfig for nss-systemd and nss-myhostname NSS modules'; the %postun omission is the package's evidenced design"
+
+[[FileGrants]]
+package = "smartmontools"
+paths = [
+    "/etc/smartd_warning.sh",
+]
+findings = [
+    "executable-marked-as-config-file",
+]
+reason = "smartd's warning hook: it must be executable to run and is marked %config because admins edit it"
+
+[[FileGrants]]
+package = "tuned"
+paths = [
+    "/etc/grub.d/00_tuned",
+]
+findings = [
+    "executable-marked-as-config-file",
+]
+reason = "grub.d scripts are executables by construction (grub-mkconfig runs them); the %config marking is deliberate"
 
 [FileDigestLocation]
 

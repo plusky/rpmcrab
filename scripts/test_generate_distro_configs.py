@@ -866,6 +866,59 @@ def test_append_extra_checks_without_checks_list_raises():
     raise AssertionError("append_extra_checks accepted a document with no Checks list")
 
 
+def test_append_extra_atomic_allowed_dirs_lands_inside_the_list():
+    """The extra AtomicAllowedDirs entries must land inside
+    `AtomicAllowedDirs = [...]`, nowhere else.
+
+    Appending to the wrong list (or outside any list) would either
+    whitelist nothing or corrupt the vendored config; the drift check
+    compares bytes, so this pins the shape the generator emits.
+    """
+    text = (
+        'AtomicAllowedDirs = [\n'
+        '    "/etc/",\n'
+        '    "/usr/",\n'
+        ']\n'
+        'AtomicDisallowedSubdirs = [\n'
+        '    "/usr/local/",\n'
+        ']\n'
+    )
+    out = gen.append_extra_atomic_allowed_dirs(
+        text, [d for d, _reason in gen.EXTRA_ATOMIC_ALLOWED_DIRS])
+    allowed_part, disallowed_part = out.split("AtomicDisallowedSubdirs = [", 1)
+    for d, _reason in gen.EXTRA_ATOMIC_ALLOWED_DIRS:
+        assert f'"{d}",' in allowed_part, allowed_part
+        assert d not in disallowed_part, disallowed_part
+        # The entry is inside the list: it precedes the closing bracket.
+        assert allowed_part.index(f'"{d}",') < allowed_part.index("]"), allowed_part
+    assert gen.EXTRA_ATOMIC_ALLOWED_DIRS[0][0] == "/srv/www/"
+
+
+def test_append_extra_atomic_allowed_dirs_without_the_list_raises():
+    """A config with no AtomicAllowedDirs list must fail loudly.
+
+    Silently skipping the append would ship a vendored config in which
+    the whitelisted directory is missing again.
+    """
+    try:
+        gen.append_extra_atomic_allowed_dirs("Checks = [\n]\n", ["/srv/www/"])
+    except AssertionError:
+        return
+    raise AssertionError(
+        "append_extra_atomic_allowed_dirs accepted a document with no AtomicAllowedDirs list")
+
+
+def test_extra_atomic_allowed_dirs_carry_their_provenance_reasons():
+    """Each EXTRA_ATOMIC_ALLOWED_DIRS entry pairs its prefix with the
+    reason the generator logs for it in PROVENANCE: the /srv/www/
+    entry keeps its known-regression marking."""
+    reasons = dict(gen.EXTRA_ATOMIC_ALLOWED_DIRS)
+    assert len(reasons) == len(gen.EXTRA_ATOMIC_ALLOWED_DIRS)
+    for prefix, reason in gen.EXTRA_ATOMIC_ALLOWED_DIRS:
+        assert prefix and reason, (prefix, reason)
+    assert "known regression" in reasons["/srv/www/"], reasons["/srv/www/"]
+
+
 def test_remove_excluded_checks_drops_entry_and_explains():
     """The excluded Checks must vanish from `Checks = [...]` only.
 
@@ -1870,6 +1923,80 @@ def test_append_systemd_preset_packages_appends_at_eof_without_table():
     )
     assert gen.append_systemd_preset_packages('Version = 3\n', ["a"]) == 'Version = 3\n' + block
     assert gen.append_systemd_preset_packages('Version = 3', ["a"]) == 'Version = 3\n' + block
+
+
+def test_append_file_grants_before_file_digest_location():
+    """The stanzas land immediately before [FileDigestLocation],
+    alongside the other exception lists. A blank line already before
+    the header separates the block, so the block's own leading blank
+    line is dropped: exactly one blank line remains on each side."""
+    text = (
+        'Version = 3\n'
+        '\n'
+        '[[SymlinkExceptions]]\n'
+        'packages = ["systemd"]\n'
+        'paths = [\n'
+        '    "/usr/lib/sysctl.d/99-sysctl.conf"\n'
+        ']\n'
+        '\n'
+        '[FileDigestLocation]\n'
+    )
+    grants = [
+        {
+            "package": "rpm",
+            "paths": ["/usr/lib64/librpm.so.10.2.1"],
+            "findings": ["postin-without-ldconfig"],
+            "reason": "no ldconfig scriptlets by design",
+        }
+    ]
+    out = gen.append_file_grants(text, grants)
+    assert out == (
+        'Version = 3\n'
+        '\n'
+        '[[SymlinkExceptions]]\n'
+        'packages = ["systemd"]\n'
+        'paths = [\n'
+        '    "/usr/lib/sysctl.d/99-sysctl.conf"\n'
+        ']\n'
+        '\n'
+        '# Per-file grants for FilesCheck findings (not from upstream;\n'
+        '# see FILE_GRANTS in scripts/generate-distro-configs.py). Each\n'
+        '# grant names the package, the findings that stay quiet for its\n'
+        '# files, and the reason the grant exists.\n'
+        '[[FileGrants]]\n'
+        'package = "rpm"\n'
+        'paths = [\n'
+        '    "/usr/lib64/librpm.so.10.2.1",\n'
+        ']\n'
+        'findings = [\n'
+        '    "postin-without-ldconfig",\n'
+        ']\n'
+        'reason = "no ldconfig scriptlets by design"\n'
+        '\n'
+        '[FileDigestLocation]\n'
+    ), out
+
+
+def test_append_file_grants_without_anchor_fails():
+    """A document with no [FileDigestLocation] table fails loudly
+    instead of stranding the grants inside another table's scope."""
+    try:
+        gen.append_file_grants('Version = 3\n', gen.FILE_GRANTS)
+    except AssertionError:
+        return
+    raise AssertionError("missing [FileDigestLocation] anchor did not raise")
+
+
+def test_file_grants_carry_reasons():
+    """Every FILE_GRANTS entry names its package, at least one path
+    and one finding, and a non-empty reason: FilesCheck rejects a
+    grant without a recorded reason, so a reasonless entry here would
+    be dead config."""
+    for grant in gen.FILE_GRANTS:
+        assert grant["package"], grant
+        assert grant["paths"], grant
+        assert grant["findings"], grant
+        assert grant["reason"].strip(), grant
 
 
 

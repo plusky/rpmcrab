@@ -123,7 +123,14 @@ static SETGID_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static SETUID_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static SETGROUPS_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static MKTEMP_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static GETS_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static TMPNAM_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static GETHOSTBYNAME_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static MD5_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static DES_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static RC4_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static WEAK_PRNG_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static UNBOUNDED_COPY_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
 const GLIBC_EMPTY_ARCHIVES: &[&str] = &["libanl", "libdl", "libpthread", "librt", "libutil"];
@@ -336,6 +343,14 @@ struct ReadelfInfo {
     /// True when the binary was produced by the Zig toolchain.
     /// Computed during parse; see `detect_zig_binary`.
     is_zig: bool,
+    /// The Go toolchain release that built this binary, parsed from
+    /// the `.go.buildinfo` section's version string. Computed during
+    /// parse; see `detect_go_toolchain`. `None` when the section is
+    /// absent (a stripped binary, or not a Go binary) and when the
+    /// recorded string is not a clean release version (devel and
+    /// release-candidate strings): the toolchain finder stays silent
+    /// in both cases.
+    go_toolchain: Option<GoVersion>,
     soname: Option<String>,
     needed: Vec<String>,
     runpaths: Vec<String>,
@@ -389,6 +404,12 @@ struct ReadelfInfo {
     /// bitcode, GIMPLE offload text, plain data), so the archive is
     /// outside the ELF checks' remit. Set by `parse_archive`.
     no_elf_members: bool,
+    /// An ar archive with no members at all: the file is exactly the
+    /// ar magic. glibc's post-2.34 merged-library linker stubs
+    /// (libpthread.a, libdl.a and their kin) are shipped in this
+    /// shape: empty placeholder archives whose symbols live in libc.
+    /// Set by `parse_archive`.
+    no_members: bool,
 }
 
 /// ar archive magic: `!<arch>` followed by a newline.
@@ -412,6 +433,7 @@ impl ReadelfInfo {
             is_debug: name.ends_with(".debug"),
             is_rust: false,
             is_zig: false,
+            go_toolchain: None,
             soname: None,
             needed: Vec::new(),
             runpaths: Vec::new(),
@@ -427,6 +449,7 @@ impl ReadelfInfo {
             code_machines: Vec::new(),
             failed: None,
             no_elf_members: false,
+            no_members: false,
         }
     }
 
@@ -508,6 +531,7 @@ impl ReadelfInfo {
             }
         }
         info.no_elf_members = members > 0 && elf_members == 0;
+        info.no_members = members == 0;
         info
     }
 
@@ -720,6 +744,12 @@ impl ReadelfInfo {
         // OR across archive members: any Rust member marks the whole file.
         self.is_rust = self.is_rust || detect_rust_binary(elf, data, &self.functions);
         self.is_zig = self.is_zig || detect_zig_binary(elf, data);
+        // First member wins: an archive's members are one build's
+        // objects, so any member's recorded toolchain stands for the
+        // file, and a later member never overwrites it.
+        if self.go_toolchain.is_none() {
+            self.go_toolchain = detect_go_toolchain(elf, data);
+        }
     }
     fn has_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
         self.functions
@@ -816,10 +846,39 @@ impl ReadelfInfo {
     /// A shared object for which an empty DT_NEEDED is legitimate, not
     /// "missing dependency information": a dlopen-only plugin (no
     /// DT_SONAME, so never DT_NEEDED-linked), a fully self-contained
-    /// object (no non-weak undefined symbols), or an executable-entry
-    /// shim (defines `main`).
-    fn is_plugin_like(&self) -> bool {
-        self.soname.is_none() || !self.has_nonweak_undefined || self.defines_main
+    /// object (no non-weak undefined symbols), an executable-entry
+    /// shim (defines `main`), or a module whose build stamped its own
+    /// file name as its DT_SONAME (see `soname_is_own_module_name`).
+    fn is_plugin_like(&self, file_name: &str) -> bool {
+        self.soname.is_none()
+            || !self.has_nonweak_undefined
+            || self.defines_main
+            || self.soname_is_own_module_name(file_name)
+    }
+
+    /// The object's DT_SONAME is exactly its own file name and carries
+    /// no version component: the shape of a module built to be loaded
+    /// by path -- application plugins (slurm, apache, collectd),
+    /// interpreter extension modules, VirtualBox ring-0 payloads --
+    /// whose build stamps the module's own name as its SONAME. Such
+    /// an object is never DT_NEEDED-linked under that name (verified
+    /// over the Factory corpus: no package records a DT_NEEDED on any
+    /// of these names) and resolves its undefined symbols against the
+    /// host process, so an empty DT_NEEDED states nothing. A versioned
+    /// SONAME (`lib....so.<N>`) is a library ABI name instead: it
+    /// stays checked even when it equals the file name, and so does a
+    /// versioned SONAME carried by a longer file name (the genuine
+    /// `libfrrfpm_pb.so.0` in `libfrrfpm_pb.so.0.0.0` shape, which
+    /// other packages do DT_NEEDED-link).
+    fn soname_is_own_module_name(&self, file_name: &str) -> bool {
+        let Some(soname) = self.soname.as_deref() else {
+            return false;
+        };
+        let base = Path::new(file_name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(file_name);
+        soname == base && !soname_has_version_component(soname)
     }
 }
 
@@ -840,6 +899,22 @@ fn is_rust_symbol(name: &str) -> bool {
     // may carry one, and the base name is what identifies the runtime.
     let base = name.split('@').next().unwrap_or(name);
     base == "rust_begin_unwind" || base == "rust_eh_personality" || base.starts_with("__rust_")
+}
+
+/// Whether a DT_SONAME carries a library ABI version component: a
+/// `.so.` immediately followed by a digit (`libfoo.so.0`). An
+/// unversioned module name (`mod_foo.so`, `plugin.so`, `VMMR0.r0`)
+/// has none.
+fn soname_has_version_component(soname: &str) -> bool {
+    let mut rest = soname;
+    while let Some(idx) = rest.find(".so.") {
+        let after = &rest[idx + 4..];
+        if after.as_bytes().first().is_some_and(|c| c.is_ascii_digit()) {
+            return true;
+        }
+        rest = after;
+    }
+    false
 }
 
 /// The base name of a symbol: the name with any `@VERSION` suffix
@@ -946,6 +1021,242 @@ fn detect_zig_binary(elf: &goblin::elf::Elf, data: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// A Go release version, parsed from the version string a Go
+/// binary's `.go.buildinfo` section records
+/// (`go<major>.<minor>[.<patch>]`). Only clean release strings
+/// parse: devel, release-candidate and bootstrap strings return
+/// `None`, so the toolchain finder built on this type stays silent
+/// for toolchains it cannot order against the floor table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct GoVersion {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl GoVersion {
+    fn parse(raw: &str) -> Option<GoVersion> {
+        fn component(text: &str) -> Option<u32> {
+            if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            text.parse().ok()
+        }
+        let rest = raw.strip_prefix("go")?;
+        let mut parts = rest.split('.');
+        let version = GoVersion {
+            major: component(parts.next()?)?,
+            minor: component(parts.next()?)?,
+            patch: match parts.next() {
+                Some(text) => component(text)?,
+                None => 0,
+            },
+        };
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(version)
+    }
+
+    /// The release line this version belongs to: the version with
+    /// the patch component zeroed, so line identity compares on
+    /// (major, minor) alone.
+    fn line(self) -> GoVersion {
+        GoVersion { patch: 0, ..self }
+    }
+}
+
+impl std::fmt::Display for GoVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.patch == 0 {
+            write!(f, "go{}.{}", self.major, self.minor)
+        } else {
+            write!(f, "go{}.{}.{}", self.major, self.minor, self.patch)
+        }
+    }
+}
+
+/// The build-info magic every Go binary's `.go.buildinfo` section
+/// starts with.
+const GO_BUILDINFO_MAGIC: &[u8; 14] = b"\xff Go buildinf:";
+
+/// Extract the toolchain version string from a `.go.buildinfo`
+/// section, mirroring `debug/buildinfo`: the blob opens with a
+/// fixed 32-byte header — magic, a pointer-size byte, a flags byte,
+/// then pointers to the version and module-info string headers.
+/// With the flags version bit set (Go 1.18 and later) the strings
+/// instead follow the header inline as uvarint-length-prefixed
+/// contents. Without it, the header's first pointer addresses the
+/// version string's (data pointer, length) header, resolved here
+/// through the file's PT_LOAD segments; the flags low bit marks
+/// big-endian pointer words. Anything malformed yields `None`,
+/// never a guess.
+fn parse_go_buildinfo(section: &[u8], data: &[u8], elf: &goblin::elf::Elf) -> Option<String> {
+    const HEADER_LEN: usize = 32;
+    if section.len() < HEADER_LEN || !section.starts_with(GO_BUILDINFO_MAGIC.as_slice()) {
+        return None;
+    }
+    let ptr_size = usize::from(section[14]);
+    if ptr_size != 4 && ptr_size != 8 {
+        return None;
+    }
+    let flags = section[15];
+    if flags & 2 != 0 {
+        let (version, _) = read_go_buildinfo_string(section.get(HEADER_LEN..)?)?;
+        return Some(version);
+    }
+    let big_endian = flags & 1 != 0;
+    let read_word = |bytes: &[u8], offset: usize| -> Option<u64> {
+        let raw = bytes.get(offset..offset + ptr_size)?;
+        let mut value = 0u64;
+        if big_endian {
+            for byte in raw {
+                value = (value << 8) | u64::from(*byte);
+            }
+        } else {
+            for (i, byte) in raw.iter().enumerate() {
+                value |= u64::from(*byte) << (8 * i);
+            }
+        }
+        Some(value)
+    };
+    let resolve = |address: u64| -> Option<usize> {
+        for ph in &elf.program_headers {
+            if ph.p_type != goblin::elf::program_header::PT_LOAD {
+                continue;
+            }
+            if address >= ph.p_vaddr && address - ph.p_vaddr < ph.p_filesz {
+                return usize::try_from(ph.p_offset.checked_add(address - ph.p_vaddr)?).ok();
+            }
+        }
+        None
+    };
+    let header_offset = resolve(read_word(section, 16)?)?;
+    let address = read_word(data, header_offset)?;
+    let length = usize::try_from(read_word(data, header_offset + ptr_size)?).ok()?;
+    if length == 0 || length > 256 {
+        return None;
+    }
+    let offset = resolve(address)?;
+    let bytes = data.get(offset..offset + length)?;
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// One uvarint-length-prefixed string from Go build info; returns
+/// the string and the number of bytes consumed.
+fn read_go_buildinfo_string(bytes: &[u8]) -> Option<(String, usize)> {
+    let mut length: u64 = 0;
+    let mut shift = 0u32;
+    let mut consumed = 0usize;
+    loop {
+        let byte = *bytes.get(consumed)?;
+        consumed += 1;
+        length |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    let length = usize::try_from(length).ok()?;
+    let end = consumed.checked_add(length)?;
+    let text = bytes.get(consumed..end)?;
+    Some((String::from_utf8_lossy(text).into_owned(), end))
+}
+
+/// The Go toolchain that built this ELF, from its `.go.buildinfo`
+/// section; `None` when the section is absent or its version string
+/// is not a clean release version.
+fn detect_go_toolchain(elf: &goblin::elf::Elf, data: &[u8]) -> Option<GoVersion> {
+    for sh in &elf.section_headers {
+        if elf.shdr_strtab.get_at(sh.sh_name) != Some(".go.buildinfo") {
+            continue;
+        }
+        let start = usize::try_from(sh.sh_offset).ok()?;
+        let end = start
+            .saturating_add(usize::try_from(sh.sh_size).ok()?)
+            .min(data.len());
+        let section = data.get(start..end)?;
+        return parse_go_buildinfo(section, data, elf).and_then(|raw| GoVersion::parse(&raw));
+    }
+    None
+}
+
+/// The embedded Go toolchain floor: per release line, the minimum
+/// release carrying the fixes for the recorded defect set. Baked in
+/// like the defect-pattern registry so an installed binary needs no
+/// data dir next to it; the table's as-of date and update route are
+/// recorded in the file itself.
+const GO_TOOLCHAIN_FLOOR_TOML: &str = include_str!("../../data/go-toolchain-floor.toml");
+
+/// The parsed floor, parsed once (the `defect_pattern::registry`
+/// pattern).
+fn go_toolchain_floor() -> &'static [(GoVersion, GoVersion)] {
+    static FLOOR: OnceLock<Vec<(GoVersion, GoVersion)>> = OnceLock::new();
+    FLOOR.get_or_init(|| parse_go_toolchain_floor(GO_TOOLCHAIN_FLOOR_TOML))
+}
+
+/// Parse and validate the floor table. Validation takes the
+/// staged-data posture (the registry's): a malformed table panics at
+/// startup instead of silently disabling the finder.
+fn parse_go_toolchain_floor(raw: &str) -> Vec<(GoVersion, GoVersion)> {
+    let table: toml::Table = raw.parse().expect("go toolchain floor is valid TOML");
+    assert!(
+        table.get("as_of").and_then(toml::Value::as_str).is_some(),
+        "go toolchain floor records an as_of date"
+    );
+    let records = table
+        .get("line")
+        .and_then(toml::Value::as_array)
+        .expect("go toolchain floor has a [[line]] array");
+    let mut floor: Vec<(GoVersion, GoVersion)> = records
+        .iter()
+        .map(|record| {
+            let field = |name: &str| -> String {
+                record
+                    .get(name)
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_else(|| panic!("go toolchain floor line is missing {name:?}"))
+                    .to_string()
+            };
+            let line = GoVersion::parse(&format!("go{}", field("release")))
+                .expect("go toolchain floor release is a version");
+            let minimum = GoVersion::parse(&format!("go{}", field("minimum")))
+                .expect("go toolchain floor minimum is a version");
+            assert!(
+                minimum.line() == line && line.patch == 0,
+                "go toolchain floor minimum belongs to its release line"
+            );
+            (line, minimum)
+        })
+        .collect();
+    floor.sort();
+    floor.dedup();
+    assert!(
+        floor.windows(2).all(|pair| pair[0].0 < pair[1].0),
+        "go toolchain floor lines are strictly ascending"
+    );
+    floor
+}
+
+/// Whether `version` is below the floor: below its own line's
+/// minimum, or on a line older than every listed line (no release
+/// on such a line carries the recorded fixes). A version on a line
+/// newer than every listed line stays silent — the table does not
+/// judge what it does not know, so a stale table under-fires and
+/// never false-fires.
+fn go_toolchain_below_floor(version: GoVersion, floor: &[(GoVersion, GoVersion)]) -> bool {
+    let line = version.line();
+    for (listed, minimum) in floor {
+        if *listed == line {
+            return version < *minimum;
+        }
+    }
+    floor.first().is_some_and(|(lowest, _)| line < *lowest)
 }
 
 struct LddInfo {
@@ -2147,6 +2458,95 @@ impl ArInfo {
     }
 }
 
+/// True when `data` is a structurally valid archive in the gplib
+/// dialect -- the MPLIB-compatible format gputils' `gplib` writes for
+/// SDCC's PIC (pic14/pic16) targets. GNU binutils does not implement
+/// the dialect, so `ar t` fails on these files even though they are
+/// working libraries for their toolchain.
+///
+/// The dialect keeps the `!<arch>` magic but frames members its own
+/// way: a 256-byte name field (the member name, terminated by `/`,
+/// padded with spaces), a fixed 22-byte field of digits, `l` and
+/// spaces whose last digit run is the member size, and a `! ` header
+/// terminator in place of the GNU `` ` `` + newline. Object members
+/// carry PIC COFF objects (magic 0x1240). An optional symbol-index
+/// member named `/` may come first. The test is deliberately strict
+/// -- the member chain must land exactly on EOF -- so a corrupt GNU
+/// archive cannot pass it.
+fn is_gplib_archive(data: &[u8]) -> bool {
+    if !data.starts_with(b"!<arch>\n") {
+        return false;
+    }
+    let mut off = 8;
+    let mut members = 0;
+    while off < data.len() {
+        let Some(header) = data.get(off..off + 280) else {
+            return false;
+        };
+        let (name_field, fields) = header.split_at(256);
+        let Some(pad) = name_field.iter().position(|&b| b == b' ') else {
+            return false;
+        };
+        let name = &name_field[..pad];
+        if name.is_empty()
+            || !name.ends_with(b"/")
+            || !name.iter().all(|&b| (0x21..=0x7e).contains(&b))
+            || !name_field[pad..].iter().all(|&b| b == b' ')
+        {
+            return false;
+        }
+        if !fields[..22]
+            .iter()
+            .all(|&b| b.is_ascii_digit() || b == b'l' || b == b' ')
+        {
+            return false;
+        }
+        // The member size is the last run of digits in the field area.
+        let mut size: Option<usize> = None;
+        let mut run: Option<usize> = None;
+        for &b in &fields[..22] {
+            if b.is_ascii_digit() {
+                let digit = usize::from(b - b'0');
+                let cur = run.unwrap_or(0);
+                let Some(next) = cur.checked_mul(10).and_then(|v| v.checked_add(digit)) else {
+                    return false;
+                };
+                run = Some(next);
+            } else if let Some(v) = run.take() {
+                size = Some(v);
+            }
+        }
+        if let Some(v) = run {
+            size = Some(v);
+        }
+        let Some(size) = size else {
+            return false;
+        };
+        if &fields[22..24] != b"! " {
+            return false;
+        }
+        let data_start = off + 280;
+        let Some(end) = data_start.checked_add(size) else {
+            return false;
+        };
+        let Some(member) = data.get(data_start..end) else {
+            return false;
+        };
+        if name.len() == 1 && name[0] == b'/' {
+            // The symbol index is only ever the first member.
+            if members != 0 {
+                return false;
+            }
+        } else if !member.starts_with(b"\x40\x12") {
+            // Object members are PIC COFF objects.
+            return false;
+        }
+        off = end;
+        members += 1;
+    }
+    members > 0 && off == data.len()
+}
+
 pub struct BinariesCheck {
     checked_files: usize,
     strings: Tool,
@@ -2158,7 +2558,14 @@ pub struct BinariesCheck {
     setuid_call_regex: Regex,
     setgroups_call_regex: Regex,
     mktemp_call_regex: Regex,
+    gets_call_regex: Regex,
+    tmpnam_call_regex: Regex,
     gethostbyname_call_regex: Regex,
+    md5_call_regex: Regex,
+    des_call_regex: Regex,
+    rc4_call_regex: Regex,
+    weak_prng_call_regex: Regex,
+    unbounded_copy_call_regex: Regex,
     // Per-file state, set by detect_attributes before run_elf_checks.
     is_exec: bool,
     is_shobj: bool,
@@ -2779,6 +3186,117 @@ fn report_forbidden_functions(
     }
 }
 
+/// The embedded table of known native-layout data formats
+/// (`data/arch-format-magics.toml`): on-disk structures whose byte
+/// layout depends on the word size of the machine that wrote them.
+/// Baked in like the defect-pattern registry so an installed binary
+/// needs no data dir next to it; the table's as-of date and the
+/// evidence for each entry are recorded in the file itself.
+const ARCH_FORMAT_MAGICS_TOML: &str = include_str!("../../data/arch-format-magics.toml");
+
+/// The parsed magic prefixes, parsed once (the
+/// `defect_pattern::registry` pattern).
+fn arch_format_magics() -> &'static [Vec<u8>] {
+    static MAGICS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    MAGICS.get_or_init(|| parse_arch_format_magics(ARCH_FORMAT_MAGICS_TOML))
+}
+
+/// Parse and validate the magic table. Validation takes the
+/// staged-data posture (the registry's): a malformed table panics at
+/// startup instead of silently disabling the exemption.
+fn parse_arch_format_magics(raw: &str) -> Vec<Vec<u8>> {
+    let table: toml::Table = raw.parse().expect("arch-format magics are valid TOML");
+    assert!(
+        table.get("as_of").and_then(toml::Value::as_str).is_some(),
+        "arch-format magics record an as_of date"
+    );
+    let records = table
+        .get("format")
+        .and_then(toml::Value::as_array)
+        .expect("arch-format magics have a [[format]] array");
+    assert!(!records.is_empty(), "arch-format magics are not empty");
+    records
+        .iter()
+        .map(|record| {
+            let hex = record
+                .get("magic")
+                .and_then(toml::Value::as_str)
+                .expect("arch-format magic entry has a magic string");
+            assert!(
+                !hex.is_empty() && hex.len() % 2 == 0,
+                "arch-format magic is whole bytes: {hex:?}"
+            );
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| {
+                    u8::from_str_radix(&hex[i..i + 2], 16)
+                        .unwrap_or_else(|_| panic!("arch-format magic is hex: {hex:?}"))
+                })
+                .collect::<Vec<u8>>()
+        })
+        .collect()
+}
+
+/// Whether any payload file of `pkg` is data in a known native-layout
+/// format (see `data/arch-format-magics.toml`). Such a file is bound
+/// to the architecture class of the machine that wrote it, so its
+/// presence is positive evidence that the package's arch marking is
+/// deliberate rather than a forgotten `noarch` -- the case
+/// `check_no_binary` exists to catch. Only regular files with an
+/// on-disk payload count: a ghost entry has no bytes to read, and a
+/// symlink's bytes name its target rather than carrying data.
+fn pkg_has_arch_format_data(pkg: &Pkg) -> bool {
+    use std::io::Read;
+    let magics = arch_format_magics();
+    let width = magics.iter().map(Vec::len).max().unwrap_or(0);
+    pkg.files.iter().any(|pkgfile| {
+        if pkgfile.is_ghost()
+            || !crate::pkg::pkgfile::is_reg(pkgfile.mode)
+            || crate::pkg::pkgfile::is_symlink(pkgfile.mode)
+        {
+            return false;
+        }
+        let Ok(mut fh) = std::fs::File::open(&pkgfile.path) else {
+            return false;
+        };
+        let mut head = vec![0u8; width];
+        let mut filled = 0;
+        while filled < width {
+            match fh.read(&mut head[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(_) => return false,
+            }
+        }
+        head.truncate(filled);
+        magics
+            .iter()
+            .any(|magic| head.len() >= magic.len() && &head[..magic.len()] == magic.as_slice())
+    })
+}
+
+/// Privilege gate (#959): the file itself runs with raised
+/// privileges -- setuid or setgid bits, or file capabilities.
+fn file_is_privileged(pkgfile: &PkgFile) -> bool {
+    pkgfile.mode & (0o4000 | 0o2000) != 0
+        || pkgfile
+            .filecaps
+            .as_deref()
+            .is_some_and(|caps| !caps.is_empty())
+}
+
+/// Exposure gate (#959): the package ships a systemd service or
+/// socket unit, so its binaries form daemon surface. Only units in
+/// the package's own file list count, and only `.service`/`.socket`
+/// under a `systemd/system` directory -- a D-Bus activation file
+/// under share/dbus-1/services is not a daemon unit.
+fn pkg_ships_daemon_units(pkg: &Pkg) -> bool {
+    pkg.files.iter().any(|f| {
+        f.name.contains("/systemd/system/")
+            && (f.name.ends_with(".service") || f.name.ends_with(".socket"))
+    })
+}
+
 impl BinariesCheck {
     pub fn new(config: &Config) -> Self {
         Self::with_tool_source(config, ToolSource::Path)
@@ -2797,9 +3315,15 @@ impl BinariesCheck {
                 })
                 .unwrap_or_default()
         };
+        // The reference matches each PieExecutables pattern with
+        // `regex.fullmatch(bin_name)`, so anchor the compiled patterns:
+        // an unanchored search would also charge paths that merely
+        // contain a listed name (e.g. /usr/bin/ssh-authorized-keys
+        // containing /usr/bin/ssh, or /usr/bin/susedialog containing
+        // /usr/bin/su) at error severity instead of the suggestion.
         let pie_exec_regexes: Vec<Regex> = get_strings("PieExecutables")
             .iter()
-            .filter_map(|r| Regex::new(r).ok())
+            .filter_map(|r| Regex::new(&format!("^(?:{r})$")).ok())
             .collect();
         let (strings, _) = Tool::probe(&source, "strings", &[]);
         let (ar, _) = Tool::probe(&source, "ar", &["--version"]);
@@ -2828,9 +3352,26 @@ impl BinariesCheck {
                         .expect("static regex")
                 })
                 .clone(),
+            // Anchored at the start, unlike the reference's searched
+            // regexp: the charged symbol must BE mktemp (optionally
+            // version-decorated), not merely end with it — project
+            // wrappers such as netsnmp_mktemp are their own functions,
+            // not calls to the libc mktemp (fix-and-diverge; see the
+            // divergences ledger).
             mktemp_call_regex: MKTEMP_CALL_REGEX
-                .get_or_init(|| Regex::new(r"(mktemp(?:@GLIBC\S+)?)(?:\s|$)")
+                .get_or_init(|| Regex::new(r"^(mktemp(?:@GLIBC\S+)?)(?:\s|$)")
                     .expect("static regex"))
+                .clone(),
+            gets_call_regex: GETS_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"^gets(?:@GLIBC\S+)?$").expect("static regex")
+                })
+                .clone(),
+            tmpnam_call_regex: TMPNAM_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"^(tmpnam|tmpnam_r|tempnam)(?:@GLIBC\S+)?$")
+                        .expect("static regex")
+                })
                 .clone(),
             gethostbyname_call_regex: GETHOSTBYNAME_CALL_REGEX
                 .get_or_init(|| {
@@ -2838,6 +3379,41 @@ impl BinariesCheck {
                         r"((gethostbyname|gethostbyname2|gethostbyaddr|gethostbyname_r|gethostbyname2_r|gethostbyaddr_r)(?:@GLIBC\S+)?)(?:\s|$)",
                     )
                     .expect("static regex")
+                })
+                .clone(),
+            md5_call_regex: MD5_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(
+                        r"^((MD5|MD5_Init|MD5_Update|MD5_Final|MD5_Transform)(?:@\S+)?)(?:\s|$)",
+                    )
+                    .expect("static regex")
+                })
+                .clone(),
+            weak_prng_call_regex: WEAK_PRNG_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(
+                        r"^((drand48_r|drand48|erand48_r|erand48|lrand48_r|lrand48|nrand48_r|nrand48|mrand48_r|mrand48|jrand48_r|jrand48|seed48_r|seed48|lcong48_r|lcong48|srand48_r|srand48|initstate_r|setstate_r|initstate|setstate|srandom_r|srandom|random_r|random|srand|rand_r|rand)(?:@GLIBC\S+)?)(?:\s|$)",
+                    )
+                    .expect("static regex")
+                })
+                .clone(),
+            unbounded_copy_call_regex: UNBOUNDED_COPY_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(
+                        r"^((strcpy|strcat|sprintf|vsprintf)(?:@GLIBC\S+)?)(?:\s|$)",
+                    )
+                    .expect("static regex")
+                })
+                .clone(),
+            des_call_regex: DES_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"^((DES_[A-Za-z0-9_]+)(?:@\S+)?)(?:\s|$)").expect("static regex")
+                })
+                .clone(),
+            rc4_call_regex: RC4_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"^((RC4|RC4_set_key|RC4_options)(?:@\S+)?)(?:\s|$)")
+                        .expect("static regex")
                 })
                 .clone(),
             is_exec: false,
@@ -2982,7 +3558,8 @@ impl BinariesCheck {
                 .iter()
                 .any(|r| r.is_match(bin_name).unwrap_or(false))
             {
-                // fullmatch semantics: the config regexes are anchored by convention
+                // the compiled patterns are anchored at construction,
+                // giving the reference's fullmatch semantics
                 add_info(
                     out,
                     Level::Error,
@@ -3014,10 +3591,15 @@ impl BinariesCheck {
         // shape with no binaries is the expected shape, not a defect.
         // The suffix test matches the debug-companion recognition
         // FilesCheck and FilelistCheck use (plusky/rpmcrab#948).
+        // Payload in a known native-layout data format (an X11
+        // compose cache, a GDBM database) is bound to the build
+        // architecture, so a package shipping it is arch-specific by
+        // design even without binaries (boo#1110020).
         if !has_binary
             && !has_file_in_libdir
             && pkg.arch != "noarch"
             && !pkg.name.ends_with("-debugsource")
+            && !pkg_has_arch_format_data(pkg)
         {
             add_info(out, Level::Warning, pkg, "no-binary", &[]);
         }
@@ -3042,6 +3624,15 @@ impl BinariesCheck {
         }
         let ar = ArInfo::parse(&self.ar, &pkgfile.path);
         if let Some(reason) = ar.failed {
+            // A structurally valid gplib archive (the MPLIB-compatible
+            // dialect gputils writes for SDCC's PIC targets) is a
+            // working library for its toolchain; GNU `ar` cannot read
+            // the dialect, but that is a format difference, not
+            // corruption. Treat it as a non-standard archive, like the
+            // `.bca` case above, instead of charging ar-failed.
+            if std::fs::read(&pkgfile.path).is_ok_and(|data| is_gplib_archive(&data)) {
+                return false;
+            }
             add_info(
                 out,
                 Level::Error,
@@ -3154,6 +3745,18 @@ impl BinariesCheck {
         out: &mut Filter,
     ) {
         if !self.is_archive {
+            return;
+        }
+        // An archive with no members has nothing an index could
+        // index and nothing a symtab could describe: glibc's
+        // post-2.34 merged-library stubs (libpthread.a, libdl.a,
+        // ...) are empty placeholder archives shipped so the old
+        // `-l` names keep resolving to libc, and they link
+        // vacuously. The finding's premise -- a linkable library
+        // gutted of its symtab -- cannot hold there. The sibling
+        // debuginfo check stays quiet on the same shape through
+        // its no-code-carrying-member gate (plusky/rpmcrab#847).
+        if info.no_members {
             return;
         }
         for elf_file in &info.sections {
@@ -3798,7 +4401,81 @@ impl BinariesCheck {
         } else {
             info.has_function_matching(&self.mktemp_call_regex)
         };
+        // gets (#972): the charge is the undefined reference itself,
+        // in archives and linked objects alike. gets reads a line
+        // into a caller buffer with no bound -- CWE-242's defining
+        // call, removed from C11 and POSIX.1-2024, kept by glibc only
+        // as a binary-compatibility symbol. There is no safe use and
+        // no gated form: the pattern is a tripwire, and the corpus
+        // measurement behind this finder found the population at
+        // zero. A definition is never charged (glibc's libc defines
+        // gets; the provider is not a caller), and the fortified
+        // __gets_chk -- a different symbol with a checked bound --
+        // does not match the anchored pattern. STT_NOTYPE dynsym
+        // imports land only in `undefined_functions` (fill_from_elf),
+        // so that set is scanned too (#1045).
+        let gets = info.has_undefined_function_matching(&self.gets_call_regex)
+            || info
+                .undefined_functions
+                .iter()
+                .any(|s| self.gets_call_regex.is_match(s).unwrap_or(false));
+        // tmpnam family (#972): the charge is the undefined reference
+        // itself, in archives and linked objects alike. All three names
+        // (tmpnam, tmpnam_r, tempnam) return a caller-chosen file NAME
+        // rather than an open descriptor, so the name-to-open interval
+        // is the CWE-377 race call-to-mktemp charges, and glibc's own
+        // linker warning records the family's no-safe-use verdict. A
+        // definition is never charged: the library that implements
+        // the family (glibc's libc carries the definitions) is the
+        // provider, not a caller -- the definition-is-not-a-call line
+        // the mktemp scoping draws for archives (#852), applied here
+        // to every object kind, so this finder does not import the
+        // defined-match overreach the family tightening removes.
+        let tmpnam = info.has_undefined_function_matching(&self.tmpnam_call_regex);
         let gethostbyname = info.has_function_matching(&self.gethostbyname_call_regex);
+        // Legacy crypto primitives (#972 candidate 6): undefined
+        // references to the low-level OpenSSL-style entry points.
+        // The reference is the predicate -- the implementing
+        // libraries define these symbols and stay silent. Warning
+        // only: the artefact cannot tell a security use (credential
+        // storage, confidentiality) from a benign one (a checksum
+        // over public data), and the corpus classification in #972
+        // shows both. The regexes are anchored: EVP_MD5 and friends
+        // are the policy-controlled high-level interface, not this
+        // pattern.
+        let md5 = info.has_undefined_function_matching(&self.md5_call_regex);
+        let des = info.has_undefined_function_matching(&self.des_call_regex);
+        let rc4 = info.has_undefined_function_matching(&self.rc4_call_regex);
+        // Weak PRNG family (#972 candidate 7): undefined references
+        // to rand/random and the *48 generators. Charged only inside
+        // the privilege-or-exposure gate -- the bare population stays
+        // silent, because outside a privileged or daemon context the
+        // family's dominant uses are jitter, sampling and test data.
+        // Warning inside the gate too: the artefact cannot tell a
+        // security value (session id, password salt, token) from
+        // jitter, and the gated corpus population is dominated by
+        // the benign uses. The regex is anchored: arc4random and
+        // getrandom are strong sources, not this pattern.
+        let weak_prng = info.has_undefined_function_matching(&self.weak_prng_call_regex)
+            && (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg));
+        // An undefined reference charges the call (#972 candidate 4):
+        // the definition site -- glibc itself, or a library shipping
+        // its own variant -- makes no call and stays silent, unlike
+        // call-to-mktemp's linked-object rule (#852), whose subject
+        // has no implementation library in the distribution. The
+        // fortified __*_chk spellings do not match the regex: they
+        // are the checked form of the same calls. Warning only --
+        // whether a call overflows depends on the destination size
+        // at the call site, which the binary cannot decide, so the
+        // gated population measured in #972 earns no Error form.
+        // The second disjunct covers dynsym imports typed STT_NOTYPE:
+        // fill_from_elf files those only under `undefined_functions`,
+        // never under the FUNC-only `undefined_function_refs`.
+        let unbounded_copy = info.has_undefined_function_matching(&self.unbounded_copy_call_regex)
+            || info
+                .undefined_functions
+                .iter()
+                .any(|s| self.unbounded_copy_call_regex.is_match(s).unwrap_or(false));
 
         if setgid && setuid && !setgroups {
             // Warning unconditionally (fix-and-diverge, #743). The
@@ -3820,13 +4497,121 @@ impl BinariesCheck {
         if mktemp {
             add_info(out, Level::Error, pkg, "call-to-mktemp", &[&pkgfile.name]);
         }
+        if gets {
+            add_info(out, Level::Error, pkg, "call-to-gets", &[&pkgfile.name]);
+        }
+        if tmpnam {
+            add_info(out, Level::Error, pkg, "call-to-tmpnam", &[&pkgfile.name]);
+        }
         if gethostbyname {
+            // Defect-pattern gate (registry gate shape
+            // "privilege-or-exposure", #959): the bare pattern stays a
+            // Warning. The gated forms report at Error: the file
+            // itself carries privilege (setuid/setgid bits or file
+            // capabilities), or the package ships systemd service or
+            // socket units, i.e. the caller runs as a daemon. The
+            // Error form also requires a call — an undefined reference
+            // to the family. A file that only defines the symbols
+            // (an NSS module implementing the legacy entry points, a
+            // bundled replacement) carries the pattern without making
+            // the call and stays in the Warning population: the same
+            // definition/call split the archive scoping of
+            // call-to-mktemp uses (#852). The level rests on the
+            // Factory corpus measurement recorded in the divergence
+            // ledger (#967).
+            if info.has_undefined_function_matching(&self.gethostbyname_call_regex)
+                && (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg))
+            {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "binary-or-shlib-calls-gethostbyname",
+                    &[&pkgfile.name],
+                );
+            } else {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "binary-or-shlib-calls-gethostbyname",
+                    &[&pkgfile.name],
+                );
+            }
+        }
+        if md5 {
             add_info(
                 out,
                 Level::Warning,
                 pkg,
-                "binary-or-shlib-calls-gethostbyname",
+                "binary-or-shlib-calls-md5",
                 &[&pkgfile.name],
+            );
+        }
+        if des {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "binary-or-shlib-calls-des",
+                &[&pkgfile.name],
+            );
+        }
+        if rc4 {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "binary-or-shlib-calls-rc4",
+                &[&pkgfile.name],
+            );
+        }
+        if weak_prng {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "binary-or-shlib-calls-weak-prng",
+                &[&pkgfile.name],
+            );
+        }
+        if unbounded_copy {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "binary-or-shlib-calls-unbounded-copy",
+                &[&pkgfile.name],
+            );
+        }
+    }
+
+    /// `go-toolchain-outdated`: the file's `.go.buildinfo` records
+    /// a Go toolchain below the embedded floor (see
+    /// `go_toolchain_below_floor`). A Go binary keeps the standard
+    /// library it was built with, so defects fixed upstream stay in
+    /// the shipped binary until the package is rebuilt; the remedy
+    /// is a rebuild with a fixed toolchain, a distribution
+    /// scheduling action rather than a defect that should fail a
+    /// build, which is why this is a warning and not an error.
+    fn check_go_toolchain(
+        &self,
+        pkg: &Pkg,
+        pkgfile: &PkgFile,
+        info: &ReadelfInfo,
+        out: &mut Filter,
+    ) {
+        let Some(version) = info.go_toolchain else {
+            return;
+        };
+        if go_toolchain_below_floor(version, go_toolchain_floor()) {
+            let version_text = version.to_string();
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "go-toolchain-outdated",
+                &[&pkgfile.name, &version_text],
             );
         }
     }
@@ -3908,7 +4693,7 @@ impl BinariesCheck {
                     "statically-linked-binary",
                     &[&pkgfile.name],
                 );
-            } else if !info.is_go_binary() && !info.is_plugin_like() {
+            } else if !info.is_go_binary() && !info.is_plugin_like(&pkgfile.name) {
                 // Go binaries are ET_DYN with no DT_NEEDED, and plugin-like
                 // objects legitimately carry none; only genuine shared
                 // objects are missing dependency information here.
@@ -4127,6 +4912,7 @@ impl BinariesCheck {
             self.check_library_dependency_location(pkg, pkgfile, l, out);
         }
         self.check_security_functions(pkg, pkgfile, info, out);
+        self.check_go_toolchain(pkg, pkgfile, info, out);
         self.check_rpath(pkg, pkgfile, info, out);
         self.check_library_dependency(pkg, pkgfile, info, out);
         self.check_forbidden_functions(pkg, pkgfile, info, config, out);
@@ -4843,12 +5629,32 @@ mod tests {
         soname: Option<&str>,
         dynsyms: &[(&str, u8, u8, u16)],
     ) -> Vec<(String, String)> {
+        shlib_libdep_results_named(
+            id,
+            go_note,
+            needed,
+            is_shobj,
+            soname,
+            dynsyms,
+            "/usr/lib64/libnodep.so.1",
+        )
+    }
+
+    fn shlib_libdep_results_named(
+        id: &str,
+        go_note: bool,
+        needed: Option<&str>,
+        is_shobj: bool,
+        soname: Option<&str>,
+        dynsyms: &[(&str, u8, u8, u16)],
+        file_name: &str,
+    ) -> Vec<(String, String)> {
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         check.is_shobj = is_shobj;
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let pkgfile = PkgFile {
-            name: "/usr/lib64/libnodep.so.1".to_string(),
+            name: file_name.to_string(),
             ..Default::default()
         };
         let bytes = craft_shlib_elf(go_note, needed, soname, dynsyms);
@@ -5014,6 +5820,135 @@ mod tests {
         );
         assert_lacks(&results, "shared-library-without-dependency-information");
         assert!(results.is_empty(), "main shim must be quiet: {results:?}");
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_skips_own_name_module() {
+        // Module shape: the build stamped the module's own file name
+        // as its DT_SONAME (the slurm/apache plugin shape). The real
+        // non-weak undefined import rules out the self-contained
+        // disjunct and the present SONAME rules out the dlopen-only
+        // one -- only the own-name disjunct can silence this fixture,
+        // so dropping it must fail this test.
+        let results = shlib_libdep_results_named(
+            "ownname",
+            false,
+            None,
+            true,
+            Some("certmgr_script.so"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+            "/usr/lib64/slurm/certmgr_script.so",
+        );
+        assert_lacks(&results, "shared-library-without-dependency-information");
+        assert!(
+            results.is_empty(),
+            "own-name module must be quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_skips_own_name_non_so_module() {
+        // The own-name shape is not tied to a `.so` name: a VirtualBox
+        // ring-0 payload carries its own `.r0` file name as SONAME.
+        let results = shlib_libdep_results_named(
+            "ownnamer0",
+            false,
+            None,
+            true,
+            Some("VMMR0.r0"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+            "/usr/lib/virtualbox/VMMR0.r0",
+        );
+        assert_lacks(&results, "shared-library-without-dependency-information");
+        assert!(
+            results.is_empty(),
+            "own-name .r0 module must be quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_fires_versioned_own_name() {
+        // Near miss: the SONAME equals the file name but carries an
+        // ABI version component -- a genuine linkable library whose
+        // name other packages record DT_NEEDED against, still
+        // checked. Dropping the version condition in the own-name
+        // disjunct must fail this test.
+        let results = shlib_libdep_results_named(
+            "versionedname",
+            false,
+            None,
+            true,
+            Some("libfoo.so.1"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+            "/usr/lib64/libfoo.so.1",
+        );
+        let lines = lines_for(&results, "shared-library-without-dependency-information");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_fires_versioned_shorter_soname() {
+        // Near miss, the genuine-library shape measured in the corpus
+        // (libfrrfpm_pb): a versioned SONAME carried by a file with a
+        // longer full-version name. The own-name credit must not
+        // reach it.
+        let results = shlib_libdep_results_named(
+            "versionedshort",
+            false,
+            None,
+            true,
+            Some("libfrrfpm_pb.so.0"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+            "/usr/lib64/libfrrfpm_pb.so.0.0.0",
+        );
+        let lines = lines_for(&results, "shared-library-without-dependency-information");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_fires_foreign_unversioned_soname() {
+        // Near miss: an unversioned SONAME that is NOT the object's
+        // own file name. The credit is the own-name shape, not the
+        // mere absence of a version component.
+        let results = shlib_libdep_results_named(
+            "foreignname",
+            false,
+            None,
+            true,
+            Some("other.so"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+            "/usr/lib64/plugins/thing.so",
+        );
+        let lines = lines_for(&results, "shared-library-without-dependency-information");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
     }
 
     #[test]
@@ -5253,6 +6188,7 @@ mod tests {
                 is_debug: false,
                 is_rust: false,
                 is_zig: false,
+                go_toolchain: None,
                 soname: None,
                 needed: Vec::new(),
                 runpaths,
@@ -5266,6 +6202,7 @@ mod tests {
                 code_machines: Vec::new(),
                 failed: None,
                 no_elf_members: false,
+                no_members: false,
             };
             let pkgfile = PkgFile {
                 name: name.to_string(),
@@ -5461,6 +6398,17 @@ mod tests {
         ehdr[62..64].copy_from_slice(&(shnum - 1).to_le_bytes()); // shstrndx
         buf[0..64].copy_from_slice(&ehdr);
         buf
+    }
+
+    fn parse_elf_bytes(tag: &str, bytes: &[u8]) -> ReadelfInfo {
+        // Unique per test: parallel cargo test threads share the process.
+        let path =
+            std::env::temp_dir().join(format!("rpmcrab-go-detect-{}-{}", tag, std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/bin/probe");
+        assert!(info.failed.is_none(), "crafted ELF must parse");
+        std::fs::remove_file(&path).ok();
+        info
     }
 
     fn parse_crafted_sections(tag: &str, sections: &[(&str, &[u8])]) -> ReadelfInfo {
@@ -7396,6 +8344,142 @@ description = "explicit priority string bypasses the system crypto policy"
         );
     }
 
+    /// One gplib member: the 256-byte name field, the fixed numeric
+    /// field area (a timestamp-shaped run, then the size), the `! `
+    /// terminator and the payload.
+    fn gplib_member(name: &str, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut name_field = name.as_bytes().to_vec();
+        name_field.resize(256, b' ');
+        out.extend_from_slice(&name_field);
+        out.extend_from_slice(format!("{}l {:<10}", 1_785_131_819u64, payload.len()).as_bytes());
+        out.extend_from_slice(b"! ");
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn gplib_archive(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = b"!<arch>\n".to_vec();
+        for (name, payload) in members {
+            out.extend_from_slice(&gplib_member(name, payload));
+        }
+        out
+    }
+
+    #[test]
+    fn gplib_archive_shapes_validate() {
+        let coff = b"\x40\x12\x02\x00\x2a\xf3\x66\x6a";
+        // Symbol index first, then an object member.
+        let with_index = gplib_archive(&[("/", b"\x01\x00\x00\x00"), ("foo.o/", coff)]);
+        assert!(is_gplib_archive(&with_index));
+        // Index-less single-member archive (the shape SDCC's libio
+        // libraries take).
+        let single = gplib_archive(&[("libfoo_a-dummy.o/", coff)]);
+        assert!(is_gplib_archive(&single));
+        // The index alone (an empty library).
+        let index_only = gplib_archive(&[("/", b"\x00\x00\x00\x00")]);
+        assert!(is_gplib_archive(&index_only));
+    }
+
+    #[test]
+    fn gplib_archive_near_misses_do_not_validate() {
+        let coff = b"\x40\x12\x02\x00\x2a\xf3\x66\x6a";
+        let good = gplib_archive(&[("/", b"\x01\x00\x00\x00"), ("foo.o/", coff)]);
+        // Truncated payload: the chain no longer lands on EOF.
+        assert!(!is_gplib_archive(&good[..good.len() - 1]));
+        // Trailing garbage after the last member.
+        let mut trailed = good.clone();
+        trailed.push(b'\n');
+        assert!(!is_gplib_archive(&trailed));
+        // Wrong global magic.
+        let mut wrong_magic = good.clone();
+        wrong_magic[0] = b'?';
+        assert!(!is_gplib_archive(&wrong_magic));
+        // GNU ar framing (16-byte name field) is not the dialect.
+        let gnu: &[u8] =
+            b"!<arch>\nfoo.o/          1785131819  1000  1000  100644  8         `\n........";
+        assert!(!is_gplib_archive(gnu));
+        // An object member without the PIC COFF magic.
+        let not_coff = gplib_archive(&[("foo.o/", b"NOPE........")]);
+        assert!(!is_gplib_archive(&not_coff));
+        // A member name without the terminating slash.
+        let no_slash = gplib_archive(&[("foo.o", coff)]);
+        assert!(!is_gplib_archive(&no_slash));
+        // A lying size field breaks the member chain.
+        let mut lying = gplib_archive(&[("foo.o/", coff)]);
+        let pos = 8 + 256 + 12;
+        lying[pos] = if lying[pos] == b'9' { b'1' } else { b'9' };
+        assert!(!is_gplib_archive(&lying));
+    }
+
+    #[test]
+    fn gplib_archive_is_not_charged_ar_failed() {
+        // GNU `ar` cannot read the gplib dialect, but a structurally
+        // valid gplib archive is a working library for its toolchain:
+        // a non-standard archive, not an ar-failed one.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        assert!(check.ar.is_present());
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let archive = dir.path().join("libsdcc.lib");
+        let coff = b"\x40\x12\x02\x00\x2a\xf3\x66\x6a";
+        std::fs::write(
+            &archive,
+            gplib_archive(&[("/", b"\x01\x00\x00\x00"), ("foo.o/", coff)]),
+        )
+        .expect("write archive");
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let extract_dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = Pkg::open(std::path::Path::new(&rpm_path), extract_dir.path(), true)
+            .expect("open fixture");
+        let pkgfile = PkgFile {
+            name: "/usr/share/sdcc/lib/pic16/libsdcc.lib".to_string(),
+            path: archive.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        assert!(
+            !check.is_standard_archive(&pkg, &pkgfile, &mut out),
+            "gplib archives are non-standard archives"
+        );
+        assert!(
+            out.results().is_empty(),
+            "no findings invented: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn broken_archive_is_charged_ar_failed() {
+        // Garbage behind an ar magic is neither GNU ar nor gplib: the
+        // ar-failed charge stands.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        assert!(check.ar.is_present());
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let archive = dir.path().join("libbroken.a");
+        let mut bytes = b"!<arch>\n".to_vec();
+        bytes.resize(8 + 400, b'x');
+        std::fs::write(&archive, bytes).expect("write archive");
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let extract_dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = Pkg::open(std::path::Path::new(&rpm_path), extract_dir.path(), true)
+            .expect("open fixture");
+        let pkgfile = PkgFile {
+            name: "/usr/lib64/libbroken.a".to_string(),
+            path: archive.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        assert!(!check.is_standard_archive(&pkg, &pkgfile, &mut out));
+        assert_eq!(out.results().len(), 1, "one finding: {:?}", out.results());
+        assert!(
+            out.results()[0].1.contains("ar-failed"),
+            "the finding is ar-failed: {:?}",
+            out.results()
+        );
+    }
+
     #[test]
     fn hash_sections_fire_at_most_once_per_file() {
         // #218: the missing-section needle used to reset for every section
@@ -7469,8 +8553,10 @@ description = "explicit priority string bypasses the system crypto policy"
                 code_machines: Vec::new(),
                 failed: None,
                 no_elf_members: false,
+                no_members: false,
                 is_rust: false,
                 is_zig: false,
+                go_toolchain: None,
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_hash_sections(&pkg, &pkgfile, &info, &mut out);
@@ -7610,8 +8696,10 @@ description = "explicit priority string bypasses the system crypto policy"
             code_machines: Vec::new(),
             failed: None,
             no_elf_members: false,
+            no_members: false,
             is_rust: false,
             is_zig: false,
+            go_toolchain: None,
         }
     }
 
@@ -8583,6 +9671,146 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn arch_format_magics_table_is_well_formed() {
+        // The embedded table parses (staged-data validation) and
+        // carries the two evidenced formats.
+        let magics = arch_format_magics();
+        assert!(magics.contains(&b"XimC".to_vec()), "{magics:?}");
+        assert!(magics.contains(&vec![0xcf, 0x9a, 0x57, 0x13]), "{magics:?}");
+        assert!(magics.contains(&vec![0x13, 0x57, 0x9a, 0xcf]), "{magics:?}");
+        assert!(magics.contains(&vec![0xce, 0x9a, 0x57, 0x13]), "{magics:?}");
+        assert!(magics.contains(&vec![0x13, 0x57, 0x9a, 0xce]), "{magics:?}");
+    }
+
+    #[test]
+    fn no_binary_quiet_for_ximc_payload() {
+        // xorg-x11-libX11-ccache shape (boo#1110020): the payload is
+        // X11 compose caches -- data in libX11's native-word layout,
+        // bound to the architecture that generated it.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let cache = dir.path().join("l4_030_deadbeef");
+        let mut bytes = b"XimC".to_vec();
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 64]);
+        std::fs::write(&cache, &bytes).expect("write cache");
+        let config = test_config();
+        let mut cache_file = syn_file("/var/cache/libx11/compose/l4_030_deadbeef", "data");
+        cache_file.path = cache.to_string_lossy().into_owned();
+        let pkg = synthetic_pkg(
+            "xorg-x11-libX11-ccache",
+            "x86_64",
+            vec![
+                cache_file,
+                syn_file(
+                    "/usr/share/licenses/xorg-x11-libX11-ccache/LICENSE",
+                    "ASCII text",
+                ),
+            ],
+        );
+        let results = driver_results(&pkg, &config);
+        let lines = lines_for(&results, "no-binary");
+        assert!(
+            lines.is_empty(),
+            "no-binary must stay quiet for XimC payload: {results:?}"
+        );
+    }
+
+    #[test]
+    fn no_binary_quiet_for_gdbm_payload() {
+        // A GDBM database header is a native C struct (magic in host
+        // byte order, then native int/off_t members): both byte
+        // orders of both magics exempt.
+        let config = test_config();
+        for magic in [
+            vec![0xcf, 0x9a, 0x57, 0x13], // 0x13579acf, little-endian
+            vec![0x13, 0x57, 0x9a, 0xcf], // 0x13579acf, big-endian
+            vec![0xce, 0x9a, 0x57, 0x13], // 0x13579ace, little-endian
+            vec![0x13, 0x57, 0x9a, 0xce], // 0x13579ace, big-endian
+        ] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let db = dir.path().join("data.db");
+            let mut bytes = magic.clone();
+            bytes.extend_from_slice(&[0u8; 60]);
+            std::fs::write(&db, &bytes).expect("write db");
+            let mut db_file = syn_file("/var/lib/foo/data.db", "data");
+            db_file.path = db.to_string_lossy().into_owned();
+            let pkg = synthetic_pkg("foodb", "x86_64", vec![db_file]);
+            let results = driver_results(&pkg, &config);
+            let lines = lines_for(&results, "no-binary");
+            assert!(
+                lines.is_empty(),
+                "no-binary must stay quiet for GDBM magic {magic:?}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_binary_still_fires_for_portable_or_near_miss_payload() {
+        // Portable payload is not arch evidence: a gettext .mo has
+        // fixed-width fields and a magic that self-describes the byte
+        // order. Near misses are not evidence either: the match is
+        // the full magic prefix, not a resemblance.
+        let config = test_config();
+        for (name, bytes) in [
+            ("mo", vec![0xde, 0x12, 0x04, 0x95, 0, 0, 0, 0]),
+            ("ximc-truncated", b"Xim".to_vec()),
+            ("ximc-wrong-fourth-byte", b"XimD\0\0\0\0".to_vec()),
+            ("gdbm-off-by-one", vec![0xcf, 0x9a, 0x57, 0x14]),
+            ("text", b"just some text\n".to_vec()),
+        ] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let f = dir.path().join("payload");
+            std::fs::write(&f, &bytes).expect("write payload");
+            let mut pf = syn_file("/usr/share/foo/payload", "data");
+            pf.path = f.to_string_lossy().into_owned();
+            let pkg = synthetic_pkg("foopkg", "x86_64", vec![pf]);
+            let results = driver_results(&pkg, &config);
+            let lines = lines_for(&results, "no-binary");
+            assert_eq!(
+                lines.len(),
+                1,
+                "{name} must still fire no-binary: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_binary_still_fires_when_arch_format_file_is_ghost_or_symlink() {
+        // A ghost entry has no on-disk bytes, so it is no evidence;
+        // a symlink's bytes name its target rather than carrying
+        // data. Neither exempts.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let cache = dir.path().join("cache");
+        let mut bytes = b"XimC".to_vec();
+        bytes.extend_from_slice(&[0u8; 32]);
+        std::fs::write(&cache, &bytes).expect("write cache");
+
+        let mut ghost = syn_file("/var/cache/foo/cache", "data");
+        ghost.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        ghost.path = cache.to_string_lossy().into_owned();
+        let pkg = synthetic_pkg("foopkg", "x86_64", vec![ghost]);
+        let results = driver_results(&pkg, &config);
+        assert_eq!(
+            lines_for(&results, "no-binary").len(),
+            1,
+            "ghost XimC must still fire: {results:?}"
+        );
+
+        let mut link = syn_file("/var/cache/foo/cache", "symbolic link");
+        link.mode = 0o120777;
+        link.linkto = "real-cache".to_string();
+        link.path = cache.to_string_lossy().into_owned();
+        let pkg = synthetic_pkg("foopkg", "x86_64", vec![link]);
+        let results = driver_results(&pkg, &config);
+        assert_eq!(
+            lines_for(&results, "no-binary").len(),
+            1,
+            "symlink to XimC must still fire: {results:?}"
+        );
+    }
+
+    #[test]
     fn no_binary_quiet_when_files_in_lib64() {
         // Same shape on 64-bit: the pre-existing lib64 exemption keeps working.
         let config = test_config();
@@ -8925,6 +10153,49 @@ description = "explicit priority string bypasses the system crypto policy"
             lines[0]
         );
         assert_lacks(&results, "position-independent-executable-suggested");
+    }
+
+    #[test]
+    fn non_pie_executable_error_requires_full_path_match() {
+        // The reference matches PieExecutables with fullmatch: a path
+        // that merely contains a listed name is not the listed
+        // executable and only gets the suggestion. Corpus cases:
+        // ssh-tools' /usr/bin/ssh-authorized-keys and /usr/bin/ssh-sig
+        // (contain /usr/bin/ssh) and susedialog's /usr/bin/susedialog
+        // (contains /usr/bin/su) were charged at E by an unanchored
+        // search; the reference charges all three at W.
+        let config = config_with("PieExecutables = [\"/usr/bin/ssh\", \"/usr/bin/su\"]");
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+
+        // Exact listed paths keep firing at E.
+        for name in ["/usr/bin/ssh", "/usr/bin/su"] {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_non_pie(&pkg, name, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "non-position-independent-executable");
+            assert_eq!(lines.len(), 1, "{name} must fire at E: {results:?}");
+            assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+            assert_lacks(&results, "position-independent-executable-suggested");
+        }
+
+        // Prefix extensions, suffix extensions and paths containing a
+        // listed name in the middle only get the suggestion.
+        for name in [
+            "/usr/bin/ssh-authorized-keys",
+            "/usr/bin/ssh-sig",
+            "/usr/bin/susedialog",
+            "/usr/bin/supercat",
+            "/usr/share/rootfs/usr/bin/ssh",
+        ] {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_non_pie(&pkg, name, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "position-independent-executable-suggested");
+            assert_eq!(lines.len(), 1, "{name} must only be suggested: {results:?}");
+            assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+            assert_lacks(&results, "non-position-independent-executable");
+        }
     }
 
     #[test]
@@ -9891,6 +11162,51 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn zero_member_archive_parses_as_no_members() {
+        // The file is exactly the ar magic: glibc's post-2.34
+        // merged-library stubs (libpthread.a and kin) ship in this
+        // shape, as empty placeholders whose symbols live in libc.
+        let path = std::env::temp_dir().join(format!("rpmcrab-ar-empty-{}", std::process::id()));
+        std::fs::write(&path, b"!<arch>\n").unwrap();
+
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "/usr/lib64/libpthread.a");
+        assert!(
+            info.failed.is_none(),
+            "zero-member archive must parse: {:?}",
+            info.failed
+        );
+        assert!(info.no_members, "the member count is recorded at parse");
+        assert!(!info.no_elf_members, "no members is not no-ELF-members");
+        assert!(info.sections.is_empty(), "no member contributes sections");
+
+        // Both archive checks stay quiet on the parsed shape: the
+        // symtab check through the no-members gate above, the
+        // debuginfo check through its no-code-member gate (#847) --
+        // the two agree on what a zero-member archive is.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("glibc-devel", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libpthread.a", "current ar archive");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_missing_symtab_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "symtab check quiet on zero members: {:?}",
+            out.results()
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_missing_debug_info_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "debuginfo check quiet on zero members: {:?}",
+            out.results()
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn static_library_without_symtab() {
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
@@ -9918,6 +11234,20 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             out.results().is_empty(),
             ".symtab present must be quiet: {:?}",
+            out.results()
+        );
+
+        // A zero-member archive (glibc's post-2.34 merged-library
+        // stubs: the file is exactly the ar magic, which parses to
+        // no sections and no members) has nothing a symtab could
+        // describe and stays quiet.
+        let mut info = syn_info();
+        info.no_members = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_missing_symtab_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "zero-member archive must be quiet: {:?}",
             out.results()
         );
     }
@@ -12459,6 +13789,170 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(count(&with(&["mktemp64"], &[])), 0);
     }
 
+    #[test]
+    fn gets_charges_undefined_references_only() {
+        // #972: call-to-gets charges an undefined reference to gets,
+        // in an archive and in a linked object alike. A definition is
+        // never a call (glibc's libc defines gets as a compatibility
+        // symbol), and the anchored pattern keeps the safe and the
+        // fortified neighbours silent.
+        let config = test_config();
+        let count = |is_archive: bool, info: &ReadelfInfo| {
+            let mut check = BinariesCheck::with_tool_dir(&config, None);
+            check.is_archive = is_archive;
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let pkgfile = if is_archive {
+                syn_file("/usr/lib64/libfoo.a", "current ar archive")
+            } else {
+                syn_file("/usr/lib64/libfoo.so", "ELF 64-bit LSB shared object")
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "call-to-gets").len()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        for is_archive in [true, false] {
+            // A reference is a call: fires, plain and versioned.
+            assert_eq!(count(is_archive, &with(&["gets"], &["gets"])), 1);
+            assert_eq!(
+                count(is_archive, &with(&["gets"], &["gets@GLIBC_2.2.5"])),
+                1
+            );
+            // The definition alone (the glibc shape) is not a call: silent.
+            assert_eq!(count(is_archive, &with(&["gets"], &[])), 0);
+            // Near-miss names stay silent: the safe replacement, the
+            // bounded Annex K form, and the fortified variant whose
+            // bound is checked.
+            assert_eq!(count(is_archive, &with(&["fgets"], &["fgets"])), 0);
+            assert_eq!(count(is_archive, &with(&["gets_s"], &["gets_s"])), 0);
+            assert_eq!(
+                count(is_archive, &with(&["__gets_chk"], &["__gets_chk"])),
+                0
+            );
+            assert_eq!(count(is_archive, &with(&["getline"], &["getline"])), 0);
+            // A NOTYPE dynsym import lands only in
+            // `undefined_functions`, with no FUNC reference: fires.
+            let mut info = syn_info();
+            info.undefined_functions = vec!["gets".to_string()];
+            assert_eq!(count(is_archive, &info), 1);
+        }
+    }
+
+    #[test]
+    fn tmpnam_charges_undefined_references_only() {
+        // #972: call-to-tmpnam charges an undefined reference to the
+        // tmpnam family (tmpnam, tmpnam_r, tempnam), in an archive and
+        // in a linked object alike. A definition is never a call: the
+        // library implementing the family (glibc's libc carries the
+        // definitions) is the provider, not a caller.
+        let config = test_config();
+        let count = |is_archive: bool, info: &ReadelfInfo| {
+            let mut check = BinariesCheck::with_tool_dir(&config, None);
+            check.is_archive = is_archive;
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let pkgfile = if is_archive {
+                syn_file("/usr/lib64/libfoo.a", "current ar archive")
+            } else {
+                syn_file("/usr/lib64/libfoo.so", "ELF 64-bit LSB shared object")
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "call-to-tmpnam").len()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        for is_archive in [true, false] {
+            // Each family member, referenced: a call, fires.
+            assert_eq!(count(is_archive, &with(&["tmpnam"], &["tmpnam"])), 1);
+            assert_eq!(count(is_archive, &with(&["tmpnam_r"], &["tmpnam_r"])), 1);
+            assert_eq!(count(is_archive, &with(&["tempnam"], &["tempnam"])), 1);
+            // A versioned reference fires.
+            assert_eq!(
+                count(is_archive, &with(&["tmpnam"], &["tmpnam@GLIBC_2.2.5"])),
+                1
+            );
+            // The definition alone (the glibc shape) is not a call: silent.
+            assert_eq!(count(is_archive, &with(&["tmpnam"], &[])), 0);
+            assert_eq!(count(is_archive, &with(&["tempnam"], &[])), 0);
+            // Near-miss names stay silent: the safe sibling, the
+            // descriptor-returning relative, and suffixed strangers the
+            // anchored pattern must not reach.
+            assert_eq!(count(is_archive, &with(&["mkstemp"], &["mkstemp"])), 0);
+            assert_eq!(count(is_archive, &with(&["tmpfile"], &["tmpfile"])), 0);
+            assert_eq!(count(is_archive, &with(&["tmpnam64"], &["tmpnam64"])), 0);
+            assert_eq!(count(is_archive, &with(&["my_tmpnam"], &["my_tmpnam"])), 0);
+            // Another family's reference does not cross-fire.
+            assert_eq!(count(is_archive, &with(&["mktemp"], &["mktemp"])), 0);
+        }
+    }
+
+    #[test]
+    fn mktemp_lookalike_names_stay_silent() {
+        // The charged symbol must BE mktemp: the pattern is anchored
+        // at the start, so a project-private wrapper whose name merely
+        // ends in mktemp (net-snmp's netsnmp_mktemp and its kin) is a
+        // call to that project's own function, not to the libc mktemp.
+        // The reference's searched regexp fires on these names too;
+        // this is a deliberate divergence (see the divergences ledger).
+        let config = test_config();
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let run = |check: &BinariesCheck, pkgfile: &PkgFile, info: &ReadelfInfo| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, pkgfile, info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "call-to-mktemp").len()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        // Linked object: any FUNC match charges, defined or not.
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let exe = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        for name in [
+            "netsnmp_mktemp",
+            "apr_file_mktemp",
+            "e_mktemp",
+            "netsnmp_mktemp@GLIBC_2.2.5",
+            "mktemp_wrapper",
+        ] {
+            assert_eq!(run(&check, &exe, &with(&[name], &[name])), 0, "{name}");
+        }
+        // The real symbol still fires, plain and versioned.
+        assert_eq!(run(&check, &exe, &with(&["mktemp"], &[])), 1);
+        assert_eq!(run(&check, &exe, &with(&["mktemp@GLIBC_2.2.5"], &[])), 1);
+
+        // Archive: only an undefined reference charges.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let lib = syn_file("/usr/lib64/libnetsnmp.a", "current ar archive");
+        assert_eq!(
+            run(
+                &check,
+                &lib,
+                &with(&["netsnmp_mktemp"], &["netsnmp_mktemp"])
+            ),
+            0
+        );
+        assert_eq!(run(&check, &lib, &with(&["mktemp"], &["mktemp"])), 1);
+    }
+
     /// Minimal ET_REL ELF64 object carrying a `.symtab`, for the #852
     /// parse tests. Each sym is (name, bind, type, shndx); shndx 0 is
     /// SHN_UNDEF (a reference), 1 is the `.text` section (a definition).
@@ -12739,6 +14233,415 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn legacy_crypto_findings() {
+        // #972 candidate 6: an undefined reference to a low-level
+        // legacy-primitive entry point reports at Warning, one tag
+        // per primitive set. Definitions (the implementing library's
+        // shape) and the high-level EVP interface stay silent.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let count = |info: &ReadelfInfo, tag: &str| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, tag).len()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        // MD5 set: each entry point referenced fires, at Warning.
+        for sym in ["MD5", "MD5_Init", "MD5_Update", "MD5_Final"] {
+            let info = with(&[sym], &[sym]);
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "binary-or-shlib-calls-md5");
+            assert_eq!(lines.len(), 1, "{sym} referenced must fire: {results:?}");
+            assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+            assert_eq!(count(&info, "binary-or-shlib-calls-des"), 0);
+            assert_eq!(count(&info, "binary-or-shlib-calls-rc4"), 0);
+        }
+        // A versioned reference is a call: fires.
+        assert_eq!(
+            count(
+                &with(&["MD5_Init"], &["MD5_Init@OPENSSL_3.0.0"]),
+                "binary-or-shlib-calls-md5"
+            ),
+            1
+        );
+        // The definition alone (libcrypto's shape) is not a call: silent.
+        assert_eq!(
+            count(&with(&["MD5_Init"], &[]), "binary-or-shlib-calls-md5"),
+            0
+        );
+        // EVP_MD5 is the high-level interface, not this pattern: silent.
+        assert_eq!(
+            count(
+                &with(&["EVP_MD5"], &["EVP_MD5"]),
+                "binary-or-shlib-calls-md5"
+            ),
+            0
+        );
+        // SHA1 is not in the candidate's sets: silent.
+        assert_eq!(
+            count(
+                &with(&["SHA1_Init"], &["SHA1_Init"]),
+                "binary-or-shlib-calls-md5"
+            ),
+            0
+        );
+
+        // DES set: the DES_* entry points referenced fire.
+        for sym in ["DES_ecb_encrypt", "DES_set_key", "DES_cbc_encrypt"] {
+            assert_eq!(
+                count(&with(&[sym], &[sym]), "binary-or-shlib-calls-des"),
+                1,
+                "{sym} referenced must fire"
+            );
+        }
+        assert_eq!(
+            count(
+                &with(&["DES_ecb_encrypt"], &[]),
+                "binary-or-shlib-calls-des"
+            ),
+            0
+        );
+        // A name merely containing the prefix off-anchor stays silent.
+        assert_eq!(
+            count(
+                &with(&["XDES_ecb_encrypt"], &["XDES_ecb_encrypt"]),
+                "binary-or-shlib-calls-des"
+            ),
+            0
+        );
+
+        // RC4 set.
+        for sym in ["RC4", "RC4_set_key"] {
+            assert_eq!(
+                count(&with(&[sym], &[sym]), "binary-or-shlib-calls-rc4"),
+                1,
+                "{sym} referenced must fire"
+            );
+        }
+        assert_eq!(count(&with(&["RC4"], &[]), "binary-or-shlib-calls-rc4"), 0);
+    }
+
+    #[test]
+    fn weak_prng_gated_findings() {
+        // #972 candidate 7: an undefined reference to the rand family
+        // reports at Warning only inside the privilege-or-exposure
+        // gate; the bare shape, the definition-only shape and the
+        // strong generators stay silent everywhere.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let plain = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let bare_pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let count = |pkg: &Pkg, pkgfile: &PkgFile, functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-weak-prng").len()
+        };
+        let called = |sym: &str| count(&bare_pkg, &plain, &[sym], &[sym]);
+
+        // Bare shape: silent for the whole family.
+        for sym in ["rand", "random", "srand", "drand48", "srand48", "initstate"] {
+            assert_eq!(called(sym), 0, "bare {sym} must stay silent");
+        }
+
+        // Setuid firing file -> Warning.
+        let mut suid = plain.clone();
+        suid.mode = 0o104755;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut info = syn_info();
+        info.functions = vec!["rand".to_string()];
+        info.undefined_function_refs = vec!["rand".to_string()];
+        check.check_security_functions(&bare_pkg, &suid, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "binary-or-shlib-calls-weak-prng");
+        assert_eq!(lines.len(), 1, "one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Setgid and capability-carrying firing files -> fire.
+        let mut sgid = plain.clone();
+        sgid.mode = 0o102755;
+        assert_eq!(count(&bare_pkg, &sgid, &["srand48"], &["srand48"]), 1);
+        let mut caps = plain.clone();
+        caps.filecaps = Some("cap_net_raw+ep".to_string());
+        assert_eq!(count(&bare_pkg, &caps, &["random"], &["random"]), 1);
+
+        // Daemon packages (service or socket unit) -> fire.
+        let svc_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/lib/systemd/system/foo.service",
+                "ASCII text",
+            )],
+        );
+        assert_eq!(count(&svc_pkg, &plain, &["drand48"], &["drand48"]), 1);
+        let sock_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/foo.socket", "ASCII text")],
+        );
+        assert_eq!(count(&sock_pkg, &plain, &["lrand48"], &["lrand48"]), 1);
+
+        // Near miss: a timer unit is not daemon surface -> silent.
+        let timer_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/foo.timer", "ASCII text")],
+        );
+        assert_eq!(count(&timer_pkg, &plain, &["rand"], &["rand"]), 0);
+        // Near miss: a D-Bus activation file is not a systemd unit.
+        let dbus_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/share/dbus-1/services/org.example.Foo.service",
+                "ASCII text",
+            )],
+        );
+        assert_eq!(count(&dbus_pkg, &plain, &["rand"], &["rand"]), 0);
+        // Near miss: privilege on a different file does not gate this one.
+        let mut other = syn_file("/usr/bin/helper", "ELF 64-bit LSB executable");
+        other.mode = 0o104755;
+        let mixed_pkg = synthetic_pkg("testpkg", "x86_64", vec![other]);
+        assert_eq!(count(&mixed_pkg, &plain, &["rand"], &["rand"]), 0);
+        // Definition-only (an implementing library's shape) stays silent
+        // even in a gated package.
+        assert_eq!(count(&svc_pkg, &plain, &["rand"], &[]), 0);
+        // Reentrant forms fire inside the gate.
+        assert_eq!(count(&bare_pkg, &suid, &["srandom_r"], &["srandom_r"]), 1);
+        assert_eq!(count(&svc_pkg, &plain, &["drand48_r"], &["drand48_r"]), 1);
+        // The strong generators are not this pattern, even setuid.
+        assert_eq!(count(&bare_pkg, &suid, &["arc4random"], &["arc4random"]), 0);
+        assert_eq!(count(&bare_pkg, &suid, &["getrandom"], &["getrandom"]), 0);
+        assert_eq!(count(&bare_pkg, &suid, &["getentropy"], &["getentropy"]), 0);
+    }
+
+    #[test]
+    fn gethostbyname_gate_levels() {
+        // The defect-pattern privilege/exposure gates (#959, #967):
+        // the bare pattern is a Warning; a firing file that itself
+        // carries privilege, or any firing file in a package shipping
+        // systemd service/socket units, is an Error.
+        fn run(pkg: &Pkg, pkgfile: &PkgFile, functions: &[&str]) -> Vec<String> {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = info.functions.clone();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-gethostbyname")
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        // A file that only defines the pattern (no undefined
+        // reference): the pattern fires, the gate cannot promote it.
+        fn run_definition_only(pkg: &Pkg, pkgfile: &PkgFile) -> Vec<String> {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let mut info = syn_info();
+            info.functions = vec!["gethostbyname".to_string()];
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-gethostbyname")
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        let plain = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let bare_pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+
+        // Setuid firing file -> Error.
+        let mut suid = plain.clone();
+        suid.mode = 0o104755;
+        let lines = run(&bare_pkg, &suid, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // Setgid firing file -> Error.
+        let mut sgid = plain.clone();
+        sgid.mode = 0o102755;
+        let lines = run(&bare_pkg, &sgid, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // Capability-carrying firing file -> Error.
+        let mut caps = plain.clone();
+        caps.filecaps = Some("cap_net_raw+ep".to_string());
+        let lines = run(&bare_pkg, &caps, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // Package shipping a systemd service unit -> Error, and the
+        // _r lookalike fires through the same gate.
+        let svc_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/lib/systemd/system/foo.service",
+                "ASCII text",
+            )],
+        );
+        let lines = run(&svc_pkg, &plain, &["gethostbyname_r"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // Package shipping a systemd socket unit -> Error.
+        let sock_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/foo.socket", "ASCII text")],
+        );
+        let lines = run(&sock_pkg, &plain, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // Near miss: a timer unit is not daemon surface -> Warning.
+        let timer_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/foo.timer", "ASCII text")],
+        );
+        let lines = run(&timer_pkg, &plain, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Near miss: a D-Bus activation file is not a systemd unit ->
+        // Warning.
+        let dbus_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/share/dbus-1/services/org.example.Foo.service",
+                "ASCII text",
+            )],
+        );
+        let lines = run(&dbus_pkg, &plain, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Near miss: privilege on a *different* file of the package
+        // does not gate this file's finding -> Warning.
+        let mut other = syn_file("/usr/bin/helper", "ELF 64-bit LSB executable");
+        other.mode = 0o104755;
+        let mixed_pkg = synthetic_pkg("testpkg", "x86_64", vec![other]);
+        let lines = run(&mixed_pkg, &plain, &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Near miss: a definition-only file in a daemon package
+        // (an NSS module implementing the legacy entry points)
+        // stays a Warning although the exposure gate matches.
+        let lines = run_definition_only(&svc_pkg, &plain);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Near miss: a definition-only setuid file stays a Warning
+        // although the privilege gate matches.
+        let lines = run_definition_only(&bare_pkg, &suid);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Quiet shape: a privileged file in a daemon package that
+        // resolves through getaddrinfo emits nothing.
+        let mut suid_svc = plain.clone();
+        suid_svc.mode = 0o104755;
+        let lines = run(&svc_pkg, &suid_svc, &["getaddrinfo"]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
+    }
+
+    #[test]
+    fn unbounded_copy_findings() {
+        // #972 candidate 4: an undefined reference to strcpy, strcat,
+        // sprintf or vsprintf reports at Warning. The predicate is the
+        // reference, not the definition, and the fortified __*_chk
+        // spellings are the checked form and stay silent.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let count = |info: &ReadelfInfo| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-unbounded-copy").len()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        // Every set member referenced is a call: fires, at Warning.
+        for sym in ["strcpy", "strcat", "sprintf", "vsprintf"] {
+            let info = with(&[sym], &[sym]);
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            let lines = lines_for(&results, "binary-or-shlib-calls-unbounded-copy");
+            assert_eq!(lines.len(), 1, "{sym} referenced must fire: {results:?}");
+            assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        }
+        // A versioned reference is a call: fires.
+        assert_eq!(count(&with(&["strcpy"], &["strcpy@GLIBC_2.2.5"])), 1);
+        // The definition alone (glibc's own shape) is not a call: silent.
+        assert_eq!(count(&with(&["strcpy"], &[])), 0);
+        // The fortified spellings are the checked form: silent.
+        assert_eq!(count(&with(&["__strcpy_chk"], &["__strcpy_chk"])), 0);
+        assert_eq!(count(&with(&["__sprintf_chk"], &["__sprintf_chk"])), 0);
+        // Bounded siblings and the out-of-set stpcpy stay silent.
+        assert_eq!(count(&with(&["strncpy"], &["strncpy"])), 0);
+        // xstrcpy is a different function (an allocating wrapper that
+        // sizes the destination to the input): the anchored regex
+        // must not charge it for strcpy.
+        assert_eq!(count(&with(&["xstrcpy"], &["xstrcpy"])), 0);
+        assert_eq!(count(&with(&["snprintf"], &["snprintf"])), 0);
+        assert_eq!(count(&with(&["stpcpy"], &["stpcpy"])), 0);
+
+        // A NOTYPE dynsym import (the stripped-binary shape) lands
+        // only in `undefined_functions`, with no FUNC reference at
+        // all: fires, plain and versioned.
+        let mut info = syn_info();
+        info.undefined_functions = vec!["strcpy".to_string()];
+        assert_eq!(count(&info), 1);
+        let mut info = syn_info();
+        info.undefined_functions = vec!["strcpy@GLIBC_2.2.5".to_string()];
+        assert_eq!(count(&info), 1);
+
+        // An archive member's reference is a call too: fires.
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let info = with(&["strcat"], &["strcat"]);
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            lines_for(&results, "binary-or-shlib-calls-unbounded-copy").len(),
+            1,
+            "archive reference must fire: {results:?}"
+        );
+    }
+
+    #[test]
     fn forbidden_function_crypto_policy() {
         // Reference warn-on-functions.toml: the finding fires on a bare
         // SSL_CTX_set_cipher_list call, and is waived when the strings
@@ -12961,5 +14864,308 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = out.results().to_vec();
         assert_lacks(&results, "executable-in-library-package");
         assert_lacks(&results, "non-versioned-file-in-library-package");
+    }
+
+    /// Fabricate `.go.buildinfo` section bytes in the inline-strings
+    /// format (Go 1.18 and later) recording `version` as the
+    /// toolchain, with a minimal module-info string behind it.
+    fn go_buildinfo_inline(version: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\xff Go buildinf:");
+        bytes.push(8); // pointer size
+        bytes.push(2); // flags: inline strings
+        bytes.extend_from_slice(&[0u8; 16]); // rest of the 32-byte header
+        let push_string = |bytes: &mut Vec<u8>, text: &str| {
+            assert!(text.len() < 128, "fixture strings use a one-byte uvarint");
+            bytes.push(text.len() as u8);
+            bytes.extend_from_slice(text.as_bytes());
+        };
+        push_string(&mut bytes, version);
+        push_string(
+            &mut bytes,
+            "path\texample.invalid/tool\nbuild\t-buildmode=exe\n",
+        );
+        bytes
+    }
+
+    /// A minimal ELF64 (little-endian) with one identity PT_LOAD
+    /// (vaddr == file offset) and a legacy-format `.go.buildinfo`
+    /// section: the 32-byte header's first pointer addresses the
+    /// version string's (data pointer, length) header, which sits
+    /// behind the version bytes outside the section.
+    fn go_buildinfo_legacy_elf(version: &str) -> Vec<u8> {
+        let shstrtab: &[u8] = b"\0.go.buildinfo\0.shstrtab\0";
+        let buildinfo_off = 120u64; // ELF header (64) + program header (56)
+        let version_off = buildinfo_off + 32;
+        let strhdr_off = version_off + version.len() as u64;
+        let shstrtab_off = strhdr_off + 16;
+        let mut shoff = shstrtab_off + shstrtab.len() as u64;
+        while !shoff.is_multiple_of(8) {
+            shoff += 1;
+        }
+        let total = shoff + 3 * 64;
+
+        let mut buf = vec![0u8; 64]; // ELF header placeholder, patched in below
+        let mut ph = vec![0u8; 56];
+        ph[0..4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        ph[4..8].copy_from_slice(&5u32.to_le_bytes()); // R+X
+        ph[32..40].copy_from_slice(&total.to_le_bytes()); // filesz
+        ph[40..48].copy_from_slice(&total.to_le_bytes()); // memsz
+        ph[48..56].copy_from_slice(&0x1000u64.to_le_bytes()); // align
+        buf.extend(ph);
+
+        let mut section = Vec::new();
+        section.extend_from_slice(b"\xff Go buildinf:");
+        section.push(8); // pointer size
+        section.push(0); // flags: pointer strings
+        section.extend_from_slice(&strhdr_off.to_le_bytes());
+        section.extend_from_slice(&0u64.to_le_bytes()); // module info: null
+        assert_eq!(section.len(), 32);
+        buf.extend(section);
+        buf.extend_from_slice(version.as_bytes());
+        buf.extend_from_slice(&version_off.to_le_bytes());
+        buf.extend_from_slice(&(version.len() as u64).to_le_bytes());
+        buf.extend_from_slice(shstrtab);
+        while !buf.len().is_multiple_of(8) {
+            buf.push(0);
+        }
+        assert_eq!(buf.len() as u64, shoff);
+
+        let shdr = |name: u32, ty: u32, off: u64, size: u64| -> Vec<u8> {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&name.to_le_bytes());
+            h[4..8].copy_from_slice(&ty.to_le_bytes());
+            h[24..32].copy_from_slice(&off.to_le_bytes());
+            h[32..40].copy_from_slice(&size.to_le_bytes());
+            h[48..56].copy_from_slice(&1u64.to_le_bytes());
+            h
+        };
+        buf.extend(vec![0u8; 64]); // NULL section
+        buf.extend(shdr(1, 1, buildinfo_off, 32)); // .go.buildinfo, SHT_PROGBITS
+        buf.extend(shdr(15, 3, shstrtab_off, shstrtab.len() as u64)); // .shstrtab
+
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2; // ELFCLASS64
+        ehdr[5] = 1; // ELFDATA2LSB
+        ehdr[6] = 1; // EV_CURRENT
+        ehdr[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        ehdr[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
+        ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[52..54].copy_from_slice(&64u16.to_le_bytes()); // ehsize
+        ehdr[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
+        ehdr[56..58].copy_from_slice(&1u16.to_le_bytes()); // phnum
+        ehdr[58..60].copy_from_slice(&64u16.to_le_bytes()); // shentsize
+        ehdr[60..62].copy_from_slice(&3u16.to_le_bytes()); // shnum
+        ehdr[62..64].copy_from_slice(&2u16.to_le_bytes()); // shstrndx
+        buf[0..64].copy_from_slice(&ehdr);
+        buf
+    }
+
+    #[test]
+    fn go_version_parse_accepts_releases_only() {
+        let v = |major, minor, patch| {
+            Some(GoVersion {
+                major,
+                minor,
+                patch,
+            })
+        };
+        assert_eq!(GoVersion::parse("go1.23.8"), v(1, 23, 8));
+        assert_eq!(GoVersion::parse("go1.24"), v(1, 24, 0));
+        assert_eq!(GoVersion::parse("go1.9.2"), v(1, 9, 2));
+        // Devel, release-candidate and bootstrap strings never parse:
+        // the finder stays silent for versions it cannot order
+        // against the floor.
+        for raw in [
+            "devel go1.25-0123456789ab",
+            "go1.24rc1",
+            "go1.4-bootstrap-20171003",
+            "(devel)",
+            "go",
+            "go1",
+            "go1.x",
+            "go1.2.3.4",
+            "",
+        ] {
+            assert_eq!(GoVersion::parse(raw), None, "{raw:?} must not parse");
+        }
+    }
+
+    #[test]
+    fn go_floor_comparison() {
+        let floor = [
+            (
+                GoVersion {
+                    major: 1,
+                    minor: 23,
+                    patch: 0,
+                },
+                GoVersion {
+                    major: 1,
+                    minor: 23,
+                    patch: 8,
+                },
+            ),
+            (
+                GoVersion {
+                    major: 1,
+                    minor: 24,
+                    patch: 0,
+                },
+                GoVersion {
+                    major: 1,
+                    minor: 24,
+                    patch: 2,
+                },
+            ),
+        ];
+        let v = |major, minor, patch| GoVersion {
+            major,
+            minor,
+            patch,
+        };
+        assert!(go_toolchain_below_floor(v(1, 23, 5), &floor));
+        assert!(!go_toolchain_below_floor(v(1, 23, 8), &floor));
+        assert!(!go_toolchain_below_floor(v(1, 23, 12), &floor));
+        assert!(go_toolchain_below_floor(v(1, 24, 1), &floor));
+        assert!(!go_toolchain_below_floor(v(1, 24, 2), &floor));
+        // Older than every listed line: no release there carries the
+        // recorded fixes, so it fires.
+        assert!(go_toolchain_below_floor(v(1, 22, 4), &floor));
+        assert!(go_toolchain_below_floor(v(1, 14, 1), &floor));
+        // Newer than every listed line: the table does not judge what
+        // it does not know, so it stays silent.
+        assert!(!go_toolchain_below_floor(v(1, 25, 0), &floor));
+        assert!(!go_toolchain_below_floor(v(1, 27, 0), &floor));
+        assert!(!go_toolchain_below_floor(v(2, 0, 0), &floor));
+    }
+
+    #[test]
+    fn go_floor_table_records_the_anchor_fixes() {
+        // The shipped floor is anchored on CVE-2025-22871, fixed in
+        // go1.23.8 and go1.24.2: versions just below those releases
+        // must read as below the floor whatever later raises the
+        // recorded defect set adds.
+        let floor = go_toolchain_floor();
+        assert!(!floor.is_empty(), "the shipped floor has lines");
+        for (line, minimum) in floor {
+            assert_eq!(minimum.line(), *line, "minimum belongs to its line");
+        }
+        let v = |major, minor, patch| GoVersion {
+            major,
+            minor,
+            patch,
+        };
+        assert!(go_toolchain_below_floor(v(1, 23, 7), floor));
+        assert!(go_toolchain_below_floor(v(1, 24, 1), floor));
+        assert!(go_toolchain_below_floor(v(1, 22, 0), floor));
+    }
+
+    #[test]
+    fn go_floor_table_validation_rejects_a_misfiled_minimum() {
+        let raw = "as_of = \"2026-10-26\"\n\n[[line]]\nrelease = \"1.24\"\nminimum = \"1.23.8\"\n";
+        let result = std::panic::catch_unwind(|| parse_go_toolchain_floor(raw));
+        assert!(result.is_err(), "a minimum on the wrong line is rejected");
+    }
+
+    #[test]
+    fn go_toolchain_detected_from_inline_buildinfo() {
+        let info = parse_crafted_sections(
+            "go-inline",
+            &[(".go.buildinfo", &go_buildinfo_inline("go1.23.5"))],
+        );
+        assert_eq!(
+            info.go_toolchain,
+            Some(GoVersion {
+                major: 1,
+                minor: 23,
+                patch: 5
+            })
+        );
+    }
+
+    #[test]
+    fn go_toolchain_detected_from_legacy_buildinfo() {
+        let info = parse_elf_bytes("go-legacy", &go_buildinfo_legacy_elf("go1.16.3"));
+        assert_eq!(
+            info.go_toolchain,
+            Some(GoVersion {
+                major: 1,
+                minor: 16,
+                patch: 3
+            })
+        );
+    }
+
+    #[test]
+    fn go_toolchain_absent_without_buildinfo() {
+        let info = parse_crafted_sections("go-none", &[(".text", b"\0"), (".rodata", b"hello\0")]);
+        assert_eq!(info.go_toolchain, None);
+    }
+
+    #[test]
+    fn go_toolchain_devel_string_stays_silent() {
+        let info = parse_crafted_sections(
+            "go-devel",
+            &[(
+                ".go.buildinfo",
+                &go_buildinfo_inline("devel go1.25-0123456789ab"),
+            )],
+        );
+        assert_eq!(info.go_toolchain, None);
+    }
+
+    #[test]
+    fn go_toolchain_garbage_buildinfo_stays_silent() {
+        let info = parse_crafted_sections(
+            "go-garbage",
+            &[(".go.buildinfo", b"\xff Go buildinf:\x08\x02\xff\xff\xff")],
+        );
+        assert_eq!(info.go_toolchain, None);
+    }
+
+    #[test]
+    fn go_toolchain_below_floor_fires_a_warning() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/tool", "ELF 64-bit LSB executable");
+        let lines = |version: Option<GoVersion>| -> Vec<String> {
+            let mut info = syn_info();
+            info.go_toolchain = version;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_go_toolchain(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "go-toolchain-outdated")
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        };
+        let v = |major, minor, patch| {
+            Some(GoVersion {
+                major,
+                minor,
+                patch,
+            })
+        };
+        let firing = lines(v(1, 22, 4));
+        assert_eq!(firing.len(), 1, "exactly one finding: {firing:?}");
+        assert!(firing[0].contains(" W: "), "Warning level: {}", firing[0]);
+        assert!(
+            firing[0].contains("go1.22.4"),
+            "the detail names the recorded version: {}",
+            firing[0]
+        );
+        assert_eq!(lines(v(1, 23, 7)).len(), 1);
+        assert_eq!(lines(v(1, 24, 1)).len(), 1);
+        // The fixed releases, and toolchains newer than the table
+        // knows, stay silent.
+        assert_eq!(lines(v(1, 23, 8)).len(), 0);
+        assert_eq!(lines(v(1, 24, 2)).len(), 0);
+        assert_eq!(lines(v(1, 26, 0)).len(), 0);
+        assert_eq!(lines(None).len(), 0);
     }
 }

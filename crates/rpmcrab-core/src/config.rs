@@ -720,10 +720,45 @@ fn splitlines(text: &str) -> Vec<&str> {
     .collect()
 }
 
+/// The directive a rpmlintrc line attempts but does not parse as: the
+/// line's code (everything before a `#` comment) opens with one of the
+/// recognised directive names at a word boundary, or assigns a TOML
+/// `Filters` array. Such a line is a filter the maintainer believes is
+/// in effect; importing nothing and saying nothing would hide that it
+/// is not. Lines that attempt no directive (blank lines, comments,
+/// anything else) stay silent, exactly as in the reference.
+fn attempted_directive(line: &str) -> Option<&'static str> {
+    let code = line.split('#').next().unwrap_or("").trim();
+    for name in ["addFilter", "setBadness"] {
+        if let Some(rest) = code.strip_prefix(name)
+            && !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Some(name);
+        }
+    }
+    if let Some(rest) = code.strip_prefix("Filters")
+        && rest.trim_start().starts_with('=')
+    {
+        return Some("Filters");
+    }
+    None
+}
+
 /// The two `rpmlintrc` directives rpmlint recognises (`config.py`).
 /// `addFilter` appends to `Filters` and is recorded for the unused-filter
 /// audit. `setBadness` is parsed and ignored with a warning: badness no
 /// longer adjusts finding levels (issue #699).
+///
+/// A line that attempts one of the directives but does not parse --
+/// an unquoted or unterminated `addFilter` argument, a `setBadness`
+/// without its value, a TOML `Filters` assignment in an old-syntax
+/// file -- is not imported, but it is no longer dropped silently
+/// either: a warning naming the file and line is recorded with the
+/// load warnings, and the load continues. The permissible forms are
+/// the ones the reference accepts: a quoted string (either quote
+/// character, optional `r` prefix) in parentheses for `addFilter`,
+/// and a quoted name plus a number for `setBadness`, with arbitrary
+/// whitespace and trailing content such as a comment.
 pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
     let re_filter =
         Regex::new(r#"^\s*addFilter\s*\(\s*r?["\'](.*)["\']\s*\)"#).expect("static regex");
@@ -732,9 +767,10 @@ pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
     let text = std::fs::read_to_string(path)?;
 
     let mut filters = Vec::new();
-    for line in splitlines(&text) {
+    for (index, line) in splitlines(&text).into_iter().enumerate() {
         if let Ok(Some(m)) = re_filter.captures(line) {
             filters.push(m.get(1).expect("capture group").as_str().to_string());
+            continue;
         }
         if let Ok(Some(m)) = re_badness.captures(line) {
             let name = m.get(1).expect("capture group").as_str();
@@ -742,6 +778,20 @@ pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
                 "warning: ignoring setBadness({name:?}) in {}: badness no longer adjusts finding levels",
                 path.display()
             );
+            continue;
+        }
+        if let Some(directive) = attempted_directive(line) {
+            let hint = if directive == "Filters" {
+                "; TOML belongs in a configuration file -- an rpmlintrc takes addFilter(...) lines"
+            } else {
+                ""
+            };
+            config.load_warnings.push(format!(
+                "warning: ignoring malformed {directive} in {} line {}: {}{hint}",
+                path.display(),
+                index + 1,
+                line.trim()
+            ));
         }
     }
 
@@ -1326,6 +1376,124 @@ mod tests {
         std::fs::write(&rc, "setBadness('no-%check-section', 10)\n").unwrap();
         load_rpmlintrc(&mut cfg, &rc).unwrap();
         assert!(cfg.scoring.is_empty());
+    }
+
+    #[test]
+    fn attempted_directive_verdicts() {
+        for line in [
+            "addFilter(unquoted-pattern)",
+            "addFilter(\"unterminated)",
+            "addFilter()",
+            "addFilter",
+            "  addFilter ('x'",
+            "addFilter(bare) # trailing comment",
+            "setBadness('some-check')",
+            "setBadness()",
+            "Filters = [\"toml-attempt\"]",
+            "Filters=[]",
+        ] {
+            assert!(attempted_directive(line).is_some(), "must warn: {line}");
+        }
+        for line in [
+            "",
+            "   ",
+            "# addFilter('commented-out')",
+            "# Filters = []",
+            "addFilterFoo('x')",
+            "addFilters = []",
+            "FiltersX = []",
+            "from Config import *",
+            "addCheck(\"ErlangCheck\")",
+            "// a C++-style comment, not a directive",
+            "x = 'addFilter'",
+        ] {
+            assert!(
+                attempted_directive(line).is_none(),
+                "must stay silent: {line}"
+            );
+        }
+        assert_eq!(attempted_directive("addFilter(x)"), Some("addFilter"));
+        assert_eq!(attempted_directive("setBadness('x')"), Some("setBadness"));
+        assert_eq!(attempted_directive("Filters = []"), Some("Filters"));
+    }
+
+    #[test]
+    fn rpmlintrc_permissible_forms_import_silently() {
+        // Every form the reference accepts imports, with no warning:
+        // either quote character, an `r` prefix, arbitrary whitespace,
+        // a trailing comment, and a `#` inside the quoted pattern.
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join("pkg-rpmlintrc");
+        std::fs::write(
+            &rc,
+            "addFilter(\"double\")\naddFilter('single')\naddFilter(r'raw-single')\n  addFilter(  \"spaced\"  )\naddFilter(\"trailing\") # comment\naddFilter(\"hash # inside\")\n",
+        )
+        .unwrap();
+        let mut cfg = load_inner(&[], &[], false).unwrap();
+        let _ = cfg.take_load_warnings();
+        load_rpmlintrc(&mut cfg, &rc).unwrap();
+        assert_eq!(
+            cfg.rpmlintrc_filters,
+            vec![
+                "double".to_string(),
+                "single".to_string(),
+                "raw-single".to_string(),
+                "spaced".to_string(),
+                "trailing".to_string(),
+                "hash # inside".to_string()
+            ]
+        );
+        let warnings = cfg.take_load_warnings();
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn rpmlintrc_malformed_directives_warn_and_the_load_continues() {
+        // Each attempted-but-unparsable directive records one warning
+        // naming the file and line; nothing is imported for it, the
+        // well-formed filters around it still land, and the load
+        // succeeds. Comment lines and the legacy non-directive content
+        // two ancient files carry stay silent.
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join("pkg-rpmlintrc");
+        std::fs::write(
+            &rc,
+            "# addFilter(\"commented-out\") stays silent\naddFilter('good-one')\naddFilter(unquoted-pattern)\naddFilter(\"unterminated)\naddFilter()\nsetBadness('some-check')\nFilters = [\"toml-attempt\"]\naddFilter(r\"raw-one\") # trailing comment\nfrom Config import *\naddCheck(\"ErlangCheck\")\n",
+        )
+        .unwrap();
+        let mut cfg = load_inner(&[], &[], false).unwrap();
+        let _ = cfg.take_load_warnings();
+        load_rpmlintrc(&mut cfg, &rc).unwrap();
+        assert_eq!(
+            cfg.rpmlintrc_filters,
+            vec!["good-one".to_string(), "raw-one".to_string()]
+        );
+        let warnings = cfg.take_load_warnings();
+        assert_eq!(warnings.len(), 5, "warnings: {warnings:?}");
+        for (warning, needle) in warnings.iter().zip([
+            "malformed addFilter in",
+            "malformed addFilter in",
+            "malformed addFilter in",
+            "malformed setBadness in",
+            "malformed Filters in",
+        ]) {
+            assert!(warning.contains(needle), "warning: {warning}");
+            assert!(
+                warning.contains(&rc.display().to_string()),
+                "warning names the file: {warning}"
+            );
+        }
+        for (warning, line_no) in warnings.iter().zip([3, 4, 5, 6, 7]) {
+            assert!(
+                warning.contains(&format!("line {line_no}:")),
+                "warning names the line: {warning}"
+            );
+        }
+        assert!(
+            warnings[4].contains("TOML belongs in a configuration file"),
+            "the Filters warning explains the fix: {}",
+            warnings[4]
+        );
     }
 
     fn config_with_toml(toml_text: &str) -> Config {

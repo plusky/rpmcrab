@@ -129,11 +129,40 @@ impl DocCheck {
         out
     }
 
-    /// Doc files ending in `/INSTALL`.
+    /// Directory names that root an embedded example/demo/sample tree.
+    const EXAMPLE_TREE_DIRS: &[&str] =
+        &["example", "examples", "demo", "demos", "sample", "samples"];
+
+    /// Whether a `/INSTALL` doc file sits inside an embedded
+    /// example/demo/sample tree: one of the tree-root names appears among
+    /// its directory components, but is not its immediate parent
+    /// directory. The file then belongs to a self-contained tree the
+    /// package itself ships below that component (e.g.
+    /// `examples/hello-c/INSTALL`, whose instructions describe building
+    /// that example, complete with its own `autogen.sh`/`configure.ac`),
+    /// not to the already-installed package. An `INSTALL` directly
+    /// inside the named directory itself (e.g. a package whose doc dir
+    /// is `examples/INSTALL`) keeps firing: there the name is the doc
+    /// root, not a tree root above a shipped subtree.
+    fn in_embedded_example_tree(path: &str) -> bool {
+        let dirs: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        // `dirs` ends with the file name; the directory components are
+        // everything before it, and the immediate parent is the last of
+        // those, so a tree root must sit strictly above it.
+        let Some((_, parent_and_above)) = dirs.split_last() else {
+            return false;
+        };
+        parent_and_above[..parent_and_above.len().saturating_sub(1)]
+            .iter()
+            .any(|c| Self::EXAMPLE_TREE_DIRS.contains(c))
+    }
+
+    /// Doc files ending in `/INSTALL`, except those inside an embedded
+    /// example/demo/sample tree.
     fn install_files<'a>(doc_files: &[&'a str]) -> Vec<&'a str> {
         doc_files
             .iter()
-            .filter(|f| f.ends_with("/INSTALL"))
+            .filter(|f| f.ends_with("/INSTALL") && !Self::in_embedded_example_tree(f))
             .copied()
             .collect()
     }
@@ -272,6 +301,58 @@ mod tests {
             vec!["/usr/share/doc/pkg/INSTALL"]
         );
         assert!(DocCheck::install_files(&["/usr/share/doc/pkg/README"]).is_empty());
+    }
+
+    #[test]
+    fn install_file_in_embedded_example_tree_is_quiet() {
+        // The INSTALL belongs to the shipped example/demo/sample tree
+        // below the named component, not to the installed package.
+        for path in [
+            "/usr/share/doc/pkg/examples/hello-c/INSTALL",
+            "/usr/share/doc/pkg/demos/perl/INSTALL",
+            "/usr/share/doc/pkg/samples/new_fax.all/INSTALL",
+            "/usr/share/doc/pkg/example/tour/INSTALL",
+            "/usr/share/doc/pkg/demo/tour/INSTALL",
+            "/usr/share/doc/pkg/sample/tour/INSTALL",
+        ] {
+            assert!(
+                DocCheck::install_files(&[path]).is_empty(),
+                "expected no finding for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_file_with_example_name_as_parent_still_flagged() {
+        // The named directory is the file's own parent: it is the doc
+        // root of the shipped tree, not a tree root above a subtree.
+        for path in [
+            "/usr/share/doc/pkg/examples/INSTALL",
+            "/usr/share/doc/examples/INSTALL",
+            "/usr/share/doc/pkg/sample/INSTALL",
+        ] {
+            assert_eq!(
+                DocCheck::install_files(&[path]),
+                vec![path],
+                "expected a finding for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_file_with_near_miss_component_still_flagged() {
+        // Component names must match exactly, not by prefix.
+        for path in [
+            "/usr/share/doc/pkg/example-projects/foo/INSTALL",
+            "/usr/share/doc/pkg/samples2/foo/INSTALL",
+            "/usr/share/doc/pkg/dovecot-pigeonhole/INSTALL",
+        ] {
+            assert_eq!(
+                DocCheck::install_files(&[path]),
+                vec![path],
+                "expected a finding for {path}"
+            );
+        }
     }
 
     #[test]

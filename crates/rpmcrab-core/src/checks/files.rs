@@ -192,6 +192,23 @@ fn scm_regex() -> &'static Regex {
     })
 }
 
+static BACKUP_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// The paths `backup-file-in-package` charges: the reference's
+/// `backup_regex` (FilesCheck.py) verbatim -- a trailing `~`, an
+/// Emacs `#...#` autosave name, or `.orig`/`.rej` optionally followed
+/// by a compression suffix; end-anchored and case-sensitive. There
+/// is no `.bak` arm: the one Factory instance (`/var/lib/nfs/sm.bak`)
+/// is rpc.statd's state file, and uppercase `.ORIG` content such as
+/// aranym's AFROS `mint.cnf.ORIG` is deliberate payload, so the wider
+/// lowercase suffix test this replaces charged only false positives.
+fn backup_regex() -> &'static Regex {
+    BACKUP_REGEX.get_or_init(|| {
+        Regex::new(r"(~|\#[^/]+\#|((\.orig|\.rej)(\.(gz|z|Z|zip|bz2|lzma|xz|zst))?))$")
+            .expect("static regex")
+    })
+}
+
 static KERNEL_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn kernel_package_regex() -> &'static Regex {
     KERNEL_PACKAGE_REGEX.get_or_init(|| {
@@ -369,6 +386,34 @@ fn python_lib_tree_regex() -> &'static Regex {
         .get_or_init(|| Regex::new(r"/(?:site|dist)-packages(?:/|$)").expect("static regex"))
 }
 
+/// A subdirectory of a bin dir named `<tool>.d` is the companion
+/// directory of the executable `<tool>` shipped in the same bin dir:
+/// the tool's own modules and helpers, installed next to their driver
+/// under a name derived from it (liblouis-tools ships
+/// `/usr/bin/lou_maketable.d/*` for `/usr/bin/lou_maketable`). The
+/// shape is decidable from the package's own file list: the first
+/// component below the bin dir must end in `.d`, and stripping the
+/// suffix must name a regular, executable file in the same bin dir.
+/// A `.d` directory without that namesake executable, a namesake
+/// that is not an executable regular file, and any non-`.d`
+/// subdirectory keep firing.
+fn subdir_in_bin_is_companion_dir(pkg: &Pkg, bindir: &str, fname: &str) -> bool {
+    let rest = &fname[bindir.len()..];
+    let Some((first, _)) = rest.split_once('/') else {
+        return false;
+    };
+    let Some(tool) = first.strip_suffix(".d") else {
+        return false;
+    };
+    if tool.is_empty() {
+        return false;
+    }
+    let sibling = format!("{bindir}{tool}");
+    pkg.files
+        .iter()
+        .any(|f| f.name == sibling && f.mode & 0o170000 == 0o100000 && f.mode & 0o111 != 0)
+}
+
 /// Whether a non-executable file carrying an interpreter line is
 /// content the owning program consumes by reading, importing,
 /// sourcing or rendering, so the interpreter line marks data rather
@@ -413,13 +458,37 @@ fn python_lib_tree_regex() -> &'static Regex {
 ///   interpreter whose basename is exactly `false`, which declares
 ///   the file is never executed;
 /// - a template: a basename ending in `.in`, `.sample`, `.tmpl`,
-///   `.tpl`, `.template`, `.skel` or `.j2` — the installed name is
-///   the name an instantiation step rewrites, so the shipped file
-///   is the template's content, not an entry point.
+///   `.tpl`, `.template`, `.skel`, `.j2` or `.ex` — the installed
+///   name is the name an instantiation step rewrites, so the
+///   shipped file is the template's content, not an entry point
+///   (`.ex` is the Debian example-file suffix, dh-make's
+///   maintainer-script templates above all);
+/// - a Python package directory (inside the data and library
+///   trees): a `.py` file with a Python interpreter whose own
+///   directory is a package directory — the package ships an
+///   `__init__.py` in the same directory, the caller-verified
+///   `python_pkg_dir` fact — so the file is a module of an
+///   application-private package tree (kitty's, calibre's and
+///   hplip's module trees), imported by the owning program;
+/// - a sourced-fragment, documentation or CI directory (inside
+///   the data and library trees): an `include` or `common`
+///   component — the fragment libraries a program sources
+///   (lynis's `include/`, the blktests and xfstests `common/`
+///   helpers) — a `doc` or `docs` component (documentation-tree
+///   material, the texlive doc packages' scripts) or a `ci`
+///   component (continuous-integration harness scripts, the
+///   ceph dashboard's `ci/` runners);
+/// - an image tree: a `rootfs` component — the file is payload
+///   of a filesystem image another system boots (warewulf's
+///   node overlays), so its mode is set when the image is
+///   assembled or provisioned, not an installed entry point's
+///   defect. The component counts wherever the image tree is
+///   rooted.
 fn non_executable_script_is_data(
     fname: &str,
     interpreter: &str,
     python_lib_tree_re: &Regex,
+    python_pkg_dir: bool,
 ) -> bool {
     // Script directories hold entry points: no shape exempts a
     // file installed directly in one.
@@ -434,6 +503,9 @@ fn non_executable_script_is_data(
         return true;
     }
     if is_match(python_lib_tree_re, fname) {
+        return true;
+    }
+    if python_pkg_dir {
         return true;
     }
     if fname.starts_with("/usr/share/bash-completion/") {
@@ -469,6 +541,7 @@ fn non_executable_script_is_data(
         ".template",
         ".skel",
         ".j2",
+        ".ex",
     ]
     .iter()
     .any(|suffix| base.ends_with(suffix))
@@ -481,6 +554,12 @@ fn non_executable_script_is_data(
     }
     let dirs = &comps[..comps.len() - 1];
     if dirs.iter().any(|c| matches!(*c, "node_modules" | "gems")) {
+        return true;
+    }
+    // An image tree's payload is another system's files, wherever
+    // the tree is rooted: the mode is set when the image is
+    // assembled, so it counts outside the data trees too.
+    if dirs.contains(&"rootfs") {
         return true;
     }
     // The remaining shapes are bare directory components, whose
@@ -501,6 +580,12 @@ fn non_executable_script_is_data(
             "src" | "test" | "tests" | "selftests" | "example" | "examples" | "sample" | "samples"
         )
     }) {
+        return true;
+    }
+    if dirs
+        .iter()
+        .any(|c| matches!(*c, "include" | "common" | "doc" | "docs" | "ci"))
+    {
         return true;
     }
     if dirs.iter().any(|c| {
@@ -530,6 +615,903 @@ fn non_executable_script_is_data(
         "py" | "rb" | "pl" | "pm" | "lua" | "php" | "sh" | "bash"
     ) && dirs.len() > 2
         && dirs[2..].contains(&"lib")
+}
+
+/// Whether a file carrying an interpreter line is test or harness
+/// payload: content a testsuite harness runs, sources or reads,
+/// rather than a script the installed system executes in place
+/// (corpus E audit 2026-10-26, section 2). A test package's
+/// scripts are its payload -- the harness invokes them by path,
+/// inside a test VM or a scratch tree -- so their interpreter
+/// lines and exec bits are the harness's business, not an
+/// installed entry point's defect. Every fact is decidable from
+/// the binary package's name and the file's path alone:
+///
+/// - the package's name carries a `test`, `tests` or `testsuite`
+///   hyphen component -- the package exists to carry a test suite
+///   (lvm2-testsuite, systemd-testsuite, pcp-testsuite,
+///   mercurial-tests), wherever in the tree the payload sits
+///   (pcp-testsuite's scripts live under /usr/libexec/);
+/// - a directory component names a test tree outright --
+///   `testsuite` or `testsuites`, or a component ending in
+///   `-testsuite` or `-testsuites` -- wherever the tree is rooted;
+/// - inside the data and library trees (/usr/src/, /usr/share/,
+///   /usr/lib/, /usr/lib64/, /usr/etc/, /etc/), a directory
+///   component is `test`, `tests` or `selftests`, or ends in
+///   `-tests` or `-test` -- the test directories shipped inside
+///   source and data trees (the bazel and kafka source trees,
+///   test helpers bundled inside Python packages, doc trees).
+///
+/// Two bounds keep the gate honest. A file installed directly in
+/// a script directory (/bin, /sbin, /usr/bin, /usr/sbin,
+/// /usr/local/bin or /usr/local/sbin) is an entry point and never
+/// counts as test payload, whatever the package or the tree is
+/// called: a test suite's own runner installed in /usr/bin keeps
+/// the interpreter findings. And fused names carry no fact:
+/// blktests and xfstests glue the word into a single component,
+/// so they and their `common/` fragments stay outside this gate --
+/// a raw suffix match would also claim non-test names
+/// (perftest, minetest) whose scripts are real entry points.
+fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
+    let parent = fname.rsplit_once('/').map_or("", |(parent, _)| parent);
+    if matches!(
+        parent,
+        "/bin" | "/sbin" | "/usr/bin" | "/usr/sbin" | "/usr/local/bin" | "/usr/local/sbin"
+    ) {
+        return false;
+    }
+    if pkg_name
+        .to_lowercase()
+        .split('-')
+        .any(|c| matches!(c, "test" | "tests" | "testsuite"))
+    {
+        return true;
+    }
+    let comps: Vec<&str> = fname.split('/').filter(|c| !c.is_empty()).collect();
+    if comps.len() < 2 {
+        return false;
+    }
+    let dirs = &comps[..comps.len() - 1];
+    if dirs.iter().any(|c| {
+        let cl = c.to_lowercase();
+        cl == "testsuite"
+            || cl == "testsuites"
+            || cl.ends_with("-testsuite")
+            || cl.ends_with("-testsuites")
+    }) {
+        return true;
+    }
+    let data_tree = fname.starts_with("/usr/src/")
+        || fname.starts_with("/usr/share/")
+        || fname.starts_with("/usr/lib/")
+        || fname.starts_with("/usr/lib64/")
+        || fname.starts_with("/usr/etc/")
+        || fname.starts_with("/etc/");
+    if !data_tree {
+        return false;
+    }
+    dirs.iter().any(|c| {
+        let cl = c.to_lowercase();
+        cl == "test"
+            || cl == "tests"
+            || cl == "selftests"
+            || cl.ends_with("-tests")
+            || cl.ends_with("-test")
+    })
+}
+
+/// One token of the small shell lexer behind
+/// `shell_script_has_top_level_return`. The lexer resolves quoting
+/// and escapes and consumes here-document bodies, so a word token's
+/// text is the shell's own view of the word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellTok {
+    Word(String),
+    Newline,
+    /// `;` or `&`
+    Semi,
+    /// `&&` or `||`
+    AndOr,
+    /// `|` or `|&`
+    Pipe,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    /// Any redirection operator; the word after it is its target
+    /// (a here-document delimiter included), never a command.
+    Redir,
+}
+
+/// How much of a script the sourced-fragment proof reads. A shell
+/// script past a megabyte is not a fragment anyone sources, and
+/// refusing the proof there keeps the scan bounded; the peek the
+/// interpreter line comes from reads only 2048 bytes, which is why
+/// the proof cannot ride on it.
+const FRAGMENT_PROOF_SCAN_LIMIT: u64 = 1_048_576;
+
+/// Whether `word` is a shell name (a function or variable name).
+/// The tail also admits `-` and `.`: bash accepts both in function
+/// names (`my-func ()`, `my.func ()`), and the function-definition
+/// arms gate on this — a definition the gate misses leaves the
+/// body's `return`s looking top-level, while a name it admits too
+/// freely only ever spans a body the shell reads as one too.
+fn is_shell_name(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+/// Whether `word`, read at command position, is a variable
+/// assignment (`name=...`): the command it prefixes is still to
+/// come.
+fn is_assignment_word(word: &str) -> bool {
+    match word.split_once('=') {
+        Some((name, _)) => is_shell_name(name),
+        None => false,
+    }
+}
+
+/// Whether a word read at command position leaves the next word at
+/// command position too: the condition and body keywords, the
+/// negation and the prefix builtins that take a command as their
+/// argument, and assignments.
+fn word_keeps_command_position(word: &str) -> bool {
+    matches!(
+        word,
+        "if" | "then"
+            | "else"
+            | "elif"
+            | "while"
+            | "until"
+            | "do"
+            | "!"
+            | "time"
+            | "command"
+            | "builtin"
+            | "exec"
+    ) || is_assignment_word(word)
+}
+
+/// The index just past the bracket span that opens at `start`
+/// (`chars[start]` is `(` or `{`), or the end of the input if the
+/// span never closes. Quoted strings, backtick substitutions,
+/// escapes and comments inside the span are skipped whole, so a
+/// bracket inside one of them cannot close the span early. Inside
+/// a parenthesised span the `)` that ends a `case` pattern list
+/// is not the span's closer either: the scanner tracks each open
+/// `case` through its pattern and item phases, and only a `)`
+/// read outside a pattern list counts towards the balance.
+fn scan_balanced(chars: &[char], start: usize) -> usize {
+    #[derive(PartialEq)]
+    enum CasePhase {
+        /// `case` and its subject read, `in` not seen yet.
+        BeforeIn,
+        /// Reading a pattern list: a `)` ends the list, not the span.
+        Pattern,
+        /// Reading a pattern's commands, up to `;;` or `esac`.
+        Item,
+    }
+
+    let n = chars.len();
+    let open = chars[start];
+    let close = if open == '(' { ')' } else { '}' };
+    let parens = open == '(';
+    let mut depth = 0usize;
+    let mut cases: Vec<CasePhase> = Vec::new();
+    let mut command_start = true;
+    let mut i = start;
+    while i < n {
+        match chars[i] {
+            '\\' => {
+                i += if i + 1 < n { 2 } else { 1 };
+            }
+            '\'' => {
+                i += 1;
+                while i < n && chars[i] != '\'' {
+                    i += 1;
+                }
+                if i < n {
+                    i += 1;
+                }
+                command_start = false;
+            }
+            '"' => {
+                i += 1;
+                while i < n && chars[i] != '"' {
+                    i += if chars[i] == '\\' && i + 1 < n { 2 } else { 1 };
+                }
+                if i < n {
+                    i += 1;
+                }
+                command_start = false;
+            }
+            '`' => {
+                i += 1;
+                while i < n && chars[i] != '`' {
+                    i += if chars[i] == '\\' && i + 1 < n { 2 } else { 1 };
+                }
+                if i < n {
+                    i += 1;
+                }
+                command_start = false;
+            }
+            '#' if command_start && parens => {
+                while i < n && chars[i] != '\n' {
+                    i += if chars[i] == '\\' && i + 1 < n { 2 } else { 1 };
+                }
+            }
+            c if c == open => {
+                if !(parens && cases.last() == Some(&CasePhase::Pattern)) {
+                    depth += 1;
+                }
+                command_start = true;
+                i += 1;
+            }
+            c if c == close => {
+                if parens && cases.last() == Some(&CasePhase::Pattern) {
+                    if let Some(top) = cases.last_mut() {
+                        *top = CasePhase::Item;
+                    }
+                } else {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                command_start = true;
+                i += 1;
+            }
+            ';' => {
+                if parens
+                    && i + 1 < n
+                    && matches!(chars[i + 1], ';' | '&')
+                    && cases.last() == Some(&CasePhase::Item)
+                {
+                    if let Some(top) = cases.last_mut() {
+                        *top = CasePhase::Pattern;
+                    }
+                }
+                command_start = true;
+                i += 1;
+            }
+            '&' | '|' | '\n' => {
+                command_start = true;
+                i += 1;
+            }
+            ' ' | '\t' | '\r' => {
+                i += 1;
+            }
+            _ => {
+                let mut j = i;
+                while j < n && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                if j == i {
+                    // punctuation that starts no word (`$`, `*`, ...)
+                    i += 1;
+                } else {
+                    if parens {
+                        let word: String = chars[i..j].iter().collect();
+                        match word.as_str() {
+                            "case" if command_start => cases.push(CasePhase::BeforeIn),
+                            "in" if cases.last() == Some(&CasePhase::BeforeIn) => {
+                                if let Some(top) = cases.last_mut() {
+                                    *top = CasePhase::Pattern;
+                                }
+                            }
+                            "esac" if command_start && !cases.is_empty() => {
+                                cases.pop();
+                            }
+                            _ => {}
+                        }
+                    }
+                    i = j;
+                }
+                command_start = false;
+            }
+        }
+    }
+    n
+}
+
+/// Scan one shell word starting at `i` (a character that starts a
+/// word): quotes and escapes resolve to their literal text, and
+/// command and parameter substitutions are consumed whole as
+/// opaque content, so no token boundary or keyword hides inside
+/// them. Returns the word's text and the index just past it.
+fn scan_shell_word(chars: &[char], mut i: usize) -> (String, usize) {
+    let n = chars.len();
+    let mut word = String::new();
+    while i < n {
+        match chars[i] {
+            ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>' => break,
+            '\\' => {
+                if i + 1 < n {
+                    if chars[i + 1] != '\n' {
+                        word.push(chars[i + 1]);
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            '\'' => {
+                i += 1;
+                while i < n && chars[i] != '\'' {
+                    word.push(chars[i]);
+                    i += 1;
+                }
+                if i < n {
+                    i += 1;
+                }
+            }
+            '"' => {
+                i += 1;
+                while i < n && chars[i] != '"' {
+                    if chars[i] == '\\'
+                        && i + 1 < n
+                        && matches!(chars[i + 1], '"' | '\\' | '$' | '`' | '\n')
+                    {
+                        if chars[i + 1] != '\n' {
+                            word.push(chars[i + 1]);
+                        }
+                        i += 2;
+                    } else {
+                        word.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < n {
+                    i += 1;
+                }
+            }
+            '`' => {
+                word.push('`');
+                i += 1;
+                while i < n {
+                    let c = chars[i];
+                    word.push(c);
+                    i += 1;
+                    if c == '\\' && i < n {
+                        word.push(chars[i]);
+                        i += 1;
+                    } else if c == '`' {
+                        break;
+                    }
+                }
+            }
+            '$' if i + 1 < n && (chars[i + 1] == '(' || chars[i + 1] == '{') => {
+                let end = scan_balanced(chars, i + 1);
+                word.extend(chars[i..end].iter().copied());
+                i = end;
+            }
+            c => {
+                word.push(c);
+                i += 1;
+            }
+        }
+    }
+    (word, i)
+}
+
+/// Skip a here-document body: lines from `i` up to and including
+/// the line that consists solely of the delimiter (leading tabs
+/// stripped first for `<<-`). Returns the index just past it.
+fn skip_heredoc_body(chars: &[char], mut i: usize, delim: &str, strip_tabs: bool) -> usize {
+    let n = chars.len();
+    while i < n {
+        let mut j = i;
+        if strip_tabs {
+            while j < n && chars[j] == '\t' {
+                j += 1;
+            }
+        }
+        let mut k = j;
+        while k < n && chars[k] != '\n' {
+            k += 1;
+        }
+        let line: String = chars[j..k].iter().collect();
+        i = if k < n { k + 1 } else { k };
+        if line == delim {
+            break;
+        }
+    }
+    i
+}
+
+/// Tokenize a shell script's text. Comments vanish, an arithmetic
+/// command `(( ... ))` collapses to one opaque word, and
+/// here-document bodies are consumed at the newline that ends the
+/// line opening them, so none of those shapes can produce a token.
+/// Process substitutions are consumed whole as word tokens, and
+/// the brace tokens are re-read against command position at the
+/// end (see `recheck_brace_tokens`).
+fn lex_shell(content: &str) -> Vec<ShellTok> {
+    let chars: Vec<char> = content.chars().collect();
+    let n = chars.len();
+    let mut toks = Vec::new();
+    let mut heredocs: Vec<(String, bool)> = Vec::new();
+    let mut want_delim: Option<bool> = None;
+    let mut i = 0;
+    while i < n {
+        match chars[i] {
+            ' ' | '\t' | '\r' => i += 1,
+            '\n' => {
+                toks.push(ShellTok::Newline);
+                i += 1;
+                for (delim, strip) in std::mem::take(&mut heredocs) {
+                    i = skip_heredoc_body(&chars, i, &delim, strip);
+                }
+            }
+            '#' => {
+                // A backslash-newline inside a comment continues
+                // it onto the next line, so backslashes are
+                // consumed in pairs: an escaped backslash does
+                // not fake a continuation.
+                while i < n && chars[i] != '\n' {
+                    i += if chars[i] == '\\' && i + 1 < n { 2 } else { 1 };
+                }
+            }
+            '\\' if i + 1 < n && chars[i + 1] == '\n' => i += 2,
+            ';' => {
+                toks.push(ShellTok::Semi);
+                i += 1;
+            }
+            '&' => {
+                if i + 1 < n && chars[i + 1] == '&' {
+                    toks.push(ShellTok::AndOr);
+                    i += 2;
+                } else {
+                    toks.push(ShellTok::Semi);
+                    i += 1;
+                }
+            }
+            '|' => {
+                if i + 1 < n && chars[i + 1] == '|' {
+                    toks.push(ShellTok::AndOr);
+                    i += 2;
+                } else if i + 1 < n && chars[i + 1] == '&' {
+                    toks.push(ShellTok::Pipe);
+                    i += 2;
+                } else {
+                    toks.push(ShellTok::Pipe);
+                    i += 1;
+                }
+            }
+            '(' => {
+                if i + 1 < n && chars[i + 1] == '(' {
+                    let mut depth = 0usize;
+                    let mut j = i;
+                    while j < n {
+                        match chars[j] {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    j += 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    toks.push(ShellTok::Word("((arith))".to_string()));
+                    i = j;
+                } else {
+                    toks.push(ShellTok::LParen);
+                    i += 1;
+                }
+            }
+            ')' => {
+                toks.push(ShellTok::RParen);
+                i += 1;
+            }
+            '<' => {
+                if i + 1 < n && chars[i + 1] == '(' {
+                    // a process substitution is a word-like
+                    // operand: consume it whole, like `$(...)`,
+                    // so its content produces no tokens
+                    let end = scan_balanced(&chars, i + 1);
+                    toks.push(ShellTok::Word(chars[i..end].iter().collect()));
+                    i = end;
+                } else if i + 2 < n && chars[i + 1] == '<' && chars[i + 2] == '<' {
+                    // here-string: a redirection, no body follows
+                    toks.push(ShellTok::Redir);
+                    i += 3;
+                } else if i + 1 < n && chars[i + 1] == '<' {
+                    let strip = i + 2 < n && chars[i + 2] == '-';
+                    toks.push(ShellTok::Redir);
+                    want_delim = Some(strip);
+                    i += if strip { 3 } else { 2 };
+                } else {
+                    toks.push(ShellTok::Redir);
+                    i += 1;
+                    if i < n && (chars[i] == '&' || chars[i] == '|') {
+                        i += 1;
+                    }
+                }
+            }
+            '>' => {
+                if i + 1 < n && chars[i + 1] == '(' {
+                    // process substitution, as in the `<` arm
+                    let end = scan_balanced(&chars, i + 1);
+                    toks.push(ShellTok::Word(chars[i..end].iter().collect()));
+                    i = end;
+                } else {
+                    toks.push(ShellTok::Redir);
+                    i += 1;
+                    if i < n && chars[i] == '>' {
+                        i += 1;
+                    }
+                    if i < n && (chars[i] == '&' || chars[i] == '|') {
+                        i += 1;
+                    }
+                }
+            }
+            '{' if i + 1 >= n
+                || matches!(
+                    chars[i + 1],
+                    ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>'
+                ) =>
+            {
+                toks.push(ShellTok::LBrace);
+                i += 1;
+            }
+            '}' if i + 1 >= n
+                || matches!(
+                    chars[i + 1],
+                    ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>'
+                ) =>
+            {
+                toks.push(ShellTok::RBrace);
+                i += 1;
+            }
+            _ => {
+                let (word, next) = scan_shell_word(&chars, i);
+                i = next;
+                if let Some(strip) = want_delim.take() {
+                    heredocs.push((word.clone(), strip));
+                }
+                toks.push(ShellTok::Word(word));
+            }
+        }
+    }
+    recheck_brace_tokens(&toks)
+}
+
+/// Re-read a lexed script's brace tokens. `{` and `}` are shell
+/// reserved words only at command position — a brace group's or
+/// a function body's brackets — and ordinary word characters
+/// everywhere else: arguments (`echo }` prints one), names and
+/// redirection targets. A brace emitted at a non-command
+/// position becomes a word token, so it can neither manufacture
+/// a command position for the word behind it (the `echo a }
+/// return` shape, where `return` is an argument) nor close a
+/// function span. The position pass mirrors the one in
+/// `shell_script_has_top_level_return`, plus the function-header
+/// zone that span detection recognizes: between a `name ()` or
+/// `function name` header and its body the position is still the
+/// body's, so a `{` there still opens it.
+fn recheck_brace_tokens(toks: &[ShellTok]) -> Vec<ShellTok> {
+    let mut out: Vec<ShellTok> = Vec::with_capacity(toks.len());
+    let mut expect_command = true;
+    let mut skip_word = false;
+    // Between a function header and its body; `name_pending` is
+    // set only by the `function` form, whose name is still to come.
+    let mut in_header = false;
+    let mut name_pending = false;
+    for (idx, tok) in toks.iter().enumerate() {
+        match tok {
+            ShellTok::LBrace | ShellTok::RBrace if skip_word || !expect_command => {
+                out.push(ShellTok::Word(
+                    if matches!(tok, ShellTok::LBrace) {
+                        "{"
+                    } else {
+                        "}"
+                    }
+                    .to_string(),
+                ));
+                skip_word = false;
+            }
+            ShellTok::LBrace => {
+                out.push(tok.clone());
+                in_header = false;
+                expect_command = true;
+            }
+            ShellTok::RBrace => {
+                out.push(tok.clone());
+                in_header = false;
+                expect_command = true;
+            }
+            ShellTok::Word(w) => {
+                out.push(tok.clone());
+                if skip_word {
+                    skip_word = false;
+                } else if !w.is_empty()
+                    && w.chars().all(|c| c.is_ascii_digit())
+                    && matches!(toks.get(idx + 1), Some(ShellTok::Redir))
+                {
+                    // an fd number before a redirection: the
+                    // command it prefixes is still to come, and
+                    // the position is unchanged
+                } else if in_header {
+                    if name_pending {
+                        name_pending = false;
+                    } else {
+                        // the first word of a brace-less body
+                        in_header = false;
+                        expect_command = word_keeps_command_position(w);
+                    }
+                } else if expect_command {
+                    if w == "function" {
+                        in_header = true;
+                        name_pending = true;
+                    } else if is_shell_name(w)
+                        && matches!(toks.get(idx + 1), Some(ShellTok::LParen))
+                        && matches!(toks.get(idx + 2), Some(ShellTok::RParen))
+                    {
+                        in_header = true;
+                        name_pending = false;
+                    } else {
+                        expect_command = word_keeps_command_position(w);
+                    }
+                }
+            }
+            ShellTok::Redir => {
+                out.push(tok.clone());
+                skip_word = true;
+            }
+            ShellTok::Newline => {
+                out.push(tok.clone());
+                expect_command = true;
+            }
+            ShellTok::LParen | ShellTok::RParen => {
+                out.push(tok.clone());
+                expect_command = true;
+            }
+            ShellTok::Semi | ShellTok::AndOr | ShellTok::Pipe => {
+                out.push(tok.clone());
+                in_header = false;
+                expect_command = true;
+            }
+        }
+    }
+    out
+}
+
+/// The token span (opener..=closer) of the body of the function
+/// definition whose header starts at token `i`, if `i` starts one:
+/// `name ()` or `function name` (the `()` optional there), then a
+/// `{ ... }` or `( ... )` body, with redirections and newlines
+/// allowed between the header and the body. The body is spanned by
+/// counting brackets of the body's own kind. A body that opens
+/// with a word instead — a compound command (`f () if ...`,
+/// `f () while ...`, `f () case ...`) or any other command — is
+/// spanned to the end of the token stream: the scan cannot prove
+/// where such a body ends, and a `return` it cannot prove
+/// top-level must not count as one (fail-closed).
+fn shell_function_body_span(toks: &[ShellTok], i: usize) -> Option<(usize, usize)> {
+    let mut j = i;
+    match toks.get(j) {
+        Some(ShellTok::Word(w)) if is_shell_name(w) => {
+            if matches!(toks.get(j + 1), Some(ShellTok::LParen))
+                && matches!(toks.get(j + 2), Some(ShellTok::RParen))
+            {
+                j += 3;
+            } else if w == "function" {
+                match toks.get(j + 1) {
+                    Some(ShellTok::Word(name)) if is_shell_name(name) => j += 2,
+                    _ => return None,
+                }
+                if matches!(toks.get(j), Some(ShellTok::LParen))
+                    && matches!(toks.get(j + 1), Some(ShellTok::RParen))
+                {
+                    j += 2;
+                }
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    loop {
+        match toks.get(j) {
+            Some(ShellTok::Newline) => j += 1,
+            Some(ShellTok::Redir) => {
+                j += if matches!(toks.get(j + 1), Some(ShellTok::Word(_))) {
+                    2
+                } else {
+                    1
+                };
+            }
+            Some(open @ (ShellTok::LBrace | ShellTok::LParen)) => {
+                let close = if *open == ShellTok::LBrace {
+                    ShellTok::RBrace
+                } else {
+                    ShellTok::RParen
+                };
+                let mut depth = 0usize;
+                let mut k = j;
+                while k < toks.len() {
+                    if toks[k] == *open {
+                        depth += 1;
+                    } else if toks[k] == close {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some((j, k));
+                        }
+                    }
+                    k += 1;
+                }
+                return None;
+            }
+            Some(ShellTok::Word(_)) => return Some((j, usize::MAX)),
+            _ => return None,
+        }
+    }
+}
+
+/// Whether a shell script's text carries a `return` statement at
+/// top level: at command position, outside every function
+/// definition. bash and the POSIX shells refuse a top-level
+/// `return` in an executed script ("can only 'return' from a
+/// function or sourced script"), so its presence is a decidable
+/// marker that the file was written to be sourced by another
+/// script. The marker is not exclusive: a dual-mode script that
+/// also supports direct execution, guarding its `return` behind
+/// a runtime sourcedness test an executing shell never trips,
+/// carries the same marker, and no decidable reading of the
+/// text separates the two shapes.
+///
+/// The scan is the lexer above plus a command-position pass, not
+/// a text search, so the shapes that merely mention `return` do
+/// not count: comments, quoted strings, here-document bodies,
+/// substitutions (opaque word content), a `return` used as an
+/// argument, a loop variable or a `case` pattern, and a `return`
+/// inside a function definition. A `return` directly before a
+/// `)` or a `|` is a `case` pattern, not a statement, and does not count
+/// either (a bare `return` closing a subshell reads the same and
+/// is left firing). Control flow at top level does not suppress
+/// the proof: a `return` inside a top-level `if`, loop, `case`
+/// item, brace group or subshell would be refused by an
+/// executing shell that reached it in exactly the same way.
+fn shell_script_has_top_level_return(content: &str) -> bool {
+    let toks = lex_shell(content);
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut expect_command = true;
+    let mut skip_word = false;
+    for (i, tok) in toks.iter().enumerate() {
+        match tok {
+            ShellTok::Word(w) => {
+                if skip_word {
+                    skip_word = false;
+                    continue;
+                }
+                if !w.is_empty()
+                    && w.chars().all(|c| c.is_ascii_digit())
+                    && matches!(toks.get(i + 1), Some(ShellTok::Redir))
+                {
+                    // the fd number of a redirection (`2>file cmd`):
+                    // the command it prefixes is still to come
+                    continue;
+                }
+                if expect_command {
+                    if let Some(span) = shell_function_body_span(&toks, i) {
+                        spans.push(span);
+                    } else if w == "return"
+                        && !matches!(
+                            toks.get(i + 1),
+                            Some(ShellTok::RParen) | Some(ShellTok::Pipe)
+                        )
+                        && !spans.iter().any(|&(s, e)| s <= i && i <= e)
+                    {
+                        return true;
+                    }
+                    expect_command = word_keeps_command_position(w);
+                }
+            }
+            ShellTok::Redir => skip_word = true,
+            _ => expect_command = true,
+        }
+    }
+    false
+}
+
+/// Whether the interpreter line names a POSIX-family shell,
+/// resolving `/usr/bin/env` to the program it names: env's first
+/// argument that is neither an option (the argument-taking `-u`
+/// and `-C` skipped with their values) nor an assignment. Only
+/// the sh family qualifies: a top-level `return` is refused by an
+/// executing sh, bash, dash, ash or ksh, while zsh runs a script
+/// in a function-like context where `return` is legal, so the
+/// proof does not hold there.
+fn interpreter_is_posix_shell(interpreter: &str, args: &str) -> bool {
+    let base = interpreter.rsplit('/').next().unwrap_or("");
+    let program: String = if base == "env" {
+        let mut found = None;
+        let mut skip_next = false;
+        for word in args.split_whitespace() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if matches!(word, "-u" | "--unset" | "-C" | "--chdir") {
+                skip_next = true;
+                continue;
+            }
+            if word.starts_with('-') || is_assignment_word(word) {
+                continue;
+            }
+            found = Some(word.rsplit('/').next().unwrap_or(word).to_string());
+            break;
+        }
+        match found {
+            Some(p) => p,
+            None => return false,
+        }
+    } else {
+        base.to_string()
+    };
+    matches!(
+        program.as_str(),
+        "sh" | "bash" | "dash" | "ash" | "ksh" | "ksh93" | "mksh" | "pdksh"
+    )
+}
+
+/// Whether a non-executable file with an interpreter line is a
+/// sourced fragment rather than a script executed in place: the
+/// interpreter names a POSIX-family shell (see
+/// `interpreter_is_posix_shell`) and the file's text carries a
+/// top-level `return` (see `shell_script_has_top_level_return`).
+/// An executing shell that reaches the `return` refuses it, so
+/// the missing exec bit is the fragment's correct state; a
+/// dual-mode script that also runs standalone carries the same
+/// marker and is exempted with it, an accepted consequence of
+/// there being no decidable separation. The proof reads the
+/// file's own text, bounded by `FRAGMENT_PROOF_SCAN_LIMIT`,
+/// because a fragment's `return` can sit anywhere in it -- the
+/// xim fragment's are at lines 160 to 225, far past the 2048-byte
+/// peek the interpreter line is parsed from. The
+/// script-directory guard of `non_executable_script_is_data`
+/// applies unchanged: a file installed directly in a script
+/// directory is an entry point whatever its text says, so the
+/// proof is not consulted there.
+fn non_executable_script_is_provable_fragment(
+    pkgfile: &PkgFile,
+    fname: &str,
+    interpreter: &str,
+    interpreter_args: &str,
+) -> bool {
+    let parent = fname.rsplit_once('/').map_or("", |(parent, _)| parent);
+    if matches!(
+        parent,
+        "/bin" | "/sbin" | "/usr/bin" | "/usr/sbin" | "/usr/local/bin" | "/usr/local/sbin"
+    ) {
+        return false;
+    }
+    if !interpreter_is_posix_shell(interpreter, interpreter_args) {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(&pkgfile.path) else {
+        return false;
+    };
+    let Ok(bytes) = read_prefix(file, FRAGMENT_PROOF_SCAN_LIMIT + 1) else {
+        return false;
+    };
+    if bytes.len() as u64 > FRAGMENT_PROOF_SCAN_LIMIT {
+        return false;
+    }
+    let Ok(content) = String::from_utf8(bytes) else {
+        return false;
+    };
+    shell_script_has_top_level_return(&content)
 }
 
 static PYTHON_BYTECODE_PEP3147_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -629,6 +1611,20 @@ fn clean_path(path: &str) -> String {
     out.to_string_lossy().into_owned()
 }
 
+/// One `[[FileGrants]]` config entry: the named findings stay quiet
+/// for one package's named files. The `reason` is the recorded
+/// justification, surfaced in the debug log when the grant applies;
+/// an entry without one is rejected at parse time (see
+/// `FilesCheck::parse_file_grants`), so every live grant carries its
+/// explanation in the settings record itself.
+#[derive(Debug, Clone)]
+struct FileGrant {
+    packages: Vec<String>,
+    paths: Vec<String>,
+    findings: Vec<String>,
+    reason: String,
+}
+
 #[allow(dead_code)]
 pub struct FilesCheck {
     man_re: Regex,
@@ -681,6 +1677,7 @@ pub struct FilesCheck {
     standard_groups: Vec<String>,
     disallowed_dirs: Vec<String>,
     preset_packages: Vec<String>,
+    file_grants: Vec<FileGrant>,
     dangling_exceptions: Vec<(String, Regex)>,
     ldconfig_re: Regex,
     python_default_version: String,
@@ -818,6 +1815,7 @@ impl FilesCheck {
             standard_groups: get_strings("StandardGroups"),
             disallowed_dirs: get_strings("DisallowedDirs"),
             preset_packages: get_strings("SystemdPresetPackages"),
+            file_grants: Self::parse_file_grants(config),
             dangling_exceptions: dangling,
             ldconfig_re: Regex::new(r"(?m)^[^#]*ldconfig").expect("static regex"),
             python_default_version: get_str("PythonDefaultVersion"),
@@ -839,6 +1837,137 @@ impl FilesCheck {
     /// environment.
     pub fn with_tool_dir(config: &Config, bin_dir: Option<&std::path::Path>) -> Self {
         Self::with_tool_source(config, test_source(bin_dir))
+    }
+
+    /// Parse the `FileGrants` tables from the config: the per-file
+    /// grants the distribution settings record (the vendored openSUSE
+    /// config carries the set; see FILE_GRANTS in
+    /// scripts/generate-distro-configs.py). An entry is honoured only
+    /// when it names its package(s), paths and findings and records a
+    /// non-empty `reason`; a malformed entry is logged and skipped
+    /// rather than silently matching nothing or everything.
+    fn parse_file_grants(config: &Config) -> Vec<FileGrant> {
+        let mut out = Vec::new();
+        let Some(list) = config
+            .configuration
+            .get("FileGrants")
+            .and_then(toml::Value::as_array)
+        else {
+            return out;
+        };
+        for item in list {
+            let Some(table) = item.as_table() else {
+                log::error!("FileGrants: entry is not a table, skipping");
+                continue;
+            };
+            let has_package = table.contains_key("package");
+            let has_packages = table.contains_key("packages");
+            if has_package == has_packages {
+                log::error!(
+                    "FileGrants: entry needs exactly one of \"package\"/\"packages\", skipping"
+                );
+                continue;
+            }
+            let mut packages = Vec::new();
+            if let Some(p) = table.get("package") {
+                match p.as_str() {
+                    Some(s) => packages.push(s.to_string()),
+                    None => {
+                        log::error!("FileGrants: \"package\" must be a string, skipping entry");
+                        continue;
+                    }
+                }
+            }
+            if let Some(ps) = table.get("packages") {
+                let Some(arr) = ps.as_array() else {
+                    log::error!("FileGrants: \"packages\" must be an array, skipping entry");
+                    continue;
+                };
+                let mut ok = true;
+                for v in arr {
+                    match v.as_str() {
+                        Some(s) => packages.push(s.to_string()),
+                        None => {
+                            log::error!(
+                                "FileGrants: \"packages\" entries must be strings, skipping entry"
+                            );
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+            }
+            let string_list = |key: &str| -> Option<Vec<String>> {
+                table
+                    .get(key)?
+                    .as_array()?
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            };
+            let Some(paths) = string_list("paths") else {
+                log::error!(
+                    "FileGrants: entry for {packages:?} needs a \"paths\" array of strings, \
+                     skipping"
+                );
+                continue;
+            };
+            let Some(findings) = string_list("findings") else {
+                log::error!(
+                    "FileGrants: entry for {packages:?} needs a \"findings\" array of strings, \
+                     skipping"
+                );
+                continue;
+            };
+            if paths.is_empty() || findings.is_empty() {
+                log::error!(
+                    "FileGrants: entry for {packages:?} names no paths or no findings, skipping"
+                );
+                continue;
+            }
+            let reason = table
+                .get("reason")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("");
+            if reason.trim().is_empty() {
+                log::error!("FileGrants: entry for {packages:?} records no reason, skipping");
+                continue;
+            }
+            out.push(FileGrant {
+                packages,
+                paths,
+                findings,
+                reason: reason.to_string(),
+            });
+        }
+        out
+    }
+
+    /// Whether a `FileGrants` entry covers this package, path and
+    /// finding: package name, file path and finding tag must all
+    /// match exactly.
+    fn file_granted(&self, pkg_name: &str, path: &str, finding: &str) -> bool {
+        let Some(grant) = self.file_grants.iter().find(|g| {
+            g.packages.iter().any(|p| p.as_str() == pkg_name)
+                && g.paths.iter().any(|p| p.as_str() == path)
+                && g.findings.iter().any(|f| f.as_str() == finding)
+        }) else {
+            return false;
+        };
+        // The logged values are the grant's own config values: the
+        // exact-match predicate above means they name the matched
+        // package and path, and package-derived data stays out of
+        // the log line.
+        log::debug!(
+            "FileGrants: {finding} on {:?} in {:?} stays quiet: {}",
+            grant.paths,
+            grant.packages,
+            grant.reason
+        );
+        true
     }
 }
 
@@ -2168,18 +3297,58 @@ fn perl_base_credited(lists: &DepLists, vers: &str) -> bool {
         .any(|d| d.name == "/usr/bin/perl" || d.name.starts_with("libperl.so"))
 }
 
+/// Whether `name` is a flavour base package name: `python3`
+/// followed by one or more digits and `-base` - `python313-base`,
+/// `python314-base` - carrying the optional `(arch-bits)` qualifier
+/// of the `dep_name_matches` shape. Nothing else is the form: a
+/// longer suffix (`python313-base-devel`), a letter in the digit run
+/// (`python31a-base`) or the bare `python3-base` (credited on its own
+/// arm) does not match.
+fn is_flavour_base_name(name: &str) -> bool {
+    let stem = match name.split_once('(') {
+        Some((head, rest)) => {
+            let Some(inner) = rest.strip_suffix(')') else {
+                return false;
+            };
+            let Some((arch, bits)) = inner.split_once('-') else {
+                return false;
+            };
+            if arch.is_empty()
+                || !arch.chars().all(|c| c.is_alphanumeric() || c == '_')
+                || bits.is_empty()
+                || !bits.chars().all(|c| c.is_ascii_digit())
+            {
+                return false;
+            }
+            head
+        }
+        None => name,
+    };
+    let Some(digits) = stem
+        .strip_prefix("python3")
+        .and_then(|rest| rest.strip_suffix("-base"))
+    else {
+        return false;
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
 /// Whether the lists carry the python base dependency for `ver`: the
 /// `=`-pinned `python` / `python-base` / `python(abi)` names the
 /// reference credits, the SUSE base name `python3-base` in any
 /// relation and the versioned interpreter path `/usr/bin/python<ver>`
 /// (issue #568), plus the interpreter expressed as the unversioned
 /// `/usr/bin/python3` path or the `libpython<ver>` soname (issue
-/// #862).
+/// #862), plus the flavour base name `python3<digits>-base` in any
+/// relation (maintainer ruling, 2026-10-26) - the base package of
+/// one specific flavour, which for a non-primary flavour is the
+/// only spelling of that base.
 fn python_base_credited(lists: &DepLists, ver: &str) -> bool {
     let interpreter = format!("/usr/bin/python{ver}");
     let soname = format!("libpython{ver}.so");
     if lists.hard().any(|d| {
         dep_name_matches(&d.name, "python3-base")
+            || is_flavour_base_name(&d.name)
             || d.name == interpreter
             || d.name == "/usr/bin/python3"
             || d.name.starts_with(&soname)
@@ -2685,6 +3854,9 @@ impl FilesCheck {
         // sub_bin_regex: bin dirs with a subdirectory component
         for bindir in ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"] {
             if fname.starts_with(bindir) && fname[bindir.len()..].contains('/') {
+                if subdir_in_bin_is_companion_dir(pkg, bindir, fname) {
+                    break;
+                }
                 add_info(out, Level::Error, pkg, "subdir-in-bin", &[fname]);
                 break;
             }
@@ -2704,12 +3876,7 @@ impl FilesCheck {
     }
 
     fn check_file_backup_file_in_package(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        let lower = fname.to_lowercase();
-        if lower.ends_with('~')
-            || lower.ends_with(".bak")
-            || lower.ends_with(".orig")
-            || lower.ends_with(".rej")
-        {
+        if is_match(backup_regex(), fname) {
             add_info(out, Level::Error, pkg, "backup-file-in-package", &[fname]);
         }
     }
@@ -3065,7 +4232,29 @@ impl FilesCheck {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let abslink = crate::pkg::normalize_path(&format!("{parent}/{link}"));
-            if !pkg.files.iter().any(|f| f.name == abslink) && !pkg.req_names.contains(&abslink) {
+            // A target naming a directory this package itself populates
+            // is not dangling: installing the package creates the target
+            // directory as a leading directory of its own payload, so the
+            // link resolves even though no header entry names the target
+            // itself (a link to `.` or `../..`, a JDK tree link whose
+            // directory carries the package's own headers). The evidence
+            // must be a non-%ghost entry strictly below the target --
+            // a %ghost entry installs no payload, so it creates no
+            // directory -- and the prefix carries a trailing slash, so a
+            // sibling path that merely shares a string prefix does not
+            // credit. The test runs on the verbatim normalised target:
+            // a root-level link's `//usr/...` form matches no shipped
+            // path, so the class-F parity shape (filesystem's own root
+            // links) keeps firing, as the #547 ledger entry pins. The
+            // reference has no such credit; the divergence is ledgered.
+            let populated_dir = pkg
+                .files
+                .iter()
+                .any(|f| !f.is_ghost() && f.name.starts_with(&format!("{abslink}/")));
+            if !populated_dir
+                && !pkg.files.iter().any(|f| f.name == abslink)
+                && !pkg.req_names.contains(&abslink)
+            {
                 // Session-aware decision (issue #547): record the link
                 // and decide in `after_checks`, when the file sets of
                 // the whole run are known — a sibling package in the
@@ -3433,12 +4622,14 @@ impl FilesCheck {
         // debug trees hold the mirrored .debug companions of the
         // runtime libraries (issue #955, divergences.toml): a
         // -debuginfo package's payload by construction, scoped out
-        // via is_debug_path.
+        // via is_debug_path. A package that is the library's combined
+        // home (lib_combined_home) is scoped out the same way.
         if is_match(&self.lib_re, fname)
             && st.devel_pkg
             && !is_debug_path(fname)
             && !cross_sysroot_matches(fname)
             && !(is_match(&self.sofile_re, fname) && pkgfile::is_symlink(pkgfile.mode))
+            && !Self::lib_combined_home(pkg, fname)
         {
             add_info(
                 out,
@@ -3448,6 +4639,37 @@ impl FilesCheck {
                 &[fname],
             );
         }
+    }
+
+    /// Combined-home shape for the versioned-library arm above: the
+    /// package ships the library's own devel payload — the
+    /// unversioned linker symlink (`libfoo.so`) in the same
+    /// directory, resolving within the package to the versioned file
+    /// itself. Within the package's own build the library then has
+    /// no other home: no separate runtime package was deprived of
+    /// the file, so the finding's premise (a devel package holding a
+    /// runtime file that belongs elsewhere) does not hold. gettext-tools, which
+    /// ships libgettextpo with its headers and linker symlink and
+    /// Provides gettext-devel, is the measured instance
+    /// (divergences.toml). A linker symlink whose chain leaves the
+    /// package or lands on a different file points at a runtime home
+    /// elsewhere and does not credit.
+    fn lib_combined_home(pkg: &Pkg, fname: &str) -> bool {
+        let (dir, base) = match fname.rfind('/') {
+            Some(i) => (&fname[..i + 1], &fname[i + 1..]),
+            None => ("", fname),
+        };
+        let Some(idx) = base.find(".so.") else {
+            return false;
+        };
+        let linker = format!("{dir}{}", &base[..idx + 3]);
+        let Some(link) = pkg.files.iter().find(|f| f.name == linker) else {
+            return false;
+        };
+        if !pkgfile::is_symlink(link.mode) {
+            return false;
+        }
+        matches!(pkg.readlink(link), Some(resolved) if resolved.name == fname)
     }
 
     fn check_normal_rpaths_in_buildconfig(
@@ -3729,6 +4951,43 @@ impl FilesCheck {
         }
     }
 
+    /// True when `fname` is a PEP 3147 cache file whose cache tag names a
+    /// different CPython version than the `pythonX.Y` tree it ships in (for
+    /// example a `cpython-312` cache file under `python3.13`). The tree's
+    /// interpreter never consults such a file -- the cache filename is keyed
+    /// to the other version -- so its embedded timestamp cannot make the
+    /// shipped source's bytecode stale in this tree. A version mismatch is
+    /// the wrong-magic check's jurisdiction, not the mtime check's.
+    /// Anything that does not parse (no PEP 3147 tag, a non-CPython
+    /// tag, no version in the tree path) returns false: the mtime check
+    /// keeps its say.
+    fn pyc_cache_version_mismatch(&self, fname: &str) -> bool {
+        let Ok(Some(caps)) = self.python_bytecode_pep3147_re.captures(fname) else {
+            return false;
+        };
+        let Some(tag) = caps.get(3).map(|m| m.as_str()) else {
+            return false;
+        };
+        let Some(digits) = tag.strip_prefix("cpython-") else {
+            return false;
+        };
+        if digits.len() < 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        let tag_version = format!("{}.{}", &digits[..1], &digits[1..]);
+        let Ok(Some(tree)) = self.python_re.captures(fname) else {
+            return false;
+        };
+        let Some(tree_version) = tree.get(1).map(|m| m.as_str()) else {
+            return false;
+        };
+        // A bare `python3` tree pins no minor version to compare against.
+        if !tree_version.contains('.') {
+            return false;
+        }
+        tag_version != tree_version
+    }
+
     fn python_bytecode_to_script(&self, path: &str) -> Option<String> {
         if let Ok(Some(caps)) = self.python_bytecode_pep3147_re.captures(path) {
             return Some(format!(
@@ -3786,13 +5045,18 @@ impl FilesCheck {
                 }
 
                 // Verify the timestamp embedded in the .pyc header matches
-                // the mtime of the .py file.
-                if let Some(details) = Self::pyc_mtime_check(
-                    Self::pyc_mtime_from_chunk(&fd.chunk),
-                    srcfile.mtime,
-                    fname,
-                    &srcfile.name,
-                ) {
+                // the mtime of the .py file. A cache file keyed to a
+                // different CPython version than its tree is never read by
+                // that tree's interpreter, so skip it here (see
+                // pyc_cache_version_mismatch).
+                if !self.pyc_cache_version_mismatch(fname)
+                    && let Some(details) = Self::pyc_mtime_check(
+                        Self::pyc_mtime_from_chunk(&fd.chunk),
+                        srcfile.mtime,
+                        fname,
+                        &srcfile.name,
+                    )
+                {
                     let refs: Vec<&str> = details.iter().map(|s| s.as_str()).collect();
                     add_info(
                         out,
@@ -3817,10 +5081,28 @@ impl FilesCheck {
         let mode = pkgfile.mode;
         let mode_is_exec = mode & 0o111 != 0;
         if mode_is_exec {
-            if pkg.config_files.iter().any(|c| c == fname) {
+            if pkg.config_files.iter().any(|c| c == fname)
+                && !self.file_granted(&pkg.name, fname, "executable-marked-as-config-file")
+            {
+                // Severity split on the noreplace flag (maintainer
+                // ruling, 2026-10-26; see the divergence ledger): a
+                // %config(noreplace) executable warns instead of
+                // erroring. The noreplace marking is deliberate -- the
+                // packager opted into keep-local-edits semantics for
+                // this file, and for hook-style files the execution is
+                // the design -- so the finding stays visible for the
+                // maintainer's call and can be suppressed per package,
+                // but it does not fail the build. A plain %config
+                // executable carries no such signal and keeps the
+                // reference's error.
+                let level = if pkg.noreplace_files.iter().any(|c| c == fname) {
+                    Level::Warning
+                } else {
+                    Level::Error
+                };
                 add_info(
                     out,
-                    Level::Error,
+                    level,
                     pkg,
                     "executable-marked-as-config-file",
                     &[fname],
@@ -4038,13 +5320,21 @@ impl FilesCheck {
                 if mode_is_exec || is_match(&self.script_re, fname) {
                     match self.interpreter_re.captures(&interpreter) {
                         Ok(Some(caps)) if caps.get(1).map(|m| m.as_str()) == Some("env") => {
-                            add_info(
-                                out,
-                                Level::Error,
-                                pkg,
-                                "env-script-interpreter",
-                                &[fname, &interpreter, &fd.interpreter_args],
-                            );
+                            // Test and harness payload is run by
+                            // its harness, not executed in place as
+                            // an installed entry point, so the env
+                            // form of its interpreter line is not a
+                            // defect there: `script_is_test_data`
+                            // carries the shapes and their guards.
+                            if !script_is_test_data(&pkg.name, fname) {
+                                add_info(
+                                    out,
+                                    Level::Error,
+                                    pkg,
+                                    "env-script-interpreter",
+                                    &[fname, &interpreter, &fd.interpreter_args],
+                                );
+                            }
                         }
                         Ok(Some(_)) => {}
                         _ => {
@@ -4069,15 +5359,60 @@ impl FilesCheck {
             // script executed in place and the missing exec bit is
             // not a defect (issues #813, #845):
             // `non_executable_script_is_data` carries the shapes
-            // and their guards. Scripts the shapes do not cover
-            // keep the reference behaviour.
+            // and their guards. Test and harness payload is data
+            // the same way -- a harness runs it by path, so the
+            // missing exec bit is not a defect there either:
+            // `script_is_test_data` carries those shapes and
+            // their guards. A script whose own text marks it as
+            // a sourced fragment -- a top-level `return` in a
+            // POSIX-family shell script -- is not a defect
+            // either: `non_executable_script_is_provable_fragment`
+            // carries that proof. Scripts none of the shapes
+            // cover keep the reference behaviour.
             if !mode_is_exec && !is_doc {
                 if let Some(interpreter) = &fd.interpreter {
+                    // Python package evidence for
+                    // `non_executable_script_is_data`: a `.py` file
+                    // carrying a Python interpreter line, inside the
+                    // data and library trees, whose package ships an
+                    // `__init__.py` in the same directory is a module
+                    // of an application-private package tree, not a
+                    // script executed in place.
+                    let parent = fname.rsplit_once('/').map_or("", |(p, _)| p);
+                    let interp_base = interpreter.rsplit('/').next().unwrap_or("");
+                    let pythonish =
+                        interp_base.starts_with("python")
+                            || (interp_base == "env"
+                                && fd.interpreter_args.split_whitespace().next().is_some_and(
+                                    |arg| {
+                                        arg.rsplit('/').next().unwrap_or("").starts_with("python")
+                                    },
+                                ));
+                    let in_python_pkg_dir = pythonish
+                        && fname.ends_with(".py")
+                        && (fname.starts_with("/usr/src/")
+                            || fname.starts_with("/usr/share/")
+                            || fname.starts_with("/usr/lib/")
+                            || fname.starts_with("/usr/lib64/")
+                            || fname.starts_with("/usr/etc/")
+                            || fname.starts_with("/etc/"))
+                        && pkg
+                            .files
+                            .iter()
+                            .any(|f| f.name == format!("{parent}/__init__.py"));
                     if interpreter.starts_with('/')
                         && !non_executable_script_is_data(
                             fname,
                             interpreter,
                             &self.python_lib_tree_re,
+                            in_python_pkg_dir,
+                        )
+                        && !script_is_test_data(&pkg.name, fname)
+                        && !non_executable_script_is_provable_fragment(
+                            pkgfile,
+                            fname,
+                            interpreter,
+                            &fd.interpreter_args,
                         )
                     {
                         add_info(
@@ -4172,29 +5507,35 @@ impl FilesCheck {
                 // a missing scriptlet emits library-without-ldconfig-*, a
                 // present-but-ldconfig-less one emits postin-without-ldconfig.
                 // Emitting both was a port bug. A -p ldconfig interpreter
-                // satisfies the check outright via is_ldconfig above.
+                // satisfies the check outright via is_ldconfig above. A
+                // FileGrants entry naming this package, file and finding
+                // suppresses the emission (see parse_file_grants).
                 if st.postin.is_empty() {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "library-without-ldconfig-postin",
-                        &[fname],
-                    );
-                } else {
+                    if !self.file_granted(&pkg.name, fname, "library-without-ldconfig-postin") {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "library-without-ldconfig-postin",
+                            &[fname],
+                        );
+                    }
+                } else if !self.file_granted(&pkg.name, fname, "postin-without-ldconfig") {
                     add_info(out, Level::Error, pkg, "postin-without-ldconfig", &[fname]);
                 }
             }
             if !is_ldconfig(&st.postun, &postun_prog) {
                 if st.postun.is_empty() {
-                    add_info(
-                        out,
-                        Level::Error,
-                        pkg,
-                        "library-without-ldconfig-postun",
-                        &[fname],
-                    );
-                } else {
+                    if !self.file_granted(&pkg.name, fname, "library-without-ldconfig-postun") {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "library-without-ldconfig-postun",
+                            &[fname],
+                        );
+                    }
+                } else if !self.file_granted(&pkg.name, fname, "postun-without-ldconfig") {
                     add_info(out, Level::Error, pkg, "postun-without-ldconfig", &[fname]);
                 }
             }
@@ -4277,7 +5618,7 @@ mod tests {
     use super::*;
     use crate::color::Color;
     use crate::pkg::dep::{DepInfo, account_capability};
-    use crate::pkg::pkgfile::RPMFILE_GHOST;
+    use crate::pkg::pkgfile::{RPMFILE_CONFIG, RPMFILE_GHOST, RPMFILE_NOREPLACE};
 
     fn test_config() -> Config {
         // Load the bundled defaults so the check sees the same configuration
@@ -4507,6 +5848,129 @@ mod tests {
         out.results().to_vec()
     }
 
+    /// Build a package from `files` with the header-derived config
+    /// lists set explicitly, run the full FilesCheck over it, and
+    /// return the levels `executable-marked-as-config-file` fired at,
+    /// in emission order.
+    fn exec_config_levels(
+        files: Vec<PkgFile>,
+        config_files: &[&str],
+        noreplace_files: &[&str],
+    ) -> Vec<Level> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.ghost_files = files
+            .iter()
+            .filter(|f| f.is_ghost())
+            .map(|f| f.name.clone())
+            .collect();
+        pkg.files = files;
+        pkg.config_files = config_files.iter().map(|s| s.to_string()).collect();
+        pkg.noreplace_files = noreplace_files.iter().map(|s| s.to_string()).collect();
+        let (results, levels) = run_files_check_pkgs(&[pkg], &test_config());
+        results
+            .iter()
+            .zip(&levels)
+            .filter(|((name, _), _)| name == "executable-marked-as-config-file")
+            .map(|(_, level)| *level)
+            .collect()
+    }
+
+    /// A regular executable file carrying the given header flags.
+    fn exec_file(name: &str, flags: u32) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode: 0o100755,
+            flags,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn executable_config_noreplace_is_warning() {
+        // Maintainer ruling (2026-10-26): %config(noreplace) is a
+        // deliberate marking -- the executable warns, it does not
+        // error, and it is not dropped.
+        let levels = exec_config_levels(
+            vec![exec_file(
+                "/etc/fcprobe/hook.sh",
+                RPMFILE_CONFIG | RPMFILE_NOREPLACE,
+            )],
+            &["/etc/fcprobe/hook.sh"],
+            &["/etc/fcprobe/hook.sh"],
+        );
+        assert_eq!(levels, vec![Level::Warning]);
+    }
+
+    #[test]
+    fn executable_config_plain_stays_error() {
+        // A plain %config executable carries no deliberate-marking
+        // signal and keeps the reference's error.
+        let levels = exec_config_levels(
+            vec![exec_file("/etc/fcprobe/hook.sh", RPMFILE_CONFIG)],
+            &["/etc/fcprobe/hook.sh"],
+            &[],
+        );
+        assert_eq!(levels, vec![Level::Error]);
+    }
+
+    #[test]
+    fn executable_config_split_within_one_package() {
+        // Both arms in one package: the noreplace file warns, the
+        // plain one errors; neither finding is dropped.
+        let levels = exec_config_levels(
+            vec![
+                exec_file("/etc/fcprobe/a.sh", RPMFILE_CONFIG | RPMFILE_NOREPLACE),
+                exec_file("/etc/fcprobe/b.sh", RPMFILE_CONFIG),
+            ],
+            &["/etc/fcprobe/a.sh", "/etc/fcprobe/b.sh"],
+            &["/etc/fcprobe/a.sh"],
+        );
+        assert_eq!(levels.len(), 2, "both arms fire: {levels:?}");
+        assert!(levels.contains(&Level::Warning), "{levels:?}");
+        assert!(levels.contains(&Level::Error), "{levels:?}");
+    }
+
+    #[test]
+    fn executable_config_ghost_noreplace_warns_not_exempt() {
+        // The aaa_base shape: a %ghost %config(noreplace) stub follows
+        // the same split -- it lands on the warning arm; there is no
+        // ghost exemption.
+        let levels = exec_config_levels(
+            vec![exec_file(
+                "/etc/init.d/after.local",
+                RPMFILE_CONFIG | RPMFILE_NOREPLACE | RPMFILE_GHOST,
+            )],
+            &["/etc/init.d/after.local"],
+            &["/etc/init.d/after.local"],
+        );
+        assert_eq!(levels, vec![Level::Warning]);
+    }
+
+    #[test]
+    fn executable_nonconfig_file_is_quiet() {
+        // Near-miss: an executable not marked %config at all must not
+        // fire this tag.
+        let levels = exec_config_levels(vec![exec_file("/usr/lib/fcprobe/tool.sh", 0)], &[], &[]);
+        assert!(levels.is_empty(), "{levels:?}");
+    }
+
+    #[test]
+    fn nonexec_config_noreplace_file_is_quiet() {
+        // Near-miss: %config(noreplace) without the exec bit must not
+        // fire this tag.
+        let mut file = exec_file("/etc/fcprobe/hook.sh", RPMFILE_CONFIG | RPMFILE_NOREPLACE);
+        file.mode = 0o100644;
+        let levels = exec_config_levels(
+            vec![file],
+            &["/etc/fcprobe/hook.sh"],
+            &["/etc/fcprobe/hook.sh"],
+        );
+        assert!(levels.is_empty(), "{levels:?}");
+    }
+
     fn plain_file(name: &str) -> PkgFile {
         PkgFile {
             name: name.to_string(),
@@ -4522,6 +5986,73 @@ mod tests {
             flags: RPMFILE_GHOST,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn subdir_in_bin_quiet_for_companion_dot_d_dir() {
+        // A `.d` directory named after an executable in the same bin
+        // dir is that tool's companion directory (liblouis-tools
+        // ships /usr/bin/lou_maketable.d/* for /usr/bin/lou_maketable):
+        // its payload, at any depth below it, stays quiet.
+        let names = finding_names(&run_files_check_with_files(vec![
+            mkfile("/usr/bin/lou_tool", 0o100755, 1),
+            mkfile("/usr/bin/lou_tool.d/helper.py", 0o100755, 2),
+            mkfile("/usr/bin/lou_tool.d/sub/deep.sh", 0o100644, 3),
+        ]));
+        assert_lacks(&names, "subdir-in-bin");
+    }
+
+    #[test]
+    fn subdir_in_bin_fires_for_dot_d_dir_without_namesake() {
+        // Near miss: no executable named after the `.d` directory.
+        let names = finding_names(&run_files_check_with_files(vec![mkfile(
+            "/usr/bin/orphan.d/helper",
+            0o100755,
+            1,
+        )]));
+        assert_has(&names, "subdir-in-bin");
+    }
+
+    #[test]
+    fn subdir_in_bin_fires_when_namesake_not_executable() {
+        // Near miss: the namesake exists but is not an executable
+        // regular file, so the `.d` directory is nobody's companion.
+        let names = finding_names(&run_files_check_with_files(vec![
+            mkfile("/usr/bin/tool", 0o100644, 1),
+            mkfile("/usr/bin/tool.d/helper", 0o100755, 2),
+        ]));
+        assert_has(&names, "subdir-in-bin");
+    }
+
+    #[test]
+    fn subdir_in_bin_fires_when_namesake_is_symlink() {
+        // Near miss: a symlink namesake is not the tool itself.
+        let names = finding_names(&run_files_check_with_files(vec![
+            mkfile("/usr/bin/tool", 0o120777, 1),
+            mkfile("/usr/bin/tool.d/helper", 0o100755, 2),
+        ]));
+        assert_has(&names, "subdir-in-bin");
+    }
+
+    #[test]
+    fn subdir_in_bin_still_fires_for_plain_subdir_with_sibling() {
+        // Only the `.d` companion shape is credited; a plain
+        // subdirectory next to a same-named executable keeps firing.
+        let names = finding_names(&run_files_check_with_files(vec![
+            mkfile("/usr/bin/tool", 0o100755, 1),
+            mkfile("/usr/bin/tool/helper", 0o100755, 2),
+        ]));
+        assert_has(&names, "subdir-in-bin");
+    }
+
+    #[test]
+    fn subdir_in_bin_fires_for_plain_subdir() {
+        let names = finding_names(&run_files_check_with_files(vec![mkfile(
+            "/usr/bin/foo/bar",
+            0o100755,
+            1,
+        )]));
+        assert_has(&names, "subdir-in-bin");
     }
 
     #[test]
@@ -5547,6 +7078,156 @@ mod tests {
             .collect()
     }
 
+    /// Like `non_devel_lines`, but each file carries a mode and a
+    /// symlink target (empty for regular files), and the package may
+    /// carry explicit Provides — the devel classification can come
+    /// from a Provide rather than the package name.
+    fn non_devel_lines_typed(
+        pkg_name: &str,
+        provides: &[&str],
+        files: &[(&str, u32, &str)],
+    ) -> Vec<String> {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.name = pkg_name.to_string();
+        pkg.doc_files = vec![];
+        pkg.provides = provides.iter().map(|p| dep_named(p)).collect();
+        pkg.files = files
+            .iter()
+            .map(|(fname, mode, linkto)| {
+                let path = dir.path().join(fname.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+                std::fs::write(&path, b"fake lib\n").expect("write temp file");
+                PkgFile {
+                    name: fname.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: *mode,
+                    magic: "ASCII text".to_string(),
+                    linkto: linkto.to_string(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .filter(|(name, _)| name == "non-devel-file-in-devel-package")
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
+
+    #[test]
+    fn combined_home_linker_symlink_is_quiet() {
+        // gettext-tools shape: a tools package that is its library's
+        // combined home — the versioned library plus the linker
+        // symlink resolving to it in the same package. The devel
+        // classification comes from the gettext-devel Provide.
+        let lines = non_devel_lines_typed(
+            "gettext-tools",
+            &["gettext-devel"],
+            &[
+                ("/usr/lib64/libgettextpo.so.0.6.0", 0o100644, ""),
+                (
+                    "/usr/lib64/libgettextpo.so",
+                    0o120777,
+                    "libgettextpo.so.0.6.0",
+                ),
+            ],
+        );
+        assert!(lines.is_empty(), "combined home must be quiet: {lines:?}");
+        // glib2-stage1 shape: a -devel-named bootstrap package whose
+        // linker chain runs through the SONAME symlink.
+        let lines = non_devel_lines_typed(
+            "foo-devel",
+            &[],
+            &[
+                ("/usr/lib64/libfoo.so.1.2.3", 0o100644, ""),
+                ("/usr/lib64/libfoo.so.1", 0o120777, "libfoo.so.1.2.3"),
+                ("/usr/lib64/libfoo.so", 0o120777, "libfoo.so.1"),
+            ],
+        );
+        assert!(
+            lines.is_empty(),
+            "two-hop combined home must be quiet: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn combined_home_near_misses_still_fire() {
+        // Linker symlink present, but its target is not shipped: the
+        // chain points at a runtime home elsewhere.
+        let lines = non_devel_lines_typed(
+            "foo-devel",
+            &[],
+            &[
+                ("/usr/lib64/libfoo.so.1.2.3", 0o100644, ""),
+                ("/usr/lib64/libfoo.so", 0o120777, "libfoo.so.1"),
+            ],
+        );
+        assert_eq!(lines.len(), 1, "dangling linker chain must fire: {lines:?}");
+        // The linker symlink belongs to another library of the same
+        // package; the versioned libfoo has no devel payload here.
+        let lines = non_devel_lines_typed(
+            "foo-devel",
+            &[],
+            &[
+                ("/usr/lib64/libfoo.so.1.2.3", 0o100644, ""),
+                ("/usr/lib64/libbar.so.9.9", 0o100644, ""),
+                ("/usr/lib64/libbar.so", 0o120777, "libbar.so.9.9"),
+            ],
+        );
+        assert_eq!(lines.len(), 1, "only libfoo must fire: {lines:?}");
+        assert!(lines[0].contains("libfoo"), "{lines:?}");
+        // A -devel Provide unrelated to the shipped library does not
+        // credit on its own: no linker symlink, no combined home.
+        let lines = non_devel_lines_typed(
+            "bar-tools",
+            &["foo-devel"],
+            &[("/usr/lib64/libbar.so.1.2.3", 0o100644, "")],
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "unrelated Provide must not credit: {lines:?}"
+        );
+        // A regular file at the linker name is not a linker symlink.
+        let lines = non_devel_lines_typed(
+            "foo-devel",
+            &[],
+            &[
+                ("/usr/lib64/libfoo.so.1.2.3", 0o100644, ""),
+                ("/usr/lib64/libfoo.so", 0o100644, ""),
+            ],
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "regular libfoo.so must not credit: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn combined_home_does_not_touch_the_typelib_arm() {
+        // nemo-extension-preview shape: the package's own typelib is
+        // charged by the .typelib arm; the combined-home credit is
+        // scoped to the versioned-library arm.
+        let lines = non_devel_lines_typed(
+            "nemo-extension-preview",
+            &["nemo-extension-preview-devel"],
+            &[(
+                "/usr/lib64/nemo-preview/girepository-1.0/NemoPreview-1.0.typelib",
+                0o100644,
+                "",
+            )],
+        );
+        assert_eq!(lines.len(), 1, "typelib arm must still fire: {lines:?}");
+    }
+
     #[test]
     fn cross_sysroot_runtime_libs_in_devel_package_are_quiet() {
         // Issue #860: the glibc-cross packages ship the target's
@@ -5951,13 +7632,60 @@ mod tests {
     }
 
     #[test]
-    fn normal_python_dep_flavour_base_name_fires() {
-        // The flavour-named base form (`python313-base`, even with a
-        // floor) is not one of the credited forms: #568 already left
-        // it firing, and #862 does not widen the name forms.
+    fn normal_python_dep_flavour_base_name_satisfies() {
+        // The flavour-named base form is the base dependency: the
+        // package `python313-base` is the very package that provides
+        // the credited `python3-base` name. #568 and #862 left the
+        // form uncredited; the maintainer ruling of 2026-10-26
+        // credits it (any relation, floor included).
         let names = run_dep_check(
             "foo",
             vec![dep_flagged("python313-base", 12, Some("3.9"))],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_flavour_base_name_other_flavour_satisfies() {
+        // The 3.14 flavour's base package provides no `python3-base`
+        // at all, so the flavour name is the only spelling of its
+        // base dependency.
+        let names = run_dep_check(
+            "foo",
+            vec![dep_flagged("python314-base", 12, Some("3.9"))],
+            "/usr/lib/python3.14/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_flavour_base_name_arch_qualified_satisfies() {
+        // The `(arch-bits)` qualifier shape counts, as it does for
+        // the `python3-base` name (`dep_name_matches` semantics).
+        let names = run_dep_check(
+            "foo",
+            vec![dep_named("python313-base(x86-64)")],
+            "/usr/lib/python3.13/site-packages/foo.py",
+            b"x = 1\n",
+        );
+        assert_lacks(&names, "no-dependency-on");
+    }
+
+    #[test]
+    fn normal_python_dep_flavour_base_lookalikes_fire() {
+        // The grammar is exact - `python3` + digits + `-base` and
+        // nothing else: a suffixed package name, a letter in the
+        // digit run and a flavour module package are not the base.
+        let names = run_dep_check(
+            "foo",
+            vec![
+                dep_named("python313-base-devel"),
+                dep_named("python31a-base"),
+                dep_named("python313-gobject"),
+            ],
             "/usr/lib/python3.13/site-packages/foo.py",
             b"x = 1\n",
         );
@@ -6006,6 +7734,33 @@ mod tests {
                 nodep_lines(&results)
             );
         }
+    }
+
+    #[test]
+    fn normal_python_dep_anchor_sibling_carries_flavour_base() {
+        // The anchor judgement shares the own-package predicate: a
+        // sibling carrying the base dependency in its flavour-named
+        // form credits the anchored package the same way.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let lang = dep_test_pkg(
+            &dir,
+            "foo-lang",
+            vec![dep_flagged("foo", 8, Some("1.0"))],
+            Some(("/usr/lib/python3.13/site-packages/foo.py", b"x = 1\n")),
+        );
+        let main = dep_test_pkg(
+            &dir,
+            "foo",
+            vec![dep_flagged("python313-base", 12, Some("3.9"))],
+            None,
+        );
+        let (results, _levels) = run_files_check_pkgs(&[lang, main], &config);
+        assert!(
+            nodep_lines(&results).is_empty(),
+            "got {:?}",
+            nodep_lines(&results)
+        );
     }
 
     #[test]
@@ -7575,6 +9330,86 @@ mod tests {
         );
     }
 
+    /// Build one package from `files` (fcprobe header) and return the
+    /// names of the findings the full session-aware FilesCheck emits.
+    fn dangling_names_for_files(files: Vec<PkgFile>) -> Vec<String> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.ghost_files = files
+            .iter()
+            .filter(|f| f.is_ghost())
+            .map(|f| f.name.clone())
+            .collect();
+        pkg.files = files;
+        let (results, _levels) = run_files_check_pkgs(&[pkg], &test_config());
+        results.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    #[test]
+    fn dangling_relative_populated_dir_target_stays_silent() {
+        // The link's target is a directory no header entry names, but
+        // the package ships payload below it, so installing the package
+        // creates the directory and the link resolves (gajim-lang's
+        // locale link shape). The reference fires here; the divergence
+        // is ledgered.
+        let names = dangling_names_for_files(vec![
+            symlink("/usr/share/foo/locale", "../locale"),
+            plain_file("/usr/share/locale/en/LC_MESSAGES/foo.mo"),
+        ]);
+        assert_lacks(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_ancestor_and_dot_targets_stay_silent() {
+        // A link to an ancestor of its own tree (`../..`, the ntp
+        // chroot-mirror shape) and a link to `.` (the onednn / X11
+        // shape) name directories the package's own payload creates as
+        // leading directories.
+        let names = dangling_names_for_files(vec![
+            symlink("/var/lib/foo/var/lib/foo", "../.."),
+            plain_file("/var/lib/foo/drift"),
+            symlink("/usr/include/mkl-foo", "."),
+            plain_file("/usr/include/foo.h"),
+        ]);
+        assert_lacks(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_ghost_only_population_fires() {
+        // A %ghost entry below the target installs no payload, so it
+        // creates no directory: the target stays dangling.
+        let mut ghost = plain_file("/usr/share/locale/en/LC_MESSAGES/foo.mo");
+        ghost.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        let names =
+            dangling_names_for_files(vec![symlink("/usr/share/foo/locale", "../locale"), ghost]);
+        assert_has(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_string_prefix_lookalike_fires() {
+        // `/usr/share/locale2/...` shares a string prefix with the
+        // target `/usr/share/locale` but is not below it: no credit.
+        let names = dangling_names_for_files(vec![
+            symlink("/usr/share/foo/locale", "../locale"),
+            plain_file("/usr/share/locale2/en/LC_MESSAGES/foo.mo"),
+        ]);
+        assert_has(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_root_link_populated_target_still_fires() {
+        // Class-F parity (issue #547): a root-level link's normalised
+        // target keeps the double leading slash (`//usr/...`), which no
+        // shipped path starts with, so the populated-directory credit
+        // does not rescue it -- the reference fires identically.
+        let names = dangling_names_for_files(vec![
+            symlink("/lone-root-link", "usr/share/foo/sub"),
+            plain_file("/usr/share/foo/sub/data.txt"),
+        ]);
+        assert_has(&names, "dangling-relative-symlink");
+    }
+
     #[test]
     fn symlink_up_and_down_segments() {
         // The reference emits E symlink-contains-up-and-down-segments once
@@ -7812,6 +9647,163 @@ mod tests {
             .is_none()
         );
     }
+
+    #[test]
+    fn pyc_cache_version_mismatch_foreign_tag() {
+        let check = FilesCheck::new(&test_config());
+        // The live shape: a cpython-312 cache file in a python3.13 tree
+        // (and in a python3.14 tree), plain and opt-1 forms.
+        assert!(check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.cpython-312.pyc"
+        ));
+        assert!(check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.14/site-packages/foo/__pycache__/__init__.cpython-312.opt-1.pyc"
+        ));
+        assert!(check.pyc_cache_version_mismatch(
+            "/usr/lib/python3.13/site-packages/foo/__pycache__/mod.cpython-27.pyc"
+        ));
+    }
+
+    #[test]
+    fn pyc_cache_version_mismatch_matching_tag_is_no_mismatch() {
+        let check = FilesCheck::new(&test_config());
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.cpython-313.pyc"
+        ));
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.cpython-313.opt-2.pyc"
+        ));
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib/python2.7/site-packages/foo/__pycache__/__init__.cpython-27.pyc"
+        ));
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.9/site-packages/foo/__pycache__/__init__.cpython-39.pyc"
+        ));
+    }
+
+    #[test]
+    fn pyc_cache_version_mismatch_fails_closed() {
+        let check = FilesCheck::new(&test_config());
+        // Direct (non-PEP 3147) layout: no cache tag at all.
+        assert!(
+            !check
+                .pyc_cache_version_mismatch("/usr/lib64/python3.13/site-packages/foo/__init__.pyc")
+        );
+        // No versioned tree in the path: nothing to compare against.
+        assert!(
+            !check
+                .pyc_cache_version_mismatch("/usr/share/foo/__pycache__/__init__.cpython-312.pyc")
+        );
+        // A bare python3 tree pins no minor version.
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib/python3/site-packages/foo/__pycache__/__init__.cpython-312.pyc"
+        ));
+        // Non-CPython cache tags do not parse as a CPython version.
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.pypy-41.pyc"
+        ));
+        assert!(!check.pyc_cache_version_mismatch(
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.graalpy-310.pyc"
+        ));
+    }
+
+    /// Build a package holding one .py and one .pyc with real on-disk
+    /// content, so the .pyc header chunk is read for real.
+    fn pyc_mtime_pkg(
+        dir: &tempfile::TempDir,
+        py_name: &str,
+        py_mtime: u64,
+        pyc_name: &str,
+        pyc_header: &[u8],
+    ) -> Pkg {
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.name = "pyc-mtime-test".to_string();
+        let mk = |name: &str, content: &[u8], mtime: u64| {
+            let path = dir.path().join(name.trim_start_matches('/'));
+            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+            std::fs::write(&path, content).expect("write temp file");
+            PkgFile {
+                name: name.to_string(),
+                path: path.to_string_lossy().into_owned(),
+                mode: 0o100644,
+                mtime,
+                ..Default::default()
+            }
+        };
+        pkg.files = vec![
+            mk(py_name, b"x = 1\n", py_mtime),
+            mk(pyc_name, pyc_header, py_mtime),
+        ];
+        pkg
+    }
+
+    fn pyc_header(magic: u32, flags: u32, ts: u32) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&magic.to_le_bytes());
+        v.extend_from_slice(&flags.to_le_bytes());
+        v.extend_from_slice(&ts.to_le_bytes());
+        v.extend_from_slice(&4u32.to_le_bytes());
+        v
+    }
+
+    fn inconsistent_mtime_lines(pkg: &Pkg) -> Vec<String> {
+        run_check_binary(pkg)
+            .iter()
+            .filter(|(n, _)| n == "python-bytecode-inconsistent-mtime")
+            .map(|(_, l)| l.clone())
+            .collect()
+    }
+
+    #[test]
+    fn pyc_mtime_foreign_cache_version_is_silent() {
+        // Stale embedded timestamp (1000 < 2000), but the cache file is
+        // keyed to CPython 3.12 while the tree is python3.13: the tree's
+        // interpreter never reads it, so no mtime finding.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pyc_mtime_pkg(
+            &dir,
+            "/usr/lib64/python3.13/site-packages/foo/__init__.py",
+            2000,
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.cpython-312.pyc",
+            &pyc_header(3531, 0, 1000),
+        );
+        assert!(inconsistent_mtime_lines(&pkg).is_empty());
+    }
+
+    #[test]
+    fn pyc_mtime_matching_cache_version_stale_fires() {
+        // Same staleness with the tree's own cache tag: the finding fires.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pyc_mtime_pkg(
+            &dir,
+            "/usr/lib64/python3.13/site-packages/foo/__init__.py",
+            2000,
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/__init__.cpython-313.pyc",
+            &pyc_header(3571, 0, 1000),
+        );
+        let lines = inconsistent_mtime_lines(&pkg);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("1000"), "{}", lines[0]);
+        assert!(lines[0].contains("2000"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn pyc_mtime_unversioned_tree_stale_fires() {
+        // Fail closed: no version in the tree path, so the foreign tag
+        // cannot be credited and the stale finding stands.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pyc_mtime_pkg(
+            &dir,
+            "/usr/share/foo/__init__.py",
+            2000,
+            "/usr/share/foo/__pycache__/__init__.cpython-312.pyc",
+            &pyc_header(3531, 0, 1000),
+        );
+        assert_eq!(inconsistent_mtime_lines(&pkg).len(), 1);
+    }
+
     #[test]
     fn duplicate_executable_fires_for_two_real_executables() {
         // Drives check_binary (the real emission path): two regular executable
@@ -9146,6 +11138,71 @@ mod tests {
     }
 
     #[test]
+    fn backup_regex_matches_the_reference_pattern() {
+        // The reference's backup_regex (FilesCheck.py) verbatim: a
+        // trailing `~`, an Emacs `#...#` autosave name, or `.orig`/
+        // `.rej` optionally followed by a compression suffix;
+        // end-anchored and case-sensitive.
+        for path in [
+            "/usr/share/foo/file.txt~",
+            "/usr/share/foo/file.orig",
+            "/usr/share/foo/file.rej",
+            "/usr/share/foo/file.orig.gz",
+            "/usr/share/foo/file.rej.xz",
+            "/usr/include/foo/#file.hpp#",
+            "/etc/openvswitch/.conf.db.~lock~",
+        ] {
+            assert!(
+                is_match(backup_regex(), path),
+                "backup_regex must match {path}"
+            );
+        }
+        for path in [
+            // No `.bak` arm in the reference; the Factory instance is
+            // rpc.statd's state file, not an editor leftover.
+            "/var/lib/nfs/sm.bak",
+            "/usr/share/foo/file.bak",
+            // Case-sensitive: uppercase suffixes are not charged.
+            "/usr/share/foo/file.BAK",
+            "/usr/share/aranym/afros/drive_c/mint/1-17-cur/mint.cnf.ORIG",
+            "/usr/share/foo/file.Rej",
+            // `.orig` must end the name (modulo a compression suffix).
+            "/usr/share/foo/file.orig.bak",
+            "/usr/share/foo/file.original",
+            // A lone `#` is not an Emacs autosave pair.
+            "/usr/share/foo/#file.hpp",
+            "/usr/share/foo/file.hpp#",
+            "/usr/share/foo/file.txt",
+        ] {
+            assert!(
+                !is_match(backup_regex(), path),
+                "backup_regex must not match {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn backup_file_in_package_charges_reference_shapes_only() {
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/share/foo/file.orig.gz", 0o100644, 71),
+            mkfile("/var/lib/nfs/sm.bak", 0o100644, 72),
+            mkfile("/usr/share/foo/mint.cnf.ORIG", 0o100644, 73),
+        ]);
+        let results = run_check_binary(&pkg);
+        let lines: Vec<&String> = results
+            .iter()
+            .filter(|(n, _)| n == "backup-file-in-package")
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("/usr/share/foo/file.orig.gz"),
+            "the compressed .orig charges: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
     fn version_control_internal_file_charges_internals_not_dotfiles() {
         let config = test_config();
         let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
@@ -10209,6 +12266,301 @@ mod tests {
         );
     }
 
+    /// `test_config` plus the `FileGrants` tables parsed from the
+    /// given TOML snippet.
+    fn grant_test_config(snippet: &str) -> Config {
+        let mut cfg = test_config();
+        let parsed: toml::Table = toml::from_str(snippet).expect("grant snippet parses");
+        cfg.configuration
+            .insert("FileGrants".to_string(), parsed["FileGrants"].clone());
+        cfg
+    }
+
+    /// Drive `check_ldconfig` for one library of a synthetic package
+    /// with the given scriptlet bodies, returning the emitted
+    /// (name, line) pairs.
+    fn run_ldconfig(
+        config: &Config,
+        pkg_name: &str,
+        fname: &str,
+        postin: &str,
+        postun: &str,
+    ) -> Vec<(String, String)> {
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        pkg.name = pkg_name.to_string();
+        let pkgfile = PkgFile {
+            name: fname.to_string(),
+            path: fname.to_string(),
+            mode: 0o100755,
+            size: Some(100),
+            ..Default::default()
+        };
+        let st = PkgState {
+            postin: postin.to_string(),
+            postun: postun.to_string(),
+            ..Default::default()
+        };
+        let check = FilesCheck::new(config);
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        check.check_ldconfig(&pkg, fname, &pkgfile, &st, &mut out);
+        out.results().to_vec()
+    }
+
+    const RPM_GRANT: &str = r#"
+[[FileGrants]]
+package = "rpm"
+paths = ["/usr/lib64/librpm.so.10.2.1"]
+findings = ["postin-without-ldconfig", "library-without-ldconfig-postun"]
+reason = "no ldconfig scriptlets by design"
+"#;
+
+    #[test]
+    fn file_grants_quiet_the_granted_ldconfig_findings() {
+        // rpm's shape: %post present but ldconfig-less, no %postun at
+        // all. Both resulting tags are granted for the named library.
+        let config = grant_test_config(RPM_GRANT);
+        let results = run_ldconfig(&config, "rpm", "/usr/lib64/librpm.so.10.2.1", "echo hi", "");
+        assert!(
+            results.is_empty(),
+            "granted findings must stay quiet: {results:?}"
+        );
+        // The same shape without the grant config fires both tags at E.
+        let results = run_ldconfig(
+            &test_config(),
+            "rpm",
+            "/usr/lib64/librpm.so.10.2.1",
+            "echo hi",
+            "",
+        );
+        assert_eq!(results.len(), 2, "ungranted shape must fire: {results:?}");
+        assert!(results.iter().all(|(_, line)| line.contains(": E: ")));
+    }
+
+    #[test]
+    fn file_grants_stay_exact() {
+        let config = grant_test_config(RPM_GRANT);
+        // Ungranted path in the granted package still fires.
+        let results = run_ldconfig(&config, "rpm", "/usr/lib64/libfoo.so.1", "echo hi", "");
+        assert_eq!(results.len(), 2, "ungranted path must fire: {results:?}");
+        // Granted path in an ungranted package still fires.
+        let results = run_ldconfig(
+            &config,
+            "rpm2",
+            "/usr/lib64/librpm.so.10.2.1",
+            "echo hi",
+            "",
+        );
+        assert_eq!(results.len(), 2, "ungranted package must fire: {results:?}");
+        // A grant naming only one of the two tags leaves the other live.
+        let partial = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "rpm"
+paths = ["/usr/lib64/librpm.so.10.2.1"]
+findings = ["postin-without-ldconfig"]
+reason = "postin side only"
+"#,
+        );
+        let results = run_ldconfig(
+            &partial,
+            "rpm",
+            "/usr/lib64/librpm.so.10.2.1",
+            "echo hi",
+            "",
+        );
+        assert_eq!(
+            results.len(),
+            1,
+            "only the granted tag is quiet: {results:?}"
+        );
+        assert_eq!(results[0].0, "library-without-ldconfig-postun");
+    }
+
+    #[test]
+    fn file_grants_without_a_reason_are_rejected() {
+        // No reason key at all: the grant is invalid and never applies.
+        let no_reason = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "rpm"
+paths = ["/usr/lib64/librpm.so.10.2.1"]
+findings = ["postin-without-ldconfig", "library-without-ldconfig-postun"]
+"#,
+        );
+        assert!(FilesCheck::parse_file_grants(&no_reason).is_empty());
+        let results = run_ldconfig(
+            &no_reason,
+            "rpm",
+            "/usr/lib64/librpm.so.10.2.1",
+            "echo hi",
+            "",
+        );
+        assert_eq!(
+            results.len(),
+            2,
+            "a reasonless grant must not apply: {results:?}"
+        );
+        // A blank reason is no reason.
+        let blank_reason = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "rpm"
+paths = ["/usr/lib64/librpm.so.10.2.1"]
+findings = ["postin-without-ldconfig"]
+reason = "  "
+"#,
+        );
+        assert!(FilesCheck::parse_file_grants(&blank_reason).is_empty());
+        // Both package keys at once is malformed, as is a missing
+        // paths list: neither parses into a live grant.
+        let both_keys = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "rpm"
+packages = ["rpm"]
+paths = ["/usr/lib64/librpm.so.10.2.1"]
+findings = ["postin-without-ldconfig"]
+reason = "recorded"
+"#,
+        );
+        assert!(FilesCheck::parse_file_grants(&both_keys).is_empty());
+        let no_paths = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "rpm"
+findings = ["postin-without-ldconfig"]
+reason = "recorded"
+"#,
+        );
+        assert!(FilesCheck::parse_file_grants(&no_paths).is_empty());
+    }
+
+    #[test]
+    fn file_grants_quiet_the_granted_config_file_finding() {
+        let config = grant_test_config(
+            r#"
+[[FileGrants]]
+package = "smartmontools"
+paths = ["/etc/smartd_warning.sh"]
+findings = ["executable-marked-as-config-file"]
+reason = "warning hook: executable and %config by design"
+"#,
+        );
+        let config_findings = |results: &[(String, String)]| {
+            results
+                .iter()
+                .filter(|(n, _)| n == "executable-marked-as-config-file")
+                .count()
+        };
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile("/etc/smartd_warning.sh", 0o100755, 61)]);
+        pkg.name = "smartmontools".to_string();
+        pkg.config_files = vec!["/etc/smartd_warning.sh".to_string()];
+        assert_eq!(
+            config_findings(&run_check_binary_with_config(&pkg, &config)),
+            0,
+            "granted config file must stay quiet"
+        );
+        assert_eq!(
+            config_findings(&run_check_binary(&pkg)),
+            1,
+            "the same file fires without the grant"
+        );
+        // An executable %config file of another package at an
+        // ungranted path still fires under the grant config.
+        let (mut pkg, _dir) = pkg_with_files(vec![mkfile("/etc/init.d/after.local", 0o100755, 62)]);
+        pkg.name = "aaa_base".to_string();
+        pkg.config_files = vec!["/etc/init.d/after.local".to_string()];
+        assert_eq!(
+            config_findings(&run_check_binary_with_config(&pkg, &config)),
+            1,
+            "ungranted config file must still fire"
+        );
+    }
+
+    /// The vendored openSUSE config's `FileGrants` set is the grant
+    /// source default runs actually use: the four audited core-package
+    /// clusters (rpm/systemd ldconfig, smartmontools/tuned config
+    /// files) stay quiet under it, so generator or typo drift in the
+    /// set surfaces here instead of false-firing on those packages.
+    #[test]
+    fn opensuse_file_grants_cover_the_audited_clusters() {
+        let opensuse_toml =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("data/distro/opensuse/opensuse.toml");
+        let parsed: toml::Table = toml::from_str(
+            &std::fs::read_to_string(opensuse_toml).expect("vendored opensuse config"),
+        )
+        .expect("vendored opensuse config parses");
+        let grants = parsed["FileGrants"]
+            .as_array()
+            .expect("FileGrants is an array");
+        assert_eq!(
+            grants.len(),
+            4,
+            "the vendored openSUSE grant set changed: {grants:?}"
+        );
+        for g in grants {
+            let reason = g.get("reason").and_then(toml::Value::as_str).unwrap_or("");
+            assert!(
+                !reason.trim().is_empty(),
+                "every vendored grant records its reason: {g:?}"
+            );
+        }
+        let mut cfg = test_config();
+        cfg.configuration
+            .insert("FileGrants".to_string(), parsed["FileGrants"].clone());
+        // rpm: %post ldconfig-less, no %postun — quiet on all three
+        // libraries the audit measured.
+        for path in [
+            "/usr/lib64/librpm.so.10.2.1",
+            "/usr/lib64/librpmio.so.10.2.1",
+            "/usr/lib64/librpmsign.so.10.2.1",
+        ] {
+            let results = run_ldconfig(&cfg, "rpm", path, "echo hi", "");
+            assert!(
+                results.is_empty(),
+                "rpm grant must cover {path}: {results:?}"
+            );
+        }
+        // systemd: %post runs ldconfig, %postun is ldconfig-less —
+        // quiet on both NSS modules; without the grant exactly the
+        // postun tag fires.
+        for path in [
+            "/usr/lib64/libnss_myhostname.so.2",
+            "/usr/lib64/libnss_systemd.so.2",
+        ] {
+            let results = run_ldconfig(&cfg, "systemd", path, "/sbin/ldconfig", "echo hi");
+            assert!(
+                results.is_empty(),
+                "systemd grant must cover {path}: {results:?}"
+            );
+            let ungranted =
+                run_ldconfig(&test_config(), "systemd", path, "/sbin/ldconfig", "echo hi");
+            assert_eq!(
+                ungranted.len(),
+                1,
+                "systemd shape fires without the grant: {ungranted:?}"
+            );
+            assert_eq!(ungranted[0].0, "postun-without-ldconfig");
+        }
+        // smartmontools and tuned: executable %config files stay quiet.
+        for (pkg_name, path) in [
+            ("smartmontools", "/etc/smartd_warning.sh"),
+            ("tuned", "/etc/grub.d/00_tuned"),
+        ] {
+            let (mut pkg, _dir) = pkg_with_files(vec![mkfile(path, 0o100755, 71)]);
+            pkg.name = pkg_name.to_string();
+            pkg.config_files = vec![path.to_string()];
+            let results = run_check_binary_with_config(&pkg, &cfg);
+            assert!(
+                !results
+                    .iter()
+                    .any(|(n, _)| n == "executable-marked-as-config-file"),
+                "{pkg_name} grant must cover {path}: {results:?}"
+            );
+        }
+    }
+
     /// `test_config` plus a `SystemdPresetPackages` exemption list, the
     /// config key the vendored openSUSE/SLFO distro configs carry.
     fn preset_test_config() -> Config {
@@ -10874,7 +13226,7 @@ mod tests {
         let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
         let mut pkg =
             Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
-        pkg.name = "nonexec-test".to_string();
+        pkg.name = "nonexec-demo".to_string();
         pkg.files = files
             .iter()
             .map(|(name, mode, magic, content)| {
@@ -11307,6 +13659,423 @@ mod tests {
         );
     }
 
+    /// The sourced-fragment proof is read from the script's own
+    /// text: a top-level `return` counts bare and inside top-level
+    /// control flow, a function definition and a redirection or
+    /// assignment prefix alike.
+    #[test]
+    fn top_level_return_shapes() {
+        let positives = [
+            "#!/bin/bash\nreturn 0\n",
+            "#!/bin/sh\nif [ -z \"$X\" ]; then\n  return 1\nfi\n",
+            "#!/bin/sh\nfor f in a b; do\n  return 1\ndone\n",
+            "#!/bin/sh\nwhile read -r l; do\n  return 1\ndone\n",
+            "#!/bin/sh\ncase $1 in\n  a) return 1 ;;\nesac\n",
+            "#!/bin/sh\n{ return 1; }\n",
+            "#!/bin/sh\n( return 1 )\n",
+            "#!/bin/sh\nf() { return 1; }\nreturn 0\n",
+            "#!/bin/sh\n2>/dev/null return 1\n",
+            "#!/bin/sh\nX=1 return 1\n",
+            "#!/bin/sh\ncat <<EOF\nbody\nEOF\nreturn 0\n",
+            "#!/bin/sh\n! return 1\n",
+            "#!/bin/bash\ncase $1 in\n  a|b) echo ok ;;\nesac\nreturn 0\n",
+            "#!/bin/bash\nx=$((1+2))\nreturn 0\n",
+            "#!/bin/bash\nx=${#a[@]}\nreturn 0\n",
+            "#!/bin/bash\necho }\nreturn 0\n",
+        ];
+        for text in positives {
+            assert!(
+                shell_script_has_top_level_return(text),
+                "top-level return expected: {text:?}"
+            );
+        }
+    }
+
+    /// The shapes that merely mention `return` are not a proof:
+    /// returns inside function definitions of every header form
+    /// (`name ()`, `function name`, with and without `()`) and
+    /// every body form (brace group, subshell and brace-less
+    /// compound commands), in comments — a backslash-continued
+    /// one included — in quoted strings, in here-document bodies
+    /// and in substitutions (process substitutions included),
+    /// and `return` read as an argument, a value, a loop
+    /// variable or a `case` pattern, a pattern alternative
+    /// before a `|` included.
+    #[test]
+    fn no_top_level_return_shapes() {
+        let negatives = [
+            "#!/bin/bash\necho hello\n",
+            "#!/bin/bash\nf() { return 1; }\n",
+            "#!/bin/bash\nf()\n{\n  return 1\n}\n",
+            "#!/bin/bash\nfunction f { return 1; }\n",
+            "#!/bin/bash\nfunction f() { return 1; }\n",
+            "#!/bin/bash\nf() ( return 1 )\n",
+            "#!/bin/bash\nouter() { inner() { return 1; }; return 2; }\n",
+            "#!/bin/bash\n# return 0\necho hi # return\n",
+            "#!/bin/bash\necho \"return\"\necho 'return'\n",
+            "#!/bin/bash\necho return\n",
+            "#!/bin/bash\nx=return\n",
+            "#!/bin/bash\nfor return in a b; do echo $return; done\n",
+            "#!/bin/bash\ncase $1 in\n  return) echo x ;;\nesac\n",
+            "#!/bin/bash\ncat <<EOF\nreturn 0\nEOF\n",
+            "#!/bin/bash\ncat <<-'EOF'\n\treturn 0\n\tEOF\n",
+            "#!/bin/bash\nx=$(return)\n",
+            "#!/bin/bash\necho ${x:-return}\n",
+            "#!/bin/bash\ncase $1 in\n  a|return|b) echo ok ;;\nesac\n",
+            "#!/bin/bash\nf() if true; then return 0; fi\n",
+            "#!/bin/bash\nf() while true; do return 0; done\n",
+            "#!/bin/bash\nf() until true; do return 0; done\n",
+            "#!/bin/bash\nf() for i in 1 2; do return 0; done\n",
+            "#!/bin/bash\nf() case $1 in\n  a) return 0 ;;\nesac\n",
+            "#!/bin/bash\nf() select i in a; do return 0; done\n",
+            "#!/bin/bash\nmy-func() { return 1; }\n",
+            "#!/bin/bash\nmy.func() { return 1; }\n",
+            "#!/bin/bash\nfunction my-func { return 1; }\n",
+            "#!/bin/bash\nx=$(case $y in a) return 1 ;; esac)\n",
+            "#!/bin/bash\nx=$(echo \")\"; return 1)\n",
+            "#!/bin/bash\nx=$(echo $(return 1))\n",
+            "#!/bin/bash\ncat <(return 1)\n",
+            "#!/bin/bash\ndiff <(return 1) >(return 2)\n",
+            "#!/bin/bash\nf() { return 1; }>log\n",
+            "#!/bin/bash\n# setup \\\nreturn 0\necho hi\n",
+            "#!/bin/bash\necho a } return 0\n",
+            "#!/bin/bash\necho { return 0\n",
+        ];
+        for text in negatives {
+            assert!(
+                !shell_script_has_top_level_return(text),
+                "no top-level return expected: {text:?}"
+            );
+        }
+    }
+
+    /// The dialect gate: the proof holds for the sh family,
+    /// resolved through `/usr/bin/env`, and not for other
+    /// interpreters -- zsh included, which runs a script in a
+    /// function-like context where `return` is legal.
+    #[test]
+    fn posix_shell_interpreter_resolution() {
+        assert!(interpreter_is_posix_shell("/bin/sh", ""));
+        assert!(interpreter_is_posix_shell("/bin/bash", ""));
+        assert!(interpreter_is_posix_shell("/usr/bin/env", "bash"));
+        assert!(interpreter_is_posix_shell("/usr/bin/env", "-i /bin/sh"));
+        assert!(interpreter_is_posix_shell("/usr/bin/env", "FOO=1 dash"));
+        assert!(!interpreter_is_posix_shell("/usr/bin/env", "python3"));
+        assert!(!interpreter_is_posix_shell("/usr/bin/env", ""));
+        assert!(!interpreter_is_posix_shell("/bin/zsh", ""));
+        assert!(!interpreter_is_posix_shell("/usr/bin/python3", ""));
+    }
+
+    /// A shell script whose text marks it as a sourced fragment
+    /// (a top-level `return`) draws no `non-executable-script`:
+    /// the xim shape, whose returns sit past the 2048-byte peek so
+    /// the proof has to read the whole file, an `/usr/bin/env`
+    /// fragment, and a fragment whose only return sits inside
+    /// top-level control flow.
+    #[test]
+    fn non_executable_script_silent_for_provable_sourced_fragments() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sh = "Bourne-Again shell script, ASCII text executable";
+        let mut xim = String::from(
+            "#!/bin/bash\n# XIM fragment\nsetup() {\n  XMODIFIERS=@im=local\n}\ncleanup() {\n  unset XMODIFIERS\n}\n",
+        );
+        while xim.len() < 2100 {
+            xim.push_str("# input method selection follows\n");
+        }
+        xim.push_str("if [ -z \"$InputMethod\" ]; then\n  return 0\nfi\nreturn 0\n");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                ("/usr/etc/X11/xim", 0o100644, sh, xim.as_bytes()),
+                (
+                    "/usr/share/myapp/helper",
+                    0o100644,
+                    sh,
+                    b"#!/usr/bin/env bash\nreturn 0\n",
+                ),
+                (
+                    "/usr/share/myapp/frag",
+                    0o100644,
+                    sh,
+                    b"#!/bin/sh\nif [ -n \"$SKIP\" ]; then\n  return 1\nfi\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        let flagged: Vec<&str> = lines
+            .iter()
+            .filter(|(n, _)| n == "non-executable-script")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(
+            flagged,
+            Vec::<&str>::new(),
+            "no non-executable-script for provable fragments: {lines:?}"
+        );
+    }
+
+    /// The proof is confined to what it proves: a script whose
+    /// only `return` sits inside a function, a non-shell script
+    /// carrying a top-level `return`, a zsh script (legal there),
+    /// and a provable fragment installed directly in a script
+    /// directory all keep `non-executable-script`.
+    #[test]
+    fn non_executable_script_still_fires_for_unprovable_scripts() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let sh = "Bourne-Again shell script, ASCII text executable";
+        let py = "Python script, ASCII text executable";
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/etc/X11/ximfunc",
+                    0o100644,
+                    sh,
+                    b"#!/bin/bash\nf() { return 1; }\nf\n",
+                ),
+                (
+                    "/usr/share/myapp/tool.py",
+                    0o100644,
+                    py,
+                    b"#!/usr/bin/python3\nreturn\n",
+                ),
+                (
+                    "/usr/share/myapp/ztool",
+                    0o100644,
+                    sh,
+                    b"#!/bin/zsh\nreturn 1\n",
+                ),
+                ("/usr/bin/xim", 0o100644, sh, b"#!/bin/bash\nreturn 0\n"),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/etc/X11/ximfunc",
+            "/usr/share/myapp/tool.py",
+            "/usr/share/myapp/ztool",
+            "/usr/bin/xim",
+        ] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|(n, line)| n == "non-executable-script" && line.contains(path)),
+                "non-executable-script must fire for {path}: {lines:?}"
+            );
+        }
+    }
+
+    /// A `.py` file whose directory is a Python package directory
+    /// — the package ships an `__init__.py` in the same directory —
+    /// is a module of an application-private package tree, imported
+    /// by the owning program: a non-executable module there draws
+    /// no `non-executable-script`. The bounds: a `.py` file with no
+    /// package marker, a package tree in an entry-point tree
+    /// (`/usr/libexec/`), and a non-Python file inside a package
+    /// directory all keep firing.
+    #[test]
+    fn non_executable_script_silent_in_python_package_dirs() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/lib64/kitty/kitty/__init__.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python\n",
+                ),
+                (
+                    "/usr/lib64/kitty/kitty/boss.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python\n",
+                ),
+                (
+                    "/usr/share/hplip/base/__init__.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/hplip/base/device.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/myapp/tool.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/libexec/myapp/pkg/__init__.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/libexec/myapp/pkg/mod.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/share/myapp/pkg/__init__.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/python3\n",
+                ),
+                (
+                    "/usr/share/myapp/pkg/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/lib64/kitty/kitty/__init__.py",
+            "/usr/lib64/kitty/kitty/boss.py",
+            "/usr/share/hplip/base/__init__.py",
+            "/usr/share/hplip/base/device.py",
+            "/usr/share/myapp/pkg/__init__.py",
+        ] {
+            assert!(
+                !lines
+                    .iter()
+                    .any(|(n, line)| n == "non-executable-script" && line.contains(path)),
+                "no non-executable-script for package module {path}: {lines:?}"
+            );
+        }
+        for path in [
+            "/usr/share/myapp/tool.py",
+            "/usr/libexec/myapp/pkg/__init__.py",
+            "/usr/libexec/myapp/pkg/mod.py",
+            "/usr/share/myapp/pkg/run.sh",
+        ] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|(n, line)| n == "non-executable-script" && line.contains(path)),
+                "non-executable-script must fire for {path}: {lines:?}"
+            );
+        }
+    }
+
+    /// Sourced-fragment directories (`include`, `common`),
+    /// documentation trees (`doc`), CI harness directories (`ci`),
+    /// image payload under a `rootfs` component and `.ex` example
+    /// templates are content the owning program sources, reads or
+    /// assembles elsewhere: non-executable files there draw no
+    /// `non-executable-script`. The bounds: the same components in
+    /// an entry-point tree or outside the data trees, and a
+    /// `rootfs` basename rather than a directory component, all
+    /// keep firing.
+    #[test]
+    fn non_executable_script_silent_for_fragment_doc_and_image_trees() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/lynis/include/functions",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/sh\n",
+                ),
+                (
+                    "/usr/lib/blktests/common/rc",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/texmf/doc/latex/foo/build.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/ceph/mgr/dashboard/ci/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/var/lib/warewulf/overlays/ignition/rootfs/warewulf/wwinit.d/10-ignition.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/sh\n",
+                ),
+                (
+                    "/usr/share/debhelper/dh_make/debian/postinst.ex",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/sh\n",
+                ),
+                (
+                    "/usr/libexec/myapp/common/helper.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/scripts/build.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/rootfs.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/opt/myapp/doc/build.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for path in [
+            "/usr/share/lynis/include/functions",
+            "/usr/lib/blktests/common/rc",
+            "/usr/share/texmf/doc/latex/foo/build.sh",
+            "/usr/share/ceph/mgr/dashboard/ci/run.sh",
+            "/var/lib/warewulf/overlays/ignition/rootfs/warewulf/wwinit.d/10-ignition.sh",
+            "/usr/share/debhelper/dh_make/debian/postinst.ex",
+        ] {
+            assert!(
+                !lines
+                    .iter()
+                    .any(|(n, line)| n == "non-executable-script" && line.contains(path)),
+                "no non-executable-script for data shape {path}: {lines:?}"
+            );
+        }
+        for path in [
+            "/usr/libexec/myapp/common/helper.sh",
+            "/usr/share/myapp/scripts/build.sh",
+            "/usr/share/myapp/rootfs.sh",
+            "/opt/myapp/doc/build.sh",
+        ] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|(n, line)| n == "non-executable-script" && line.contains(path)),
+                "non-executable-script must fire for {path}: {lines:?}"
+            );
+        }
+    }
+
     /// The gate covers the one emission only: an executable file
     /// inside a source tree still draws the interpreter findings, so
     /// `env-script-interpreter` keeps parity there (issue #845).
@@ -11350,6 +14119,199 @@ mod tests {
         let names: Vec<String> = lines.iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "env-script-interpreter");
         assert_lacks(&names, "non-executable-script");
+    }
+
+    fn flagged(lines: &[(String, String)], tag: &str, path: &str) -> bool {
+        lines
+            .iter()
+            .any(|(n, line)| n == tag && line.contains(path))
+    }
+
+    /// Test packages carry their suite as payload: a harness runs
+    /// the scripts by path, so a non-executable test script draws
+    /// no `non-executable-script` and an executable one's env
+    /// interpreter line draws no `env-script-interpreter`,
+    /// wherever in the tree the payload sits (the audit's
+    /// lvm2-testsuite, systemd-testsuite and pcp-testsuite
+    /// shapes, the last under /usr/libexec/).
+    #[test]
+    fn script_findings_silent_in_test_packages() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/lvm2-testsuite/shell/check.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/libexec/pcp/stash/testsuite/src/helper.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/lib/systemd/tests/integration-tests/run.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+            ],
+        );
+        pkg.name = "lvm2-testsuite".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for (tag, path) in [
+            (
+                "non-executable-script",
+                "/usr/share/lvm2-testsuite/shell/check.sh",
+            ),
+            (
+                "non-executable-script",
+                "/usr/libexec/pcp/stash/testsuite/src/helper.py",
+            ),
+            (
+                "env-script-interpreter",
+                "/usr/lib/systemd/tests/integration-tests/run.sh",
+            ),
+        ] {
+            assert!(
+                !flagged(&lines, tag, path),
+                "no {tag} for test payload {path}: {lines:?}"
+            );
+        }
+    }
+
+    /// Test trees inside a plain package's source or data tree are
+    /// harness material the same way: test directories of the
+    /// shipped bazel and kafka source trees, test helpers bundled
+    /// inside a Python package, and a `testsuite` tree under a
+    /// doc directory draw neither script finding.
+    #[test]
+    fn script_findings_silent_in_test_trees_of_plain_packages() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/src/kafka/tests/bin/run.sh",
+                    0o100755,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/usr/bin/env bash\n",
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages/certbot/tests/helper.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/doc/myapp/testsuite/check.q",
+                    0o100644,
+                    "ASCII text executable",
+                    b"#!/usr/bin/env qore\n",
+                ),
+                (
+                    "/usr/share/myapp/integration-tests/tool.py",
+                    0o100644,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+            ],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        for (tag, path) in [
+            ("env-script-interpreter", "/usr/src/kafka/tests/bin/run.sh"),
+            (
+                "env-script-interpreter",
+                "/usr/lib/python3.13/site-packages/certbot/tests/helper.py",
+            ),
+            (
+                "non-executable-script",
+                "/usr/share/doc/myapp/testsuite/check.q",
+            ),
+            (
+                "non-executable-script",
+                "/usr/share/myapp/integration-tests/tool.py",
+            ),
+        ] {
+            assert!(
+                !flagged(&lines, tag, path),
+                "no {tag} for test tree payload {path}: {lines:?}"
+            );
+        }
+    }
+
+    /// The test gate's bounds: an entry point in a script
+    /// directory keeps both findings whatever the package is
+    /// called; fused package names (blktests, perftest) carry no
+    /// test fact; a weak test component in an entry-point tree
+    /// (/usr/libexec/) does not exempt; and the test word must be
+    /// a directory component or a package-name component, never
+    /// part of a file name or a longer component.
+    #[test]
+    fn script_findings_still_fire_at_test_gate_bounds() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = script_mode_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/bin/runfabtests.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/lib/blktests/fio",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/perftest/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/libexec/myapp/tests/run.py",
+                    0o100755,
+                    "Python script, ASCII text executable",
+                    b"#!/usr/bin/env python3\n",
+                ),
+                (
+                    "/usr/share/myapp/test-runner.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
+                    "/usr/share/myapp/contest/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+            ],
+        );
+        pkg.name = "fabtests".to_string();
+        let lines = script_finding_lines(&pkg, &config);
+        for (tag, path) in [
+            ("env-script-interpreter", "/usr/bin/runfabtests.py"),
+            ("non-executable-script", "/usr/lib/blktests/fio"),
+            ("non-executable-script", "/usr/share/perftest/run.sh"),
+            ("env-script-interpreter", "/usr/libexec/myapp/tests/run.py"),
+            ("non-executable-script", "/usr/share/myapp/test-runner.sh"),
+            ("non-executable-script", "/usr/share/myapp/contest/run.sh"),
+        ] {
+            assert!(
+                flagged(&lines, tag, path),
+                "{tag} must fire for {path}: {lines:?}"
+            );
+        }
     }
 
     fn eol_flagged(lines: &[(String, String)], path: &str) -> bool {

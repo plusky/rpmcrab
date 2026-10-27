@@ -29,6 +29,56 @@ provenance = [
 ]
 
 [[member]]
+tag = "binary-or-shlib-calls-md5"
+class = "defect-pattern"
+family = "pattern"
+gate = "none"
+provenance = [
+    "Class-level provenance (rpmcrab#972): MD5 collision resistance is broken (chosen-prefix collisions are practical), so the low-level MD5 entry points (MD5, MD5_Init, MD5_Update, MD5_Final, MD5_Transform) must not carry integrity, authenticity or credential decisions. No per-file CVE is claimed: in the survey window, weak-crypto fixes were library-internal or config/policy changes, and the distribution already carries the config half as the crypto-policy-non-compliance checks.",
+    "Factory corpus on-ramp measurement (rpmcrab#972, full snapshot): 98 files in 52 binary packages hold an undefined reference to the set, every one classified by hand. The population is protocol-mandated compatibility (HTTP Digest, IPMI, CRAM-MD5, STUN), content and format checksums (dpkg md5sums, AFF image hashes, build-system identifiers), password-cracking workloads and library/binding surface; security-context uses exist (znc, tvheadend in daemon packages) but no package-fact shape separates them, so the level is Warning.",
+]
+
+[[member]]
+tag = "binary-or-shlib-calls-des"
+class = "defect-pattern"
+family = "pattern"
+gate = "none"
+provenance = [
+    "Class-level provenance (rpmcrab#972): single DES has a 56-bit key, brute-forced routinely since the EFF's Deep Crack (1998), and triple-DES is disallowed for new protection under NIST SP 800-131A; the low-level DES_* entry points survive legitimately only as protocol and format compatibility. No per-file CVE is claimed, for the same reason as the MD5 member.",
+    "Factory corpus on-ramp measurement (rpmcrab#972, full snapshot): 42 files in 31 binary packages hold an undefined reference to a DES_* entry point, every one classified by hand. The population is NTLM/DIGEST-MD5 SASL and GSS compatibility, MIFARE and TPM-spec surfaces, MariaDB's legacy DES_ENCRYPT functions, the OpenSSL legacy provider, and one verified security-context use -- grisbi encrypts the user's account file with single DES -- which no package fact separates from the compatibility mass, so the level is Warning.",
+]
+
+[[member]]
+tag = "binary-or-shlib-calls-rc4"
+class = "defect-pattern"
+family = "pattern"
+gate = "none"
+provenance = [
+    "Class-level provenance (rpmcrab#972): RC4's keystream biases are exploitable in practice and RC4 is prohibited in TLS by RFC 7465; the entry points (RC4, RC4_set_key, RC4_options) survive legitimately only as protocol compatibility. No per-file CVE is claimed, for the same reason as the MD5 member.",
+    "Factory corpus on-ramp measurement (rpmcrab#972, full snapshot): 7 files in 6 binary packages hold an undefined reference to the set, every one classified by hand -- NTLM session-key compatibility (gssntlmssp), BitTorrent and DC++ protocol encryption, a Python binding surface (M2Crypto) and VirtualBox's runtime. No security-context application use and no isolable shape, so the level is Warning.",
+]
+
+[[member]]
+tag = "binary-or-shlib-calls-weak-prng"
+class = "defect-pattern"
+family = "pattern"
+gate = "privilege-or-exposure"
+provenance = [
+    "Verified in-distro instance (rpmcrab#972 corpus audit, full Factory snapshot): solanum's solanum-mkpasswd, shipped in the daemon package, generates crypt(3) password salts; when /dev/random cannot be read the generator falls back to srand(time(NULL)) and picks the salt characters with rand() (CWE-338) -- both failure paths of the shipped binary tail-jump to the srand-seeded loop, and the daemon's own m_mkpasswd module carries the same call set.",
+    "Factory corpus on-ramp measurement (rpmcrab#972): 3,251 files in 1,765 binary packages (1,420 source packages) reference the family; the privilege-or-exposure population is 332 files in 185 packages. Warning only, and the bare population stays silent: the gated set's dominant uses are jitter, retry backoff and identifier uniqueness, so the gated population is not the defect population and no Error form is earned.",
+]
+
+[[member]]
+tag = "binary-or-shlib-calls-unbounded-copy"
+class = "defect-pattern"
+family = "pattern"
+gate = "none"
+provenance = [
+    "CVE-2026-60095: Vinchin agentlink_server copies a network-supplied field with strcpy() into a fixed-size stack buffer (CWE-120, CVSS 6.5) -- the class instance for the unbounded string copy/format family (strcpy, strcat, sprintf, vsprintf).",
+    "Factory corpus on-ramp measurement (rpmcrab#972, full snapshot): 8,856 files in 2,866 binary packages (2,010 source packages) hold an undefined reference to the family; the privilege-or-exposure population is 508 files in 198 packages, of which 325 also reference the fortified __*_chk forms. No gated Error form is earned: whether a call overflows depends on the call-site destination size, which the artefact does not carry. The fortified __*_chk spellings are a separate symbol story and are not in the set.",
+]
+
+[[member]]
 tag = "call-to-mktemp"
 class = "defect-pattern"
 family = "pattern"
@@ -36,6 +86,26 @@ gate = "no-safe-use"
 provenance = [
     "mktemp(3) returns a predictable name, so an attacker pre-plants a symlink at that name and the caller's subsequent open follows it (CWE-377); the manpage directs callers to mkstemp() instead.",
     "Factory corpus measurement in rpmcrab#852: 74 errors in 41 source packages with every firing file classified.",
+]
+
+[[member]]
+tag = "call-to-gets"
+class = "defect-pattern"
+family = "pattern"
+gate = "no-safe-use"
+provenance = [
+    "gets(3) reads a line into a caller buffer with no bound -- the defining call of CWE-242 (use of an inherently dangerous function); it was removed from C11 and from POSIX.1-2024, and glibc keeps the symbol only for binary compatibility with old programs.",
+    "Factory corpus measurement for this finder (rpmcrab#972): zero undefined references in 51,586 binary RPMs \u2014 no in-distro caller exists today, so the finder stands as a tripwire for the class; glibc's own libc, which defines gets as a compatibility symbol, stays silent because a definition is not a reference.",
+]
+
+[[member]]
+tag = "call-to-tmpnam"
+class = "defect-pattern"
+family = "pattern"
+gate = "no-safe-use"
+provenance = [
+    "tmpnam(3), tmpnam_r(3) and tempnam(3) return a predictable file name rather than an open descriptor, so an attacker pre-plants a symlink at the name and the caller's subsequent open follows it (CWE-377); glibc's linker itself warns that the use of `tmpnam' is dangerous when a link unit references the family.",
+    "Verified in-distro instances in the Factory corpus measurement for this finder (rpmcrab#972): 38 files in 33 binary packages from 28 source packages carry an undefined reference to a family member — libXaw3d's libXaw3d.so.8, libguile-3.0 and framel's FrameDataDump among them — and every firing file was independently classified with readelf as a genuine call reference; glibc's own libc, which defines all three names, stays silent because a definition is not a reference.",
 ]
 
 [[member]]
@@ -108,4 +178,14 @@ family = "hardening"
 gate = "none"
 provenance = [
     "A non-PIE executable loads at a fixed address, so its code and gadgets sit at known addresses and ASLR gives its main image no layout secrecy.",
+]
+
+[[member]]
+tag = "go-toolchain-outdated"
+class = "defect-pattern"
+family = "pattern"
+gate = "none"
+provenance = [
+    "CVE-2025-22871: net/http chunked request parsing accepts a bare LF in chunk extensions, enabling request smuggling; a Go binary keeps the standard library of the toolchain that built it, so the defect stays in shipped binaries until they are rebuilt with a fixed toolchain (fixed in go1.23.8 and go1.24.2).",
+    "Factory corpus measurement in rpmcrab#972: 874 Go binaries in 613 binary packages record a parseable toolchain version; 44 files in 4 binary packages sit below the floor (the go1.21 and go1.22 toolchain packages' own tools, aws-nitro-enclaves-binaryblobs-upstream's linuxkit blob at go1.22.3, kubectl-validate at go1.22.12).",
 ]

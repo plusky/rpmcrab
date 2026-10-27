@@ -31,7 +31,12 @@ bidi-control-character = W
 bin-sh-syntax-error = W
 binary-entry-value-not-found = W
 binary-in-etc = E
-binary-or-shlib-calls-gethostbyname = W
+binary-or-shlib-calls-des = W
+binary-or-shlib-calls-gethostbyname = E,W
+binary-or-shlib-calls-md5 = W
+binary-or-shlib-calls-rc4 = W
+binary-or-shlib-calls-unbounded-copy = W
+binary-or-shlib-calls-weak-prng = W
 binary-or-shlib-defines-rpath = E
 branding-conflicts-missing = E
 branding-excessive-enhances = W
@@ -44,7 +49,9 @@ branding-requires-unversioned = W
 branding-supplements-missing = E
 buildarch-instead-of-exclusivearch-tag = E
 buildprereq-use = E
+call-to-gets = E
 call-to-mktemp = E
+call-to-tmpnam = E
 changelog-time-in-future = E
 changelog-time-overflow = W
 comparison-operator-in-deptoken = W
@@ -77,7 +84,6 @@ empty-libalternatives-directory = E
 env-script-interpreter = E
 executable-crontab-file = E
 executable-docs = E
-executable-marked-as-config-file = E
 executable-menu-file = E
 executable-sourced-script = E
 executable-stack = E
@@ -86,7 +92,6 @@ file-contains-buildroot = E
 file-contains-current-date = E
 file-contains-date-and-time = E
 file-in-meta-package = W
-file-parent-ownership-mismatch = E
 filelist-forbidden-fhs23 = E
 filelist-forbidden-opt = E
 filename-not-utf8 = E
@@ -96,6 +101,7 @@ forbidden-controlchar-found = E,W
 forbidden-optflags = E
 ghost-files-without-postin = W
 ghost-outside-snapshot = W
+go-toolchain-outdated = W
 gzipped-svg-icon = W
 hardcoded-packager-tag = W
 hardcoded-path-in-menu-icon = W
@@ -378,7 +384,7 @@ zero-perms = W
 zero-perms-ghost = W
 
 [unresolved-sites]
-# count = 37
+# count = 39
 alternatives.rs: add_info( out, level, pkg, "li
 binaries.rs: add_info( out, info_type, pkg, "unused-direct-
 binaries.rs: add_info(out, Level::Warning, pkg, r_name, &[&pkgfile.name, f_name])
@@ -396,11 +402,13 @@ fhs.rs: add_info(out, Level::Warning, pkg, &check, &[&subdir])
 file_digest.rs: add_info( out, Level::Error, pkg,
 file_digest.rs: add_info( out, Level::Error, pkg, &format!("{c
 filelist.rs: add_info(out, Level::Error, pkg, &rule.message, &[f])
+files.rs: add_info( out, level, pkg, "ex
 files.rs: add_info(finding)
 files.rs: add_info(out, Level::Error, pkg, &tag, &[fname])
 files.rs: add_info(out, level, pkg, "python-bytecode-wrong-magic-value", &refs)
 i18n.rs: add_info(out, level, pkg, &check, &detail_refs)
 menu.rs: add_info( out, Level::Error,
+mixed_ownership.rs: add_info( out, level, pkg, "file-parent-owners
 pam_modules.rs: add_info(out, Level::Error, pkg, finding, &[&detail])
 pkg_config.rs: add_info(out, Level::Error, pkg, check, &[&file.name, l])
 pkg_config.rs: add_info(out, Level::Error, pkg, check, &[&file.name])

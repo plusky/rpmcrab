@@ -121,12 +121,12 @@ in some editors but can lead to obscure errors. It should be replaced by a
 regular space.
 """
 specfile-error="""
-This error occurred when rpmlint used rpm to query the specfile. The error
-is output by rpm and the message should contain more information.
+This error occurred when the spec file was queried with rpm. The
+message is output by rpm and should contain more information.
 """
 specfile-warning="""
-This warning occurred when rpmlint used rpm to query the specfile. The error
-is output by rpm and the message should contain more information.
+This warning occurred when the spec file was queried with rpm. The
+message is output by rpm and should contain more information.
 """
 comparison-operator-in-deptoken="""
 This dependency token contains a comparison operator (<, > or =).  This is

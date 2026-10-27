@@ -60,7 +60,7 @@ invalid-menu-section="""
 The section field of the menu entry isn't standard.
 """
 unable-to-parse-menu-section="""
-rpmlint wasn't able to parse the menu section. Please report a bug.
+The menu section could not be parsed. Check its syntax.
 """
 hardcoded-path-in-menu-icon="""
 The path of the icon is hardcoded in the menu entry. This prevents multiple

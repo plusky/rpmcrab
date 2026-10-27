@@ -464,7 +464,7 @@ impl PostCheck {
             // (`try-restart`, `condrestart`, `reload-or-try-restart`)
             // genuinely no-op when the unit is inactive and stay quiet.
             Regex::new(
-                r"(?m)((?:^|[;`|]|&&|&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:\S*/)?systemctl\s+(?:--?\S+\s+)*(reload-or-restart|reenable|enable|start|restart)\b",
+                r"(?m)((?:^|[;`|]|&&|&|\$\()\s*(?:then\s+|do\s+|else\s+)?|^\s*[^\s()]+\s*\)\s*)(?:\S*/)?systemctl\s+(?:--?\S+\s+)*(reload-or-restart|reenable|enable|start|restart)\b((?:[^\n;|&]|&[\d-])*)",
             )
             .expect("static regex")
         })
@@ -1053,7 +1053,10 @@ impl PostCheck {
     /// `chkconfig --level <levels> <name> on`), in first-seen order.
     /// `chkconfig <name> off` and `chkconfig --del`/`--remove <name>`
     /// deactivate or remove and stay quiet, like the insserv removal
-    /// form. Matching runs on the heredoc-blanked, comment-stripped,
+    /// form. A `systemctl` verb form whose invocations all name
+    /// `.timer` units only is not an activation either: enabling or
+    /// starting a timer schedules the oneshot it drives, it starts
+    /// no daemon. Matching runs on the heredoc-blanked, comment-stripped,
     /// quote-blanked text (`code_only`) and is command-position only
     /// (start of line, after a command separator — a bare `&`
     /// backgrounding included — or as a `case` arm), so comments,
@@ -1073,12 +1076,24 @@ impl PostCheck {
                 out.push("insserv".to_string());
             }
         }
+        let mut verb_order: Vec<String> = Vec::new();
+        let mut activating: Vec<String> = Vec::new();
         for caps in Self::systemctl_regex().captures_iter(&text).flatten() {
-            if let Some(verb) = caps.get(2) {
-                let detail = format!("systemctl {}", verb.as_str());
-                if !out.contains(&detail) {
-                    out.push(detail);
-                }
+            let Some(verb) = caps.get(2) else {
+                continue;
+            };
+            let detail = format!("systemctl {}", verb.as_str());
+            if !verb_order.contains(&detail) {
+                verb_order.push(detail.clone());
+            }
+            let args = caps.get(3).map_or("", |m| m.as_str());
+            if !Self::timer_only_invocation(args) && !activating.contains(&detail) {
+                activating.push(detail);
+            }
+        }
+        for detail in verb_order {
+            if activating.contains(&detail) {
+                out.push(detail);
             }
         }
         for caps in Self::chkconfig_regex().captures_iter(&text).flatten() {
@@ -1104,6 +1119,64 @@ impl PostCheck {
             }
         }
         out
+    }
+
+    /// Whether one systemctl invocation's argument tail names at
+    /// least one unit and every unit it names is a `.timer`. Option
+    /// tokens (starting with `-`) and redirection tokens name no
+    /// unit, and a closing paren left attached to a unit name by a
+    /// subshell or case arm is not part of the name. Quoted unit
+    /// names reach this scan blanked (see `code_only`), so they
+    /// name no unit here and the invocation counts as an
+    /// activation: only a literally written `.timer` target is
+    /// trusted.
+    fn timer_only_invocation(args: &str) -> bool {
+        let tokens: Vec<&str> = args.split_whitespace().collect();
+        let mut targets = 0;
+        let mut i = 0;
+        while i < tokens.len() {
+            let token = tokens[i];
+            i += 1;
+            if token.starts_with('-') {
+                continue;
+            }
+            match Self::redirection(token) {
+                // A bare operator takes the next token as its file
+                // target; neither names a unit.
+                Some(true) => i += 1,
+                Some(false) => {}
+                None => {
+                    let target = token.trim_end_matches(')');
+                    if target.is_empty() {
+                        continue;
+                    }
+                    targets += 1;
+                    if !target.ends_with(".timer") {
+                        return false;
+                    }
+                }
+            }
+        }
+        targets > 0
+    }
+
+    /// The redirection shape of a token in a systemctl argument
+    /// tail: `Some(true)` for a bare operator (`>`, `>>`, `2>`),
+    /// whose file target is the following token; `Some(false)` for
+    /// an operator with its target glued on (`>/dev/null`,
+    /// `2>/dev/null`); `None` for any other token.
+    fn redirection(token: &str) -> Option<bool> {
+        let digits = token
+            .len()
+            .saturating_sub(token.trim_start_matches(|c: char| c.is_ascii_digit()).len());
+        let rest = &token[digits..];
+        if matches!(rest, ">" | ">>" | "<" | "<<") {
+            return Some(true);
+        }
+        if rest.starts_with('>') || rest.starts_with('<') {
+            return Some(false);
+        }
+        None
     }
 
     /// `sh -n` / `perl -wc` syntax check via subprocess. `None` when the
@@ -2775,6 +2848,180 @@ mod tests {
         assert!(found.iter().any(|(l, f, d)| *l == Level::Error
             && f == "daemon-activation-in-%post"
             && d == &vec!["systemctl start".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_enable_timer_only_is_quiet() {
+        let found =
+            check().check_scriptlet("/bin/sh", "systemctl enable foo.timer", "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "a timer-only enable starts no daemon: {found:?}"
+        );
+    }
+
+    #[test]
+    fn systemctl_start_timer_only_is_quiet() {
+        let found =
+            check().check_scriptlet("/bin/sh", "systemctl start foo.timer", "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "a timer-only start only schedules the oneshot: {found:?}"
+        );
+    }
+
+    #[test]
+    fn systemctl_timer_enable_and_start_guarded_are_quiet() {
+        // The openSUSE-build-key shape: a guarded enable+start of the
+        // key-import timer beside the %service_add_post expansion.
+        let script = "test -x /usr/bin/systemctl && systemctl enable openSUSE-build-key-import.timer && systemctl start openSUSE-build-key-import.timer || true";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "guarded timer enable+start must stay quiet: {found:?}"
+        );
+    }
+
+    #[test]
+    fn systemctl_enable_timer_and_service_on_one_line_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl enable foo.timer bar.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl enable".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_enable_timer_line_and_service_line_is_flagged_once() {
+        let script = "systemctl enable foo.timer\nsystemctl enable bar.service";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        let hits: Vec<_> = found
+            .iter()
+            .filter(|(_, f, _)| f == "daemon-activation-in-%post")
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].2, vec!["systemctl enable".to_string()]);
+    }
+
+    #[test]
+    fn systemctl_timer_verb_does_not_mask_service_verb() {
+        let script = "systemctl enable foo.timer\nsystemctl start bar.service";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        let details: Vec<&str> = found
+            .iter()
+            .filter(|(_, f, _)| f == "daemon-activation-in-%post")
+            .map(|(_, _, d)| d[0].as_str())
+            .collect();
+        assert_eq!(details, vec!["systemctl start"]);
+    }
+
+    #[test]
+    fn systemctl_restart_timer_only_is_quiet() {
+        let found =
+            check().check_scriptlet("/bin/sh", "systemctl restart foo.timer", "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "a timer-only restart reschedules, it restarts no daemon: {found:?}"
+        );
+    }
+
+    #[test]
+    fn systemctl_enable_without_unit_is_flagged() {
+        let found = check().check_scriptlet("/bin/sh", "systemctl enable", "%post", &[], &[]);
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "a unit-less enable names no timer and stays flagged: {found:?}"
+        );
+    }
+
+    #[test]
+    fn systemctl_enable_timer_with_redirections_is_quiet() {
+        for script in [
+            "systemctl enable foo.timer >/dev/null 2>&1",
+            "systemctl enable foo.timer > /dev/null",
+            "systemctl start foo.timer 2>/dev/null",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "{script} must stay quiet: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemctl_enable_service_with_redirections_is_flagged() {
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl enable foo.service >/dev/null 2>&1",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl enable".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_enable_service_after_fd_duplication_is_flagged() {
+        // The args tail must not stop at the `&` of `2>&1`: a service
+        // named after the duplication is still enabled by the call.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "systemctl enable foo.timer 2>&1 bar.service",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "daemon-activation-in-%post"
+            && d == &vec!["systemctl enable".to_string()]));
+    }
+
+    #[test]
+    fn systemctl_enable_timer_after_fd_duplication_is_quiet() {
+        for script in [
+            "systemctl enable foo.timer 2>&1 bar.timer",
+            "systemctl enable 2>&1 foo.timer",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+                "{script} must stay quiet: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemctl_enable_timer_instance_is_quiet() {
+        let found =
+            check().check_scriptlet("/bin/sh", "systemctl enable foo@.timer", "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "daemon-activation-in-%post"),
+            "a timer template instance must stay quiet: {found:?}"
+        );
     }
 
     #[test]

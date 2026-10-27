@@ -10,6 +10,14 @@
 //! `new` takes a `Config` only to satisfy the `Check` construction signature;
 //! like the reference's `__init__`, it reads no config keys.
 //!
+//! The supplements obligation is satisfied by the prescribed
+//! `(base and branding-<flavor>)` entry, or by any supplement whose
+//! rich-boolean tree carries `branding-<flavor>` as a conjunct of a
+//! plain conjunction (a renamed or compound base in the same
+//! conjunction still gates on the flavour). The zypp `packageand()`
+//! spelling and a flavour atom under `or`, `if`, `unless`, `with` or
+//! `without` do not satisfy it.
+//!
 //! The flavour obligations — `branding-conflicts-missing`,
 //! `branding-supplements-missing` and `branding-provides-missing` — are
 //! scoped to the branding arm: they are charged on
@@ -19,6 +27,9 @@
 //! selected by name; a theme package that provides the generic name is
 //! still charged `branding-provides-unversioned` for an unversioned
 //! provide, and the excessive-dependency warnings apply on both arms.
+//! On the requirer side, `branding-requires-specific-flavor` is charged
+//! only on package names: an ELF shared-library capability name
+//! (`lib....so...`) is not a package name and pins no flavour.
 
 use fancy_regex::Regex;
 
@@ -28,6 +39,7 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::dep::{DepExpr, parse_dep_expr};
 
 const RPMSENSE_GREATER: u32 = 4;
 const RPMSENSE_EQUAL: u32 = 8;
@@ -53,6 +65,21 @@ impl BrandingPolicyCheck {
         }
     }
 
+    /// Whether `name` is an ELF shared-library capability name
+    /// (`lib-theme-resources.so()(64bit)`, `libfoo.so.6(GLIBC_2.4)(64bit)`):
+    /// a `.so` component followed only by version or symbol decoration.
+    /// Such names live in the library-capability namespace, not the
+    /// package-name namespace this check polices.
+    fn is_elf_capability(name: &str) -> bool {
+        match name.find(".so") {
+            Some(i) => {
+                let rest = &name[i + 3..];
+                rest.is_empty() || rest.starts_with(['.', '('])
+            }
+            None => false,
+        }
+    }
+
     /// The `(name, type, flavor)` triple when `pkg_name` is a branding package.
     fn parse_branding(re: &Regex, pkg_name: &str) -> Option<(String, String, String)> {
         let caps = re.captures(pkg_name).ok().flatten()?;
@@ -61,6 +88,47 @@ impl BrandingPolicyCheck {
             caps.name("type")?.as_str().to_string(),
             caps.name("flavor")?.as_str().to_string(),
         ))
+    }
+
+    /// Whether `require_name`, required by `pkg_name`, is a patterns
+    /// composition pin: a branding-type pin charged on a package in
+    /// the reserved `patterns-*` namespace. Patterns packages are the
+    /// distribution composition layer, the place where a product
+    /// flavour selection is *made*, so their branding
+    /// pins are the selection itself, not a consumer bypassing the
+    /// generic mechanism, and `branding-requires-specific-flavor` is
+    /// not charged for them. Theme-type pins are not composition
+    /// pins: themes are additive content packs selected by name, and
+    /// they stay charged on every requirer, patterns packages
+    /// included.
+    fn is_composition_pin(re: &Regex, pkg_name: &str, require_name: &str) -> bool {
+        pkg_name.starts_with("patterns-")
+            && matches!(
+                Self::parse_branding(re, require_name),
+                Some((_, kind, _)) if kind == "branding"
+            )
+    }
+}
+
+/// True when `expr` is a plain conjunction carrying `atom` as one of
+/// its conjuncts: an `and` tree with the atom — unversioned and
+/// unqualified — as a direct conjunct, or a nested `and` carrying it.
+/// The atom under any other operator does not gate the expression on
+/// the atom, so it never credits; a bare atom is not a conjunction
+/// and does not credit either.
+fn flavour_conjunct(expr: &DepExpr, atom: &str) -> bool {
+    match expr {
+        DepExpr::And(children) => children.iter().any(|child| match child {
+            DepExpr::Simple {
+                name,
+                qualifier,
+                flags,
+                ..
+            } => name == atom && qualifier.is_none() && *flags == 0,
+            DepExpr::And(_) => flavour_conjunct(child, atom),
+            _ => false,
+        }),
+        _ => false,
     }
 }
 
@@ -78,7 +146,10 @@ impl Check for BrandingPolicyCheck {
         let Some((branding_pkg, branding_type, branding_flavor)) = parsed else {
             // Not a branding package: check its requires.
             for require in &pkg.requires {
-                if is_match(&self.re_branding, &require.name) {
+                if is_match(&self.re_branding, &require.name)
+                    && !Self::is_composition_pin(&self.re_branding, &pkg.name, &require.name)
+                    && !Self::is_elf_capability(&require.name)
+                {
                     add_info(
                         out,
                         Level::Error,
@@ -133,7 +204,11 @@ impl Check for BrandingPolicyCheck {
             }
 
             let correct_supplement = format!("({branding_pkg} and {branding_type_flavor})");
-            if !pkg.supplements.iter().any(|d| d.name == correct_supplement) {
+            let supplement_carried = pkg.supplements.iter().any(|d| {
+                d.name == correct_supplement
+                    || flavour_conjunct(&parse_dep_expr(&d.name), &branding_type_flavor)
+            });
+            if !supplement_carried {
                 add_info(
                     out,
                     Level::Error,
@@ -327,6 +402,35 @@ mod tests {
             unversioned[0]
         );
         assert!(unversioned[0].ends_with("testingpackage-branding"));
+    }
+
+    // An ELF capability name whose soname is branding-shaped is not a
+    // flavour pin: it names a library, not a package. Package-name
+    // near-misses (no `.so` component) keep firing.
+    #[test]
+    fn soname_requires_are_not_flavor_pins() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "brandingdep-testpackage".to_string();
+        pkg.requires = vec![
+            dep("lib-theme-resources.so()(64bit)", 0),
+            dep("lib-theme.so.1()(64bit)", 0),
+            dep("libtheme-branding-openSUSE", 0),
+            dep("testingpackage-branding-openSUSE", 0),
+        ];
+        let results = run(&pkg);
+
+        let specific = has(&results, "branding-requires-specific-flavor");
+        assert_eq!(specific.len(), 2, "{results:?}");
+        assert!(
+            specific
+                .iter()
+                .any(|l| l.contains("libtheme-branding-openSUSE"))
+        );
+        assert!(
+            specific
+                .iter()
+                .any(|l| l.contains("testingpackage-branding-openSUSE"))
+        );
     }
 
     // #857: the unversioned finding is scoped to the generic branding
@@ -529,5 +633,201 @@ mod tests {
         ] {
             assert!(has(&results, finding).is_empty(), "{finding}: {results:?}");
         }
+    }
+
+    /// A branding package whose conflicts and provides obligations
+    /// are met, so only `branding-supplements-missing` can be charged.
+    fn branding_pkg(name: &str, supplements: Vec<DepInfo>) -> Pkg {
+        let (generic, _flavor) = name.rsplit_once('-').expect("flavoured name");
+        let mut pkg = fixture_pkg();
+        pkg.name = name.to_string();
+        pkg.conflicts = vec![dep(generic, 0)];
+        pkg.supplements = supplements;
+        pkg.provides = vec![dep(generic, RPMSENSE_EQUAL)];
+        pkg
+    }
+
+    fn supplements_missing(pkg: &Pkg) -> Vec<String> {
+        has(&run(pkg), "branding-supplements-missing")
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    // The grub2-branding-openSUSE shape: the flavour atom is a direct
+    // conjunct of the top-level `and`; the other conjunct is an `or`
+    // over the compound base, mirroring the package's own Requires.
+    #[test]
+    fn rich_supplement_with_compound_base_credits() {
+        let pkg = branding_pkg(
+            "grub2-branding-openSUSE",
+            vec![dep("((grub2 or grub2-common) and branding-openSUSE)", 0)],
+        );
+        assert!(supplements_missing(&pkg).is_empty(), "{:?}", run(&pkg));
+    }
+
+    // The yast2-qt-branding-openSUSE shape: the base atom is the
+    // modern name of the library (libyui-qt), not the legacy base the
+    // package name carries; the flavour conjunct still gates.
+    #[test]
+    fn rich_supplement_with_renamed_base_credits() {
+        let pkg = branding_pkg(
+            "yast2-qt-branding-openSUSE",
+            vec![dep("(libyui-qt and branding-openSUSE)", 0)],
+        );
+        assert!(supplements_missing(&pkg).is_empty(), "{:?}", run(&pkg));
+    }
+
+    // A nested plain conjunction carrying the flavour atom credits:
+    // ((yast-installation and icewm) and branding-openSUSE).
+    #[test]
+    fn rich_supplement_with_nested_and_credits() {
+        let pkg = branding_pkg(
+            "icewm-branding-openSUSE",
+            vec![dep(
+                "((yast-installation and icewm) and branding-openSUSE)",
+                0,
+            )],
+        );
+        assert!(supplements_missing(&pkg).is_empty(), "{:?}", run(&pkg));
+    }
+
+    // The zypp `packageand()` spelling is not credited (settled
+    // doctrine, #853/#854): the finding still fires.
+    #[test]
+    fn packageand_supplement_still_fires() {
+        let pkg = branding_pkg(
+            "grub2-branding-openSUSE",
+            vec![dep("packageand(grub2:branding-openSUSE)", 0)],
+        );
+        let got = supplements_missing(&pkg);
+        assert_eq!(got.len(), 1, "{:?}", run(&pkg));
+        assert!(got[0].contains("(grub2 and branding-openSUSE)"), "{got:?}");
+    }
+
+    // The flavour atom under `or` does not gate the supplement on the
+    // flavour: the finding still fires.
+    #[test]
+    fn flavour_atom_under_or_still_fires() {
+        let pkg = branding_pkg(
+            "grub2-branding-openSUSE",
+            vec![dep("(grub2 or branding-openSUSE)", 0)],
+        );
+        assert_eq!(supplements_missing(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
+    // The flavour atom as an `if` condition does not credit either.
+    #[test]
+    fn flavour_atom_under_if_still_fires() {
+        let pkg = branding_pkg(
+            "grub2-branding-openSUSE",
+            vec![dep("(grub2 if branding-openSUSE)", 0)],
+        );
+        assert_eq!(supplements_missing(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
+    // Nor does the flavour atom under `without`.
+    #[test]
+    fn flavour_atom_under_without_still_fires() {
+        let pkg = branding_pkg(
+            "grub2-branding-openSUSE",
+            vec![dep("(grub2 without branding-openSUSE)", 0)],
+        );
+        assert_eq!(supplements_missing(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
+    // A versioned flavour conjunct is not the plain atom the
+    // obligation prescribes: the finding still fires.
+    #[test]
+    fn versioned_flavour_atom_still_fires() {
+        let pkg = branding_pkg(
+            "grub2-branding-openSUSE",
+            vec![dep("(grub2 and branding-openSUSE >= 84)", 0)],
+        );
+        assert_eq!(supplements_missing(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
+    // The libreoffice-branding-upstream corpus shape: a conjunction
+    // on a *different* flavour's atom does not credit this flavour.
+    #[test]
+    fn wrong_flavour_conjunct_still_fires() {
+        let pkg = branding_pkg(
+            "libreoffice-branding-upstream",
+            vec![dep("(libreoffice and branding-openSUSE)", 0)],
+        );
+        assert_eq!(supplements_missing(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
+    // A bare flavour atom is not a conjunction: the finding still
+    // fires.
+    #[test]
+    fn bare_flavour_atom_still_fires() {
+        let pkg = branding_pkg("grub2-branding-openSUSE", vec![dep("branding-openSUSE", 0)]);
+        assert_eq!(supplements_missing(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
+    // Maintainer ruling (2026-10-26): packages in the reserved
+    // patterns-* namespace are the composition layer. Their branding
+    // pins, own-flavour, borrowed-flavour and rich conditional alike,
+    // make the flavour selection, so the specific-flavor error is not
+    // charged for them. Theme pins are not flavour selections and
+    // stay charged on patterns packages too, and the generic-name
+    // (unversioned) arm is untouched.
+    #[test]
+    fn patterns_branding_pins_are_composition_not_consumption() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "patterns-test-base".to_string();
+        pkg.requires = vec![
+            dep("testingpackage-branding-openSUSE", 0),
+            dep("otherpackage-branding-upstream", 0),
+            dep("(grub2-branding-openSUSE if branding-openSUSE)", 0),
+            dep("testingpackage-theme-openSUSE", 0),
+            dep("testingpackage-branding", 0),
+        ];
+        let results = run(&pkg);
+
+        let specific = has(&results, "branding-requires-specific-flavor");
+        assert_eq!(specific.len(), 1, "{results:?}");
+        assert!(specific[0].contains("testingpackage-theme-openSUSE"));
+
+        let unversioned = has(&results, "branding-requires-unversioned");
+        assert_eq!(unversioned.len(), 1, "{results:?}");
+        assert!(unversioned[0].ends_with("testingpackage-branding"));
+    }
+
+    // The exemption keys on the reserved patterns-* prefix exactly:
+    // names that merely contain "pattern", use the singular, drop the
+    // dash or shift the prefix are not in the namespace and keep
+    // firing.
+    #[test]
+    fn near_miss_names_are_not_patterns_packages() {
+        for name in [
+            "mypatterns-test",
+            "pattern-test",
+            "patterns",
+            "x-patterns-test",
+        ] {
+            let mut pkg = fixture_pkg();
+            pkg.name = name.to_string();
+            pkg.requires = vec![dep("testingpackage-branding-openSUSE", 0)];
+            let results = run(&pkg);
+            let specific = has(&results, "branding-requires-specific-flavor");
+            assert_eq!(specific.len(), 1, "{name}: {results:?}");
+        }
+    }
+
+    // A non-patterns requirer keeps the full behaviour: branding pins
+    // and theme pins both fire.
+    #[test]
+    fn non_patterns_requirer_branding_and_theme_pins_fire() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "plain-testpackage".to_string();
+        pkg.requires = vec![
+            dep("testingpackage-branding-openSUSE", 0),
+            dep("testingpackage-theme-openSUSE", 0),
+        ];
+        let results = run(&pkg);
+        let specific = has(&results, "branding-requires-specific-flavor");
+        assert_eq!(specific.len(), 2, "{results:?}");
     }
 }

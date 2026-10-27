@@ -165,6 +165,7 @@ names the owner source file that holds the entry.
 | `severity` | the finding fires at a different severity than the reference |
 | `detail` | the finding fires with different detail wording than the reference |
 | `limitation` | a divergence that genuinely cannot be implemented in the Rust port |
+| `config` | the port's shipped config (the bundled defaults or a vendored flavour config) departs from the reference's shipped config, so findings differ under the shipped configs while the check code itself is unchanged |
 
 `limitation` is the narrowest kind and must not become a bucket for unfinished
 work: the ledger guard exempts it from the "reason must say what is absent"
@@ -204,10 +205,11 @@ The differ attributes each difference to a `divergences.toml` entry. An
 entry naming the finding, its family stem (for templated findings such
 as `daemon-activation-in-%post`), or its emitting check module — or a
 check-module entry whose reason names the finding — accounts for a presence
-difference when its kind is `missing`, `behaviour` or `limitation`;
+difference when its kind is `missing`, `behaviour`, `limitation` or `config`;
 a finding only rpmcrab emits is the exception — it takes `behaviour`
 or `limitation`, since a `missing` entry records that the port does
-not emit the finding and cannot account for it appearing. Severity
+not emit the finding, and a `config` entry that its shipped config
+suppresses it — neither can account for it appearing. Severity
 differences take a `severity` entry, and detail differences a
 `detail` or `behaviour` entry. The session header is accounted by the
 `session-header` and `config` entries, the footer by `report` and

@@ -60,3 +60,31 @@ kind = "behaviour"
 reason = "Fix-and-diverge (issue #932): a libalternatives `binary=` entry is credited when its path resolves through the package's own symlinks to a shipped regular file. The reference credits an entry only by its bin/ suffix rule -- the literal-path credit is rpmcrab's own divergence, ledgered under issue #811 -- so an entry whose path resolves through a symlink shipped by the same package -- the JDK layout, /usr/lib64/jvm/java-11-openjdk -> java-11-openjdk-11 -- draws both `binary-entry-value-not-found` and `wrong-or-missed-binary-entry` on every conf even though the package ships the target. rpmcrab resolves the entry path through the package's own file set, following symlinks at every component, directory and file alike, component-wise with the kernel's hop bound, and credits it when the walk lands on a shipped regular file; a walk that exhausts the hop bound is a cycle (the kernel's ELOOP) and earns no credit; the walk canonicalises the value the way the kernel resolves it, so a doubled leading slash (binary=//usr/bin/..., emitted by the SUSE python packaging macros) names the shipped file too. Resolutions leaving the package's file set (sibling-package or genuinely absent targets) and symlink cycles keep firing. Pinned by binary_entry_through_shipped_dir_symlink_is_credited, binary_entry_through_absolute_dir_symlink_is_credited, binary_entry_through_symlink_chain_is_credited, binary_entry_through_dir_symlink_to_unshipped_file_still_fires, binary_entry_through_symlink_loop_still_fires, binary_entry_resolving_to_directory_still_fires, binary_entry_through_cycle_landing_on_shipped_name_still_fires and binary_entry_with_doubled_leading_slash_is_credited in alternatives.rs."
 since = "0.4.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/932"
+
+[[divergence]]
+case = "global"
+check = "AlternativesCheck"
+kind = "detail"
+reason = "Staged `--explain` texts for `update-alternatives-post-call-missing` and `update-alternatives-postun-call-missing` were garbled (`install all the configuration`, `remove all the configuration for each individual --install binary`). Reworded: the package does not call update-alternatives --install in the %post phase to register its alternatives / --remove in the %postun phase for each --install that was done in %post."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "update-alternatives-postun-call-missing"
+kind = "behaviour"
+reason = "Fix-and-diverge: the %postun phase runs only when the %post phase collected at least one --install. The reference calls its postun check unconditionally for every package passing the presence gate and reports the bare package-level finding whenever %postun carries no update-alternatives line, even when %post installed nothing — there is then no --remove the package could owe. The vacuous arm covers packages whose %post only cleans up legacy registrations (the JDK and Node.js families' existence-guarded cleanup lines, kept after their move to libalternatives) and packages present only through shipped /etc/alternatives files. Measured over a 1,961-package Tumbleweed candidate universe (every /etc/alternatives or libalternatives shipper plus the name families): the tag goes from 57 findings to 5, the five remaining being genuine un-removed installs (fakeroot, makewhat, python3-openqa_review, python313-mutagen, python314-mutagen), and every other AlternativesCheck tag is unchanged on the same scan (update-alternatives-requirement-missing 81, update-alternatives-post-call-missing 50). Pinned by postun_phase_silent_when_post_installed_nothing and postun_phase_reports_when_install_is_never_removed in alternatives.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "update-alternatives-postun-call-missing"
+kind = "behaviour"
+reason = "Fix-and-diverge: a %postun --remove line is credited when the installed name ends the token (followed by whitespace, a command separator, or end of line), not on the reference's trailing word-boundary. A name ending in a non-word character has no word boundary before the whitespace that follows it, so the reference never credits the toluapp packages' --remove tolua++ line and reports all four (5.1, 5.3, 5.4, 5.5) for a removal they perform. The token-end form also refuses the reference's false credit for an installed name that is a proper prefix of the removed one. Pinned by postun_remove_of_plus_suffixed_name_is_credited, postun_remove_of_longer_name_does_not_credit_prefix and postun_remove_of_suffixed_word_name_does_not_credit in alternatives.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "AlternativesCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: the file-list validation skips an extracted alternative link that still contains a shell variable reference ($i, ${lib}, $bin). Such a link comes from an --install/--slave line inside a shell loop and is a template, not a literal path: no shipped file can carry that name, so the reference's literal lookup always reports alternative-generic-name-missing (and alternative-link-missing for the derived /etc/alternatives/<basename>) for a path that is never registered. Factory corpus (2026-10-26): exactly 6 such links among 1,945 extracted install/slave links -- db48-utils (/usr/bin/db_$i), compatlibopenblas_openmp0/pthreads0/serial0 (/usr/lib64/${lib}) and python313/314-ctranslate2 (/usr/bin/$bin) -- and every concrete expansion of those loops ships its /etc/alternatives ghost and its generic symlink. The install set is unchanged, so the %post/%postun phase findings judge the template entries exactly as the reference does; only the file-list lookups, which need a literal path, skip them. A literal link whose generic name is not shipped keeps firing both findings. Pinned by template_link_is_detected and template_install_line_extracts_template_link in alternatives.rs and alternatives_template_link_draws_no_filelist_findings in wave6_entry.rs."
+since = "0.4.1"

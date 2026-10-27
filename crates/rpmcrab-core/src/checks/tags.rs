@@ -13,7 +13,9 @@ use fancy_regex::Regex;
 use librpm::Tag;
 
 use super::is_match;
-use super::shared::{devel_infix_regex, devel_regex, explicit_lib_package_regex, macro_regex};
+use super::shared::{
+    devel_infix_regex, devel_regex, devel_underscore_regex, explicit_lib_package_regex, macro_regex,
+};
 use super::spdx::suggest_licenses;
 use crate::check::{Check, add_info};
 use crate::config::Config;
@@ -336,25 +338,38 @@ impl TagsCheck {
         is_source: bool,
     ) {
         let mut devel_depend = false;
-        // Biarch/flavored devel packages (`-devel-32bit`, `-devel-doc`,
-        // `-debug-libs`, ...): the devel keyword is a hyphen-delimited
-        // component rather than a name suffix. They are devel packages, so
-        // their requirements must not trip devel-dependency or
-        // explicit-lib-dependency (the reference only matches the suffix
-        // form and misfires on 242 such packages in Tumbleweed). This is
-        // the requirer-side class; the dependency-side class from
-        // plusky/rpmcrab#283 (DevelNumberExceptions / word-boundary regex
-        // for required names) stays open.
-        let requirer_is_biarch_devel = is_match(devel_infix_regex(), &pkg.name);
+        // Devel packages whose name does not end in the devel keyword
+        // must not trip devel-dependency or explicit-lib-dependency
+        // (the reference only matches the suffix form):
+        // - biarch/flavored packages carry the keyword as a
+        //   hyphen-delimited component (`-devel-32bit`, `-devel-doc`,
+        //   `-debug-libs`, ...); the reference misfires on 242 such
+        //   packages in Tumbleweed;
+        // - pattern packages append the flavour to the component with
+        //   an underscore instead (`patterns-kde-devel_qt5`). The
+        //   underscore form is credited only for `patterns-*` names:
+        //   elsewhere a keyword-underscore component can be part of an
+        //   ordinary word (`ruby4.0-rubygem-debug_inspector`);
+        // - JDK `*-jmods` packages are the JDK's development modules,
+        //   split out of the corresponding `-devel` package.
+        // The dependency-side class from plusky/rpmcrab#283 is handled
+        // per leaf in the devel-dependency predicate below.
+        let requirer_is_component_devel = is_match(devel_infix_regex(), &pkg.name)
+            || (pkg.name.starts_with("patterns-") && is_match(devel_underscore_regex(), &pkg.name))
+            || pkg.name.ends_with("-jmods");
         // The requirer-side half of the cross-family credit (#861),
         // classified once per package: the per-leaf test then only
         // parses the leaf.
         let family_requirer = family_requirer(&pkg.name);
-        // The generated-soname package-name set is consulted only by
-        // the explicit-lib-dependency predicate, and only for a leaf
-        // that passes that predicate's decidable guards; it is built on
-        // the first such leaf rather than for every package (#888).
-        let mut generated_lib_names: Option<std::collections::HashSet<String>> = None;
+        // The generated-soname package-name sets are consulted only
+        // by the explicit-lib-dependency predicate, and only for a
+        // leaf that passes that predicate's decidable guards; they
+        // are built on the first such leaf rather than for every
+        // package (#888). The second set is the self-provided credit.
+        let mut generated_lib_names: Option<(
+            std::collections::HashSet<String>,
+            std::collections::HashSet<String>,
+        )> = None;
         for dep in deps {
             let value = format_require(dep);
             // Rich `(a or b)` expressions (RPM >= 4.13): run the name and
@@ -392,10 +407,24 @@ impl TagsCheck {
                     // host devel dependency. The credit is per leaf, so
                     // a credited leaf does not consume the latch: a
                     // later uncredited devel requirement still fires.
+                    // Two more per-leaf credits:
+                    // - a `python3<NN>-*-headers` leaf is a runtime
+                    //   Python module, not a header package (issue
+                    //   #283, upstream rpmlint #1091: e.g.
+                    //   python313-django-cors-headers ships only .py
+                    //   files); interpreter headers live in
+                    //   `python3<NN>-devel`;
+                    // - a `*-rebuild` package is an empty anchor whose
+                    //   single requirement exists to trigger rebuilds;
+                    //   its `-source` requirement (the source tree it
+                    //   rebuilds against, e.g. perf-rebuild on
+                    //   kernel-source) is the package's purpose.
                     if !devel_depend
-                        && !requirer_is_biarch_devel
+                        && !requirer_is_component_devel
                         && is_match(&self.devel_re, &leaf.name)
                         && !family_requirer.credits(&leaf.name)
+                        && !python_module_headers_leaf(&leaf.name)
+                        && !rebuild_source_anchor(&pkg.name, &leaf.name)
                     {
                         add_info(out, Level::Error, pkg, "devel-dependency", &[&leaf.name]);
                         devel_depend = true;
@@ -407,8 +436,8 @@ impl TagsCheck {
                     // lib*, so only lib*-prefixed names count here; this
                     // knowingly silences non-lib* true positives like
                     // Requires: zlib, where the reference is right.
-                    // Biarch/flavored devel requirers are devel packages, so
-                    // their lib requirements must not trip this either.
+                    // Component-shaped devel requirers are devel packages,
+                    // so their lib requirements must not trip this either.
                     // Capability names are not library package names either
                     // (#753): symbol capabilities in the SUSE
                     // lib<name>__<symbol> namespace (libuuid1 provides
@@ -441,15 +470,28 @@ impl TagsCheck {
                     // conventional name of the library they accompany,
                     // so they stay silent. The reference fires on all
                     // of them.
-                    if !requirer_is_biarch_devel
+                    // A generated soname dependency the package itself
+                    // provides is not a dependency on the library
+                    // package: rpm resolves it against the package's
+                    // own provides, so an explicit requirement naming
+                    // that package is the only expression of it and
+                    // cannot duplicate the generated one (the
+                    // libptscotch MPI flavours ship the serial
+                    // libscotch in their own prefix, provide its
+                    // soname, and still name libscotch7_0 for the
+                    // system copy). Names derived only from such
+                    // self-provided sonames are credited.
+                    if !requirer_is_component_devel
                         && leaf.flags == 0
                         && leaf.qualifier.is_none()
                         && !leaf.name.contains("__")
                         && !leaf.name.contains('(')
                     {
-                        let generated_lib_names = generated_lib_names
-                            .get_or_insert_with(|| generated_soname_package_names(deps));
-                        if generated_lib_names.contains(leaf.name.as_str())
+                        let generated_lib_names = generated_lib_names.get_or_insert_with(|| {
+                            generated_soname_package_names(deps, &pkg.provides)
+                        });
+                        if generated_lib_names.0.contains(leaf.name.as_str())
+                            && !generated_lib_names.1.contains(leaf.name.as_str())
                             && let Ok(Some(caps)) = self.lib_package_re.captures(&leaf.name)
                             && caps.get(1).is_none()
                         {
@@ -484,8 +526,22 @@ impl TagsCheck {
 /// candidate: it names a different package in practice (the `libnbd`
 /// tools package vs the `libnbd0` library package), so it proves
 /// nothing about redundancy.
-fn generated_soname_package_names(deps: &[DepInfo]) -> std::collections::HashSet<String> {
+/// The second returned set is the self-provided credit: package
+/// names whose every deriving generated soname is among the package's
+/// own provides, so the generated dependency resolves against the
+/// package itself and never reaches the named library package.
+fn generated_soname_package_names(
+    deps: &[DepInfo],
+    provides: &[DepInfo],
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+) {
     let mut names = std::collections::HashSet::new();
+    let mut self_names = std::collections::HashSet::new();
+    let mut external_names = std::collections::HashSet::new();
+    let provide_names: std::collections::HashSet<&str> =
+        provides.iter().map(|d| d.name.as_str()).collect();
     for dep in deps {
         if dep.flags & RPMSENSE_FIND_REQUIRES == 0 {
             continue;
@@ -520,27 +576,43 @@ fn generated_soname_package_names(deps: &[DepInfo]) -> std::collections::HashSet
                 .to_string();
             (!version.is_empty()).then(|| version.replace('.', "_"))
         });
+        let mut derived: Vec<String> = Vec::new();
         match (pkgversion, soversion) {
             // `libfoo.so.10.0.0` -> `libfoo10_0_0`, `libfoo-10_0_0`.
             (None, Some(version)) => {
-                names.insert(format!("{stem}{version}"));
-                names.insert(format!("{stem}-{version}"));
+                derived.push(format!("{stem}{version}"));
+                derived.push(format!("{stem}-{version}"));
             }
             // `libgame2-1.9.so.10.0.0` -> `libgame2-1_9-10_0_0`: with a
             // package version in the stem the SLPP form is the dash one.
             (Some(_), Some(version)) => {
-                names.insert(format!("{stem}-{version}"));
+                derived.push(format!("{stem}-{version}"));
             }
             // `libdb-4.8.so` -> `libdb-4_8`: the stem already carries
             // the whole version.
             (Some(_), None) => {
-                names.insert(stem);
+                derived.push(stem);
             }
             // A version-less soname (`libfoo.so`) names no package.
             (None, None) => {}
         }
+        // A generated dependency whose raw name is among the package's
+        // own provides resolves against the package itself, not
+        // against the library package the derived names belong to.
+        if provide_names.contains(dep.name.as_str()) {
+            self_names.extend(derived.iter().cloned());
+        } else {
+            external_names.extend(derived.iter().cloned());
+        }
+        names.extend(derived);
     }
-    names
+    // The credit set: names whose every deriving generated soname is
+    // self-provided. A name also derived from an external soname is
+    // not credited: that soname's dependency does reach the library
+    // package, so an explicit requirement on it still duplicates.
+    let credit: std::collections::HashSet<String> =
+        self_names.difference(&external_names).cloned().collect();
+    (names, credit)
 }
 
 /// The sys-root leaf of a `cross-...` package name: the target and
@@ -582,6 +654,25 @@ fn cross_compiler_target(name: &str) -> Option<String> {
 fn mingw_family(name: &str) -> Option<&str> {
     let first = name.split('-').next()?;
     (name.contains('-') && (first == "mingw32" || first == "mingw64")).then_some(first)
+}
+
+/// Whether `leaf` is a `python3<NN>-*-headers` name. In the
+/// versioned-Python namespace such a name is a runtime Python module
+/// (e.g. `python313-django-cors-headers` ships only `.py` files), not a
+/// header package; the interpreter's headers live in `python3<NN>-devel`.
+fn python_module_headers_leaf(leaf: &str) -> bool {
+    let Some(rest) = leaf.strip_prefix("python3") else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    digits > 0 && rest[digits..].starts_with('-') && leaf.ends_with("-headers")
+}
+
+/// Whether `requirer` is a `*-rebuild` anchor package and `leaf` the
+/// `-source` tree it triggers rebuilds against (e.g. `perf-rebuild`
+/// on `kernel-source`).
+fn rebuild_source_anchor(requirer: &str, leaf: &str) -> bool {
+    requirer.ends_with("-rebuild") && leaf.ends_with("-source")
 }
 
 /// The requirer-side half of the cross-family credit (issue #861),
@@ -3110,6 +3201,179 @@ mod rich_dep_emission_tests {
     }
 
     #[test]
+    fn devel_dependency_python_module_headers_leaf_is_silent() {
+        // In the versioned-Python namespace a `*-headers` name is a
+        // runtime Python module, not a header package (issue #283,
+        // upstream rpmlint #1091). The credit is on the leaf, so it
+        // holds for any requirer.
+        let config = rich_test_config(&[], false);
+        for (requirer, dep) in [
+            ("python313-sortinghat", "python313-django-cors-headers"),
+            ("python314-sortinghat", "python314-django-cors-headers"),
+            ("some-tool", "python313-kiss-headers"),
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep(dep)];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "devel-dependency").is_empty(),
+                "requirer {requirer} dep {dep}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn devel_dependency_python_headers_near_misses_still_fire() {
+        let config = rich_test_config(&[], false);
+        for (requirer, dep) in [
+            // The interpreter's own devel package is a real devel leaf.
+            ("python313-sortinghat", "python313-devel"),
+            // No version digits: outside the versioned-Python namespace.
+            ("sortinghat", "python3-django-cors-headers"),
+            // Non-Python `-headers` packages are genuine header packages.
+            ("some-tool", "suse-libsgx-headers"),
+            ("some-tool", "vulkan-headers"),
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep(dep)];
+            let results = run(&pkg, &config);
+            let hits = named(&results, "devel-dependency");
+            assert_eq!(hits.len(), 1, "requirer {requirer} dep {dep}: {results:?}");
+            assert!(hits[0].1.ends_with(dep), "line: {}", hits[0].1);
+        }
+        // A credited leaf does not consume the latch: a later real
+        // devel requirement still fires.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.name = "python313-sortinghat".to_string();
+        pkg.requires = vec![
+            plain_dep("python313-django-cors-headers"),
+            plain_dep("glibc-devel"),
+        ];
+        let results = run(&pkg, &config);
+        let hits = named(&results, "devel-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" glibc-devel"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn devel_dependency_rebuild_source_anchor_is_silent() {
+        // `*-rebuild` packages are empty anchors; their `-source`
+        // requirement is the tree they trigger rebuilds against.
+        let config = rich_test_config(&[], false);
+        for (requirer, dep) in [
+            ("perf-rebuild", "kernel-source"),
+            ("cpupower-rebuild", "kernel-source"),
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep(dep)];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "devel-dependency").is_empty(),
+                "requirer {requirer}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn devel_dependency_rebuild_near_misses_still_fire() {
+        let config = rich_test_config(&[], false);
+        for (requirer, dep) in [
+            // A `-rebuild` anchor on a real devel package still fires.
+            ("perf-rebuild", "glibc-devel"),
+            // A non-anchor requirer on a source tree still fires.
+            ("some-tool", "kernel-source"),
+            // `-debugsource` is not the `-source` anchor leaf.
+            ("perf-rebuild", "glibc-debugsource"),
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep(dep)];
+            let results = run(&pkg, &config);
+            let hits = named(&results, "devel-dependency");
+            assert_eq!(hits.len(), 1, "requirer {requirer} dep {dep}: {results:?}");
+            assert!(hits[0].1.ends_with(dep), "line: {}", hits[0].1);
+        }
+        // The credited anchor leaf does not consume the latch.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.name = "perf-rebuild".to_string();
+        pkg.requires = vec![plain_dep("kernel-source"), plain_dep("glibc-devel")];
+        let results = run(&pkg, &config);
+        let hits = named(&results, "devel-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" glibc-devel"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn devel_dependency_jmods_requirer_is_silent() {
+        // JDK jmods are development modules split out of the `-devel`
+        // package they require.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.name = "java-21-openjdk-jmods".to_string();
+        pkg.requires = vec![plain_dep("java-21-openjdk-devel")];
+        let config = rich_test_config(&[], false);
+        let results = run(&pkg, &config);
+        assert!(
+            named(&results, "devel-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn devel_dependency_jmods_near_misses_still_fire() {
+        let config = rich_test_config(&[], false);
+        for requirer in ["java-21-openjdk-headless", "some-jmod"] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep("java-21-openjdk-devel")];
+            let results = run(&pkg, &config);
+            let hits = named(&results, "devel-dependency");
+            assert_eq!(hits.len(), 1, "requirer {requirer}: {results:?}");
+        }
+    }
+
+    #[test]
+    fn devel_dependency_patterns_underscore_devel_requirer_is_silent() {
+        // Pattern packages carry the devel flavour as an
+        // underscore-appended component.
+        let config = rich_test_config(&[], false);
+        for (requirer, dep) in [
+            ("patterns-kde-devel_qt5", "libqt5-qtbase-common-devel"),
+            ("patterns-kde-devel_qt6", "qt6-base-common-devel"),
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep(dep)];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "devel-dependency").is_empty(),
+                "requirer {requirer}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn devel_dependency_underscore_near_misses_still_fire() {
+        let config = rich_test_config(&[], false);
+        for requirer in [
+            // Keyword-underscore inside an ordinary word, not a
+            // patterns flavour component.
+            "ruby4.0-rubygem-debug_inspector",
+            // Underscore flavour but not a pattern package.
+            "foo-devel_bar",
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep("somelib-devel")];
+            let results = run(&pkg, &config);
+            let hits = named(&results, "devel-dependency");
+            assert_eq!(hits.len(), 1, "requirer {requirer}: {results:?}");
+        }
+    }
+
+    #[test]
     fn devel_dependency_plain_devel_require_still_fires() {
         // A genuine runtime package requiring a devel package still trips
         // the finding.
@@ -3979,5 +4243,95 @@ mod rich_dep_emission_tests {
         let results = run(&pkg, &rich_test_config(&[], false));
         let hits = named(&results, "explicit-lib-dependency");
         assert_eq!(hits.len(), 1, "all: {results:?}");
+    }
+
+    #[test]
+    fn explicit_lib_dependency_self_provided_soname_is_silent() {
+        // The libptscotch shape: the package ships the library itself
+        // (in its MPI prefix) and provides the soname, so the
+        // generated dependency resolves against its own provides and
+        // never reaches libscotch7_0; the explicit requirement on that
+        // name is the only expression of it, not a duplicate.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo7_0"),
+            generated_dep("libfoo.so.7.0()(64bit)"),
+        ];
+        pkg.provides = vec![plain_dep("libfoo.so.7.0()(64bit)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "explicit-lib-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_lib_dependency_self_provided_other_soname_still_fires() {
+        // Providing an unrelated soname does not credit the name: the
+        // generated dependency on libfoo.so.7.0 still reaches the
+        // library package, so the explicit requirement duplicates it.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo7_0"),
+            generated_dep("libfoo.so.7.0()(64bit)"),
+        ];
+        pkg.provides = vec![plain_dep("libbar.so.9()(64bit)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libfoo7_0"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_package_name_provide_still_fires() {
+        // Providing the library package's name (a virtual provide) is
+        // not providing the soname: the generated soname dependency
+        // still reaches the library package.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo7_0"),
+            generated_dep("libfoo.so.7.0()(64bit)"),
+        ];
+        pkg.provides = vec![plain_dep("libfoo7_0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libfoo7_0"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_unqualified_soname_provide_still_fires() {
+        // The generated dependency carries its arch qualifier
+        // (libfoo.so.7.0()(64bit)); a provide of the bare soname does
+        // not satisfy it in rpm's resolution, so it does not credit.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo7_0"),
+            generated_dep("libfoo.so.7.0()(64bit)"),
+        ];
+        pkg.provides = vec![plain_dep("libfoo.so.7.0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libfoo7_0"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn explicit_lib_dependency_mixed_self_and_external_soname_still_fires() {
+        // libfoo-7_0 is derived from two generated sonames: the
+        // self-provided libfoo.so.7.0 and the external libfoo-7.0.so
+        // (stem-version shape). The external derivation reaches the
+        // library package, so the name keeps firing.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.requires = vec![
+            plain_dep("libfoo-7_0"),
+            generated_dep("libfoo.so.7.0()(64bit)"),
+            generated_dep("libfoo-7.0.so()(64bit)"),
+        ];
+        pkg.provides = vec![plain_dep("libfoo.so.7.0()(64bit)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libfoo-7_0"), "line: {}", hits[0].1);
     }
 }

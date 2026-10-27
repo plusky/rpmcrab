@@ -98,8 +98,8 @@ UPSTREAM_REPO = "rpm-software-management/rpmlint"
 PINS = {
     # flavor: (sha, date, branch, config_subdir)
     "opensuse": (
-        "513f17e8aad7d0bece1be4e46316dc8e97bd1d65",
-        "2026-10-20",
+        "783e34a56e45a4da412ef4c2328656183e01c5b4",
+        "2026-10-26",
         "opensuse",
     ),
 }
@@ -366,6 +366,32 @@ EXTRA_CHECKS = [
     "PAMModulesCheck",
 ]
 
+# Extra AtomicAllowedDirs entries appended to the openSUSE config that
+# upstream rpmlint does not carry. Each entry pairs the directory prefix
+# with the reason the generator logs for it in data/distro/PROVENANCE.
+# "/srv/www/" is a whitelist with a known regression, ledgered as such
+# (kind = "config" in crates/rpmcrab-core/data/divergences/
+# AtomicUpdateCheck.toml): the distro mandates /srv/www as the web
+# root (apache_serverroot) while its atomic packaging guideline
+# forbids applications living outside the root subvolume, and no
+# packaged web app complies with the guideline -- so genuine
+# atomic-rule violations under /srv/www go unflagged while the entry
+# stands. The entry is revisited and tightened when openSUSE settles
+# how web apps are packaged under the atomic rules.
+EXTRA_ATOMIC_ALLOWED_DIRS = [
+    (
+        "/srv/www/",
+        "whitelist with a known regression: the distro mandates"
+        " /srv/www as the web root (apache_serverroot) while the"
+        " atomic packaging guideline forbids applications outside"
+        " the root subvolume, and no packaged web app complies --"
+        " genuine violations under /srv/www go unflagged while this"
+        " stands; tightened when openSUSE settles web-app packaging"
+        " under the atomic rules; ledgered in"
+        " tests/parity/divergences.toml",
+    ),
+]
+
 # Checks upstream lists in the openSUSE config that rpmcrab deliberately
 # does NOT run under the flavor. Currently empty: the snapshot
 # layout AtomicUpdateCheck enforces is a transactional-update requirement
@@ -404,6 +430,62 @@ SYSTEMD_PRESET_PACKAGES = [
     "systemd-presets-branding-Elemental",
     "systemd-presets-branding-SLE-SAP",
     "systemd-presets-branding-SLE-SAP_immutable",
+]
+
+# Per-file grants for FilesCheck findings (see append_file_grants):
+# each entry names one package, the files the grant covers and the
+# findings that stay quiet for them, with the reason the grant exists.
+# FilesCheck honours a grant only when package, path and finding all
+# match exactly, and rejects an entry whose reason is missing or
+# empty. The set records the 2026-10-26 corpus E audit's core-package
+# clusters: rpm ships no ldconfig scriptlets by design (the platform
+# maintains the cache via glibc file triggers) and systemd's %post
+# runs ldconfig for its NSS modules under an explicit spec comment,
+# while the smartmontools and tuned files are executables that are
+# config by design. The key is rpmcrab-only; upstream configs carry
+# no such table.
+FILE_GRANTS = [
+    {
+        "package": "rpm",
+        "paths": [
+            "/usr/lib64/librpm.so.10.2.1",
+            "/usr/lib64/librpmio.so.10.2.1",
+            "/usr/lib64/librpmsign.so.10.2.1",
+        ],
+        "findings": [
+            "postin-without-ldconfig",
+            "library-without-ldconfig-postun",
+        ],
+        "reason": "the package ships no ldconfig scriptlets by design; "
+        "the platform maintains the ldconfig cache via glibc file "
+        "triggers, so per-package scriptlets are the pre-trigger "
+        "mechanism",
+    },
+    {
+        "package": "systemd",
+        "paths": [
+            "/usr/lib64/libnss_myhostname.so.2",
+            "/usr/lib64/libnss_systemd.so.2",
+        ],
+        "findings": ["postun-without-ldconfig"],
+        "reason": "%post runs ldconfig, under the spec's comment 'Run "
+        "ldconfig for nss-systemd and nss-myhostname NSS modules'; "
+        "the %postun omission is the package's evidenced design",
+    },
+    {
+        "package": "smartmontools",
+        "paths": ["/etc/smartd_warning.sh"],
+        "findings": ["executable-marked-as-config-file"],
+        "reason": "smartd's warning hook: it must be executable to run "
+        "and is marked %config because admins edit it",
+    },
+    {
+        "package": "tuned",
+        "paths": ["/etc/grub.d/00_tuned"],
+        "findings": ["executable-marked-as-config-file"],
+        "reason": "grub.d scripts are executables by construction "
+        "(grub-mkconfig runs them); the %config marking is deliberate",
+    },
 ]
 
 # Findings rpmcrab deliberately killed (see tests/parity/divergences.toml).
@@ -2171,6 +2253,40 @@ def append_extra_checks(text, checks):
     return "".join(out)
 
 
+def append_extra_atomic_allowed_dirs(text, dirs):
+    """Append directory prefixes to the `AtomicAllowedDirs = [...]` list.
+
+    Used for allowed dirs rpmcrab adds to the distro config that
+    upstream does not carry (see EXTRA_ATOMIC_ALLOWED_DIRS). Inserted
+    before the list's closing bracket so the monthly sync re-emits
+    them deterministically.
+    """
+    lines = text.splitlines(keepends=True)
+    out = []
+    in_list = False
+    done = False
+    for line in lines:
+        stripped = line.strip()
+        if not done and re.match(r"^AtomicAllowedDirs\s*=\s*\[", stripped):
+            in_list = True
+            out.append(line)
+            continue
+        if in_list and stripped.startswith("]"):
+            out.append("\n")
+            out.append("    # Extra: added by rpmcrab (whitelist with a known regression);\n")
+            out.append("    # see EXTRA_ATOMIC_ALLOWED_DIRS in\n")
+            out.append("    # scripts/generate-distro-configs.py.\n")
+            for d in dirs:
+                out.append(f'    "{d}",\n')
+            in_list = False
+            done = True
+            out.append(line)
+            continue
+        out.append(line)
+    assert done, "no AtomicAllowedDirs list found to append to"
+    return "".join(out)
+
+
 def append_systemd_preset_packages(text, packages):
     """Insert the `SystemdPresetPackages` key into a TOML document.
 
@@ -2197,6 +2313,48 @@ def append_systemd_preset_packages(text, packages):
             return "".join(lines)
     out = text if text.endswith("\n") else text + "\n"
     return out + block
+
+
+def append_file_grants(text, grants):
+    """Insert the `[[FileGrants]]` stanzas into a TOML document.
+
+    Used for the per-file grants rpmcrab adds on top of upstream (see
+    FILE_GRANTS): named FilesCheck findings stay quiet for one
+    package's named files, each grant carrying its reason. The stanzas
+    go immediately before the `[FileDigestLocation]` table, alongside
+    the `[[GhostFilesExceptions]]` / `[[SymlinkExceptions]]` lists they
+    sit next to in the vendored file; a document without that table
+    fails loudly rather than stranding the grants inside another
+    table's scope. The monthly sync re-emits them deterministically.
+    """
+    block = "\n"
+    block += "# Per-file grants for FilesCheck findings (not from upstream;\n"
+    block += "# see FILE_GRANTS in scripts/generate-distro-configs.py). Each\n"
+    block += "# grant names the package, the findings that stay quiet for its\n"
+    block += "# files, and the reason the grant exists.\n"
+    for grant in grants:
+        block += "[[FileGrants]]\n"
+        block += "package = %s\n" % json.dumps(grant["package"])
+        block += "paths = [\n"
+        for path in grant["paths"]:
+            block += "    %s,\n" % json.dumps(path)
+        block += "]\n"
+        block += "findings = [\n"
+        for finding in grant["findings"]:
+            block += "    %s,\n" % json.dumps(finding)
+        block += "]\n"
+        block += "reason = %s\n" % json.dumps(grant["reason"])
+        block += "\n"
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.rstrip("\n") == "[FileDigestLocation]":
+            if i and lines[i - 1] == "\n":
+                block = block[1:]
+            lines.insert(i, block)
+            return "".join(lines)
+    raise AssertionError(
+        "no [FileDigestLocation] table found to anchor FileGrants to"
+    )
 
 
 def remove_excluded_checks(text, checks):
@@ -2356,6 +2514,7 @@ def generate(ref_dir=None, pins=None):
                 text = append_systemd_preset_packages(
                     text, SYSTEMD_PRESET_PACKAGES
                 )
+                text = append_file_grants(text, FILE_GRANTS)
                 # Exemptions upstream does not ship (see ADD_FILTERS).
                 text = add_filters(text, added_log)
                 text = append_extra_filters(
@@ -2363,6 +2522,9 @@ def generate(ref_dir=None, pins=None):
                 )
                 text = append_extra_checks(text, EXTRA_CHECKS)
                 text = remove_excluded_checks(text, EXCLUDED_CHECKS)
+                text = append_extra_atomic_allowed_dirs(
+                    text, [d for d, _reason in EXTRA_ATOMIC_ALLOWED_DIRS]
+                )
             text, adj_log = apply_digest_adjudications(text, filename)
             adjudicated_log.extend(adj_log)
             data["files"][filename] = text
@@ -2396,10 +2558,24 @@ def generate(ref_dir=None, pins=None):
         )
     provenance.append("#")
     provenance.append(
+        "# Extra AtomicAllowedDirs entries appended (not from upstream;"
+        " see EXTRA_ATOMIC_ALLOWED_DIRS):"
+    )
+    for dir_prefix, reason in EXTRA_ATOMIC_ALLOWED_DIRS:
+        provenance.append(f"#   AtomicAllowedDirs: added {dir_prefix!r} ({reason})")
+    provenance.append("#")
+    provenance.append(
         "# SystemdPresetPackages appended (not from upstream; see SYSTEMD_PRESET_PACKAGES):"
     )
     for p in SYSTEMD_PRESET_PACKAGES:
         provenance.append(f"#   SystemdPresetPackages: added {p!r}")
+    provenance.append("#")
+    provenance.append("# FileGrants appended (not from upstream; see FILE_GRANTS):")
+    for g in FILE_GRANTS:
+        provenance.append(
+            f"#   FileGrants: added {g['package']!r} for "
+            f"{', '.join(g['findings'])} ({g['reason']})"
+        )
     provenance.append("#")
     provenance.append("# Excluded Checks (removed from the flavor; see EXCLUDED_CHECKS):")
     for c in EXCLUDED_CHECKS:
