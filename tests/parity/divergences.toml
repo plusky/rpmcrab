@@ -1976,6 +1976,20 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "logrotate-log-dir-not-packaged"
+kind = "behaviour"
+reason = "The reference charges the raw parent directory of the config's path pattern, but that string can name a directory that cannot exist: a quoted log path keeps its opening quote (`\"/var/log/i2pd`) and the parent of a multi-level glob pattern keeps a glob component (`/var/log/pacemaker/bundles/*`). rpmcrab reduces the derived directory to its literal form (one quote pair stripped, longest literal component prefix) and judges, and if needed charges, that directory; the glob components below it are per-client/per-bundle directories the daemon creates itself."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "logrotate-log-dir-not-packaged"
+kind = "behaviour"
+reason = "A log directory the package creates itself through a tmpfiles.d snippet shipped in the same package (a `d`/`D` line naming the directory exactly) is not reported: systemd-tmpfiles guarantees the directory with its declared mode and owner, the same provision the file-list test certifies. The reference credits only file-list membership, so it also charges packages whose log directories exist solely as tmpfiles.d lines (krb5-mini, usbguard, pacemaker-cli, i2pd)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "MenuCheck"
 kind = "behaviour"
 reason = "A whitespace-only quoted command (command=\" \") or a single-token command that matches a MenuLaunchers regexp (MenuCheck.py:118,137) raises IndexError in the reference and aborts the whole run with exit 3; the port emits `menu-command-not-in-package` with an empty detail and continues. One malformed menu entry must not forfeit the rest of the package."

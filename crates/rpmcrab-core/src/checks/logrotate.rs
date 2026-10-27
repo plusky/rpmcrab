@@ -9,6 +9,12 @@
 //! itself is never reported by `logrotate-log-dir-not-packaged`; it is owned
 //! by the `filesystem` package, not by the package shipping the logrotate
 //! config.
+//!
+//! Two further deliberate refinements of the not-packaged judgement, both
+//! scoped to that finding only: the derived directory is first reduced to
+//! the literal directory it names (see `judged_log_dir`), and a directory
+//! created by a tmpfiles.d snippet shipped in the same package counts as
+//! provided (see `tmpfiles_created_dirs`).
 
 use indexmap::IndexMap;
 
@@ -73,6 +79,91 @@ fn is_exempt_log_dir(dir: &str) -> bool {
     dir == "/var/log"
 }
 
+/// Reduce a derived log directory to the literal directory it names.
+///
+/// The reference charges the raw parent of the config's path pattern, but
+/// that string need not name a directory that can exist: a quoted path
+/// keeps its leading quote (`"/var/log/i2pd`), and the parent of a
+/// two-level glob pattern keeps a glob component
+/// (`/var/log/pacemaker/bundles/*`). Judging such a string against the
+/// file list can never succeed, so strip one surrounding quote pair and
+/// keep only the longest literal prefix of components; that ancestor is
+/// the directory whose packaging matters (the remaining components are
+/// created by the daemon itself, one per client/bundle/host).
+/// Strip one surrounding pair of quote character `q` from `s`; a lone
+/// leading or trailing quote is stripped on its own (after `parent_dir`
+/// the closing quote of a quoted log path sits in the dropped file part,
+/// so a quoted directory usually carries only its opening quote).
+fn strip_one_quote_pair(s: &str, q: char) -> &str {
+    let s = s.strip_prefix(q).unwrap_or(s);
+    s.strip_suffix(q).unwrap_or(s)
+}
+
+fn judged_log_dir(dir: &str) -> String {
+    let unquoted = strip_one_quote_pair(dir, '"');
+    let unquoted = strip_one_quote_pair(unquoted, '\'');
+    // Longest literal prefix: components from the first glob-bearing one
+    // on are daemon-created structure, not a packageable directory name.
+    let mut judged = if unquoted.starts_with('/') {
+        String::from("/")
+    } else {
+        String::new()
+    };
+    for comp in unquoted.split('/').filter(|c| !c.is_empty()) {
+        if comp.contains(['*', '?', '[']) {
+            break;
+        }
+        if judged.len() > 1 {
+            judged.push('/');
+        }
+        judged.push_str(comp);
+    }
+    if judged.is_empty() {
+        judged.push('/');
+    }
+    judged
+}
+
+/// Directories a package creates via systemd-tmpfiles: the paths of
+/// `d`/`D` lines in tmpfiles.d snippets shipped in the package itself.
+/// Such a directory is guaranteed to exist with its declared mode and
+/// owner once the package is installed, so charging it as not packaged
+/// is a false positive. Only exact path matches count; other line types
+/// (`e` adjusts an existing directory, `x` ignores, ...) never create.
+fn tmpfiles_created_dirs(pkg: &Pkg) -> std::collections::HashSet<String> {
+    let mut created = std::collections::HashSet::new();
+    for file in &pkg.files {
+        let fname = file.name.as_str();
+        if pkg.ghost_files.iter().any(|g| g == fname) {
+            continue;
+        }
+        if !fname.starts_with("/usr/lib/tmpfiles.d/")
+            && !fname.starts_with("/etc/tmpfiles.d/")
+            && !fname.starts_with("/run/tmpfiles.d/")
+        {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&file.path) else {
+            continue;
+        };
+        for raw_line in content.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut fields = line.split_whitespace();
+            let (Some(kind), Some(path)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            // The type letter may carry modifier suffixes (`d-`, `D!`).
+            if matches!(kind.chars().next(), Some('d') | Some('D')) {
+                created.insert(path.to_string());
+            }
+        }
+    }
+    created
+}
+
 /// The parent directory of a log file path.
 fn parent_dir(path: &str) -> String {
     match path.rfind('/') {
@@ -131,6 +222,11 @@ impl Check for LogrotateCheck {
         // so the explicit sort is parity, not a divergence.
         let mut sorted: Vec<&String> = dirs.keys().collect();
         sorted.sort();
+        let tmpfiles_dirs = if dirs.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            tmpfiles_created_dirs(pkg)
+        };
         for dir in sorted {
             let owners = &dirs[dir];
             let Some(pkgfile) = pkg.files.iter().find(|f| f.name == *dir) else {
@@ -138,13 +234,21 @@ impl Check for LogrotateCheck {
                 // so the not-packaged finding is a false positive for it.
                 // The exemption is scoped to that finding only; a packaged
                 // /var/log still gets the user-writable check below.
-                if !is_exempt_log_dir(dir) {
+                // The judged (literal) directory decides: a glob or quoted
+                // artefact is satisfied by its literal directory being
+                // packaged, and any judged directory the package creates
+                // via its own tmpfiles.d snippets is provided as well.
+                let judged = judged_log_dir(dir);
+                let satisfied = is_exempt_log_dir(&judged)
+                    || pkg.files.iter().any(|f| f.name == judged)
+                    || tmpfiles_dirs.contains(&judged);
+                if !satisfied {
                     add_info(
                         out,
                         Level::Error,
                         pkg,
                         "logrotate-log-dir-not-packaged",
-                        &[dir],
+                        &[&judged],
                     );
                 }
                 continue;
@@ -410,6 +514,163 @@ mod tests {
         let mut check = LogrotateCheck::new(&config);
         check.check_binary(&pkg, &config, &mut out);
         out.results().iter().map(|(_, line)| line.clone()).collect()
+    }
+
+    #[test]
+    fn judged_log_dir_reduces_artefacts() {
+        // Plain dirs pass through untouched.
+        assert_eq!(judged_log_dir("/var/log/app"), "/var/log/app");
+        assert_eq!(judged_log_dir("/var/log"), "/var/log");
+        // A quoted path keeps only its leading quote after parent_dir.
+        assert_eq!(judged_log_dir("\"/var/log/i2pd"), "/var/log/i2pd");
+        // Trailing glob components drop to the longest literal ancestor.
+        assert_eq!(
+            judged_log_dir("/var/log/pacemaker/bundles/*"),
+            "/var/log/pacemaker/bundles"
+        );
+        assert_eq!(
+            judged_log_dir("/var/log/radius/radacct/*"),
+            "/var/log/radius/radacct"
+        );
+        assert_eq!(judged_log_dir("/var/log/*"), "/var/log");
+        assert_eq!(judged_log_dir("/var/log/*/sub"), "/var/log");
+    }
+
+    /// Run `LogrotateCheck::check_binary` over a package with one logrotate
+    /// config plus caller-supplied extra files (name, content, mode).
+    /// Returns the rendered lines.
+    fn run_logrotate_with_extras(conf_content: &str, extras: &[(&str, &str, u32)]) -> Vec<String> {
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
+        let conf = dir.join("app");
+        std::fs::write(&conf, conf_content).expect("write conf");
+        let mut files = vec![PkgFile {
+            name: "/etc/logrotate.d/app".to_string(),
+            path: conf.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        }];
+        for (i, (name, content, mode)) in extras.iter().enumerate() {
+            let fpath = dir.join(format!("extra{i}"));
+            std::fs::write(&fpath, content).expect("write extra");
+            files.push(PkgFile {
+                name: name.to_string(),
+                path: fpath.to_string_lossy().into_owned(),
+                mode: *mode,
+                ..Default::default()
+            });
+        }
+
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = crate::pkg::Pkg::open(&rpm, dir, true).expect("open fixture pkg");
+        pkg.name = "logrotate-test".to_string();
+        pkg.files = files;
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = LogrotateCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().iter().map(|(_, line)| line.clone()).collect()
+    }
+
+    fn not_packaged_lines(rendered: &[String]) -> Vec<&String> {
+        rendered
+            .iter()
+            .filter(|l| l.contains("logrotate-log-dir-not-packaged"))
+            .collect()
+    }
+
+    /// A two-level glob pattern derives a "directory" ending in a glob
+    /// component; when the literal ancestor is packaged the stanza is
+    /// satisfied and nothing fires (the pre-fix code charged the glob
+    /// string, which no package can ever ship).
+    #[test]
+    fn glob_pattern_with_packaged_ancestor_is_satisfied() {
+        let rendered = run_logrotate_with_extras(
+            "/var/log/app/bundles/*/app.log {\n  weekly\n}\n",
+            &[("/var/log/app/bundles", "", 0o40755)],
+        );
+        assert!(
+            not_packaged_lines(&rendered).is_empty(),
+            "packaged literal ancestor must satisfy: {rendered:?}"
+        );
+    }
+
+    /// The same pattern with the ancestor unpackaged still fires, but on
+    /// the literal directory a maintainer can actually package.
+    #[test]
+    fn glob_pattern_with_unpackaged_ancestor_fires_on_literal_dir() {
+        let rendered =
+            run_logrotate_with_extras("/var/log/app/bundles/*/app.log {\n  weekly\n}\n", &[]);
+        let hits = not_packaged_lines(&rendered);
+        assert_eq!(hits.len(), 1, "{rendered:?}");
+        assert!(
+            hits[0].ends_with("logrotate-log-dir-not-packaged /var/log/app/bundles"),
+            "unexpected charge: {}",
+            hits[0]
+        );
+    }
+
+    /// A quoted log path (i2pd's shape) charges the unquoted directory.
+    #[test]
+    fn quoted_path_fires_on_unquoted_dir() {
+        let rendered = run_logrotate_with_extras("\"/var/log/app/*.log\" {\n  weekly\n}\n", &[]);
+        let hits = not_packaged_lines(&rendered);
+        assert_eq!(hits.len(), 1, "{rendered:?}");
+        assert!(
+            hits[0].ends_with("logrotate-log-dir-not-packaged /var/log/app"),
+            "unexpected charge: {}",
+            hits[0]
+        );
+    }
+
+    /// A directory created by a tmpfiles.d snippet shipped in the same
+    /// package is provided: no finding. Covers the plain case (krb5,
+    /// usbguard) and, via the quoted config, the i2pd composition.
+    #[test]
+    fn tmpfiles_created_dir_is_satisfied() {
+        for conf in [
+            "/var/log/app/*.log {\n  weekly\n}\n",
+            "\"/var/log/app/*.log\" {\n  weekly\n}\n",
+        ] {
+            let rendered = run_logrotate_with_extras(
+                conf,
+                &[(
+                    "/usr/lib/tmpfiles.d/app.conf",
+                    "d /var/log/app 0755 root root -\n",
+                    0o100644,
+                )],
+            );
+            assert!(
+                not_packaged_lines(&rendered).is_empty(),
+                "conf {conf}: tmpfiles-created dir must satisfy: {rendered:?}"
+            );
+        }
+    }
+
+    /// Near misses must keep firing: a non-creating tmpfiles line type, a
+    /// commented-out creation line, and a creation line for another dir.
+    #[test]
+    fn tmpfiles_near_misses_still_fire() {
+        for content in [
+            "e /var/log/app 0755 root root -\n",
+            "#d /var/log/app 0755 root root -\n",
+            "d /var/log/other 0755 root root -\n",
+        ] {
+            let rendered = run_logrotate_with_extras(
+                "/var/log/app/*.log {\n  weekly\n}\n",
+                &[("/usr/lib/tmpfiles.d/app.conf", content, 0o100644)],
+            );
+            assert_eq!(
+                not_packaged_lines(&rendered).len(),
+                1,
+                "tmpfiles content {content:?} must not satisfy: {rendered:?}"
+            );
+        }
     }
 
     /// The reference's `test_logrotate` (test_logrotate.py:18): the same log
