@@ -10,6 +10,7 @@ use fancy_regex::Regex;
 
 use crate::check::{Check, add_info};
 use crate::checks::fhs::cross_sysroot_matches;
+use crate::checks::files::is_cargo_toml_orig;
 use crate::checks::is_match;
 use crate::config::Config;
 use crate::filter::Filter;
@@ -206,6 +207,7 @@ impl FilelistCheck {
                         Some("ghostfile") => {
                             Some(|p: &Pkg, f: &str| p.ghost_files.iter().any(|g| g == f))
                         }
+                        Some("cargotomlorig") => Some(|_p: &Pkg, f: &str| is_cargo_toml_orig(f)),
                         _ => None,
                     };
                 rules.push(FilelistRule {
@@ -961,6 +963,41 @@ mod tests {
             lines_for(&results, "filelist-forbidden-xinetd-configuration").is_empty(),
             "unexpected: {results:?}"
         );
+    }
+
+    // Tom's ruling, 2026-10-27: `Cargo.toml.orig` is cargo's own
+    // pre-normalization manifest in every published crate tarball,
+    // shipped verbatim by vendored crate sources (rusty_v8 carries
+    // 213) -- exempt through the bundled rule's
+    // `IgnoreFileIf = "cargotomlorig"` arm, the same basename
+    // predicate FilesCheck applies for backup-file-in-package.
+    #[test]
+    fn cargo_toml_orig_is_exempt_from_filelist_forbidden() {
+        let pkg = pkg_with_files(&[
+            "/usr/lib64/crates/rusty_v8/vendor/anyhow/Cargo.toml.orig",
+            "/usr/share/foo/Cargo.toml.orig",
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        assert!(
+            lines_for(&results, "filelist-forbidden").is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn cargo_toml_orig_lookalikes_still_fire_filelist_forbidden() {
+        let pkg = pkg_with_files(&[
+            "/usr/share/foo/package.json.orig",
+            "/usr/share/foo/xCargo.toml.orig",
+            "/usr/share/foo/cargo.toml.orig",
+            "/usr/share/foo/Cargo.toml.orig.gz",
+            "/usr/share/foo/meson.build.orig",
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden");
+        assert_eq!(lines.len(), 5, "unexpected: {results:?}");
     }
 
     // Issue #605: the /opt guard matched the bare "/opt" prefix, so a

@@ -245,6 +245,26 @@ fn backup_regex() -> &'static Regex {
     })
 }
 
+/// Whether `fname`'s basename is exactly `Cargo.toml.orig`: the
+/// pre-normalization manifest cargo writes next to `Cargo.toml` in
+/// every published crate tarball. A package shipping vendored crate
+/// sources verbatim (rusty_v8 carries 213 of them) holds them as
+/// upstream content, not as a maintainer's patch backup, so the exact
+/// basename is exempt from `backup-file-in-package` here and from
+/// `filelist-forbidden` in FilelistCheck, whose `*.orig` arm charges
+/// the same files (the bundled FilelistCheck.toml declares the
+/// exemption there as `IgnoreFileIf = "cargotomlorig"`, implemented
+/// through this predicate). Deliberate divergence from the
+/// reference, which fires on them (Tom's ruling, 2026-10-27). The
+/// match is exact and case-sensitive: a lowercase `cargo.toml.orig`,
+/// a longer name the string merely ends (`xCargo.toml.orig`), a
+/// suffixed name (`Cargo.toml.orig2`, `Cargo.toml.orig.gz`) and
+/// other manifests' `.orig` files (`meson.build.orig`) are not
+/// cargo's artifact and keep firing in both checks.
+pub(crate) fn is_cargo_toml_orig(fname: &str) -> bool {
+    fname.rsplit('/').next() == Some("Cargo.toml.orig")
+}
+
 static KERNEL_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn kernel_package_regex() -> &'static Regex {
     KERNEL_PACKAGE_REGEX.get_or_init(|| {
@@ -4086,7 +4106,7 @@ impl FilesCheck {
     }
 
     fn check_file_backup_file_in_package(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        if is_match(backup_regex(), fname) {
+        if is_match(backup_regex(), fname) && !is_cargo_toml_orig(fname) {
             add_info(out, Level::Error, pkg, "backup-file-in-package", &[fname]);
         }
     }
@@ -11925,6 +11945,63 @@ mod tests {
             lines[0].contains("/usr/share/foo/file.orig.gz"),
             "the compressed .orig charges: {}",
             lines[0]
+        );
+    }
+
+    #[test]
+    fn cargo_toml_orig_basename_match_is_exact() {
+        for path in [
+            "/usr/lib64/crates/rusty_v8/vendor/anyhow/Cargo.toml.orig",
+            "/Cargo.toml.orig",
+            "Cargo.toml.orig",
+        ] {
+            assert!(is_cargo_toml_orig(path), "must exempt {path}");
+        }
+        for path in [
+            // Case matters: cargo writes exactly `Cargo.toml.orig`.
+            "/usr/share/foo/cargo.toml.orig",
+            "/usr/share/foo/CARGO.TOML.ORIG",
+            // The string as the tail of a longer name is not the basename.
+            "/usr/share/foo/xCargo.toml.orig",
+            // Suffixed names are not the plain artifact.
+            "/usr/share/foo/Cargo.toml.orig2",
+            "/usr/share/foo/Cargo.toml.orig.gz",
+            "/usr/share/foo/Cargo.toml.orig.bak",
+            // Other manifests' backups stay ordinary patch litter.
+            "/usr/share/foo/meson.build.orig",
+            "/usr/share/foo/Makefile.orig",
+            "/usr/share/foo/package.json.orig",
+            "/usr/share/foo/Cargo.toml",
+        ] {
+            assert!(!is_cargo_toml_orig(path), "must not exempt {path}");
+        }
+    }
+
+    #[test]
+    fn backup_file_in_package_exempts_cargo_toml_orig_only() {
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile(
+                "/usr/lib64/crates/vendored/anyhow/Cargo.toml.orig",
+                0o100644,
+                71,
+            ),
+            mkfile("/usr/share/foo/package.json.orig", 0o100644, 72),
+            mkfile("/usr/share/foo/xCargo.toml.orig", 0o100644, 73),
+        ]);
+        let results = run_check_binary(&pkg);
+        let lines: Vec<&String> = results
+            .iter()
+            .filter(|(n, _)| n == "backup-file-in-package")
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(lines.len(), 2, "unexpected: {results:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("package.json.orig")),
+            "package.json.orig still charges: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("xCargo.toml.orig")),
+            "xCargo.toml.orig still charges: {lines:?}"
         );
     }
 

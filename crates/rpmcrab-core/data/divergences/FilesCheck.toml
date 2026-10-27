@@ -765,3 +765,10 @@ check = "no-manual-page-for-binary"
 kind = "behaviour"
 reason = "Deliberate: the port credits a bindir name documented under a version-affixed twin name: the package ships the man page for <exe>-<version> (the flavour-suffixed pages parallel-installable toolchains ship, e.g. the Python singlespec abimap-3.13.1 for the alternatives-managed abimap), or the binary itself is the version-suffixed name of a documented tool (luajit-2.1.1756211046 for luajit). A version tail is at least two dot-separated numeric components, so single-suffix names (ps2ps2, gio-querymodules-64, stunnel3) keep firing. The reference (FilesCheck.py:559-564) consults only its man_basenames set and fires on every such name (verified against rpmlint 2.10.0 on the Factory corpus representatives)."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "backup-file-in-package"
+kind = "behaviour"
+reason = "The reference fires backup-file-in-package on a file named Cargo.toml.orig, the pre-normalization manifest cargo writes next to Cargo.toml in every published crate tarball. A package shipping vendored crate sources verbatim holds those files as upstream content, not as a maintainer's patch backup, so the port exempts the exact basename (case-sensitive: a lowercase cargo.toml.orig, a longer name the string merely ends, a suffixed name such as Cargo.toml.orig.gz and other manifests' .orig files all still fire). FilelistCheck's filelist-forbidden, whose *.orig arm charges the same files, applies the same exemption through the shared is_cargo_toml_orig predicate (Tom's ruling, 2026-10-27). Measured on the Factory corpus (header census of all 51,589 RPMs; the 16 firing packages plus a 58-package near-miss/random control set scanned with the pristine and patched binaries under an isolated config): backup-file-in-package 333 E -> 120 E and filelist-forbidden 331 E -> 118 E; the removed set in each tag is exactly rusty_v8's 213 Cargo.toml.orig files, 426 findings across both tags, with zero other findings changed in the firing set and the control set unchanged."
+since = "0.4.1"
