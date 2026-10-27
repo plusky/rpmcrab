@@ -310,9 +310,9 @@ fn buildconfig_rpath_regex() -> &'static Regex {
     //    (e.g. `'--disable-rpath'` in php-config's recorded configure
     //    command line): part of a longer word, not a standalone flag. The
     //    `-rpath` arm must start a token: it must not be preceded by a word
-    //    character or a hyphen, and must not continue as `-link`.
+    //    character, and must not continue as `-link`.
     BUILDCONFIG_RPATH_REGEX.get_or_init(|| {
-        Regex::new(r"(?:(?<![\w-])-rpath(?!-link\b)\b|Wl,-R\b)").expect("static regex")
+        Regex::new(r"(?:(?<![\w])-rpath(?!-link)\b|Wl,-R\b)").expect("static regex")
     })
 }
 
@@ -10636,18 +10636,25 @@ mod tests {
                     0o100644,
                     "Libs: -rpath=/usr/lib64 -lfoo\n",
                 ),
+                (
+                    "/usr/lib64/pkgconfig/longflag.pc",
+                    0o100644,
+                    "Libs: -Wl,--rpath,/usr/lib64 -lfoo\n",
+                ),
             ],
         );
         let results = run_check_binary(&pkg);
         let hits = rpath_findings(&results);
-        assert_eq!(hits.len(), 4, "unexpected: {results:?}");
+        assert_eq!(hits.len(), 5, "unexpected: {results:?}");
     }
 
     #[test]
     fn rpath_in_buildconfig_ignores_rpath_link() {
         // -rpath-link is the link editor's link-time search path for
         // secondary dependencies; it is never recorded in the output, so
-        // no rpath is introduced into dependent packages.
+        // no rpath is introduced into dependent packages. A token that
+        // merely continues as the `-link` prefix (`-rpath-linkfoo`) is
+        // quiet for the same reason.
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let pkg = buildconfig_pkg(
             &dir,
@@ -10661,6 +10668,11 @@ mod tests {
                     "/usr/lib64/pkgconfig/linkonly.pc",
                     0o100644,
                     "Libs: -rpath-link /usr/lib64 -lfoo\n",
+                ),
+                (
+                    "/usr/lib64/pkgconfig/linkfoo.pc",
+                    0o100644,
+                    "Libs: -rpath-linkfoo /usr/lib64 -lfoo\n",
                 ),
             ],
         );
