@@ -4587,12 +4587,20 @@ impl FilesCheck {
             // credit. The test runs on the verbatim normalised target:
             // a root-level link's `//usr/...` form matches no shipped
             // path, so the class-F parity shape (filesystem's own root
-            // links) keeps firing, as the #547 ledger entry pins. The
-            // reference has no such credit; the divergence is ledgered.
+            // links) keeps firing, as the #547 ledger entry pins. A
+            // target of exactly `/` is the one special case: its
+            // verbatim prefix would be `//`, which no shipped path
+            // starts with, so the prefix is `/` itself. The reference
+            // has no such credit; the divergence is ledgered.
+            let prefix = if abslink == "/" {
+                "/".to_string()
+            } else {
+                format!("{abslink}/")
+            };
             let populated_dir = pkg
                 .files
                 .iter()
-                .any(|f| !f.is_ghost() && f.name.starts_with(&format!("{abslink}/")));
+                .any(|f| !f.is_ghost() && f.name.starts_with(&prefix));
             if !populated_dir
                 && !pkg.files.iter().any(|f| f.name == abslink)
                 && !pkg.req_names.contains(&abslink)
@@ -9891,6 +9899,10 @@ mod tests {
             .filter(|f| f.is_ghost())
             .map(|f| f.name.clone())
             .collect();
+        // The fixture header carries its own Requires; clear them so
+        // a case cannot be satisfied through the req_names escape
+        // instead of the population it means to exercise.
+        pkg.req_names.clear();
         pkg.files = files;
         let (results, _levels) = run_files_check_pkgs(&[pkg], &test_config());
         results.iter().map(|(n, _)| n.clone()).collect()
@@ -9911,16 +9923,54 @@ mod tests {
     }
 
     #[test]
-    fn dangling_relative_ancestor_and_dot_targets_stay_silent() {
+    fn dangling_relative_ancestor_target_stays_silent() {
         // A link to an ancestor of its own tree (`../..`, the ntp
-        // chroot-mirror shape) and a link to `.` (the onednn / X11
-        // shape) name directories the package's own payload creates as
-        // leading directories.
+        // chroot-mirror shape) names a directory the package's own
+        // payload creates as a leading directory.
         let names = dangling_names_for_files(vec![
             symlink("/var/lib/foo/var/lib/foo", "../.."),
             plain_file("/var/lib/foo/drift"),
+        ]);
+        assert_lacks(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_dot_target_stays_silent() {
+        // A link to `.` (the onednn / X11 shape): the directory the
+        // link itself sits in.
+        let names = dangling_names_for_files(vec![
             symlink("/usr/include/mkl-foo", "."),
             plain_file("/usr/include/foo.h"),
+        ]);
+        assert_lacks(&names, "dangling-relative-symlink");
+    }
+
+    #[test]
+    fn dangling_relative_lone_ancestor_and_dot_links_stay_silent() {
+        // Lone-link pins: with no other payload at all, an ancestor
+        // or dot link still resolves -- installing the link creates
+        // its target as a leading directory of the link's own path,
+        // so the link entry itself is the population evidence.
+        for files in [
+            vec![symlink("/var/lib/foo/var/lib/foo", "../..")],
+            vec![symlink("/usr/include/mkl-foo", ".")],
+        ] {
+            let names = dangling_names_for_files(files);
+            assert_lacks(&names, "dangling-relative-symlink");
+        }
+    }
+
+    #[test]
+    fn dangling_relative_root_target_stays_silent() {
+        // A link whose normalised target is `/` itself: every
+        // shipped path is below the root, so the package's payload
+        // populates it. (The verbatim prefix would be `//`, which no
+        // shipped path starts with; the `//usr/...` target form of
+        // the root-link parity pin is a different shape and still
+        // fires.)
+        let names = dangling_names_for_files(vec![
+            symlink("/usr/share/foo/rootlink", "../../.."),
+            plain_file("/usr/share/foo/data.txt"),
         ]);
         assert_lacks(&names, "dangling-relative-symlink");
     }
