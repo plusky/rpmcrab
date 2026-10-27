@@ -939,16 +939,18 @@ impl ReadelfInfo {
     /// no version component: the shape of a module built to be loaded
     /// by path -- application plugins (slurm, apache, collectd),
     /// interpreter extension modules, VirtualBox ring-0 payloads --
-    /// whose build stamps the module's own name as its SONAME. Such
-    /// an object is never DT_NEEDED-linked under that name (verified
-    /// over the Factory corpus: no package records a DT_NEEDED on any
-    /// of these names) and resolves its undefined symbols against the
-    /// host process, so an empty DT_NEEDED states nothing. A versioned
-    /// SONAME (`lib....so.<N>`) is a library ABI name instead: it
-    /// stays checked even when it equals the file name, and so does a
-    /// versioned SONAME carried by a longer file name (the genuine
-    /// `libfrrfpm_pb.so.0` in `libfrrfpm_pb.so.0.0.0` shape, which
-    /// other packages do DT_NEEDED-link).
+    /// whose build stamps the module's own name as its SONAME. The
+    /// credit is judged on the file's basename alone, at any location.
+    /// Such an object is never DT_NEEDED-linked under that name
+    /// (verified over the Factory corpus: no package records a
+    /// DT_NEEDED on any of these names) and resolves its undefined
+    /// symbols against the host process, so an empty DT_NEEDED states
+    /// nothing. A versioned SONAME (`lib....so.<N>`) is a library ABI
+    /// name instead: it stays checked even when it equals the file
+    /// name, and so does a versioned SONAME carried by a longer file
+    /// name (the genuine `libfrrfpm_pb.so.0` in
+    /// `libfrrfpm_pb.so.0.0.0` shape, which other packages do
+    /// DT_NEEDED-link).
     fn soname_is_own_module_name(&self, file_name: &str) -> bool {
         let Some(soname) = self.soname.as_deref() else {
             return false;
@@ -981,17 +983,25 @@ fn is_rust_symbol(name: &str) -> bool {
 }
 
 /// Whether a DT_SONAME carries a library ABI version component: a
-/// `.so.` immediately followed by a digit (`libfoo.so.0`). An
-/// unversioned module name (`mod_foo.so`, `plugin.so`, `VMMR0.r0`)
-/// has none.
+/// `.so.` immediately followed by a digit (`libfoo.so.0`), or one of
+/// the `validso_regex` tail forms -- a digit immediately before the
+/// final `.so`, the dash and stem versions `libdb-4.8.so`,
+/// `libtcl8.6.so` and `libfoo-1.so` the soname validity gate also
+/// treats as versioned. An unversioned module name (`mod_foo.so`,
+/// `plugin.so`, `VMMR0.r0`, `libfoo.so0`) has none.
 fn soname_has_version_component(soname: &str) -> bool {
+    if validso_regex().is_match(soname).unwrap_or(false) {
+        return true;
+    }
     let mut rest = soname;
     while let Some(idx) = rest.find(".so.") {
         let after = &rest[idx + 4..];
         if after.as_bytes().first().is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
-        rest = after;
+        // Advance one byte past this occurrence's dot, so an
+        // overlapping `.so.` (`x.so.so.1`) is still examined.
+        rest = &rest[idx + 1..];
     }
     false
 }
@@ -6114,6 +6124,49 @@ mod tests {
                 0,
             )],
             "/usr/lib64/libfrrfpm_pb.so.0.0.0",
+        );
+        let lines = lines_for(&results, "shared-library-without-dependency-information");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+    }
+
+    #[test]
+    fn soname_version_component_shapes() {
+        // The `.so.<digit>` substring form, overlaps included.
+        assert!(soname_has_version_component("libfoo.so.0"));
+        assert!(soname_has_version_component("libfoo.so.1.2"));
+        assert!(soname_has_version_component("x.so.so.1"));
+        // The validso tail forms: dash and stem versions.
+        assert!(soname_has_version_component("libdb-4.8.so"));
+        assert!(soname_has_version_component("libtcl8.6.so"));
+        assert!(soname_has_version_component("libfoo-1.so"));
+        // Unversioned module names.
+        assert!(!soname_has_version_component("mod_foo.so"));
+        assert!(!soname_has_version_component("plugin.so"));
+        assert!(!soname_has_version_component("VMMR0.r0"));
+        assert!(!soname_has_version_component("libfoo.so0"));
+        assert!(!soname_has_version_component("certmgr_script.so"));
+    }
+
+    #[test]
+    fn shlib_without_dependency_information_fires_dash_versioned_own_name() {
+        // Near miss under the widened predicate: the SONAME equals
+        // the file name, but its dash version is a version component
+        // (the shape the soname validity gate treats as versioned),
+        // so the own-name credit does not reach it.
+        let results = shlib_libdep_results_named(
+            "dashverown",
+            false,
+            None,
+            true,
+            Some("libdb-4.8.so"),
+            &[(
+                "external_func",
+                goblin::elf::sym::STB_GLOBAL,
+                goblin::elf::sym::STT_FUNC,
+                0,
+            )],
+            "/usr/lib64/libdb-4.8.so",
         );
         let lines = lines_for(&results, "shared-library-without-dependency-information");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
