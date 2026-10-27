@@ -55,10 +55,9 @@ Provenance, verified against the pinned reference (`84848c0`):
   device/world-writable descriptions separately, but the `#SUFFIX#`
   references stay).
 - `TagsCheck.toml` — the pinned reference file, with the `useless-provides`
-  entry reworded per upstream rpmlint#427 (the versioned and unversioned
-  symbols are provided at once claim is not always accurate: duplicate
-  versioned provides trigger the check too), staged ahead of the reference
-  per the fix-in-port rule; minus the `non-standard-group`,
+  entry reworded per upstream rpmlint#427 (scoped to the pair the check
+  fires on: a name in both unversioned and versioned form), staged ahead
+  of the reference per the fix-in-port rule; minus the `non-standard-group`,
   `no-group-tag`, `devel-package-with-non-devel-group`,
   `no-major-in-name`, `incoherent-version-in-changelog`,
   `invalid-buildhost`, `invalid-packager`, `invalid-version`,

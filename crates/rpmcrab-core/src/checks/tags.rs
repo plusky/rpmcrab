@@ -1536,21 +1536,66 @@ impl TagsCheck {
     }
 
     fn check_useless_provides(&self, pkg: &Pkg, out: &mut Filter) {
-        let mut no_version: std::collections::BTreeSet<&str> = Default::default();
-        let mut versioned: std::collections::BTreeSet<&str> = Default::default();
+        // EVRs per name, as the parsed (epoch, version, release) tuple
+        // (both sides were built with `string_to_version`) — no
+        // `evr_string()` allocation. The check fires only when a name
+        // appears in both unversioned and versioned form.
+        type Evr<'a> = (Option<i64>, Option<&'a str>, Option<&'a str>);
+        fn evr_of(prov: &DepInfo) -> Evr<'_> {
+            (prov.epoch, prov.version.as_deref(), prov.release.as_deref())
+        }
+        fn is_unversioned(evr: &Evr) -> bool {
+            evr.0.is_none() && evr.1.is_none()
+        }
+        let mut pkg_evrs: std::collections::BTreeMap<&str, std::collections::BTreeSet<Evr>> =
+            Default::default();
         for prov in &pkg.provides {
             if prov.name.starts_with("debuginfo(") {
                 continue;
             }
-            if prov.evr_string().is_empty() {
-                no_version.insert(prov.name.as_str());
-            } else {
-                versioned.insert(prov.name.as_str());
+            pkg_evrs
+                .entry(prov.name.as_str())
+                .or_default()
+                .insert(evr_of(prov));
+        }
+        let candidates: Vec<&str> = pkg_evrs
+            .iter()
+            .filter(|(_, evrs)| {
+                evrs.iter().any(is_unversioned) && evrs.iter().any(|e| !is_unversioned(e))
+            })
+            .map(|(name, _)| *name)
+            .collect();
+        if candidates.is_empty() {
+            // No duplicated name: skip the FILEPROVIDE walk entirely.
+            return;
+        }
+        // Generator attribution, from the header's per-file provides
+        // (FILEPROVIDE): the dependency generators record the provides
+        // they derived from each shipped file. Attribution is per
+        // (name, EVR): a pair is the generator's doing only when every
+        // EVR the package carries for the name is file-covered, so a
+        // hand-written `perl(Foo) = 2.0` alongside a generated
+        // `perl(Foo) = 1.0` stays an error. Per Tom's ruling
+        // (2026-10-27) generator pairs are warnings; a duplicate
+        // involving a manual provide stays an error.
+        let mut gen_evrs: std::collections::BTreeMap<&str, std::collections::BTreeSet<Evr>> =
+            Default::default();
+        for file in &pkg.files {
+            for prov in &file.provides {
+                gen_evrs
+                    .entry(prov.name.as_str())
+                    .or_default()
+                    .insert(evr_of(prov));
             }
         }
-        for prov in no_version {
-            if versioned.contains(prov) {
-                add_info(out, Level::Error, pkg, "useless-provides", &[prov]);
+        for name in candidates {
+            let generated = gen_evrs
+                .get(name)
+                .is_some_and(|file_evrs| pkg_evrs[name].iter().all(|evr| file_evrs.contains(evr)));
+            if generated {
+                add_info(out, Level::Warning, pkg, "useless-provides", &[name]);
+            } else {
+                add_info(out, Level::Error, pkg, "useless-provides", &[name]);
             }
         }
     }
@@ -3746,6 +3791,140 @@ mod rich_dep_emission_tests {
             hits[0].1
         );
         assert!(hits[0].1.ends_with(" selfprov"), "line: {}", hits[0].1);
+    }
+
+    fn provides_file(path: &str, provides: Vec<DepInfo>) -> crate::pkg::pkgfile::PkgFile {
+        crate::pkg::pkgfile::PkgFile {
+            name: path.to_string(),
+            path: path.to_string(),
+            provides,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn useless_provides_generator_pair_is_warning() {
+        // Both forms of the duplicated name are attributed to shipped
+        // files (FILEPROVIDE): the pair is the dependency generator's
+        // doing, so it is a warning (Tom, 2026-10-27). The detail stays
+        // the name only, so severity pairing against the reference
+        // (same detail at E) works.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.provides = vec![plain_dep("perl(Foo)"), versioned_dep("perl(Foo)", "1.0")];
+        pkg.files = vec![
+            provides_file(
+                "/usr/lib/perl5/Foo.pm",
+                vec![versioned_dep("perl(Foo)", "1.0")],
+            ),
+            provides_file("/usr/lib/perl5/Foo/Bar.pm", vec![plain_dep("perl(Foo)")]),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "useless-provides");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": W: useless-provides"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.ends_with(" perl(Foo)"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn useless_provides_manual_evr_alongside_generated_stays_error() {
+        // The generated pair (unversioned + = 1.0) is file-covered, but
+        // the package also carries a hand-written = 2.0 for the same
+        // name: a duplicate involving a manual provide stays an error.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.provides = vec![
+            plain_dep("perl(Foo)"),
+            versioned_dep("perl(Foo)", "1.0"),
+            versioned_dep("perl(Foo)", "2.0"),
+        ];
+        pkg.files = vec![
+            provides_file(
+                "/usr/lib/perl5/Foo.pm",
+                vec![versioned_dep("perl(Foo)", "1.0")],
+            ),
+            provides_file("/usr/lib/perl5/Foo/Bar.pm", vec![plain_dep("perl(Foo)")]),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "useless-provides");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: useless-provides"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.ends_with(" perl(Foo)"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn useless_provides_evr_mismatch_stays_error() {
+        // Boundary pin: the versioned package EVR (= 2.0) is not the
+        // file-covered EVR (= 1.0), so name-only attribution must not
+        // downgrade the finding.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.provides = vec![plain_dep("perl(Foo)"), versioned_dep("perl(Foo)", "2.0")];
+        pkg.files = vec![
+            provides_file(
+                "/usr/lib/perl5/Foo.pm",
+                vec![versioned_dep("perl(Foo)", "1.0")],
+            ),
+            provides_file("/usr/lib/perl5/Foo/Bar.pm", vec![plain_dep("perl(Foo)")]),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "useless-provides");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: useless-provides"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.ends_with(" perl(Foo)"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn useless_provides_unattributed_unversioned_stays_error() {
+        // Only the versioned form is file-attributed: the unversioned
+        // form is a hand-written provide, so the pair stays an error
+        // even though the name looks like a generator name.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.provides = vec![plain_dep("perl(Foo)"), versioned_dep("perl(Foo)", "1.0")];
+        pkg.files = vec![provides_file(
+            "/usr/lib/perl5/Foo.pm",
+            vec![versioned_dep("perl(Foo)", "1.0")],
+        )];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "useless-provides");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: useless-provides"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.ends_with(" perl(Foo)"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn useless_provides_unattributed_versioned_stays_error() {
+        // Only the unversioned form is file-attributed (the generator
+        // extracted no version from the shipped files): the versioned
+        // form is hand-written, so the pair stays an error.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.provides = vec![plain_dep("perl(Foo)"), versioned_dep("perl(Foo)", "1.0")];
+        pkg.files = vec![provides_file(
+            "/usr/lib/perl5/Foo.pm",
+            vec![plain_dep("perl(Foo)")],
+        )];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "useless-provides");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(
+            hits[0].1.contains(": E: useless-provides"),
+            "line: {}",
+            hits[0].1
+        );
+        assert!(hits[0].1.ends_with(" perl(Foo)"), "line: {}", hits[0].1);
     }
 
     #[test]

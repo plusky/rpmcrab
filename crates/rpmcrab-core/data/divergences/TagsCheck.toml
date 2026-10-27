@@ -6,8 +6,15 @@
 case = "global"
 check = "TagsCheck"
 kind = "detail"
-reason = "useless-provides carries the upstream rpmlint#427 reword ahead of the pinned reference, per the fix-in-port rule: the reference text claims versioned and unversioned symbols are provided at once, which is not always accurate (duplicate versioned provides trigger the check too). The check behaviour and level are unchanged. Provenance: crates/rpmcrab-core/data/descriptions/README.md."
+reason = "useless-provides carries the upstream rpmlint#427 reword ahead of the pinned reference, per the fix-in-port rule. The staged text is scoped to what the check fires on — a name in both unversioned and versioned form only. The 2026-10-27 reword (Tom's ruling) also drops the earlier text's claim that the redundant provide is manual (false for dependency-generator pairs, where no manual provide exists) and documents the level split for those pairs; the split itself is ledgered separately as a severity divergence. Provenance: crates/rpmcrab-core/data/descriptions/README.md."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "useless-provides"
+kind = "severity"
+reason = "The reference reports every useless-provides finding at error. rpmcrab reports a warning when every EVR the package carries for the duplicated name is attributed to shipped files in the header's per-file provides (FILEPROVIDE), i.e. the pair was produced by a dependency generator (a module declared in several shipped files, carrying a version in one of them and none in another); any package EVR for the name that no file covers is a hand-written provide and the finding stays an error. The detail stays the name only, so this severity entry pairs against the reference finding. Heuristic limit: attribution is a set over (name, EVR), not a count — a hand-written provide exactly duplicating a generated (name, EVR) cannot be told apart and would still warn. Measured on the Factory corpus: 30 of the 34 findings are generator pairs (all perl), 4 involve a manual provide. Tom's ruling, 2026-10-27."
+since = "0.4.1"
 
 [[divergence]]
 case = "global"
