@@ -160,6 +160,13 @@ mod tests {
         }
     }
 
+    fn symlink(name: &str) -> PkgFile {
+        PkgFile {
+            mode: 0o120777,
+            ..regular(name)
+        }
+    }
+
     fn selinux_pkg_with(files: Vec<PkgFile>) -> Pkg {
         let mut pkg = fixture_pkg();
         pkg.name = "selinux-policy-foo".to_string();
@@ -340,6 +347,13 @@ mod tests {
     #[test]
     fn directory_if_entry_is_quiet() {
         let pkg = selinux_pkg_with(vec![directory("/usr/share/selinux/packages/foo.if")]);
+        let results = run(&pkg);
+        assert!(results.is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn symlink_if_file_is_quiet() {
+        let pkg = selinux_pkg_with(vec![symlink("/usr/share/selinux/packages/foo.if")]);
         let results = run(&pkg);
         assert!(results.is_empty(), "{results:?}");
     }

@@ -1269,17 +1269,18 @@ mod tests {
     #[test]
     fn malformed_non_secure_profiles_are_skipped() {
         // The reference never reads easy/paranoid: a malformed file at
-        // either level (a plain bad line in easy; an undeclared
-        // variable — one of the reference's raises — in paranoid) is
-        // skipped instead of aborting construction, the secure
-        // composition still loads, and a packaged pair the malformed
-        // easy file would have carried stays an error.
+        // either level (a bare `:package:` line in easy, which the
+        // lenient loader rejects like any malformed line; an
+        // undeclared variable — one of the reference's raises — in
+        // paranoid) is skipped instead of aborting construction, the
+        // secure composition still loads, and a packaged pair the
+        // malformed easy file would have carried stays an error.
         let tmp = tempfile::tempdir().expect("tmpdir");
         let dir = tmp.path();
         std::fs::write(dir.join("permissions"), "/usr/bin/x root:root 0755\n").expect("write");
         std::fs::write(
             dir.join("permissions.easy"),
-            "/usr/bin/x root:trusted 4750\nthis is not a valid profile line\n",
+            ":package:\n/usr/bin/x root:trusted 4750\n",
         )
         .expect("write");
         std::fs::write(
@@ -1942,6 +1943,51 @@ mod tests {
         assert!(check.perms.contains_key("/usr/bin/runme"));
         assert!(check.perms.contains_key("/usr/sbin/runme"));
         assert!(check.profiles_read, "a parsed profile was read");
+    }
+
+    #[test]
+    fn new_with_loads_wellformed_other_profiles() {
+        // The demotion's profiles, loaded end to end: well-formed
+        // scratch easy/paranoid files compose into `other_profiles`
+        // (the demotion unit tests inject that field directly), and
+        // a packaged pair matching the loaded easy composition
+        // demotes through it.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
+        std::fs::write(dir.join("permissions"), "/usr/bin/x root:root 0755\n").expect("write");
+        std::fs::write(
+            dir.join("permissions.easy"),
+            "/usr/bin/x root:trusted 4750\n",
+        )
+        .expect("write");
+        std::fs::write(
+            dir.join("permissions.paranoid"),
+            "/usr/bin/x root:root 0700\n",
+        )
+        .expect("write");
+        let base = dir.to_str().unwrap().to_string();
+        let mut check =
+            SUIDPermissionsCheck::new_with("/nonexistent/rpmcrab-variables.conf", &[base.as_str()]);
+        assert!(check.profiles_read, "the secure composition was read");
+        let easy = check
+            .other_profiles
+            .iter()
+            .find(|(level, _)| *level == "easy")
+            .map(|(_, entries)| entries)
+            .expect("the easy composition loaded");
+        assert_eq!(easy["/usr/bin/x"][0].mode, 0o4750);
+        assert_eq!(easy["/usr/bin/x"][0].group, "trusted");
+
+        let mut pkg = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.files = vec![pkgfile_owned("/usr/bin/x", 0o1004750, "root", "trusted")];
+        let results = run_check_levels(&pkg, &mut check);
+        let (level, line) = finding(&results, "permissions-incorrect").expect("mode finding");
+        assert_eq!(level, Level::Warning, "{results:?}");
+        assert!(line.ends_with(" (matches the easy profile)"), "{line}");
+        let (level, line) =
+            finding(&results, "permissions-incorrect-owner").expect("owner finding");
+        assert_eq!(level, Level::Warning, "{results:?}");
+        assert!(line.ends_with(" (matches the easy profile)"), "{line}");
     }
 
     #[test]
