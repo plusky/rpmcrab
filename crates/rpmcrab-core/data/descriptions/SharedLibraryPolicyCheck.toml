@@ -41,3 +41,14 @@ version constraint. The Shared Library Policy asks for a properly versioned
 requires on the shared library package, so that installing the -devel package
 cannot pull in a library generation it was not built against.
 """
+shlib-policy-truncated-soname-path="""
+Your package ships a versioned library path that is a truncation of the
+library's SONAME (for example the path libfoo.so.1 next to the library whose
+SONAME is libfoo.so.1.2). The short path is harmless while this SONAME
+generation is the only one, but the package for the next generation ships
+the same short path, and the two packages then conflict on it and cannot be
+installed in parallel. Delete the short link in %install; where the short
+path is the library file itself, install the library under its SONAME
+instead; if a short name has to stay, ship it from a package whose name
+does not carry the SONAME generation.
+"""
