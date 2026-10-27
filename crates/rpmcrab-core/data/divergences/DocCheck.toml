@@ -4,7 +4,6 @@
 
 [[divergence]]
 case = "global"
-
 check = "DocCheck"
 kind = "behaviour"
 reason = "package-with-huge-docs is skipped for package names ending in a configured ExemptDocSuffixes entry (default -javadoc). The reference has no such exemption (rpm-software-management/rpmlint#555 is still open) and flags 100%-docs javadoc packages."
