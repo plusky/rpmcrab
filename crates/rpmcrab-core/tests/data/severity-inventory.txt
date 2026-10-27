@@ -250,8 +250,6 @@ pem-private-key = E
 permissions-dir-without-slash = W
 permissions-file-as-dir = W
 permissions-fscaps = E
-permissions-incorrect = E
-permissions-incorrect-owner = E
 permissions-missing-postin = E
 permissions-missing-requires = E
 permissions-missing-verifyscript = W
@@ -381,7 +379,7 @@ zero-perms = W
 zero-perms-ghost = W
 
 [unresolved-sites]
-# count = 43
+# count = 44
 alternatives.rs: add_info( out, level, pkg, "li
 atomic_update.rs: add_info( out, level, pkg, "dir-or-file-outsid
 binaries.rs: add_info( out, info_type, pkg, "unused-direct-
@@ -421,6 +419,7 @@ spec.rs: .info( out, pkg, Level::Warning,
 spec.rs: .info(out, pkg, level, &check, &[])
 spec.rs: spec_add_info(out, level, pkg, pkg.current_linenum.get(), check, details)
 suid_permissions.rs: add_info( out, Level::Error, pkg, diag, &[&format!
+suid_permissions.rs: add_info( out, level, pkg, "permissions-incorr
 tags.rs: add_info( out, Level::Warning, pkg,
 world_writable.rs: add_info(out, level, pkg, check, &refs)
 zip.rs: add_info(out, level, pkg, check, &detail_refs)
