@@ -380,6 +380,15 @@ fn devel_component_regex() -> &'static Regex {
     DEVEL_COMPONENT_REGEX.get_or_init(|| Regex::new(r"(.*)-devel-").expect("static regex"))
 }
 
+/// A package name ending in a `-src` or `-sources` component
+/// (`rust1.98-src`, `erlang27-src`, `sdcc-libc-sources`) declares that
+/// the package ships source -- the same fact the devel suffix
+/// grammar's `source` alternative records in its longer spelling.
+static SRC_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
+fn src_package_regex() -> &'static Regex {
+    SRC_PACKAGE_REGEX.get_or_init(|| Regex::new(r"(.*)-(src|sources)$").expect("static regex"))
+}
+
 static BUILDCONFIGFILE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn buildconfigfile_regex() -> &'static Regex {
     BUILDCONFIGFILE_REGEX
@@ -1888,6 +1897,7 @@ pub struct FilesCheck {
     info_re: Regex,
     devel_re: Regex,
     devel_component_re: Regex,
+    src_package_re: Regex,
     kernel_package_re: Regex,
     debuginfo_package_re: Regex,
     debugsource_package_re: Regex,
@@ -2025,6 +2035,7 @@ impl FilesCheck {
             info_re: info_regex().clone(),
             devel_re: devel_regex().clone(),
             devel_component_re: devel_component_regex().clone(),
+            src_package_re: src_package_regex().clone(),
             kernel_package_re: kernel_package_regex().clone(),
             debuginfo_package_re: debuginfo_package_regex().clone(),
             debugsource_package_re: debugsource_package_regex().clone(),
@@ -2317,11 +2328,14 @@ impl Check for FilesCheck {
         // the same component test TagsCheck applies to its
         // dependency findings, scoped to the devel keyword: a
         // `-debug-` component names a debug flavour of a runtime
-        // package, not a devel package. Provides names keep the
-        // suffix test: a virtual provide carrying the keyword
-        // mid-name carries no such fact.
-        st.devel_pkg =
-            is_match(&self.devel_re, &pkg.name) || is_match(&self.devel_component_re, &pkg.name);
+        // package, not a devel package. A final `-src`/`-sources`
+        // component declares a source package in the shorter
+        // spelling of the suffix grammar's `source` alternative.
+        // Provides names keep the suffix test: a virtual provide
+        // carrying the keyword mid-name carries no such fact.
+        st.devel_pkg = is_match(&self.devel_re, &pkg.name)
+            || is_match(&self.devel_component_re, &pkg.name)
+            || is_match(&self.src_package_re, &pkg.name);
         if !st.devel_pkg {
             for p in &pkg.provides {
                 if is_match(&self.devel_re, &p.name) {
@@ -13858,6 +13872,42 @@ mod tests {
         for name in ["foo-development", "foodevel-bar"] {
             let (mut pkg, _dir) = pkg_with_files(vec![PkgFile {
                 ..mkfile("/usr/include/foo.h", 0o100644, 78)
+            }]);
+            pkg.name = name.to_string();
+            let results = run_check_binary(&pkg);
+            assert!(
+                results
+                    .iter()
+                    .any(|(n, _)| n == "devel-file-in-non-devel-package"),
+                "genuine finding lost for {name}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn devel_file_quiet_in_src_named_package() {
+        // A final -src/-sources component declares a source package
+        // (rust1.98-src, erlang27-src, sdcc-libc-sources): its headers
+        // and sources are the product, not devel files stranded in a
+        // non-devel package.
+        for name in ["rust1.98-src", "erlang27-src", "sdcc-libc-sources"] {
+            let (mut pkg, _dir) = pkg_with_files(vec![PkgFile {
+                ..mkfile("/usr/include/foo.h", 0o100644, 79)
+            }]);
+            pkg.name = name.to_string();
+            let results = run_check_binary(&pkg);
+            assert!(
+                !results
+                    .iter()
+                    .any(|(n, _)| n == "devel-file-in-non-devel-package"),
+                "false positive in source package {name}: {results:?}"
+            );
+        }
+        // Near misses: the component must be exactly src/sources at
+        // the end of the name.
+        for name in ["foo-srcx", "foo-resources", "srcfoo"] {
+            let (mut pkg, _dir) = pkg_with_files(vec![PkgFile {
+                ..mkfile("/usr/include/foo.h", 0o100644, 80)
             }]);
             pkg.name = name.to_string();
             let results = run_check_binary(&pkg);
