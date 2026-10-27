@@ -282,8 +282,10 @@ impl FilelistCheck {
             || (pkg.name.ends_with("-source") && path.starts_with("/usr/src/"))
     }
 
-    /// The FHS-prefix violations, deduplicated to one report per directory.
-    fn fhs_violations(&self, pkg: &Pkg) -> (Vec<String>, Vec<String>) {
+    /// The FHS-prefix violations, deduplicated to one report per
+    /// directory, and the forbidden /opt providers with, per provider,
+    /// whether every entry under it is a directory entry.
+    fn fhs_violations(&self, pkg: &Pkg) -> (Vec<String>, Vec<(String, bool)>) {
         let mut invalid_fhs = std::collections::BTreeSet::new();
         let is_suse = pkg
             .tag_str(librpm::Tag::VENDOR)
@@ -295,27 +297,33 @@ impl FilelistCheck {
         // form at a sanctioned path: a directory or a symlink by
         // mode, or a %ghost by flag. The ghost test is the flag, not
         // the mode - `RPMFILE_GHOST` is orthogonal to the file type,
-        // and a %ghost may carry a regular mode or mode 0.
-        let paths: Vec<(std::borrow::Cow<'_, str>, bool)> = pkg
+        // and a %ghost may carry a regular mode or mode 0. The third
+        // element records whether the entry is a directory entry,
+        // which the /opt provider walk below needs on its own:
+        // suppressible conflates directories with symlinks and
+        // %ghosts, and only a true directory entry counts there.
+        let paths: Vec<(std::borrow::Cow<'_, str>, bool, bool)> = pkg
             .files
             .iter()
             .map(|pkgfile| {
                 let file_type = (pkgfile.mode >> 12) & 0o17;
                 let suppressible = file_type == 4 || file_type == 0o12 || pkgfile.is_ghost();
-                if file_type == 4 {
+                let is_dir = file_type == 4;
+                if is_dir {
                     let mut f = pkgfile.name.clone();
                     f.push('/');
-                    (std::borrow::Cow::Owned(f), suppressible)
+                    (std::borrow::Cow::Owned(f), suppressible, is_dir)
                 } else {
                     (
                         std::borrow::Cow::Borrowed(pkgfile.name.as_str()),
                         suppressible,
+                        is_dir,
                     )
                 }
             })
             .collect();
 
-        for (f, suppressible) in &paths {
+        for (f, suppressible, _) in &paths {
             let f: &str = f;
             if !self.fhs_good_prefix(pkg, f) {
                 // Find the first invalid path component.
@@ -348,7 +356,10 @@ impl FilelistCheck {
         }
         (
             invalid_fhs.into_iter().collect(),
-            Self::invalid_opt_providers(paths.iter().map(|(p, _)| p.as_ref()), is_suse),
+            Self::invalid_opt_providers(
+                paths.iter().map(|(p, _, is_dir)| (p.as_ref(), *is_dir)),
+                is_suse,
+            ),
         )
     }
 
@@ -373,19 +384,29 @@ impl FilelistCheck {
     /// boundary: a longer sibling (`/optical/...`) is not an /opt
     /// payload, and the bare /opt directory itself has no provider to
     /// report. A SUSE-vendor package is exempt for the `suse` and
-    /// `novell` providers.
+    /// `novell` providers. The second element of each pair records
+    /// whether every entry under the provider is a directory entry:
+    /// a dir-only tree is a bare reservation with no payload in it
+    /// (openQA-llm-server's /opt/llm model store) and reports at
+    /// warning level, while any non-directory entry - a regular
+    /// file, a symlink, a fifo - makes it a payload tree, which
+    /// reports at error level.
     fn invalid_opt_providers<'a>(
-        paths: impl IntoIterator<Item = &'a str>,
+        paths: impl IntoIterator<Item = (&'a str, bool)>,
         is_suse: bool,
-    ) -> Vec<String> {
-        let mut invalid_opt = std::collections::BTreeSet::new();
-        for f in paths {
+    ) -> Vec<(String, bool)> {
+        let mut invalid_opt: std::collections::BTreeMap<String, bool> =
+            std::collections::BTreeMap::new();
+        for (f, is_dir) in paths {
             if let Some(rest) = f.strip_prefix("/opt/") {
                 let provider = rest.split('/').next().unwrap_or("");
                 if !provider.is_empty()
                     && !(is_suse && (provider == "suse" || provider == "novell"))
                 {
-                    invalid_opt.insert(format!("/opt/{provider}"));
+                    let dir_only = invalid_opt
+                        .entry(format!("/opt/{provider}"))
+                        .or_insert(true);
+                    *dir_only = *dir_only && is_dir;
                 }
             }
         }
@@ -448,8 +469,12 @@ impl Check for FilelistCheck {
         for f in &invalid_fhs {
             add_info(out, Level::Error, pkg, "filelist-forbidden-fhs23", &[f]);
         }
-        for f in &invalid_opt {
-            add_info(out, Level::Error, pkg, "filelist-forbidden-opt", &[f]);
+        for (f, dir_only) in &invalid_opt {
+            if *dir_only {
+                add_info(out, Level::Warning, pkg, "filelist-forbidden-opt", &[f]);
+            } else {
+                add_info(out, Level::Error, pkg, "filelist-forbidden-opt", &[f]);
+            }
         }
         for d in self.obsolete_mime_dirs(pkg) {
             add_info(out, Level::Warning, pkg, "obsolete-mime-format-dir", &[&d]);
@@ -1128,6 +1153,95 @@ mod tests {
         );
     }
 
+    #[test]
+    fn opt_dir_only_provider_warns() {
+        // A provider tree of nothing but directory entries is a bare
+        // reservation with no payload in it (openQA-llm-server's
+        // /opt/llm model store): it reports once, at warning level.
+        let pkg = pkg_with_modes(&[
+            ("/opt/llm", 0o040755),
+            ("/opt/llm/models", 0o040755),
+            (
+                "/usr/share/containers/systemd/openqa-llm-server.container",
+                0o100644,
+            ),
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-opt");
+        assert_eq!(lines.len(), 1, "lines: {lines:?}");
+        assert!(
+            lines[0].contains("W: filelist-forbidden-opt /opt/llm"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn opt_provider_with_symlink_stays_error() {
+        // One non-directory entry anywhere under the provider makes
+        // it a payload tree: a symlink is not a directory entry.
+        let pkg = pkg_with_modes(&[
+            ("/opt/llm", 0o040755),
+            ("/opt/llm/models", 0o040755),
+            ("/opt/llm/current", 0o120777),
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-opt");
+        assert_eq!(lines.len(), 1, "lines: {lines:?}");
+        assert!(
+            lines[0].contains("E: filelist-forbidden-opt /opt/llm"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn opt_provider_with_deep_payload_file_stays_error() {
+        // A single payload file nested deep under an otherwise
+        // dir-only provider still reports at error level.
+        let pkg = pkg_with_modes(&[
+            ("/opt/llm", 0o040755),
+            ("/opt/llm/models", 0o040755),
+            ("/opt/llm/models/deep/blob.bin", 0o100644),
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-opt");
+        assert_eq!(lines.len(), 1, "lines: {lines:?}");
+        assert!(
+            lines[0].contains("E: filelist-forbidden-opt /opt/llm"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn opt_dir_only_and_payload_providers_split_levels() {
+        // The split is per provider: within one package the dir-only
+        // provider warns while the payload provider errors.
+        let pkg = pkg_with_modes(&[
+            ("/opt/llm", 0o040755),
+            ("/opt/llm/models", 0o040755),
+            ("/opt/acme/bin/tool", 0o100755),
+        ]);
+        let config = Config::default();
+        let results = run(&config, &pkg);
+        let lines = lines_for(&results, "filelist-forbidden-opt");
+        assert_eq!(lines.len(), 2, "lines: {lines:?}");
+        assert!(
+            lines[0].contains("E: filelist-forbidden-opt /opt/acme"),
+            "name, level and detail: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("W: filelist-forbidden-opt /opt/llm"),
+            "name, level and detail: {}",
+            lines[1]
+        );
+    }
+
     fn pkg_with_ghosts(files: &[&str], ghosts: &[&str]) -> Pkg {
         for ghost in ghosts {
             assert!(
@@ -1356,15 +1470,15 @@ mod tests {
         // `novell` providers; any other provider is still reported.
         let providers = FilelistCheck::invalid_opt_providers(
             [
-                "/opt/suse/bin/tool",
-                "/opt/suse/lib/libsuse.so",
-                "/opt/novell/bin/tool",
-                "/opt/acme/bin/tool",
-                "/opt/acme/lib/libacme.so",
+                ("/opt/suse/bin/tool", false),
+                ("/opt/suse/lib/libsuse.so", false),
+                ("/opt/novell/bin/tool", false),
+                ("/opt/acme/bin/tool", false),
+                ("/opt/acme/lib/libacme.so", false),
             ],
             true,
         );
-        assert_eq!(providers, vec!["/opt/acme".to_string()]);
+        assert_eq!(providers, vec![("/opt/acme".to_string(), false)]);
     }
 
     #[test]
@@ -1373,18 +1487,18 @@ mod tests {
         // from any other vendor reports every provider.
         let providers = FilelistCheck::invalid_opt_providers(
             [
-                "/opt/suse/bin/tool",
-                "/opt/novell/bin/tool",
-                "/opt/acme/bin/tool",
+                ("/opt/suse/bin/tool", false),
+                ("/opt/novell/bin/tool", false),
+                ("/opt/acme/bin/tool", false),
             ],
             false,
         );
         assert_eq!(
             providers,
             vec![
-                "/opt/acme".to_string(),
-                "/opt/novell".to_string(),
-                "/opt/suse".to_string()
+                ("/opt/acme".to_string(), false),
+                ("/opt/novell".to_string(), false),
+                ("/opt/suse".to_string(), false)
             ]
         );
     }
