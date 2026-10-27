@@ -5412,6 +5412,12 @@ impl BinariesCheck {
         let host_machines = host_elf_machines(&pkg.arch);
         let foreign_machine =
             !host_machines.is_empty() && !host_machines.contains(&info.elf_machine);
+        // A GHC producer stamp in .comment marks Haskell output the
+        // libHS* signals cannot see: a statically linked runtime
+        // carries no libHS* reference. GHC emits neither
+        // fortification nor canaries for its own code, so both
+        // findings are noise there; the stamp is the signal
+        // `check_binary_without_debuginfo` already trusts.
         // Each finding applies only when the binary has "something to
         // protect" (rpmcrab#447): a binary that imports fewer than three
         // distinct fortifiable libc functions cannot be told apart from
@@ -5436,6 +5442,7 @@ impl BinariesCheck {
             && !is_ocaml
             && is_fortify_applicable(info)
             && !foreign_machine
+            && !info.ghc_comment
             && !has_fortify_symbol
         {
             add_info(
@@ -5456,6 +5463,7 @@ impl BinariesCheck {
             && !is_ocaml
             && is_stack_protector_applicable(info)
             && !foreign_machine
+            && !info.ghc_comment
             && !has_ssp_symbol
         {
             add_info(
@@ -8608,6 +8616,47 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_hardening(&pkg, &pkgfile, &info, &mut out);
         out.results().to_vec()
+    }
+
+    #[test]
+    fn hardening_ghc_comment_quiet_for_compile_time_findings() {
+        let run = |ghc_comment: bool| {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let pkgfile = syn_file("/usr/bin/probe", "ELF 64-bit LSB pie executable");
+            let mut info = flagless_info(FLAGLESS_IMPORTS);
+            info.ghc_comment = ghc_comment;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+            out.results().to_vec()
+        };
+
+        // Without the stamp the flagless binary fires both findings.
+        let results = run(false);
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "{results:?}"
+        );
+
+        // With the GHC stamp both compile-time findings stay quiet;
+        // the linker-level missing-relro still fires.
+        let results = run(true);
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "{results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "{results:?}"
+        );
+        assert_eq!(lines_for(&results, "missing-relro").len(), 1, "{results:?}");
     }
 
     #[test]
