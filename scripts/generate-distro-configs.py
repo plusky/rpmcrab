@@ -348,6 +348,20 @@ EXTRA_FILTERS = [
         r"^mingw64-.*arch-independent-package-contains-binary-or-object.*\.a$",
         "mingw -filesystem packages' rpmlintrc",
     ),
+    # The kernel's `-obj` build tools are stripped on purpose
+    # (kernel-default.spec, bnc#507084): a packaging decision about
+    # distro build tools, not an ELF fact the finding can read.
+    (
+        r" binary-or-shlib-without-debuginfo /usr/src/linux-[^/]+-obj/",
+        "kernel -obj build tools are stripped deliberately",
+    ),
+    # Guest firmware under /usr/share/qemu is built for the guest
+    # machine and shipped without debuginfo as a packaging decision,
+    # not an ELF fact the finding can read.
+    (
+        r" binary-or-shlib-without-debuginfo /usr/share/qemu/",
+        "qemu guest firmware ships without debuginfo",
+    ),
 ]
 
 # Extra Checks enabled in the openSUSE config that upstream rpmlint lists in
@@ -2230,6 +2244,9 @@ def append_extra_filters(text, filters):
             out.append("    # From mingw{32,64}-filesystem's mingw{32,64}-rpmlintrc (shipped as\n")
             out.append("    # /opt/testing/share/rpmlint/mingw{32,64}.toml); see EXTRA_FILTERS\n")
             out.append("    # in scripts/generate-distro-configs.py.\n")
+            out.append("    # Extra: the kernel -obj build tools and the qemu guest firmware\n")
+            out.append("    # are stripped / shipped without debuginfo deliberately; see\n")
+            out.append("    # EXTRA_FILTERS in scripts/generate-distro-configs.py.\n")
             for f in filters:
                 out.append(f"    '{f}',\n")
             in_list = False

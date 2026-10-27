@@ -194,9 +194,12 @@ should use mkstemp(3), which creates and opens the file atomically;
 the fix belongs in the upstream project that ships the code.
 """
 unstripped-binary-or-object="""
-This executable should be stripped of debugging symbols, in order to take
-less space and be loaded faster. This is usually done automatically at
-buildtime by rpm.
+This executable still carries its symbol table. Without a
+.gnu_debuglink section, rpm's debuginfo extraction did not process
+the file: enable debuginfo or give the file DWARF, and do not strip
+by hand. With a .gnu_debuglink section, the symbol table was kept on
+purpose (STRIP_KEEP_SYMTAB) and the debuginfo sits in the -debuginfo
+package as usual.
 """
 lto-bytecode="""
 This executable contains a LTO section.  LTO bytecode is not portable
@@ -301,6 +304,18 @@ defect (CVE-2025-10230). Audit what reaches the command: data from
 outside the caller's control must never be interpolated unsanitised;
 where no shell features are needed, run the program directly with an
 argv array instead.
+"""
+binary-or-shlib-without-debuginfo="""
+This binary or shared library carries no symbol table and no
+.gnu_debuglink section, so it was stripped before rpm's debuginfo
+extraction could process it and no -debuginfo exists for it. The
+usual routes are a manual strip in %install, -s or -Wl,--strip-all
+in the link flags, Cargo or maturin strip = true, CMake --strip, or
+Go -ldflags=-s. Remove the strip and let rpm strip the file itself:
+rpm splits the debuginfo into the -debuginfo package and leaves a
+.gnu_debuglink section behind. Deliberately stripped distro build
+tools and prebuilt blobs are the exceptions; a build with
+debug_package %{nil} also needs debuginfo turned on.
 """
 static-library-without-debuginfo="""
 The static library doesn't contain any debuginfo. Binaries linking against

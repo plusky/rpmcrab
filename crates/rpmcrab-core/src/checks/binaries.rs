@@ -665,6 +665,13 @@ struct ReadelfInfo {
     /// block, whose magic is a fixed byte sequence (Go's
     /// `debug/buildinfo`). Computed during parse.
     go_buildinfo: bool,
+    /// True when a `.comment` section carries a `GHC <version>` string:
+    /// the file is GHC output. GHC builds ship with debuginfo extraction
+    /// disabled (ghc-rpm-macros sets `debug_package %{nil}` unless
+    /// `%ghc_debuginfo` is in effect), so a GHC file without a symbol
+    /// table or debuglink states nothing about stripping. Computed
+    /// during parse; see `comment_has_ghc_version`.
+    ghc_comment: bool,
     soname: Option<String>,
     needed: Vec<String>,
     runpaths: Vec<String>,
@@ -749,6 +756,7 @@ impl ReadelfInfo {
             is_zig: false,
             go_toolchains: Vec::new(),
             go_buildinfo: false,
+            ghc_comment: false,
             soname: None,
             needed: Vec::new(),
             runpaths: Vec::new(),
@@ -1059,6 +1067,24 @@ impl ReadelfInfo {
         // OR across archive members: any Rust member marks the whole file.
         self.is_rust = self.is_rust || detect_rust_binary(elf, data, &self.functions);
         self.is_zig = self.is_zig || detect_zig_binary(elf, data);
+        // The `.comment` stamp GHC writes into its output: the gate
+        // the without-debuginfo finding reads. OR across archive
+        // members, like the toolchain markers above.
+        if !self.ghc_comment {
+            for sh in &elf.section_headers {
+                if elf.shdr_strtab.get_at(sh.sh_name) != Some(".comment") {
+                    continue;
+                }
+                let start = sh.sh_offset as usize;
+                let end = start.saturating_add(sh.sh_size as usize);
+                if let Some(bytes) = data.get(start..end)
+                    && comment_has_ghc_version(bytes)
+                {
+                    self.ghc_comment = true;
+                    break;
+                }
+            }
+        }
         // Accumulate across members: an archive's members are
         // normally one build's objects, but a member built by an
         // outdated toolchain carries its standard library with it,
@@ -1304,6 +1330,17 @@ fn has_go_buildinfo_magic(data: &[u8]) -> bool {
     data.windows(magic.len())
         .enumerate()
         .any(|(i, w)| w == magic && data.len() - i >= HEADER_LEN && matches!(data[i + 14], 4 | 8))
+}
+
+/// Whether `.comment` section bytes carry a `GHC <version>` string:
+/// the NUL-separated compiler stamps GHC writes into every output
+/// file read `GHC ` directly followed by the version digits (a real
+/// GHC library's `.comment` is exactly `GHC 9.12.4`). A `GHC ` prefix
+/// not followed by a digit is not a version stamp and does not count.
+fn comment_has_ghc_version(bytes: &[u8]) -> bool {
+    bytes
+        .windows(5)
+        .any(|w| w.starts_with(b"GHC ") && w[4].is_ascii_digit())
 }
 
 fn detect_rust_binary(elf: &goblin::elf::Elf, data: &[u8], functions: &[String]) -> bool {
@@ -4482,6 +4519,78 @@ impl BinariesCheck {
         }
     }
 
+    /// A linked host ELF with neither a symbol table nor a
+    /// `.gnu_debuglink` section was stripped before rpm's debuginfo
+    /// extraction could process it: find-debuginfo splits only files
+    /// that still carry their debug content, so no -debuginfo exists
+    /// for this file and none can be produced from it. The file's
+    /// `file` magic reads "stripped" either way, so
+    /// `unstripped-binary-or-object` cannot see the shape; the section
+    /// pair is the decidable signal. A `.symtab` section (the
+    /// SHT_SYMTAB section, carried under that name) means the symbol
+    /// table was kept, and a debuglink means find-debuginfo processed
+    /// the file. Eligibility mirrors the extraction's own selection:
+    /// find-debuginfo selects the files it splits by execute
+    /// permission, with shared-library names as the other selection
+    /// arm, so the finding requires an execute bit on the file or a
+    /// shared-library name (a basename ending in `.so` or carrying a
+    /// `.so.` version component); a non-executable, non-library ELF
+    /// was never eligible for extraction and its missing pair states
+    /// nothing. Separate debuginfo is the split payload itself and
+    /// stays quiet, as in `check_unstripped_binary`. Foreign-machine
+    /// payload belongs to the foreign target's debuginfo handling; an
+    /// unmapped package arch charges, as in
+    /// `check_missing_debug_info_in_archive`. GHC output stays quiet:
+    /// GHC builds ship with debuginfo extraction disabled, so the
+    /// absence states the toolchain's packaging, not a strip.
+    fn check_binary_without_debuginfo(
+        &self,
+        pkg: &Pkg,
+        pkgfile: &PkgFile,
+        info: &ReadelfInfo,
+        out: &mut Filter,
+    ) {
+        use goblin::elf::header::{ET_DYN, ET_EXEC};
+        if info.elf_type != ET_EXEC && info.elf_type != ET_DYN {
+            return;
+        }
+        let host = host_elf_machines(&pkg.arch);
+        if !host.is_empty() && !host.contains(&info.elf_machine) {
+            return;
+        }
+        let fname: &str = &pkgfile.name;
+        if fname.ends_with(".debug") || fname.starts_with("/usr/lib/debug/") {
+            return;
+        }
+        // find-debuginfo selects the files it splits by execute
+        // permission, with shared-library names as the other
+        // selection arm: a file with neither was never eligible for
+        // extraction, so its missing pair states nothing.
+        let base = basename(fname);
+        let so_named = base.ends_with(".so") || base.contains(".so.");
+        if pkgfile.mode & 0o111 == 0 && !so_named {
+            return;
+        }
+        let has_symtab_or_debuglink = info
+            .sections
+            .iter()
+            .flatten()
+            .any(|sec| sec.name == ".symtab" || sec.name == ".gnu_debuglink");
+        if has_symtab_or_debuglink {
+            return;
+        }
+        if info.ghc_comment {
+            return;
+        }
+        add_info(
+            out,
+            Level::Warning,
+            pkg,
+            "binary-or-shlib-without-debuginfo",
+            &[fname],
+        );
+    }
+
     fn check_non_pie(&self, pkg: &Pkg, bin_name: &str, out: &mut Filter) {
         if !self.is_shobj && !self.is_pie_exec {
             if self
@@ -6133,6 +6242,7 @@ impl BinariesCheck {
         self.check_no_text_in_archive(pkg, pkgfile, info, out);
         self.check_missing_symtab_in_archive(pkg, pkgfile, info, out);
         self.check_missing_debug_info_in_archive(pkg, pkgfile, info, out);
+        self.check_binary_without_debuginfo(pkg, pkgfile, info, out);
         self.check_executable_stack(pkg, pkgfile, info, out);
         let hardening = self.check_hardening(pkg, pkgfile, info, out);
         self.hardening_rollup.absorb(&pkgfile.name, hardening);
@@ -7651,6 +7761,7 @@ mod tests {
                 is_zig: false,
                 go_toolchains: Vec::new(),
                 go_buildinfo: false,
+                ghc_comment: false,
                 soname: None,
                 needed: Vec::new(),
                 runpaths,
@@ -10261,6 +10372,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 is_zig: false,
                 go_toolchains: Vec::new(),
                 go_buildinfo: false,
+                ghc_comment: false,
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_hash_sections(&pkg, &pkgfile, &info, &mut out);
@@ -10405,6 +10517,7 @@ description = "explicit priority string bypasses the system crypto policy"
             is_zig: false,
             go_toolchains: Vec::new(),
             go_buildinfo: false,
+            ghc_comment: false,
         }
     }
 
@@ -13596,6 +13709,244 @@ description = "explicit priority string bypasses the system crypto policy"
             assert_eq!(lines.len(), 1, "{} must still fire: {:?}", name, results);
             assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
         }
+    }
+
+    #[test]
+    fn binary_without_debuginfo_fires_for_prestripped_shapes() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let run = |arch: &str, name: &str, mode: u32, info: &ReadelfInfo| {
+            let pkg = synthetic_pkg("testpkg", arch, vec![]);
+            let mut pkgfile = syn_file(name, "ELF 64-bit LSB, stripped");
+            pkgfile.mode = mode;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_binary_without_debuginfo(&pkg, &pkgfile, info, &mut out);
+            out.results().to_vec()
+        };
+
+        // A stripped executable: sections remain, but neither a symbol
+        // table nor a debuglink is among them. The execute bit makes
+        // the file eligible for debuginfo extraction.
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".text")], vec![sec(".rodata")]];
+        let results = run("x86_64", "/usr/bin/foo", 0o100755, &info);
+        let lines = lines_for(&results, "binary-or-shlib-without-debuginfo");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/bin/foo"),
+            "detail names the file: {}",
+            lines[0]
+        );
+
+        // A stripped shared library: `.dynsym` is not a symbol table.
+        let mut info = syn_info();
+        info.elf_type = goblin::elf::header::ET_DYN;
+        info.sections = vec![vec![sec(".text")], vec![sec(".dynsym")]];
+        let results = run("x86_64", "/usr/lib64/libfoo.so.1", 0o100755, &info);
+        let lines = lines_for(&results, "binary-or-shlib-without-debuginfo");
+        assert_eq!(lines.len(), 1, "stripped shlib must fire: {results:?}");
+
+        // The shared-library name is the other eligibility arm: a
+        // non-executable library still fires, versioned or not,
+        // because find-debuginfo selects libraries by name.
+        let results = run("x86_64", "/usr/lib64/libfoo.so.1", 0o100644, &info);
+        let lines = lines_for(&results, "binary-or-shlib-without-debuginfo");
+        assert_eq!(
+            lines.len(),
+            1,
+            "non-executable versioned library must fire: {results:?}"
+        );
+        let results = run("x86_64", "/usr/lib64/libfoo.so", 0o100644, &info);
+        let lines = lines_for(&results, "binary-or-shlib-without-debuginfo");
+        assert_eq!(
+            lines.len(),
+            1,
+            "non-executable unversioned library must fire: {results:?}"
+        );
+
+        // An executable non-`.so` ELF outside a bin directory fires
+        // the same: the execute bit alone makes it eligible.
+        let mut info = syn_info();
+        info.elf_type = goblin::elf::header::ET_DYN;
+        info.sections = vec![vec![sec(".text")]];
+        let results = run("x86_64", "/usr/libexec/foo/helper.bin", 0o100755, &info);
+        let lines = lines_for(&results, "binary-or-shlib-without-debuginfo");
+        assert_eq!(
+            lines.len(),
+            1,
+            "executable non-.so ELF must fire: {results:?}"
+        );
+
+        // An unmapped package arch charges any machine, as in the
+        // archive debuginfo check: the gate cannot classify the file,
+        // so it must not silence the finding.
+        let mut info = syn_info();
+        info.elf_machine = goblin::elf::header::EM_S390;
+        info.sections = vec![vec![sec(".text")]];
+        let results = run("unmappedarch", "/usr/bin/foo", 0o100755, &info);
+        let lines = lines_for(&results, "binary-or-shlib-without-debuginfo");
+        assert_eq!(lines.len(), 1, "unmapped arch must charge: {results:?}");
+    }
+
+    #[test]
+    fn binary_without_debuginfo_stays_quiet_for_excluded_shapes() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let run = |arch: &str, name: &str, mode: u32, info: &ReadelfInfo| {
+            let pkg = synthetic_pkg("testpkg", arch, vec![]);
+            let mut pkgfile = syn_file(name, "ELF 64-bit LSB, stripped");
+            pkgfile.mode = mode;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_binary_without_debuginfo(&pkg, &pkgfile, info, &mut out);
+            out.results().to_vec()
+        };
+        let stripped = |sections: Vec<Vec<ElfSection>>| {
+            let mut info = syn_info();
+            info.sections = sections;
+            info
+        };
+
+        // A non-executable, non-library ELF was never eligible for
+        // debuginfo extraction, so its missing symbol table and
+        // debuglink state nothing about stripping.
+        let results = run(
+            "x86_64",
+            "/usr/bin/foo",
+            0o100644,
+            &stripped(vec![vec![sec(".text")]]),
+        );
+        assert!(
+            results.is_empty(),
+            "non-executable non-.so ELF must be quiet: {results:?}"
+        );
+        let results = run(
+            "x86_64",
+            "/usr/libexec/foo/helper.bin",
+            0o100644,
+            &stripped(vec![vec![sec(".text")]]),
+        );
+        assert!(
+            results.is_empty(),
+            "non-executable helper ELF must be quiet: {results:?}"
+        );
+
+        // A debuglink proves find-debuginfo processed the file.
+        let results = run(
+            "x86_64",
+            "/usr/bin/foo",
+            0o100755,
+            &stripped(vec![vec![sec(".text")], vec![sec(".gnu_debuglink")]]),
+        );
+        assert!(
+            results.is_empty(),
+            "debuglink file must be quiet: {results:?}"
+        );
+
+        // A kept symbol table is the unstripped shape, not this one.
+        let results = run(
+            "x86_64",
+            "/usr/bin/foo",
+            0o100755,
+            &stripped(vec![vec![sec(".text")], vec![sec(".symtab")]]),
+        );
+        assert!(results.is_empty(), "symtab file must be quiet: {results:?}");
+
+        // Relocatable objects are not linked binaries or libraries.
+        let mut info = stripped(vec![vec![sec(".text")]]);
+        info.elf_type = goblin::elf::header::ET_REL;
+        let results = run("x86_64", "/usr/lib/foo.o", 0o100755, &info);
+        assert!(results.is_empty(), "ET_REL must be quiet: {results:?}");
+
+        // Foreign-machine payload belongs to the foreign target.
+        let mut info = stripped(vec![vec![sec(".text")]]);
+        info.elf_machine = goblin::elf::header::EM_S390;
+        let results = run("x86_64", "/usr/share/qemu/s390-ccw.img", 0o100755, &info);
+        assert!(
+            results.is_empty(),
+            "foreign machine must be quiet: {results:?}"
+        );
+        // Control: the same machine in its own arch's package fires.
+        let results = run("s390x", "/usr/bin/foo", 0o100755, &info);
+        let lines = lines_for(&results, "binary-or-shlib-without-debuginfo");
+        assert_eq!(lines.len(), 1, "host machine must fire: {results:?}");
+
+        // Separate debuginfo is the split payload itself. The
+        // `.debug` library name passes the name arm at 0644, so its
+        // quiet is the debuginfo gate's, not the eligibility gate's.
+        let results = run(
+            "x86_64",
+            "/usr/lib64/libfoo.so.1.debug",
+            0o100644,
+            &stripped(vec![vec![sec(".text")]]),
+        );
+        assert!(
+            results.is_empty(),
+            "debuginfo payload must be quiet: {results:?}"
+        );
+        let results = run(
+            "x86_64",
+            "/usr/lib/debug/usr/bin/foo",
+            0o100755,
+            &stripped(vec![vec![sec(".text")]]),
+        );
+        assert!(
+            results.is_empty(),
+            "debuginfo payload must be quiet: {results:?}"
+        );
+
+        // GHC output: debuginfo extraction is disabled for GHC builds,
+        // so the absence of both sections states the toolchain's
+        // packaging, not a strip.
+        let mut info = stripped(vec![vec![sec(".text")], vec![sec(".comment")]]);
+        info.ghc_comment = true;
+        let results = run("x86_64", "/usr/bin/foo", 0o100755, &info);
+        assert!(results.is_empty(), "GHC output must be quiet: {results:?}");
+    }
+
+    #[test]
+    fn ghc_comment_gate_reads_the_comment_section() {
+        // The parse-level gate: a crafted ELF whose `.comment` is the
+        // stamp GHC writes carries the flag and stays quiet end to end;
+        // a compiler comment without the GHC version stamp does not.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let run = |info: &ReadelfInfo| {
+            let mut pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB, stripped");
+            pkgfile.mode = 0o100755;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_binary_without_debuginfo(&pkg, &pkgfile, info, &mut out);
+            out.results().to_vec()
+        };
+
+        let info = parse_crafted_sections(
+            "ghcstamp",
+            &[(".comment", b"GHC 9.12.4\0"), (".text", b"\x90")],
+        );
+        assert!(info.ghc_comment, "GHC version stamp must be read");
+        let results = run(&info);
+        assert!(
+            results.is_empty(),
+            "GHC-stamped ELF must be quiet: {results:?}"
+        );
+
+        let info = parse_crafted_sections(
+            "gccstamp",
+            &[
+                (".comment", b"GCC: (SUSE Linux) 13.2.1\0"),
+                (".text", b"\x90"),
+            ],
+        );
+        assert!(!info.ghc_comment, "a GCC stamp is not a GHC stamp");
+        let results = run(&info);
+        let lines = lines_for(&results, "binary-or-shlib-without-debuginfo");
+        assert_eq!(lines.len(), 1, "GCC-stamped ELF must fire: {results:?}");
+
+        // `GHC ` with no version digits after it is not a version stamp.
+        let info =
+            parse_crafted_sections("ghcword", &[(".comment", b"GHC \0"), (".text", b"\x90")]);
+        assert!(!info.ghc_comment, "a bare GHC word is not a version stamp");
     }
 
     #[test]

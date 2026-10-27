@@ -8,6 +8,8 @@
 # Extra Filters appended (not from upstream; see EXTRA_FILTERS):
 #   Filters: added '^mingw32-.*arch-independent-package-contains-binary-or-object.*\\.a$' (mingw -filesystem packages' rpmlintrc)
 #   Filters: added '^mingw64-.*arch-independent-package-contains-binary-or-object.*\\.a$' (mingw -filesystem packages' rpmlintrc)
+#   Filters: added ' binary-or-shlib-without-debuginfo /usr/src/linux-[^/]+-obj/' (kernel -obj build tools are stripped deliberately)
+#   Filters: added ' binary-or-shlib-without-debuginfo /usr/share/qemu/' (qemu guest firmware ships without debuginfo)
 #
 # Extra Checks appended (not from upstream; see EXTRA_CHECKS):
 #   Checks: added 'XinetdDepCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)

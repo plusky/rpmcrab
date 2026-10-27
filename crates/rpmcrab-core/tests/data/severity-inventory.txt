@@ -39,6 +39,7 @@ binary-or-shlib-calls-shell = W
 binary-or-shlib-calls-unbounded-copy = W
 binary-or-shlib-calls-weak-prng = W
 binary-or-shlib-defines-rpath = E
+binary-or-shlib-without-debuginfo = W
 branding-conflicts-missing = E
 branding-excessive-enhances = W
 branding-excessive-recommends = W
