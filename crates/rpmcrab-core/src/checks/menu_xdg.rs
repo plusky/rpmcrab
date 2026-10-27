@@ -68,9 +68,24 @@ impl MenuXDGCheck {
     fn parse_desktop(content: &str, filename: &str) -> Result<DesktopSections, ParseError> {
         let mut sections: DesktopSections = HashMap::new();
         let mut current: Option<String> = None;
-        for line in content.lines() {
-            let line = line.trim();
+        let mut last_key: Option<String> = None;
+        for raw_line in content.lines() {
+            let line = raw_line.trim();
             if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            // configparser treats a line that starts with whitespace as
+            // a continuation of the current option's value whenever the
+            // section already has an option: the stripped line is appended
+            // to the value after a newline, whatever the line contains.
+            // With no current option the line is parsed normally below.
+            if raw_line.starts_with(char::is_whitespace)
+                && let (Some(section), Some(key)) = (&current, &last_key)
+            {
+                let map = sections.get_mut(section).expect("current section");
+                let value = map.get_mut(key).expect("last option");
+                value.push('\n');
+                value.push_str(line);
                 continue;
             }
             if line.starts_with('[') {
@@ -105,6 +120,7 @@ impl MenuXDGCheck {
                 }
                 sections.insert(name.clone(), HashMap::new());
                 current = Some(name);
+                last_key = None;
                 continue;
             }
             let section = current.clone().ok_or((
@@ -123,6 +139,19 @@ impl MenuXDGCheck {
             ))?;
             // configparser lowercases keys.
             let key = line[..eq].trim().to_lowercase();
+            if key.is_empty() {
+                // configparser raises ParsingError for a line with no key
+                // before the separator, and the GKeyFile parser rejects
+                // the same line as not a key-value pair.
+                return Err((
+                    Level::Error,
+                    "invalid-desktopfile",
+                    vec![
+                        filename.to_string(),
+                        "Source contains parsing errors".to_string(),
+                    ],
+                ));
+            }
             let value = line[eq + 1..].trim().to_string();
             let map = sections.get_mut(&section).expect("current section");
             if map.contains_key(&key) {
@@ -132,7 +161,8 @@ impl MenuXDGCheck {
                     vec![filename.to_string(), format!("[{section}]/{key}")],
                 ));
             }
-            map.insert(key, value);
+            map.insert(key.clone(), value);
+            last_key = Some(key);
         }
         Ok(sections)
     }
@@ -387,6 +417,71 @@ mod tests {
         let err = MenuXDGCheck::parse_desktop("[a]\nName Foo\n", "foo.desktop").unwrap_err();
         assert_eq!(err.1, "invalid-desktopfile");
         assert_eq!(err.2[1], "Source contains parsing errors");
+    }
+
+    #[test]
+    fn indented_line_continues_previous_value() {
+        // configparser appends a line that starts with whitespace to the
+        // current option's value instead of failing the parse.
+        let content = "[Desktop Entry]\nName=Foo\n  continued text\nExec=bar\n";
+        let sections = MenuXDGCheck::parse_desktop(content, "foo.desktop").unwrap();
+        assert_eq!(
+            sections["Desktop Entry"]["name"],
+            "Foo\ncontinued text".to_string()
+        );
+        assert_eq!(sections["Desktop Entry"]["exec"], "bar".to_string());
+    }
+
+    #[test]
+    fn indented_line_with_equals_continues_previous_value() {
+        // The continuation rule applies whatever the indented line
+        // contains; it does not start a new option.
+        let content = "[Desktop Entry]\nName=Foo\n  Other=x\nExec=bar\n";
+        let sections = MenuXDGCheck::parse_desktop(content, "foo.desktop").unwrap();
+        assert_eq!(
+            sections["Desktop Entry"]["name"],
+            "Foo\nOther=x".to_string()
+        );
+        assert!(!sections["Desktop Entry"].contains_key("other"));
+    }
+
+    #[test]
+    fn indented_option_without_previous_option_parses_as_key() {
+        let content = "[Desktop Entry]\n  Name=Foo\n";
+        let sections = MenuXDGCheck::parse_desktop(content, "foo.desktop").unwrap();
+        assert_eq!(sections["Desktop Entry"]["name"], "Foo".to_string());
+    }
+
+    #[test]
+    fn indented_line_without_previous_option_or_equals_is_invalid() {
+        // configparser raises ParsingError: there is no value to continue.
+        let err = MenuXDGCheck::parse_desktop("[Desktop Entry]\n  orphan text\n", "foo.desktop")
+            .unwrap_err();
+        assert_eq!(err.1, "invalid-desktopfile");
+    }
+
+    #[test]
+    fn empty_key_is_invalid() {
+        let err = MenuXDGCheck::parse_desktop("[Desktop Entry]\nName=Foo\n=value\n", "foo.desktop")
+            .unwrap_err();
+        assert_eq!(err.1, "invalid-desktopfile");
+        assert_eq!(err.2[1], "Source contains parsing errors");
+    }
+
+    #[test]
+    fn empty_key_as_first_option_is_invalid() {
+        let err = MenuXDGCheck::parse_desktop("[Desktop Entry]\n=value\nName=Foo\n", "foo.desktop")
+            .unwrap_err();
+        assert_eq!(err.1, "invalid-desktopfile");
+    }
+
+    #[test]
+    fn trailing_junk_after_section_header_is_accepted() {
+        // configparser's section pattern is not anchored at the end of
+        // the line, so text after the closing bracket is ignored.
+        let content = "[Desktop Entry] trailing\nName=Foo\n";
+        let sections = MenuXDGCheck::parse_desktop(content, "foo.desktop").unwrap();
+        assert_eq!(sections["Desktop Entry"]["name"], "Foo".to_string());
     }
 
     #[test]
