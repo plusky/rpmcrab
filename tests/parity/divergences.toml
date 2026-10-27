@@ -220,6 +220,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "dir-or-file-outside-snapshot"
+kind = "severity"
+reason = "Fix-and-diverge: a folder under /var/cache prints the finding as W where every other folder prints E; the reference emits the finding at one level for every folder. The FHS defines /var/cache as application cache data that can be regenerated, so shipped cache payload is regenerable machine state and is not held to the error the rest of /var (state, spool and log payload) carries. Which entries fire is unchanged -- the same non-directory, non-%ghost entries under the same prefix test, aggregated per folder as ledgered under #835 -- and directory entries and %ghost entries are untouched. Measured over the Factory corpus (2026-10-27): 2 of the 372 aggregated findings sit under /var/cache -- xorg-x11-libX11-ccache (folder /var/cache/libx11/compose, 2 files of pre-generated compose cache) and libgio-2_0-0 (folder /var/cache/gio-2.0, 1 file) -- and exactly those two print W after the change; the other 370 findings are unchanged."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "bashisms"
 kind = "behaviour"
 reason = "When checkbashisms is absent the reference (BashismsCheck._detect_early_fail_option) runs `checkbashisms --help` via subprocess.check_output at init, which raises and kills the whole run; the port degrades gracefully instead: without dash the check is a no-op, without checkbashisms only `potential-bashisms` is suppressed (`bin-sh-syntax-error` still fires via `dash -n`). A missing optional tool must not abort the lint."

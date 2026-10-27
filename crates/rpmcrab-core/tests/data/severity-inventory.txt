@@ -75,7 +75,6 @@ desktopfile-missing-header = E
 desktopfile-without-binary = W
 devel-dependency = E
 devel-file-in-non-devel-package = W
-dir-or-file-outside-snapshot = E
 doc-file-dependency = W
 double-entries = E
 duplicate-executable = W
@@ -384,8 +383,9 @@ zero-perms = W
 zero-perms-ghost = W
 
 [unresolved-sites]
-# count = 39
+# count = 40
 alternatives.rs: add_info( out, level, pkg, "li
+atomic_update.rs: add_info( out, level, pkg, "dir-or-file-outsid
 binaries.rs: add_info( out, info_type, pkg, "unused-direct-
 binaries.rs: add_info(out, Level::Warning, pkg, r_name, &[&pkgfile.name, f_name])
 check.rs: add_info(Finding { level: *level, check: (*check).to_string(),

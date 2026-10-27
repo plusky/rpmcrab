@@ -2,6 +2,8 @@ dir-or-file-outside-snapshot="""
 The package contains files outside the snapshot, e.g. outside /etc and /usr
 or inside /usr/local. The finding fires once per directory carrying such
 files, and the detail names the directory and the number of files in it.
+Directories under /var/cache are reported as a warning instead of an
+error: cache content is regenerable machine state.
 """
 ghost-outside-snapshot="""
 The package contains ghosts outside the snapshot, e.g. outside /etc and /usr

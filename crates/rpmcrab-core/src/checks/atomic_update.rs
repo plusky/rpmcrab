@@ -47,6 +47,14 @@
 //! predicate. The reference fires per file, so the aggregation is a
 //! ledgered fix-and-diverge (issue #835).
 //!
+//! Folders under /var/cache fire the finding as a warning, not an
+//! error: the FHS defines /var/cache as application cache data that
+//! can be regenerated, so shipped cache payload is regenerable
+//! machine state the snapshot boundary need not hold to the error
+//! the rest of /var (state, spool and log payload) carries. The
+//! reference has no such split, so it is a ledgered severity
+//! divergence.
+//!
 //! This file hosts the transactional-update family's predicates. It also
 //! carries `usr_etc_conffile`, the predicate behind the crab-only
 //! `usr-etc-file-marked-as-conffile` warning emitted by
@@ -160,6 +168,13 @@ fn parent_dir(path: &str) -> &str {
         Some(0) | None => "/",
         Some(i) => &path[..i],
     }
+}
+
+/// True when `folder` is `/var/cache` itself or a directory under
+/// it: the folders whose payload `dir-or-file-outside-snapshot`
+/// reports as a warning rather than an error.
+fn var_cache_folder(folder: &str) -> bool {
+    folder == "/var/cache" || folder.starts_with("/var/cache/")
 }
 
 /// True when `file` is a shipped `/usr/etc` file marked `%config`.
@@ -760,9 +775,14 @@ impl Check for AtomicUpdateCheck {
         for (folder, count) in folders {
             let noun = if count == 1 { "file" } else { "files" };
             let detail = format!("{folder} ({count} {noun})");
+            let level = if var_cache_folder(folder) {
+                Level::Warning
+            } else {
+                Level::Error
+            };
             add_info(
                 out,
-                Level::Error,
+                level,
                 pkg,
                 "dir-or-file-outside-snapshot",
                 &[detail.as_str()],
@@ -2099,6 +2119,86 @@ fi
             "{}",
             results[2].1
         );
+    }
+
+    #[test]
+    fn var_cache_payload_warns_while_other_var_payload_errors() {
+        // Folders under /var/cache fire dir-or-file-outside-snapshot
+        // as a warning: cache content is regenerable machine state.
+        // The rest of /var (state, spool payload) stays an error,
+        // and a directory entry under /var/cache still does not
+        // fire at all (the #711 directory exemption is untouched).
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            regular("/var/cache/app/cache.bin"),
+            regular("/var/lib/app/state.db"),
+            regular("/var/spool/app/job"),
+            dir_entry("/var/cache/app"),
+        ];
+        let mut check = check_with(
+            &[
+                "/etc/", "/usr/", "/bin/", "/lib/", "/lib64/", "/sbin/", "/boot/",
+            ],
+            &["/usr/local/", "/boot/efi/"],
+            false,
+        );
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 3, "{results:?}");
+        for (name, _) in &results {
+            assert_eq!(name, "dir-or-file-outside-snapshot");
+        }
+        assert!(
+            results[0].1.contains("/var/cache/app (1 file)"),
+            "{}",
+            results[0].1
+        );
+        assert!(results[0].1.contains(": W: "), "level: {}", results[0].1);
+        assert!(
+            results[1].1.contains("/var/lib/app (1 file)"),
+            "{}",
+            results[1].1
+        );
+        assert!(results[1].1.contains(": E: "), "level: {}", results[1].1);
+        assert!(
+            results[2].1.contains("/var/spool/app (1 file)"),
+            "{}",
+            results[2].1
+        );
+        assert!(results[2].1.contains(": E: "), "level: {}", results[2].1);
+    }
+
+    #[test]
+    fn var_cache_top_level_file_warns_and_near_miss_prefix_errors() {
+        // A file directly in /var/cache is carried by the /var/cache
+        // folder itself and warns; a sibling prefix that merely
+        // shares the string (/var/cachex) is not the cache tree and
+        // stays an error.
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            regular("/var/cache/top.bin"),
+            regular("/var/cachex/app/f.bin"),
+        ];
+        let mut check = check_with(
+            &[
+                "/etc/", "/usr/", "/bin/", "/lib/", "/lib64/", "/sbin/", "/boot/",
+            ],
+            &["/usr/local/", "/boot/efi/"],
+            false,
+        );
+        let results = run(&mut check, &pkg);
+        assert_eq!(results.len(), 2, "{results:?}");
+        assert!(
+            results[0].1.contains("/var/cache (1 file)"),
+            "{}",
+            results[0].1
+        );
+        assert!(results[0].1.contains(": W: "), "level: {}", results[0].1);
+        assert!(
+            results[1].1.contains("/var/cachex/app (1 file)"),
+            "{}",
+            results[1].1
+        );
+        assert!(results[1].1.contains(": E: "), "level: {}", results[1].1);
     }
 
     #[test]
