@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn obsolete_mime_dirs_trailing_slash_and_empty_are_normalized() {
-        // plusky #251 review: a trailing-slash config entry must still
+        // #251 review: a trailing-slash config entry must still
         // match, and an empty entry must not match everything.
         let mut tbl = toml::Table::new();
         tbl.insert(
@@ -1024,7 +1024,7 @@ mod tests {
         );
     }
 
-    // Tom's ruling, 2026-10-27: `Cargo.toml.orig` is cargo's own
+    // `Cargo.toml.orig` is cargo's own
     // pre-normalization manifest in every published crate tarball,
     // shipped verbatim by vendored crate sources (rusty_v8 carries
     // 213) -- exempt through the bundled rule's

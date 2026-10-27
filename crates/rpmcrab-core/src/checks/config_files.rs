@@ -271,7 +271,7 @@ mod tests {
         // upstream #1606 (dropping `%config` named as an option, not just
         // moving files), byte-identical to the reference (pinned
         // rpmlint@84848c0). `conffile-without-noreplace-flag` carries the
-        // reword ruled in rpmcrab#556: both `%config` forms are valid, and
+        // rpmcrab#556 reword: both `%config` forms are valid, and
         // the text lays out the .rpmsave/.rpmnew upgrade semantics the
         // choice turns on instead of prescribing noreplace; ledgered in
         // tests/parity/divergences.toml.

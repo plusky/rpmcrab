@@ -274,7 +274,7 @@ fn backup_regex() -> &'static Regex {
 /// the same files (the bundled FilelistCheck.toml declares the
 /// exemption there as `IgnoreFileIf = "cargotomlorig"`, implemented
 /// through this predicate). Deliberate divergence from the
-/// reference, which fires on them (Tom's ruling, 2026-10-27). The
+/// reference, which fires on them. The
 /// match is exact and case-sensitive: a lowercase `cargo.toml.orig`,
 /// a longer name the string merely ends (`xCargo.toml.orig`), a
 /// suffixed name (`Cargo.toml.orig2`, `Cargo.toml.orig.gz`) and
@@ -833,8 +833,8 @@ fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
 /// Whether a file carrying an interpreter line is vendored source
 /// payload: a shipped source tree a developer or a build reads,
 /// rather than a script the installed system executes in place
-/// (corpus E audit 2026-10-26, section 5; ruled in by Tom
-/// 2026-10-27 as the D1 extension of the `script_is_test_data`
+/// (corpus E audit 2026-10-26, section 5; the D1 extension of
+/// the `script_is_test_data`
 /// gate family). Upstream's own build and helper scripts inside
 /// such a tree use the `env` form of the interpreter line as the
 /// portable choice for whoever unpacks the tree, so it is not an
@@ -3699,7 +3699,7 @@ fn is_flavour_base_name(name: &str) -> bool {
 /// (issue #568), plus the interpreter expressed as the unversioned
 /// `/usr/bin/python3` path or the `libpython<ver>` soname (issue
 /// #862), plus the flavour base name `python3<digits>-base` in any
-/// relation (maintainer ruling, 2026-10-26) - the base package of
+/// relation - the base package of
 /// one specific flavour, which for a non-primary flavour is the
 /// only spelling of that base.
 fn python_base_credited(lists: &DepLists, ver: &str) -> bool {
@@ -4261,7 +4261,7 @@ impl FilesCheck {
     ) {
         if fname.ends_with("/.htaccess") {
             // Severity split on the %doc flag plus doc-tree path
-            // (Tom's ruling, 2026-10-27; see the divergence ledger):
+            // (see the divergence ledger):
             // a .htaccess shipped as documentation under
             // /usr/share/doc/packages/ is a website artefact of the
             // shipped docs (a DirectoryIndex for a website source,
@@ -4346,7 +4346,7 @@ impl FilesCheck {
 
     /// Name credits for `incoherent-logrotate-file` beyond the
     /// reference's exact package-name equality (FilesCheck ledger;
-    /// maintainer ruling 2026-10-27; measured over the Factory
+    /// measured over the Factory
     /// corpus, 15 findings -> 9). A logrotate file is coherent when
     /// it is named after the package up to case, after the package
     /// plus a logrotate suffix, or after a daemon the same package
@@ -4416,8 +4416,8 @@ impl FilesCheck {
         // literal name `crontabs`, but that provider was renamed -- the
         // cron.* directories are shipped by `cron` and the daemon is
         // `cronie`, and the name `crontabs` exists nowhere in the corpus.
-        // A dep on either current name satisfies the check the same way
-        // (ruling 2026-10-27); exact name matches only, so lookalikes
+        // A dep on either current name satisfies the check the same way;
+        // exact name matches only, so lookalikes
         // (cronie-anacron, systemd-cron, cron-utils) keep firing.
         const CRON_PROVIDERS: [&str; 3] = ["crontabs", "cron", "cronie"];
         if !fname.starts_with("/etc/cron.")
@@ -5585,8 +5585,8 @@ impl FilesCheck {
             if pkg.config_files.iter().any(|c| c == fname)
                 && !self.file_granted(&pkg.name, fname, "executable-marked-as-config-file")
             {
-                // Severity split on the noreplace flag (maintainer
-                // ruling, 2026-10-26; see the divergence ledger): a
+                // Severity split on the noreplace flag (see the
+                // divergence ledger): a
                 // %config(noreplace) executable warns instead of
                 // erroring. The noreplace marking is deliberate -- the
                 // packager opted into keep-local-edits semantics for
@@ -5851,13 +5851,13 @@ impl FilesCheck {
                             // but in test or vendored source payload
                             // it is the harness's or upstream's
                             // business the same way as the env form
-                            // above (Tom, 2026-10-27): the shared
+                            // above: the shared
                             // `script_is_test_data` and
                             // `script_is_source_data` gates carry
                             // the shapes and their guards, doc bound
-                            // included, so the ruling extends the
-                            // gate family to this emission rather
-                            // than adding a second one.
+                            // included, so this emission joins the
+                            // gate family rather than adding a
+                            // second one.
                             if !script_is_test_data(&pkg.name, fname)
                                 && !(!is_doc && script_is_source_data(&pkg.name, fname))
                             {
@@ -6039,14 +6039,14 @@ impl FilesCheck {
     }
 }
 
-// Bug analysis decisions (2026-09-29):
-// - #1602 (Tom's PR): ldconfig -p interpreter honored — FIXED behavior implemented.
+// Upstream bug analyses and their dispositions:
+// - #1602: ldconfig -p interpreter honored — FIXED behavior implemented.
 // - #552: missing-dependency-to-crontabs base dir false positive — replicated as-is
 //   until the 2026-10-26 FP-trim tightening (directory entries and daemon files
 //   directly in /etc are no longer charged; see the FilesCheck divergence ledger).
 // - #551: logrotate-log-dir-not-packaged — NOT PORTED (LogrotateCheck not yet
 //   ported; the /var/log exclusion from rpmlint#551 defers to that port).
-// - #771: hardlink catch-22 — ABANDONED by Tom, replicate reference exactly.
+// - #771: hardlink catch-22 — ABANDONED, replicate reference exactly.
 
 impl FilesCheck {
     /// `error_details` for `--explain`, mirroring the `__init__` dict
@@ -6355,7 +6355,7 @@ mod tests {
 
     #[test]
     fn incoherent_logrotate_credits_shipped_daemon_name() {
-        // Ruling 2026-10-27: a logrotate file named after a daemon
+        // A logrotate file named after a daemon
         // the same package ships as an executable is coherent
         // (cobbler ships /usr/bin/cobblerd and /etc/logrotate.d/cobblerd).
         let names = named_pkg_findings(
@@ -6466,7 +6466,7 @@ mod tests {
 
     #[test]
     fn incoherent_logrotate_residue_keeps_firing() {
-        // Shapes with no credit (the 2026-10-27 ruling's residue):
+        // Shapes with no credit:
         // a subpackage carrying the product-named file (dnf-data)
         // and a stale previous-major name (tomcat11 ships tomcat10).
         let names = named_pkg_findings(
@@ -6542,7 +6542,7 @@ mod tests {
 
     #[test]
     fn executable_config_noreplace_is_warning() {
-        // Maintainer ruling (2026-10-26): %config(noreplace) is a
+        // %config(noreplace) is a
         // deliberate marking -- the executable warns, it does not
         // error, and it is not dropped.
         let levels = exec_config_levels(
@@ -6603,7 +6603,7 @@ mod tests {
 
     #[test]
     fn htaccess_doc_in_doc_tree_warns() {
-        // Tom's ruling (2026-10-27): a %doc-flagged .htaccess under
+        // A %doc-flagged .htaccess under
         // /usr/share/doc/packages/ is a documentation website
         // artefact -- it warns, it does not error, and it is not
         // dropped.
@@ -7120,7 +7120,7 @@ mod tests {
     fn standard_dir_silent_for_filesystem_media() {
         // filesystem-media is openSUSE's designated split owner of
         // /media (the filesystem package ships no /media entry), so it
-        // joins the FILESYS_PACKAGES exemption (Tom, 2026-10-27).
+        // joins the FILESYS_PACKAGES exemption.
         let (pkg, config) = standard_dir_pkg("filesystem-media", "/media");
         let names = standard_dir_names(&pkg, &config);
         assert_lacks(&names, "standard-dir-owned-by-package");
@@ -7536,9 +7536,9 @@ mod tests {
 
     #[test]
     fn missing_dependency_to_crontabs_cron_dep_credits() {
-        // Ruling 2026-10-27 supersedes the boundary pin this test used
-        // to carry: a dep on `cron` (the renamed provider of the cron.*
-        // directories) satisfies the check, exactly as `crontabs` did.
+        // A dep on `cron` (the renamed provider of the cron.*
+        // directories) satisfies the check, exactly as `crontabs` did;
+        // this supersedes the boundary pin the test used to carry.
         // Corpus shape: nextcloud (Requires: cron).
         let names = run_files_check_with_deps(
             "/etc/cron.d/nextcloud",
@@ -8818,8 +8818,8 @@ mod tests {
         // The flavour-named base form is the base dependency: the
         // package `python313-base` is the very package that provides
         // the credited `python3-base` name. #568 and #862 left the
-        // form uncredited; the maintainer ruling of 2026-10-26
-        // credits it (any relation, floor included).
+        // form uncredited; it is credited (any relation, floor
+        // included).
         let names = run_dep_check(
             "foo",
             vec![dep_flagged("python313-base", 12, Some("3.9"))],
@@ -16462,7 +16462,7 @@ reason = "warning hook: executable and %config by design"
     }
 
     /// The gate family reaches `wrong-script-interpreter` the
-    /// same way (Tom, 2026-10-27): the bazel wheel fixtures are
+    /// same way: the bazel wheel fixtures are
     /// test payload inside a -source package's tests tree, a
     /// testsuite package's own scripts are its payload wherever
     /// they sit, a source package's helper scripts are vendored

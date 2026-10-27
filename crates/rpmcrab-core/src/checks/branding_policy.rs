@@ -123,7 +123,7 @@ impl BrandingPolicyCheck {
     /// generic mechanism, and `branding-requires-specific-flavor` is
     /// not charged for them. Theme-type pins are not composition
     /// pins either: they are exempt on every requirer by the
-    /// 2026-10-27 ruling (see `is_theme_pin`), patterns packages
+    /// theme-type exemption (see `is_theme_pin`), patterns packages
     /// included.
     fn is_composition_pin(re: &Regex, pkg_name: &str, require_name: &str) -> bool {
         pkg_name.starts_with("patterns-")
@@ -135,8 +135,8 @@ impl BrandingPolicyCheck {
 
     /// Whether `require_name` is a theme-type pin: its parsed type
     /// component is `theme`. Theme pins are not charged
-    /// `branding-requires-specific-flavor` on any requirer
-    /// (maintainer ruling, 2026-10-27). The specific-flavor
+    /// `branding-requires-specific-flavor` on any requirer.
+    /// The specific-flavor
     /// doctrine redirects a pin to the sanctioned generic virtual;
     /// for themes that virtual usually does not exist — of the 15
     /// theme-type findings on the Factory corpus, 13 require a
@@ -199,7 +199,7 @@ impl Check for BrandingPolicyCheck {
             // Not a branding package: check its requires.
             for require in &pkg.requires {
                 // Theme-type pins are exempt from the specific-flavor
-                // doctrine entirely (maintainer ruling, 2026-10-27):
+                // doctrine entirely:
                 // they select a concrete theme pack, and they are not
                 // generic-name requires either, so neither the
                 // specific-flavor arm nor the unversioned arm below
@@ -472,7 +472,7 @@ mod tests {
     // package-name near-misses (no `.so` component) keep firing, as
     // does a dotted branding name that continues past its soname
     // decoration. The theme-type names in the list stay silent under
-    // the theme-type exemption (maintainer ruling, 2026-10-27), not
+    // the theme-type exemption, not
     // because they are capabilities.
     #[test]
     fn soname_requires_are_not_flavor_pins() {
@@ -842,12 +842,12 @@ mod tests {
         assert_eq!(supplements_missing(&pkg).len(), 1, "{:?}", run(&pkg));
     }
 
-    // Maintainer ruling (2026-10-26): packages in the reserved
+    // Packages in the reserved
     // patterns-* namespace are the composition layer. Their branding
     // pins, own-flavour, borrowed-flavour and rich conditional alike,
     // make the flavour selection, so the specific-flavor error is not
-    // charged for them. Theme pins are not flavour selections; since
-    // the 2026-10-27 ruling they are exempt on every requirer, so no
+    // charged for them. Theme pins are not flavour selections;
+    // they are exempt on every requirer, so no
     // specific-flavor finding remains here at all. The generic-name
     // (unversioned) arm is untouched.
     #[test]
@@ -892,9 +892,8 @@ mod tests {
         }
     }
 
-    // The specific-flavor charge as a matrix (maintainer rulings
-    // 2026-10-26 and 2026-10-27): a branding-type pin fires on a
-    // plain requirer and is composition on a patterns requirer; a
+    // The specific-flavor charge as a matrix: a branding-type pin fires
+    // on a plain requirer and is composition on a patterns requirer; a
     // theme-type pin is exempt on both, because the generic
     // <base>-theme name it would be redirected to has no provider
     // for most bases. A name merely containing "theme" outside

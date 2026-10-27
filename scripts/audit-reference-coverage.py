@@ -2413,7 +2413,7 @@ def port_config_family_names(data_dir):
     return names
 
 
-# Findings dispositioned by ecosystem absence (ruling, 2026-10-24):
+# Findings dispositioned by ecosystem absence:
 # the Group tag's ecosystem is absent -- openSUSE dropped the tag by
 # community agreement and spec-cleaner removes it on sight, Fedora
 # never adopted it. The census records these entries but excludes
@@ -2463,7 +2463,7 @@ def census_missing(entries, findings, exact_patterns, family_names,
 
 
 # Pre-existing drift between the ledger and the code, recorded at the
-# C4 reconciliation (2026-10-24) and reported in that PR for
+# C4 reconciliation and reported in that PR for
 # disposition. The reconciliation fails on any observed drift that is
 # not recorded here, and on a recorded item that no longer drifts, so
 # the record is removed as the drift is fixed.

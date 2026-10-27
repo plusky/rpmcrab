@@ -2952,8 +2952,8 @@ fi
             "userdel foo",
             "groupmod -g 42 foo",
             "groupdel foo",
-            // The Debian creation tool is outside the ruling,
-            // which names useradd/groupadd.
+            // The Debian creation tool is not in scope: the
+            // check names useradd/groupadd.
             "adduser --system foo",
             // Mentions: comments, quoted text, operand position.
             "# create the account with useradd -r foo\ntrue",

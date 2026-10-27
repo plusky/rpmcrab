@@ -3495,8 +3495,8 @@ fn usr_share_binary_is_foreign_target(pkgfile: &PkgFile, arch: &str) -> bool {
     }
 }
 
-/// Whether a binary-class file in a noarch package is a GRUB module
-/// (Tom's ruling, 2026-10-27): an `ET_REL` object for a host machine
+/// Whether a binary-class file in a noarch package is a GRUB module:
+/// an `ET_REL` object for a host machine
 /// carrying GRUB's `.module_license` ABI section and not defining
 /// the `grub_main` entry point. A GRUB module is loadable only
 /// inside GRUB itself -- it is the bootloader's payload, not host
@@ -9062,7 +9062,7 @@ description = "explicit priority string bypasses the system crypto policy"
     /// the symbol must be FUNC in .dynsym. Modern GCC emits undefined
     /// imports as NOTYPE, which the scan does not match -- if a future
     /// toolchain ignores the directive, the forbidden-function tests would
-    /// still go green, so this fails loudly instead (plusky's #241 review).
+    /// still go green, so this fails loudly instead (#241 review).
     fn assert_dynsym_is_func(pkg: &Pkg, so: &str, sym_name: &str) {
         let extracted = pkg.extracted_dir().expect("fixture extracted");
         let data = std::fs::read(extracted.join(so)).expect("fixture so readable");
@@ -10684,7 +10684,7 @@ description = "explicit priority string bypasses the system crypto policy"
 
     #[test]
     fn noarch_grub_module_is_quiet() {
-        // Tom's ruling (2026-10-27): a GRUB module in a noarch
+        // A GRUB module in a noarch
         // package is the bootloader's own payload, not host code --
         // a host-machine ET_REL carrying GRUB's ABI sections.
         let config = test_config();
@@ -10900,8 +10900,8 @@ description = "explicit priority string bypasses the system crypto policy"
 
     #[test]
     fn noarch_foreign_grub_shaped_payload_boundaries() {
-        // The GRUB arm is scoped to host machines (the ruled
-        // class). A foreign-machine module-shaped object is the
+        // The GRUB arm is scoped to host machines (the class
+        // defined above). A foreign-machine module-shaped object is the
         // foreign-target gate's business, unchanged: quiet in a
         // target-payload location, firing outside one.
         let config = test_config();
