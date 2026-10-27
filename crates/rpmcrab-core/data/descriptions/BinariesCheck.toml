@@ -154,19 +154,23 @@ and `SHSTK`.
 optflags-not-applied="""
 The package's build flags (the `OPTFLAGS` header tag, `%{optflags}`
 as expanded at packaging time) request the stack protector and
-`_FORTIFY_SOURCE`, but no ELF file in the package carries a
+`_FORTIFY_SOURCE`, but no judged ELF file in the package carries a
 stack-protector or fortify symbol: the distribution flags never
-reached the compiler for any file in the package. One build defect
+reached the compiler for any judged file in the package. The judged
+population is the package's C-judged EXEC/DYN ELF files: archives,
+Go and Zig binaries, debuginfo files and other ELF types are
+outside it, and noarch packages are exempt. One build defect
 strips both mitigations from every binary at once -- a spec that
 overrides `CFLAGS`/`CXXFLAGS` without `%{optflags}`, or a build
 system that drops them (for example a `%install` step that rebuilds
 without the flags `%build` used). Rebuild so `%{optflags}` reaches
 every compilation; where a package deliberately builds with its own
-flags, this finding is the one to filter in its rpmlintrc, with the
-reason recorded there. The per-file `missing-stack-protector` and
-`missing-fortify` findings name the affected files; when the flags
-also request `-fcf-protection` and no file records it, the finding
-names `cf-protection` as well.
+flags, filter this finding in its rpmlintrc with the reason
+recorded there, and filter the per-file `missing-stack-protector`
+and `missing-fortify` findings together with it: they name the
+same files for the same cause. When the flags also request
+`-fcf-protection` and no judged file records it, the finding names
+`cf-protection` as well.
 """
 missing-call-to-setgroups-before-setuid="""
 This executable is calling setuid and setgid without setgroups or initgroups.
