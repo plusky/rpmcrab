@@ -2102,6 +2102,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1023"
 
 [[divergence]]
 case = "global"
+check = "ghost-file-with-buildroot-content"
+kind = "behaviour"
+reason = "New finding with no reference counterpart (issue #1017): a %ghost regular file with a positive header size had content in the buildroot that %ghost discards, charged at W per file when the file carries the %config flag or sits under /etc or /usr/etc, and silent when a scriptlet other than %verifyscript names the path literally or appends the path tail to a variable expansion (${dir}/ls-R). A %ghost named <path>.bin whose <path> ships as a non-ghost regular file in the same package is exempt: the cache is a compiled form of shipped content, rebuilt from it at install (the SELinux file_contexts.bin, rebuilt by semodule -B). Measured over the Factory corpus (51,589 RPMs): 10,344 ghost entries, 5,656 with a positive size, 20 in the charged shapes (13 by the %config flag, 7 by the /etc path alone), 12 after the scriptlet credit, and 7 after the two exemptions -- haproxy (2), oidentd (2), samba, gvim and vpnc -- each hand-classified as content no install-time step recreates. A raw basename credit in the scriptlet step instead of the full path would have silenced 3 of the 12, among them an AppArmor local stub whose basename a scriptlet names only as a different file's path, so the credit stays the full path."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1017"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
