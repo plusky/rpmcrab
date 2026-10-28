@@ -2272,6 +2272,10 @@ struct PkgState {
     /// `no-dependency-on` candidates this package recorded (issue
     /// #862), drained into the check's session state by `check_binary`.
     nodep_candidates: Vec<NodepCandidate>,
+    /// Library-tree prefixes of the interpreters this package ships
+    /// (see `FilesCheck::interpreter_lib_trees`); a bytecode file
+    /// inside one is the shipped interpreter's own payload.
+    bytecode_interpreter_trees: Vec<String>,
     /// The parsed `License` tag identifiers for the license-coverage
     /// tags (issue #1033); empty when the package carries no usable
     /// License tag, which disables the coverage scan for the package.
@@ -2391,6 +2395,7 @@ impl Check for FilesCheck {
         );
         st.ldconfig_dirs = ldconfig_conf_dirs(pkg);
         st.source_date_epoch = crate::checks::shared::source_date_epoch_seconds(pkg);
+        st.bytecode_interpreter_trees = Self::interpreter_lib_trees(pkg);
         st.license_tag_ids = pkg
             .tag_str(librpm::Tag::LICENSE)
             .map(|t| parse_license_tag(&t))
@@ -6699,7 +6704,7 @@ impl FilesCheck {
         self.check_normal_world_w(pkg, fname, pkgfile, out);
         self.check_normal_perl_dep(pkg, fname, st);
         self.check_normal_python_dep(pkg, fname, st);
-        self.check_normal_python_source(pkg, fname, &fd, out);
+        self.check_normal_python_source(pkg, fname, &fd, st, out);
         self.check_normal_exec(pkg, fname, pkgfile, &mut fd, out);
         self.check_normal_non_conf_in_etc(pkg, fname, pkgfile, out);
         self.check_normal_python_noarch(pkg, fname, out);
@@ -7271,6 +7276,51 @@ impl FilesCheck {
         parts[1..parts.len() - 2].contains(&"__pycache__")
     }
 
+    /// The library-tree prefixes of the interpreters this package
+    /// ships: for a regular executable file named
+    /// `python<major>.<minor>` in a `bin` directory, the tree
+    /// `<prefix>/lib/python<major>.<minor>/` its modules live in
+    /// (the measured self-contained shape: `/opt/testing/bin/python3.13`
+    /// with `/opt/testing/lib/python3.13/`). Unversioned or partially
+    /// versioned names, non-regular or non-executable entries, and
+    /// interpreters outside a `bin` directory earn no tree.
+    fn interpreter_lib_trees(pkg: &Pkg) -> Vec<String> {
+        let mut trees = Vec::new();
+        for f in &pkg.files {
+            if !pkgfile::is_reg(f.mode) || f.mode & 0o111 == 0 {
+                continue;
+            }
+            let Some(slash) = f.name.rfind('/') else {
+                continue;
+            };
+            let base = &f.name[slash + 1..];
+            if !Self::is_versioned_python_name(base) {
+                continue;
+            }
+            let dir = &f.name[..slash];
+            let Some(prefix) = dir.strip_suffix("/bin") else {
+                continue;
+            };
+            trees.push(format!("{prefix}/lib/{base}/"));
+        }
+        trees
+    }
+
+    /// Whether `base` is a fully versioned interpreter name:
+    /// `python` followed by `<digits>.<digits>` and nothing else.
+    fn is_versioned_python_name(base: &str) -> bool {
+        let Some(rest) = base.strip_prefix("python") else {
+            return false;
+        };
+        let Some((maj, min)) = rest.split_once('.') else {
+            return false;
+        };
+        !maj.is_empty()
+            && !min.is_empty()
+            && maj.bytes().all(|b| b.is_ascii_digit())
+            && min.bytes().all(|b| b.is_ascii_digit())
+    }
+
     fn python_bytecode_to_script(&self, path: &str) -> Option<String> {
         if let Ok(Some(caps)) = self.python_bytecode_pep3147_re.captures(path) {
             return Some(format!(
@@ -7288,7 +7338,14 @@ impl FilesCheck {
         None
     }
 
-    fn check_normal_python_source(&self, pkg: &Pkg, fname: &str, fd: &FileData, out: &mut Filter) {
+    fn check_normal_python_source(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        fd: &FileData,
+        st: &mut PkgState,
+        out: &mut Filter,
+    ) {
         let source_file = match self.python_bytecode_to_script(fname) {
             Some(s) => s,
             None => return,
@@ -7299,9 +7356,19 @@ impl FilesCheck {
         // and mtime checks below keep their say whenever its source
         // is shipped and resolves.
         let below_cache_dir = Self::pyc_nested_below_cache_dir(fname);
+        // A bytecode file inside the library tree of an interpreter
+        // this package ships is that interpreter's own payload: a
+        // self-contained bundle ships its standard library sourceless
+        // by design, next to the interpreter that runs it. The
+        // without-source finding does not apply to it either; the
+        // magic and mtime checks keep their say on the same terms.
+        let in_shipped_tree = st
+            .bytecode_interpreter_trees
+            .iter()
+            .any(|tree| fname.starts_with(tree.as_str()));
         match pkg.files.iter().find(|f| f.name == source_file) {
             None => {
-                if !below_cache_dir {
+                if !below_cache_dir && !in_shipped_tree {
                     add_info(
                         out,
                         Level::Warning,
@@ -7315,7 +7382,7 @@ impl FilesCheck {
                 let srcfile = match pkg.readlink(src) {
                     Some(s) => s,
                     None => {
-                        if !below_cache_dir {
+                        if !below_cache_dir && !in_shipped_tree {
                             add_info(
                                 out,
                                 Level::Warning,
@@ -13838,6 +13905,177 @@ mod tests {
                 ("/usr/share/foo/build/tree/mod.py", b"x = 1\n", None),
             ],
         );
+        for f in pkg.files.iter_mut() {
+            if f.name.ends_with(".py") {
+                f.mtime = 2000;
+            }
+        }
+        assert!(without_source_lines(&pkg).is_empty());
+        assert_eq!(inconsistent_mtime_lines(&pkg).len(), 1);
+    }
+
+    /// Mark the named entry of a `pybc_pkg` package executable, as
+    /// a shipped interpreter entry is.
+    fn mark_exec(pkg: &mut Pkg, name: &str) {
+        pkg.files
+            .iter_mut()
+            .find(|f| f.name == name)
+            .expect("entry exists")
+            .mode = 0o100755;
+    }
+
+    #[test]
+    fn pyc_in_shipped_interpreter_tree_is_silent() {
+        // The rpmlint-mini shape: the package ships its interpreter
+        // and the interpreter's whole library tree as sourceless
+        // bytecode, in legacy and PEP 3147 layouts alike.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = pybc_pkg(
+            &dir,
+            &[
+                ("/opt/testing/bin/python3.13", b"elf", None),
+                (
+                    "/opt/testing/lib/python3.13/encodings/aliases.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+                (
+                    "/opt/testing/lib/python3.13/json/__pycache__/decoder.cpython-313.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+            ],
+        );
+        mark_exec(&mut pkg, "/opt/testing/bin/python3.13");
+        assert!(without_source_lines(&pkg).is_empty());
+    }
+
+    #[test]
+    fn pyc_tree_without_interpreter_still_fires() {
+        // Near miss: the same library tree with no interpreter
+        // shipped keeps the finding.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pybc_pkg(
+            &dir,
+            &[
+                (
+                    "/opt/testing/lib/python3.13/encodings/aliases.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+                (
+                    "/opt/testing/lib/python3.13/json/__pycache__/decoder.cpython-313.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+            ],
+        );
+        assert_eq!(without_source_lines(&pkg).len(), 2);
+    }
+
+    #[test]
+    fn pyc_outside_shipped_interpreter_tree_still_fires() {
+        // Near miss: an interpreter is shipped, but the bytecode
+        // sits in a different version's tree and in the system tree,
+        // neither of which is the shipped interpreter's library tree.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = pybc_pkg(
+            &dir,
+            &[
+                ("/opt/testing/bin/python3.13", b"elf", None),
+                (
+                    "/opt/testing/lib/python3.12/encodings/aliases.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages/foo.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+            ],
+        );
+        mark_exec(&mut pkg, "/opt/testing/bin/python3.13");
+        assert_eq!(without_source_lines(&pkg).len(), 2);
+    }
+
+    #[test]
+    fn pyc_tree_with_non_executable_interpreter_still_fires() {
+        // Near miss: the interpreter name is present but the entry
+        // is not an executable regular file.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pybc_pkg(
+            &dir,
+            &[
+                ("/opt/testing/bin/python3.13", b"elf", None),
+                (
+                    "/opt/testing/lib/python3.13/encodings/aliases.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+            ],
+        );
+        assert_eq!(without_source_lines(&pkg).len(), 1);
+    }
+
+    #[test]
+    fn pyc_tree_with_unversioned_or_linked_interpreter_still_fires() {
+        // Near misses: an unversioned interpreter name pins no
+        // library tree, and a symlink entry is not the shipped
+        // interpreter itself.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = pybc_pkg(
+            &dir,
+            &[
+                ("/opt/testing/bin/python3", b"elf", None),
+                (
+                    "/opt/testing/lib/python3.13/encodings/aliases.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+            ],
+        );
+        mark_exec(&mut pkg, "/opt/testing/bin/python3");
+        assert_eq!(without_source_lines(&pkg).len(), 1);
+
+        let dir2 = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pybc_pkg(
+            &dir2,
+            &[
+                (
+                    "/opt/testing/bin/python3.13",
+                    b"",
+                    Some("/usr/bin/python3.13"),
+                ),
+                (
+                    "/opt/testing/lib/python3.13/encodings/aliases.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+            ],
+        );
+        assert_eq!(without_source_lines(&pkg).len(), 1);
+    }
+
+    #[test]
+    fn pyc_in_tree_with_shipped_source_keeps_mtime_check() {
+        // The credit is scoped to the without-source finding: a
+        // module of the tree whose source ships and resolves still
+        // gets the mtime comparison.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = pybc_pkg(
+            &dir,
+            &[
+                ("/opt/testing/bin/python3.13", b"elf", None),
+                ("/opt/testing/lib/python3.13/foo.py", b"x = 1\n", None),
+                (
+                    "/opt/testing/lib/python3.13/__pycache__/foo.cpython-313.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+            ],
+        );
+        mark_exec(&mut pkg, "/opt/testing/bin/python3.13");
         for f in pkg.files.iter_mut() {
             if f.name.ends_with(".py") {
                 f.mtime = 2000;
