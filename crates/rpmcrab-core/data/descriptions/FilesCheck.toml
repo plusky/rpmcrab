@@ -376,7 +376,7 @@ directory.
 symlink-to-binary-with-shebang="""
 A file in /usr/bin is a link to a script in a different place with a shebang.
 rpm won't be able to inject the needed interpreter as dependency, so it should
-be done manually. A target script whose shebang is /bin/false is not reported:
+be done manually. A target script whose shebang is /bin/false or /usr/bin/false is not reported:
 that shebang marks the file as deliberately never executed, so there is no
 interpreter dependency to add.
 """
