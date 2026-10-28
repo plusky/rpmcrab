@@ -28,11 +28,13 @@ impl ConfigFilesCheck {
     /// file has the noreplace flag. A `ghost` entry ships no vendor
     /// content, so the noreplace finding does not apply to it: the
     /// flag protects a shipped default against local edits, and a
-    /// ghost has no shipped default. A symlink entry ships no
-    /// content of its own either — the content lives at the link
-    /// target — so the noreplace finding does not apply to it for
-    /// the same reason. The placement finding still applies to
-    /// both — it judges the `%config` mark itself.
+    /// ghost has no shipped default. A symlink entry is exempt on
+    /// the population the ledger records: rpm backs a %config link
+    /// up by its target like a regular file, but the shipped
+    /// %config links are package-managed farms (fontconfig's
+    /// conf.d) whose administrator-editable configuration is the
+    /// target files, not the links. The placement finding still
+    /// applies to both — it judges the `%config` mark itself.
     fn check_one(
         filename: &str,
         noreplace: bool,
@@ -155,10 +157,11 @@ mod tests {
 
     #[test]
     fn symlink_conffile_without_noreplace_is_quiet() {
-        // A %config symlink ships no content of its own: there is
-        // no shipped default for noreplace to protect, so the
-        // missing flag is not a finding (the fontconfig shape:
-        // /etc/fonts/conf.d links into /usr/share/fontconfig).
+        // A %config symlink is exempt from the noreplace finding:
+        // the shipped links are package-managed farms (the
+        // fontconfig shape: /etc/fonts/conf.d links into
+        // /usr/share/fontconfig), whose editable configuration is
+        // the target files.
         assert!(ConfigFilesCheck::check_one("/etc/foo.conf", false, false, true).is_empty());
     }
 
@@ -280,6 +283,43 @@ mod tests {
             hits[0].1.contains("/etc/real.conf"),
             "detail: {}",
             hits[0].1
+        );
+    }
+
+    #[test]
+    fn check_binary_entry_point_reports_usr_etc_symlink_conffile() {
+        // Only the noreplace finding is symlink-exempt: a %config
+        // symlink under /usr/etc draws the placement finding and
+        // the UsrEtc finding, like a regular file there (issue
+        // #1191 item 2).
+        use crate::pkg::pkgfile::{PkgFile, RPMFILE_CONFIG};
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.config_files = vec!["/usr/etc/link.conf".to_string()];
+        pkg.noreplace_files = vec![];
+        pkg.files = vec![PkgFile {
+            name: "/usr/etc/link.conf".to_string(),
+            mode: 0o120777,
+            flags: RPMFILE_CONFIG,
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = ConfigFilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"usr-etc-file-marked-as-conffile"),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"non-etc-or-var-file-marked-as-conffile"),
+            "{names:?}"
+        );
+        assert!(
+            !names.contains(&"conffile-without-noreplace-flag"),
+            "{names:?}"
         );
     }
 
