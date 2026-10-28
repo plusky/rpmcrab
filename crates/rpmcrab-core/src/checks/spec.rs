@@ -2287,6 +2287,18 @@ impl SpecCheck {
         // sequence, exactly as in `check_invalid_url`. `parsed` is
         // declared after the guard so it drops first.
         let _macro_guard = crate::pkg::global_macro_lock();
+        // The re-parse is internal machinery: its only output is the
+        // findings below, and the spec's parse diagnostics are already
+        // reported from the `rpm` child's output in
+        // `check_specfile_error`. librpm logs through rpmlog while
+        // parsing -- a macro a previous parse left defined in the
+        // global context makes it warn about macros expanded in
+        // comments, for example -- so the whole sequence runs with
+        // rpmlog masked to critical, the treatment
+        // `SignatureCheck`'s verified reads use. The mask is declared
+        // after the macro guard so it drops before the lock is
+        // released.
+        let _rpmlog_mask = crate::pkg::RpmlogMask::hush();
         let macros = librpm::macro_context::MacroContext::default();
         let _ = macros.define(&format!("_sourcedir {}", self.spec_file_dir()), 0);
         // Snapshot the effective state of the three judged macros.

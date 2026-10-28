@@ -100,7 +100,7 @@ impl SignatureCheck {
         // read returns.
         static VERIFY_LOCK: Mutex<()> = Mutex::new(());
         let _guard = VERIFY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _mask = RpmlogMask::hush();
+        let _mask = crate::pkg::RpmlogMask::hush();
         self.verify_read(path)
     }
 
@@ -136,23 +136,6 @@ impl SignatureCheck {
             }) => Verdict::Failed,
             Err(_) => Verdict::Unreadable,
         }
-    }
-}
-
-/// RAII guard for the rpmlog mask: `hush` narrows it to critical-only
-/// and dropping restores librpm's default (messages up to notice).
-struct RpmlogMask;
-
-impl RpmlogMask {
-    fn hush() -> Self {
-        librpm::logging::set_verbosity(librpm::logging::LogLevel::Critical);
-        Self
-    }
-}
-
-impl Drop for RpmlogMask {
-    fn drop(&mut self) {
-        librpm::logging::set_verbosity(librpm::logging::LogLevel::Notice);
     }
 }
 
