@@ -319,6 +319,23 @@ impl PythonCheck {
         }
     }
 
+    /// One header field of a dist-info METADATA: header names are
+    /// matched case-insensitively, and the header block ends at
+    /// the first blank line - a `Name:` or `Version:` line in the
+    /// long-description body is not a header (#1177 item 8).
+    fn metadata_header(content: &str, field: &str) -> Option<String> {
+        content
+            .lines()
+            .take_while(|l| !l.trim().is_empty())
+            .find_map(|l| {
+                let (name, value) = l.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case(field)
+                    .then(|| value.trim().to_string())
+            })
+            .filter(|v| !v.is_empty())
+    }
+
     /// Split a requirement head (`name[extras]specifier`) into the name,
     /// the extras and the raw version specifier. The name ends at the
     /// first specifier/bracket character (the historical charset
@@ -329,7 +346,10 @@ impl PythonCheck {
     fn split_head(head: &str) -> (String, Vec<String>, String) {
         let name_end = head.find(|c| "<>=!~ [(,".contains(c)).unwrap_or(head.len());
         let name = head[..name_end].trim().to_string();
-        let mut rest = &head[name_end..];
+        // A spaced head (`name [extra] >= 1`) leaves the bracket
+        // behind the space: trim before testing for it, or the
+        // extras are silently dropped (#1177 item 3).
+        let mut rest = head[name_end..].trim_start();
         let mut extras = Vec::new();
         if let Some(bracketed) = rest.strip_prefix('[') {
             let (extra_part, after) = match bracketed.split_once(']') {
@@ -709,7 +729,15 @@ impl PythonCheck {
         let Ok(re) = Regex::new(&pattern) else {
             return false;
         };
-        req_names.iter().any(|r| is_match(&re, r))
+        // A rich require string satisfies through ANY of its atoms,
+        // not only the leading one the anchored pattern reaches
+        // (#1177 item 10).
+        req_names.iter().any(|r| {
+            is_match(&re, r)
+                || Self::split_rich_atoms(r)
+                    .iter()
+                    .any(|atom| is_match(&re, atom))
+        })
     }
 }
 
@@ -1005,7 +1033,10 @@ fn rpm_to_pep440(version: &str, epoch: Option<i64>) -> Option<Pep440Version> {
                 }
                 out.push_str(".post");
                 let rest: String = chars.clone().collect();
-                if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case("post") {
+                if rest
+                    .get(..4)
+                    .is_some_and(|head| head.eq_ignore_ascii_case("post"))
+                {
                     for _ in 0..4 {
                         chars.next();
                     }
@@ -1071,16 +1102,8 @@ impl Check for PythonCheck {
                     .rsplit_once('/')
                     .map(|(d, _)| d.to_string())
                     .unwrap_or_default();
-                let dist_name = content
-                    .lines()
-                    .find_map(|l| l.strip_prefix("Name:"))
-                    .map(|n| n.trim().to_string())
-                    .filter(|n| !n.is_empty());
-                let metadata_version = content
-                    .lines()
-                    .find_map(|l| l.strip_prefix("Version:"))
-                    .map(|v| v.trim().to_string())
-                    .filter(|v| !v.is_empty());
+                let dist_name = Self::metadata_header(&content, "Name");
+                let metadata_version = Self::metadata_header(&content, "Version");
                 dist_infos.push(DistInfo {
                     reqs,
                     python_version,
@@ -1298,6 +1321,20 @@ enum AtomMatch {
     Bare,
 }
 
+/// The floor state of one RPM require leaf (#1177 item 2): a leaf
+/// carrying a version constraint whose value yields no usable
+/// floor is `Versioned`, never `Unversioned` - only a leaf with
+/// no version constraint at all is unversioned.
+enum LeafFloor {
+    /// No version constraint on the leaf.
+    Unversioned,
+    /// A version constraint is present but yields no usable floor
+    /// (an upper bound only, or a version that does not parse).
+    Versioned,
+    /// A usable floor.
+    Floor(Pep440Version),
+}
+
 impl PythonCheck {
     /// `python-missing-require`: declared requirements the RPM requires
     /// do not satisfy. A requirement met only by a bare `python-<name>`
@@ -1422,15 +1459,18 @@ impl PythonCheck {
         let mut atoms = Vec::new();
         let mut depth = 0i32;
         let mut current = String::new();
-        for word in s.split(' ') {
+        for word in s.split_whitespace() {
             for c in word.chars() {
                 match c {
                     '(' => depth += 1,
-                    ')' => depth -= 1,
+                    // Clamp at zero: a stray `)` must not push the
+                    // depth negative and deaden every following
+                    // depth-0 operator (#1177 item 4).
+                    ')' => depth = (depth - 1).max(0),
                     _ => {}
                 }
             }
-            if depth == 0 && matches!(word, "and" | "or" | "with") {
+            if depth == 0 && matches!(word, "and" | "or" | "with" | "without") {
                 atoms.push(std::mem::take(&mut current));
                 continue;
             }
@@ -1488,7 +1528,8 @@ impl PythonCheck {
 
     /// Classify one require atom against a requirement's name
     /// variants: `Full` for the name itself, a flavoured
-    /// `python<digits>-<name>`, or a `python3.Xdist(<name>)` spelling;
+    /// `python<digits>-<name>` (or the dotted `python3.13-<name>`
+    /// spelling), or a `python3.Xdist(<name>)` spelling;
     /// `Bare` for the unflavoured `python-<name>` only.
     fn classify_atom(atom: &str, variants: &[String]) -> Option<AtomMatch> {
         // The atom's name token: up to whitespace or a comparison
@@ -1508,10 +1549,16 @@ impl PythonCheck {
         if in_variants(name) {
             return Some(AtomMatch::Full);
         }
-        if let Some(rest) = name.strip_prefix("python")
+        // The flavour prefix matches case-insensitively, like the
+        // variant comparison itself (#1177 item 7).
+        let rest = name
+            .get(.."python".len())
+            .filter(|p| p.eq_ignore_ascii_case("python"))
+            .map(|_| &name["python".len()..]);
+        if let Some(rest) = rest
             && let Some((digits, sub)) = rest.split_once('-')
         {
-            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
                 return in_variants(sub).then_some(AtomMatch::Full);
             }
             if digits.is_empty() {
@@ -1560,6 +1607,7 @@ impl PythonCheck {
         };
         let variants = Self::module_names(&req.name, &req.extras);
         let mut any_match = false;
+        let mut any_unversioned = false;
         let mut highest: Option<(Pep440Version, String)> = None;
         for dep in pkg.requires.iter().chain(&pkg.prereq) {
             for leaf in dep.leaves() {
@@ -1567,18 +1615,22 @@ impl PythonCheck {
                     continue;
                 }
                 any_match = true;
-                let Some(leaf_floor) = Self::leaf_floor(&leaf) else {
-                    continue;
-                };
-                let floor_str = match leaf.epoch {
-                    Some(e) if e > 0 => format!("{e}:{}", leaf.version.as_deref().unwrap_or("")),
-                    _ => leaf.version.clone().unwrap_or_default(),
-                };
-                if highest
-                    .as_ref()
-                    .is_none_or(|(h, _)| pep440_cmp(&leaf_floor, h) == std::cmp::Ordering::Greater)
-                {
-                    highest = Some((leaf_floor, floor_str));
+                match Self::leaf_floor(&leaf) {
+                    LeafFloor::Unversioned => any_unversioned = true,
+                    LeafFloor::Versioned => {}
+                    LeafFloor::Floor(leaf_floor) => {
+                        let floor_str = match leaf.epoch {
+                            Some(e) if e > 0 => {
+                                format!("{e}:{}", leaf.version.as_deref().unwrap_or(""))
+                            }
+                            _ => leaf.version.clone().unwrap_or_default(),
+                        };
+                        if highest.as_ref().is_none_or(|(h, _)| {
+                            pep440_cmp(&leaf_floor, h) == std::cmp::Ordering::Greater
+                        }) {
+                            highest = Some((leaf_floor, floor_str));
+                        }
+                    }
                 }
             }
         }
@@ -1586,7 +1638,7 @@ impl PythonCheck {
             return;
         }
         match highest {
-            None => add_info(
+            None if any_unversioned => add_info(
                 out,
                 Level::Warning,
                 pkg,
@@ -1650,22 +1702,27 @@ impl PythonCheck {
         best
     }
 
-    /// The floor one RPM require leaf carries, if any: a `>`/`>=`
-    /// constraint, or an exact `=` pin. A `<`/`<=` constraint bounds
-    /// from above and carries no floor.
-    fn leaf_floor(leaf: &crate::pkg::dep::DepLeaf) -> Option<Pep440Version> {
+    /// The floor state of one RPM require leaf: a `>`/`>=`
+    /// constraint, or an exact `=` pin, yields its `Floor`; a
+    /// `<`/`<=` constraint bounds from above and yields no floor
+    /// but is still `Versioned`, as is a floor-shaped constraint
+    /// whose version does not parse. Only a leaf with no version
+    /// constraint at all is `Unversioned` (#1177 item 2).
+    fn leaf_floor(leaf: &crate::pkg::dep::DepLeaf) -> LeafFloor {
         use crate::pkg::dep::{RPMSENSE_EQUAL, RPMSENSE_GREATER, RPMSENSE_LESS};
         let sense = leaf.flags & (RPMSENSE_LESS | RPMSENSE_GREATER | RPMSENSE_EQUAL);
         if sense == 0 {
-            return None;
+            return LeafFloor::Unversioned;
         }
         if sense & RPMSENSE_GREATER == 0
             && !(sense & RPMSENSE_EQUAL != 0 && sense & RPMSENSE_LESS == 0)
         {
-            return None;
+            return LeafFloor::Versioned;
         }
-        let version = leaf.version.as_deref()?;
-        rpm_to_pep440(version, leaf.epoch)
+        let Some(version) = leaf.version.as_deref() else {
+            return LeafFloor::Versioned;
+        };
+        rpm_to_pep440(version, leaf.epoch).map_or(LeafFloor::Versioned, LeafFloor::Floor)
     }
 
     /// `python-dist-info-version-mismatch` (#1024 §3.2): the version
@@ -1730,7 +1787,9 @@ impl PythonCheck {
         else {
             return false;
         };
-        name == "python" || name.starts_with("python-") || name.starts_with("python3.")
+        name == "python"
+            || name.starts_with("python3.")
+            || Self::python_prefixed_rest(name).is_some()
     }
 
     /// The dependency name a `python3-foo`-style RPM require stands for,
@@ -1833,18 +1892,23 @@ impl PythonCheck {
     /// prefix keys as itself. PEP 503 normalised.
     fn package_key(pkg_name: &str) -> String {
         // Strip a leading `python3-` / `python313-` style prefix, if any.
-        let stripped = pkg_name
-            .strip_prefix("python")
-            .and_then(|rest| {
-                let digits: usize = rest
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '.')
-                    .map(|c| c.len_utf8())
-                    .sum();
-                rest[digits..].strip_prefix('-')
-            })
-            .unwrap_or(pkg_name);
+        let stripped = Self::python_prefixed_rest(pkg_name).unwrap_or(pkg_name);
         pep503(stripped)
+    }
+
+    /// The part of a `python<digits>-...` name after its python
+    /// prefix (`python3-foo` and `python313-foo` both yield
+    /// `foo`), or `None` when the name has no such prefix. The
+    /// prefix grammar - `python`, digits and dots, a dash - is
+    /// the one `package_key` strips (#1177 item 6).
+    fn python_prefixed_rest(name: &str) -> Option<&str> {
+        let rest = name.strip_prefix("python")?;
+        let digits: usize = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .map(|c| c.len_utf8())
+            .sum();
+        rest[digits..].strip_prefix('-')
     }
 
     /// The distribution name of an egg-info directory:
@@ -2949,6 +3013,192 @@ mod tests {
             line,
             "python-test.noarch: W: python-require-unversioned-despite-metadata-floor dulwich metadata-floor 0.22 rpm-floor unversioned"
         );
+    }
+
+    #[test]
+    fn rpm_to_pep440_caret_multibyte_straddle_does_not_panic() {
+        // #1177 item 1: the `post` probe after `^` sliced the
+        // remaining string at byte 4; a multibyte character
+        // straddling that offset panicked the conversion.
+        let _ = rpm_to_pep440("1.0^a\u{e9}\u{e9}", None);
+        // The generator spelling is still consumed as a post segment.
+        assert!(rpm_to_pep440("2.9^post0", None).is_some());
+    }
+
+    #[test]
+    fn floor_unparsable_versioned_require_stays_quiet() {
+        // #1177 item 2: a matching Require carrying a version whose
+        // value does not parse is versioned, not unversioned:
+        // neither floor tag fires for it alone.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) >= notaversion".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_GREATER | crate::pkg::dep::RPMSENSE_EQUAL,
+                Some("notaversion"),
+            )];
+        });
+        let tags = tags_of(&findings);
+        assert!(
+            !tags.contains(&"python-require-unversioned-despite-metadata-floor"),
+            "findings: {findings:?}"
+        );
+        assert!(
+            !tags.contains(&"python-require-floor-below-metadata"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn floor_unversioned_leaf_fires_alongside_unparsable_one() {
+        // #1177 item 2: an unparsable versioned leaf does not mask
+        // a truly unversioned matching leaf.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec![
+                "python3-dulwich".to_string(),
+                "python3.13dist(dulwich) >= notaversion".to_string(),
+            ];
+            pkg.requires = vec![
+                dep("python3-dulwich", 0, None),
+                dep(
+                    "python3.13dist(dulwich)",
+                    crate::pkg::dep::RPMSENSE_GREATER | crate::pkg::dep::RPMSENSE_EQUAL,
+                    Some("notaversion"),
+                ),
+            ];
+        });
+        let unversioned: Vec<_> = findings
+            .iter()
+            .filter(|(n, _, _)| n == "python-require-unversioned-despite-metadata-floor")
+            .collect();
+        assert_eq!(unversioned.len(), 1, "findings: {findings:?}");
+    }
+
+    #[test]
+    fn split_head_spaced_extras_are_parsed() {
+        // #1177 item 3: a space before the extras bracket must not
+        // silently drop the extras.
+        let (name, extras, specifier) = PythonCheck::split_head("Twisted [tls]>=14.0");
+        assert_eq!(name, "Twisted");
+        assert_eq!(extras, vec!["tls".to_string()]);
+        assert_eq!(specifier, ">=14.0");
+    }
+
+    #[test]
+    fn split_rich_atoms_stray_paren_keeps_operators_live() {
+        // #1177 item 4: a stray `)` clamps the depth at zero
+        // instead of pushing it negative, which deadened every
+        // following depth-0 operator.
+        let atoms = PythonCheck::split_rich_atoms("python3-a) or python3-b");
+        assert_eq!(
+            atoms,
+            vec!["python3-a)".to_string(), "python3-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_rich_atoms_without_is_an_operator() {
+        // #1177 item 4: `without` separates atoms at depth 0,
+        // like `with` does.
+        let atoms = PythonCheck::split_rich_atoms("(python3-a without python3-b)");
+        assert_eq!(
+            atoms,
+            vec!["python3-a".to_string(), "python3-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_rich_atoms_whitespace_variants_split() {
+        // #1177 item 4: tabs and runs of spaces separate words
+        // exactly like single spaces.
+        let atoms = PythonCheck::split_rich_atoms("python3-a\tor  python3-b");
+        assert_eq!(
+            atoms,
+            vec!["python3-a".to_string(), "python3-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn dist_info_version_mismatch_fires_for_python3_dash_sources() {
+        // #1177 item 6: `python3-foo` and `python313-foo` source
+        // names are python sources too, not only `python-foo`.
+        for source in ["python3-foo-2.0-1.src.rpm", "python313-foo-2.0-1.src.rpm"] {
+            let findings = dist_info_findings("python3-foo", Some(source), "foo", "2.0");
+            assert_eq!(findings.len(), 1, "{source}: {findings:?}");
+            assert_eq!(findings[0].0, "python-dist-info-version-mismatch");
+        }
+        // A non-python source stays quiet on the general arm.
+        let findings =
+            dist_info_findings("python3-foo", Some("kde-foo-2.0-1.src.rpm"), "foo", "2.0");
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn classify_atom_flavour_prefix_is_case_insensitive() {
+        // #1177 item 7: the `python` flavour prefix matches
+        // case-insensitively, like the variant comparison itself.
+        let variants = vec!["dulwich".to_string()];
+        assert!(matches!(
+            PythonCheck::classify_atom("Python3-dulwich", &variants),
+            Some(AtomMatch::Full)
+        ));
+        assert!(matches!(
+            PythonCheck::classify_atom("PYTHON313-dulwich", &variants),
+            Some(AtomMatch::Full)
+        ));
+        assert!(matches!(
+            PythonCheck::classify_atom("Python-dulwich", &variants),
+            Some(AtomMatch::Bare)
+        ));
+    }
+
+    #[test]
+    fn classify_atom_dotted_flavour_is_full() {
+        // #1177 item 5: the dotted flavour spelling
+        // (`python3.13-dulwich`) classifies Full, as the check's
+        // description promises; a dotted non-flavour and a dotted
+        // flavour on a different module stay unmatched.
+        let variants = vec!["dulwich".to_string()];
+        assert!(matches!(
+            PythonCheck::classify_atom("python3.13-dulwich", &variants),
+            Some(AtomMatch::Full)
+        ));
+        assert!(PythonCheck::classify_atom("python3.x-dulwich", &variants).is_none());
+        assert!(PythonCheck::classify_atom("python3.13-other", &variants).is_none());
+    }
+
+    #[test]
+    fn metadata_header_is_case_insensitive_and_stops_at_blank_line() {
+        // #1177 item 8: header names match case-insensitively, and
+        // the header block ends at the first blank line.
+        let content = "Metadata-Version: 2.1\nname: foo\nVersion: 1.2\n\nVersion: 9.9\n";
+        assert_eq!(
+            PythonCheck::metadata_header(content, "Name"),
+            Some("foo".to_string())
+        );
+        assert_eq!(
+            PythonCheck::metadata_header(content, "Version"),
+            Some("1.2".to_string())
+        );
+        let body_only = "Metadata-Version: 2.1\n\nName: bar\n";
+        assert_eq!(PythonCheck::metadata_header(body_only, "Name"), None);
+    }
+
+    #[test]
+    fn require_satisfied_matches_non_leading_rich_atom() {
+        // #1177 item 10: satisfaction can come from any atom of a
+        // rich require, not only the leading one.
+        let req_names = vec!["(python3-other or python3-requests)".to_string()];
+        assert!(PythonCheck::require_satisfied(
+            &req_names,
+            &requirement("requests")
+        ));
+        assert!(!PythonCheck::require_satisfied(
+            &req_names,
+            &requirement("urllib3")
+        ));
     }
 
     #[test]
