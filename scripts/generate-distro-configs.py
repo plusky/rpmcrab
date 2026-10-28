@@ -378,6 +378,7 @@ EXTRA_FILTERS = [
 EXTRA_CHECKS = [
     "XinetdDepCheck",
     "PAMModulesCheck",
+    "CMakeConfigCheck",
 ]
 
 # Extra AtomicAllowedDirs entries appended to the openSUSE config that

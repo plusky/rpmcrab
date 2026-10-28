@@ -147,8 +147,12 @@ Provenance, verified against the pinned reference (`84848c0`):
 - `LibraryDependencyCheck.toml`, `PkgConfigCheck.toml` — the reference
   files, with entries reworded for grammar (`no-library-dependency-on`,
   `no-library-dependency-for`, `pkgconfig-exception`; the last also names
-  reading alongside parsing, which is what the check fires on). Ledgered
-  in `tests/parity/divergences.toml`.
+  reading alongside parsing, which is what the check fires on) and, in
+  `PkgConfigCheck.toml`, the port-only `pkgconfig-dangling-library`
+  entry added. Ledgered in `tests/parity/divergences.toml`.
+- `CMakeConfigCheck.toml` — a port-only file: the reference has no
+  CMakeConfigCheck, so its one entry (`cmake-dangling-imported-location`)
+  is written for the port. Ledgered in `tests/parity/divergences.toml`.
 - `SELinuxIndependentModuleCheck.toml` — the reference file, with the
   `selinux-incorrect-if-file-location` entry reworded to state the layer
   directories the port credits (the devel Makefile collects interfaces

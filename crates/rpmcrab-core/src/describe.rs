@@ -19,6 +19,7 @@ const STAGED: &[&str] = &[
     include_str!("../data/descriptions/BinariesCheck.toml"),
     include_str!("../data/descriptions/BrandingPolicyCheck.toml"),
     include_str!("../data/descriptions/BuildRootAndDateCheck.toml"),
+    include_str!("../data/descriptions/CMakeConfigCheck.toml"),
     include_str!("../data/descriptions/CheckForXinetd.toml"),
     include_str!("../data/descriptions/ConfigFilesCheck.toml"),
     include_str!("../data/descriptions/DBusPolicyCheck.toml"),
@@ -328,6 +329,10 @@ mod tests {
                 "e663906b814d43bc97c8e4a19d5004bfcd830ad75bd66aea84ebd98ac1d666af",
             ),
             (
+                "CMakeConfigCheck.toml",
+                "4d99b66cbf814b204bf4938984d0742fc2fb5144b84f18dec6da32dcf4772043",
+            ),
+            (
                 "CheckForXinetd.toml",
                 "985a789bb7e6671d530a60a19215b6b250e693fd3e25cb0e0bb34fd57a8e594a",
             ),
@@ -409,7 +414,7 @@ mod tests {
             ),
             (
                 "PkgConfigCheck.toml",
-                "b657ebe9d799d23fd7ec6683c9470f09ff45d924349a8cd48a75b8789b7eb4ee",
+                "e33a5d675f489bc206d9dff23a4cda34251e792e3d8c629772d9c501a77dbc0d",
             ),
             (
                 "PolkitCheck.toml",

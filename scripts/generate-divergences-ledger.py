@@ -76,13 +76,23 @@ RUN_TOPICS = frozenset({
 })
 
 
+# Checks the port adds wholesale, with no counterpart in the
+# reference set: an owner file named for one is a check's file like
+# any other, it just cannot key on REFERENCE_CHECKS. Keep in sync
+# with PORT_ONLY_CHECKS in
+# crates/rpmcrab-core/tests/divergences_missing.rs.
+PORT_ONLY_CHECKS = frozenset({
+    "CMakeConfigCheck",
+})
+
+
 def known_owners():
     """The owner names a source file may use: every check in the
-    reference set plus the run topics."""
+    reference set, the port-only checks, plus the run topics."""
     checks = {line.strip() for line in
               REFERENCE_CHECKS.read_text(encoding="utf-8").splitlines()
               if line.strip() and not line.startswith("#")}
-    return checks | RUN_TOPICS
+    return checks | PORT_ONLY_CHECKS | RUN_TOPICS
 
 
 def extract_blocks(text):

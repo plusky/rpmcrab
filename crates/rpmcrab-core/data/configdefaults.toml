@@ -56,6 +56,12 @@ Checks = [
     # The port derives the authorized modules from the FileDigestGroup
     # data (see PAMModulesCheck), so the check runs here.
     "PAMModulesCheck",
+    # Deliberate rpmcrab addition (ledgered in tests/parity/divergences.toml):
+    # the reference has no CMakeConfigCheck at all. The check is
+    # run-scoped: it judges a build's CMake imported locations only
+    # when the run holds the build's source package, and stays
+    # silent on any partial input.
+    "CMakeConfigCheck",
 ]
 # List of error titles that should be filtered
 FilterErrorTitles = []

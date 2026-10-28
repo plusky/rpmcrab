@@ -7,6 +7,7 @@ pub mod bashisms;
 pub mod binaries;
 pub mod branding_policy;
 pub mod buildroot_and_date;
+pub mod cmake_config;
 pub mod config_files;
 pub mod dbus_policy;
 pub mod device_files;

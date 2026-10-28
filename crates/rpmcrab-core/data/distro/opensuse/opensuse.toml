@@ -34,6 +34,7 @@ Checks = [
     # EXTRA_CHECKS in scripts/generate-distro-configs.py.
     "XinetdDepCheck",
     "PAMModulesCheck",
+    "CMakeConfigCheck",
 ]
 
 # List of directory prefixes that are not allowed in packages
