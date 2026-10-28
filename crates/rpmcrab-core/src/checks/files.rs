@@ -7416,12 +7416,15 @@ impl FilesCheck {
 
     /// The library-tree prefixes of the interpreters this package
     /// ships: for a regular executable file named
-    /// `python<major>.<minor>` in a `bin` directory, the tree
-    /// `<prefix>/lib/python<major>.<minor>/` its modules live in
+    /// `python<major>.<minor>` with an optional trailing `t` for a
+    /// free-threaded build in a `bin` directory, the tree
+    /// `<prefix>/lib/python<major>.<minor>[t]/` its modules live in
     /// (the measured self-contained shape: `/opt/testing/bin/python3.13`
-    /// with `/opt/testing/lib/python3.13/`). Unversioned or partially
-    /// versioned names, non-regular or non-executable entries, and
-    /// interpreters outside a `bin` directory earn no tree.
+    /// with `/opt/testing/lib/python3.13/`). The tree is `lib` only,
+    /// never `lib64`. Unversioned or partially versioned names,
+    /// non-regular or non-executable entries, interpreters outside a
+    /// `bin` directory, and interpreters under `/usr/local` (user
+    /// territory, not a shipped payload) earn no tree.
     fn interpreter_lib_trees(pkg: &Pkg) -> Vec<String> {
         let mut trees = Vec::new();
         for f in &pkg.files {
@@ -7439,13 +7442,21 @@ impl FilesCheck {
             let Some(prefix) = dir.strip_suffix("/bin") else {
                 continue;
             };
+            // /usr/local is user territory: no distro package ships
+            // an interpreter there, and a user-installed interpreter
+            // is not this package's payload.
+            if prefix == "/usr/local" {
+                continue;
+            }
             trees.push(format!("{prefix}/lib/{base}/"));
         }
         trees
     }
 
     /// Whether `base` is a fully versioned interpreter name:
-    /// `python` followed by `<digits>.<digits>` and nothing else.
+    /// `python` followed by `<digits>.<digits>` with an optional
+    /// trailing `t` for a free-threaded build, and nothing else.
+    /// Any other trailing letter fails closed.
     fn is_versioned_python_name(base: &str) -> bool {
         let Some(rest) = base.strip_prefix("python") else {
             return false;
@@ -7453,6 +7464,7 @@ impl FilesCheck {
         let Some((maj, min)) = rest.split_once('.') else {
             return false;
         };
+        let min = min.strip_suffix('t').unwrap_or(min);
         !maj.is_empty()
             && !min.is_empty()
             && maj.bytes().all(|b| b.is_ascii_digit())
@@ -14138,6 +14150,73 @@ mod tests {
         );
         mark_exec(&mut pkg, "/opt/testing/bin/python3.13");
         assert!(without_source_lines(&pkg).is_empty());
+    }
+
+    #[test]
+    fn pyc_in_free_threaded_interpreter_tree_is_silent() {
+        // The t grammar: a free-threaded interpreter earns the
+        // same lib tree as its GIL twin.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = pybc_pkg(
+            &dir,
+            &[
+                ("/opt/testing/bin/python3.13t", b"elf", None),
+                (
+                    "/opt/testing/lib/python3.13t/encodings/aliases.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+            ],
+        );
+        mark_exec(&mut pkg, "/opt/testing/bin/python3.13t");
+        assert!(without_source_lines(&pkg).is_empty());
+    }
+
+    #[test]
+    fn pyc_tree_with_abi_suffix_other_than_t_still_fires() {
+        // Near misses: d and m suffixes fail closed, so their trees
+        // earn no credit and the bytecode keeps firing.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = pybc_pkg(
+            &dir,
+            &[
+                ("/opt/testing/bin/python3.13d", b"elf", None),
+                (
+                    "/opt/testing/lib/python3.13d/encodings/aliases.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+                ("/opt/testing/bin/python3.13m", b"elf", None),
+                (
+                    "/opt/testing/lib/python3.13m/encodings/aliases.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+            ],
+        );
+        mark_exec(&mut pkg, "/opt/testing/bin/python3.13d");
+        mark_exec(&mut pkg, "/opt/testing/bin/python3.13m");
+        assert_eq!(without_source_lines(&pkg).len(), 2);
+    }
+
+    #[test]
+    fn pyc_tree_under_usr_local_still_fires() {
+        // Near miss: an interpreter under /usr/local earns no tree,
+        // so its library's bytecode keeps firing.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = pybc_pkg(
+            &dir,
+            &[
+                ("/usr/local/bin/python3.13", b"elf", None),
+                (
+                    "/usr/local/lib/python3.13/encodings/aliases.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+            ],
+        );
+        mark_exec(&mut pkg, "/usr/local/bin/python3.13");
+        assert_eq!(without_source_lines(&pkg).len(), 1);
     }
 
     #[test]
