@@ -40,3 +40,10 @@ kind = "behaviour"
 reason = "A `%ghost %config` entry does not fire (issue #793): a ghost ships no vendor content, so there is no shipped default for the noreplace flag to protect and the flag is meaningless for the entry. The reference's check iterates its config-file list the same way; it stays silent on shapes like the apparmor-profiles placeholders (49 `%ghost %config` files under /etc/apparmor.d/local) only because its openSUSE config blanket-filters the whole finding — the filter #556 dropped. The exclusion mirrors the one this check's UsrEtc rule already applies to ghost entries on the same rationale. Real conffiles without noreplace keep firing, and a ghost entry outside /etc and /var still draws the placement finding, which judges the %config mark itself."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/793"
+
+[[divergence]]
+case = "global"
+check = "conffile-without-noreplace-flag"
+kind = "behaviour"
+reason = "Fix-and-diverge: a %config symlink entry does not fire. A symlink ships no content of its own \u2014 the content lives at the link target \u2014 so there is no shipped default for the noreplace flag to protect and the flag is meaningless for the entry, the same rationale as the %ghost %config exclusion in this check. The reference iterates its config-file list without consulting entry kinds and fires on symlink entries. Measured by header census over the Factory snapshot corpus (51,589 binary RPMs): the arm removes 323 warnings in 197 binary packages, the bulk of them fontconfig's /etc/fonts/conf.d links into /usr/share/fontconfig/conf.avail; no regular-file finding changes. A symlink entry outside /etc and /var still draws the placement finding, which judges the %config mark itself. Pinned by symlink_conffile_without_noreplace_is_quiet, symlink_conffile_outside_etc_reports_placement_only and check_binary_entry_point_skips_symlink_conffiles in config_files.rs."
+since = "0.4.1"
