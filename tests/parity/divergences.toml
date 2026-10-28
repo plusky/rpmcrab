@@ -1369,6 +1369,13 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/1137"
 
 [[divergence]]
 case = "global"
+check = "non-conffile-in-etc"
+kind = "behaviour"
+reason = "Fix-and-diverge: files inside a SELinux policy store (/etc/selinux/<policy>/active/\u2026) are exempt. The store is libsemanage's managed area \u2014 compiled policy modules (CIL/HLL) the tooling rewrites on every semodule operation, never administrator-edited configuration \u2014 the same mechanism species as the /etc/alternatives/ exemption above and the reference's /etc/ld.so.conf.d/ exemption. The reference fires on the store files; the selinux-policy spec silences the tag for its own packages with an rpmlintrc filter instead. Measured by header census over the Factory snapshot corpus (51,589 binary RPMs): the exemption removes 2,662 of the tag's 3,946 findings, all of them in selinux-policy-minimum and selinux-policy-targeted. The boundary is component-exact \u2014 a policy component must precede the active component \u2014 so policy-root artefacts (policy.35, file_contexts), /etc/selinux/<policy>/semanage.conf and /etc/selinux/config keep firing. Pinned by non_conf_in_etc_selinux_store_is_exempt in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "read-error"
 kind = "detail"
 reason = "FilesCheck.peek's read-error detail: the reference emits Python's str(OSError) including the filename -- e.g. [Errno 13] Permission denied: '/p' (FilesCheck.py:430, from open(path,'rb')). The port passes std::io::Error's Display (Permission denied (os error 13)), dropping both the [Errno N] prefix and the filename."
