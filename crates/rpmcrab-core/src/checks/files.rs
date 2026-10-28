@@ -7235,6 +7235,27 @@ impl FilesCheck {
         tag_version != tree_version
     }
 
+    /// True when `fname` sits at least one directory level below a
+    /// `__pycache__` directory -- the cache directory is not the file's
+    /// parent, as in a byte-compiled tree copied into a documentation
+    /// payload, where the compiled tree's own directory structure is
+    /// mirrored below `__pycache__`. No import lookup reads such a file
+    /// as bytecode: a PEP 3147 cache entry is a direct child of
+    /// `__pycache__`, and a legacy sourceless module is a direct child
+    /// of its module directory. A file directly inside `__pycache__`,
+    /// and any path with no non-parent `__pycache__` component, returns
+    /// false: the source checks keep their say.
+    fn pyc_nested_below_cache_dir(fname: &str) -> bool {
+        let parts: Vec<&str> = fname.split('/').collect();
+        if parts.len() < 3 {
+            return false;
+        }
+        // Directory components other than the file's parent directory:
+        // every component between the leading segment and the
+        // second-to-last one.
+        parts[1..parts.len() - 2].contains(&"__pycache__")
+    }
+
     fn python_bytecode_to_script(&self, path: &str) -> Option<String> {
         if let Ok(Some(caps)) = self.python_bytecode_pep3147_re.captures(path) {
             return Some(format!(
@@ -7257,27 +7278,37 @@ impl FilesCheck {
             Some(s) => s,
             None => return,
         };
+        // A bytecode file nested below a `__pycache__` directory is
+        // not in a location any import lookup reads as bytecode, so
+        // the without-source finding does not apply to it. The magic
+        // and mtime checks below keep their say whenever its source
+        // is shipped and resolves.
+        let below_cache_dir = Self::pyc_nested_below_cache_dir(fname);
         match pkg.files.iter().find(|f| f.name == source_file) {
             None => {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "python-bytecode-without-source",
-                    &[fname],
-                );
+                if !below_cache_dir {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "python-bytecode-without-source",
+                        &[fname],
+                    );
+                }
             }
             Some(src) => {
                 let srcfile = match pkg.readlink(src) {
                     Some(s) => s,
                     None => {
-                        add_info(
-                            out,
-                            Level::Warning,
-                            pkg,
-                            "python-bytecode-without-source",
-                            &[fname],
-                        );
+                        if !below_cache_dir {
+                            add_info(
+                                out,
+                                Level::Warning,
+                                pkg,
+                                "python-bytecode-without-source",
+                                &[fname],
+                            );
+                        }
                         return;
                     }
                 };
@@ -13498,6 +13529,173 @@ mod tests {
             "/usr/share/foo/__pycache__/__init__.cpython-312.pyc",
             &pyc_header(3531, 0, 1000),
         );
+        assert_eq!(inconsistent_mtime_lines(&pkg).len(), 1);
+    }
+
+    #[test]
+    fn pyc_nested_below_cache_dir_shapes() {
+        // The live shape: a byte-compiled tree mirrored below
+        // __pycache__ inside a documentation payload.
+        assert!(FilesCheck::pyc_nested_below_cache_dir(
+            "/usr/share/doc/kernel/html/rst/__pycache__/home/abuild/rpmbuild/BUILD/linux/Documentation/sphinx/kerneldoc.cpython-313.pyc"
+        ));
+        // One extra directory level is enough.
+        assert!(FilesCheck::pyc_nested_below_cache_dir(
+            "/usr/share/foo/__pycache__/sub/mod.cpython-313.pyc"
+        ));
+        // A doubled cache directory: the outer one is not the parent.
+        assert!(FilesCheck::pyc_nested_below_cache_dir(
+            "/usr/share/foo/__pycache__/__pycache__/mod.cpython-313.pyc"
+        ));
+        // A plain PEP 3147 entry: __pycache__ is the parent directory.
+        assert!(!FilesCheck::pyc_nested_below_cache_dir(
+            "/usr/lib64/python3.13/site-packages/foo/__pycache__/mod.cpython-313.pyc"
+        ));
+        // A legacy sourceless module: no cache directory at all.
+        assert!(!FilesCheck::pyc_nested_below_cache_dir(
+            "/usr/lib64/python3.13/site-packages/foo/mod.pyc"
+        ));
+        // A directory merely named with a __pycache__ prefix is not a
+        // cache directory.
+        assert!(!FilesCheck::pyc_nested_below_cache_dir(
+            "/usr/share/foo/__pycache__data/sub/mod.pyc"
+        ));
+        // A cache directory as the module directory itself: the file
+        // is its direct child, so the predicate stays out.
+        assert!(!FilesCheck::pyc_nested_below_cache_dir(
+            "/usr/share/__pycache__/mod.pyc"
+        ));
+    }
+
+    /// Build a package from explicit file entries so the bytecode
+    /// source checks can be driven over arbitrary layouts. Regular
+    /// files get real on-disk content; a symlink entry carries its
+    /// target in the package metadata, as a shipped symlink does.
+    fn pybc_pkg(dir: &tempfile::TempDir, entries: &[(&str, &[u8], Option<&str>)]) -> Pkg {
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.name = "pyc-without-source-test".to_string();
+        pkg.files = entries
+            .iter()
+            .map(|(name, content, linkto)| {
+                let path = dir.path().join(name.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+                std::fs::write(&path, content).expect("write temp file");
+                PkgFile {
+                    name: name.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mode: if linkto.is_some() { 0o120777 } else { 0o100644 },
+                    linkto: linkto.unwrap_or("").to_string(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        pkg
+    }
+
+    fn without_source_lines(pkg: &Pkg) -> Vec<String> {
+        run_check_binary(pkg)
+            .iter()
+            .filter(|(n, _)| n == "python-bytecode-without-source")
+            .map(|(_, l)| l.clone())
+            .collect()
+    }
+
+    #[test]
+    fn pyc_without_source_nested_below_cache_dir_is_silent() {
+        // Byte-compiled build tree mirrored below __pycache__ in a
+        // documentation payload; no source ships, and the location is
+        // not one any import lookup reads as bytecode.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pybc_pkg(
+            &dir,
+            &[(
+                "/usr/share/doc/kernel/html/rst/__pycache__/home/abuild/build/Documentation/sphinx/kerneldoc.cpython-313.pyc",
+                &pyc_header(3571, 0, 1000),
+                None,
+            )],
+        );
+        assert!(without_source_lines(&pkg).is_empty());
+    }
+
+    #[test]
+    fn pyc_without_source_nested_with_symlink_source_is_silent() {
+        // The computed source of a nested file ships as a symlink whose
+        // chain leaves the package; the location credit still applies.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pybc_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/foo/__pycache__/build/tree/mod.cpython-313.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+                (
+                    "/usr/share/foo/build/tree/mod.py",
+                    b"x = 1\n",
+                    Some("/usr/share/elsewhere/mod.py"),
+                ),
+            ],
+        );
+        assert!(without_source_lines(&pkg).is_empty());
+    }
+
+    #[test]
+    fn pyc_without_source_normal_cache_entry_still_fires() {
+        // Near miss: a plain PEP 3147 cache entry whose source is
+        // absent keeps the finding -- __pycache__ is its parent.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pybc_pkg(
+            &dir,
+            &[(
+                "/usr/lib64/python3.13/site-packages/foo/__pycache__/mod.cpython-313.pyc",
+                &pyc_header(3571, 0, 1000),
+                None,
+            )],
+        );
+        assert_eq!(without_source_lines(&pkg).len(), 1);
+    }
+
+    #[test]
+    fn pyc_without_source_legacy_layout_still_fires() {
+        // Near miss: a legacy sourceless module keeps the finding.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pybc_pkg(
+            &dir,
+            &[(
+                "/usr/lib64/python3.13/site-packages/foo/mod.pyc",
+                &pyc_header(3571, 0, 1000),
+                None,
+            )],
+        );
+        assert_eq!(without_source_lines(&pkg).len(), 1);
+    }
+
+    #[test]
+    fn pyc_nested_with_shipped_source_keeps_mtime_check() {
+        // The credit is scoped to the without-source finding: a nested
+        // file whose source ships and resolves still gets the mtime
+        // comparison (a stale embedded timestamp fires).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = pybc_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/foo/__pycache__/build/tree/mod.cpython-313.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+                ("/usr/share/foo/build/tree/mod.py", b"x = 1\n", None),
+            ],
+        );
+        for f in pkg.files.iter_mut() {
+            if f.name.ends_with(".py") {
+                f.mtime = 2000;
+            }
+        }
+        assert!(without_source_lines(&pkg).is_empty());
         assert_eq!(inconsistent_mtime_lines(&pkg).len(), 1);
     }
 
