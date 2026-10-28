@@ -574,9 +574,16 @@ const SPEC_SYNTAX_KEYWORDS: &[&str] = &[
 /// each pass an odd run before an introducer expands (and executes)
 /// while an even run collapses to half its length, so `%%(` stays inert
 /// but `%%(` inside one `%{expand:...}` executes. Other braced
-/// constructs expand their argument in place (even `%{quote:...}` and
-/// untaken `%{?name:...}` branches), so their contents are scanned with
-/// the surrounding pass budget. A `%{lua:...}` body reaches the
+/// constructs expand their argument in place (even `%{quote:...}`), so
+/// their contents are scanned with the surrounding pass budget. A
+/// conditional-with-text branch's text expands only when the branch is
+/// taken: on rpm 4.20.1 the `%{error:...}`, `%{lua:...}` and `%(...)`
+/// forms nested in `%{?name:...}` execute when the guard macro is
+/// defined and never when it is not (likewise for a nested untaken
+/// branch inside a taken one). Taken-ness turns on the macro state at
+/// that point of the parse, which the scan does not decide, so
+/// effectful forms in the text are reported, while plain mentions in
+/// the text stay quiet. A `%{lua:...}` body reaches the
 /// interpreter unexpanded, so it is opaque: the construct itself is the
 /// finding and its body is not scanned.
 fn comment_macro_mentions(comment: &str) -> Vec<&str> {
@@ -709,7 +716,13 @@ fn scan_comment_text<'a>(
                 // `%define` / `%global` / `%undefine` / `%lua` / `%load` —
                 // is effectful. Any other name that is not spec syntax
                 // (see `SPEC_SYNTAX_KEYWORDS`) is a plain macro
-                // reference; a stray `%` has no name at all.
+                // reference; a stray `%` has no name at all. A bare
+                // conditional reference (`%?name`, `%!name`) carries
+                // its sigil before the name: the sigil is consumed so
+                // the name is judged exactly as the braced form's is.
+                if matches!(bytes.get(i), Some(b'?' | b'!')) {
+                    i += 1;
+                }
                 let name_start = i;
                 while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
@@ -816,7 +829,9 @@ fn scan_braced_construct<'a>(
                 // with the surrounding budget. A conditional-with-text
                 // form (`%{?name:text}`) is itself quiet, and so are
                 // plain mentions in its text; effectful expansions
-                // there still count.
+                // there still count, because rpm expands them whenever
+                // the branch is taken and taken-ness is not decidable
+                // from the comment (see `comment_macro_mentions`).
                 let extra = if live && name == "expand" {
                     expand_depth + 1
                 } else {
@@ -5980,6 +5995,54 @@ mod tests {
             2,
             "{results:?}"
         );
+    }
+
+    #[test]
+    fn bare_conditional_sigils_error_1176() {
+        // Item 3: a bare conditional reference names its macro after
+        // the sigil, exactly as the braced form does, so it errors;
+        // a keyword after the sigil stays quiet, and a lone sigil
+        // names nothing.
+        for (line, token) in [
+            ("# see %?version for the old spelling", "%?version"),
+            ("# see %!version for the old spelling", "%!version"),
+        ] {
+            let results = run_mini(&format!("Name: foo\n{line}\n"));
+            let lines = lines_for(&results, "macro-in-comment");
+            assert_eq!(lines.len(), 1, "{line}: {results:?}");
+            assert!(
+                lines[0].contains(&format!("E: macro-in-comment {token}")),
+                "{line}: {lines:?}"
+            );
+        }
+        for line in ["# a %?license mention", "# a %!files section", "# just %?"] {
+            let results = run_mini(&format!("Name: foo\n{line}\n"));
+            assert!(!has(&results, "macro-in-comment"), "{line}: {results:?}");
+        }
+    }
+
+    #[test]
+    fn nested_effectful_in_conditional_text_errors_1176() {
+        // Item 6, settled against rpm output: rpm expands a taken
+        // conditional branch's text, so the effectful forms nested
+        // in `%{?name:...}` text execute whenever the guard holds;
+        // the scan reports them (taken-ness is not decidable from
+        // the comment), while plain mentions in the text stay quiet
+        // (pinned in conditional_text_and_escapes_stay_quiet_1026).
+        for line in [
+            "# %{?foo:%{lua:print(1)}}",
+            "# %{?foo:%(touch /tmp/x)}",
+            "# %{?foo:%{error:boom}}",
+            "# %{?foo:%define x 1}",
+            "# %{!foo:%{lua:print(1)}}",
+        ] {
+            let results = run_mini(&format!("Name: foo\n{line}\n"));
+            assert_eq!(
+                lines_for(&results, "macro-in-comment").len(),
+                1,
+                "{line}: {results:?}"
+            );
+        }
     }
 
     #[test]
