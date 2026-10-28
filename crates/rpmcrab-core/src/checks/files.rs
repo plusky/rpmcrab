@@ -145,6 +145,17 @@ fn strip_man_compression_suffix(path: &str) -> &str {
     path
 }
 
+/// Whether the file at `path` opens with the gzip magic bytes
+/// (`1F 8B`), or `None` when the file cannot be opened or read: an
+/// unreadable page is skipped, not judged.
+fn file_has_gzip_magic(path: &str) -> Option<bool> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut head = Vec::new();
+    file.take(2).read_to_end(&mut head).ok()?;
+    Some(head == [0x1F, 0x8B])
+}
+
 /// The `.so` targets named by one man page's text: the first
 /// whitespace-delimited token of every line that opens with the soelim
 /// request (`.so` followed by whitespace). Comment lines (`.\"`) never
@@ -2448,6 +2459,7 @@ impl Check for FilesCheck {
         for f in &pkg.files {
             self.check_file(pkg, &f.name, f, &mut st, out);
         }
+        self.check_manpage_compression(pkg, out);
         self.check_manpage_so_refs(pkg, out);
         self.check_debug_files_in_non_debug_package(pkg, &st, out);
         self.check_debuginfo_without_sources(pkg, &st, out);
@@ -5591,6 +5603,55 @@ impl FilesCheck {
                         "manpage-dangling-so-ref",
                         &[&pkgfile.name, &arg],
                     );
+                }
+            }
+        }
+    }
+
+    /// Man page compression defects beyond the suffix rule in
+    /// `check_file_manpage`: a `.gz`-suffixed page whose first two
+    /// bytes are not the gzip magic claims a compression its content
+    /// does not carry, and a compressed page that decompresses to
+    /// empty ships no page at all. Only man pages are judged (the
+    /// man-root locations `man_base_re` matches, regular files): an
+    /// uncompressed page stays under the existing
+    /// `manpage-not-compressed` rule and never fires here, and a
+    /// page whose decompressor is absent or fails is skipped rather
+    /// than judged -- a failed decompression is not an empty page,
+    /// and a page without magic fails decompression, so it does not
+    /// also read as empty. One finding per page per predicate. The
+    /// decompressed bytes come from the shared cache, so the
+    /// `.so`-reference scan reuses this check's decompression.
+    fn check_manpage_compression(&self, pkg: &Pkg, out: &mut Filter) {
+        for pkgfile in &pkg.files {
+            if !is_reg(pkgfile.mode) {
+                continue;
+            }
+            let Ok(Some(_)) = self.man_base_re.captures(&pkgfile.name) else {
+                continue;
+            };
+            if pkgfile.name.to_lowercase().ends_with(".gz")
+                && file_has_gzip_magic(&pkgfile.path) == Some(false)
+            {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "manpage-gzip-magic-mismatch",
+                    &[&pkgfile.name],
+                );
+            }
+            if self.decompressor_for(&pkgfile.name).is_some() {
+                if let Some(bytes) = self.decompressed_bytes(&pkgfile.name, &pkgfile.path, true) {
+                    if bytes.is_empty() {
+                        add_info(
+                            out,
+                            Level::Warning,
+                            pkg,
+                            "manpage-empty-after-decompression",
+                            &[&pkgfile.name],
+                        );
+                    }
                 }
             }
         }
@@ -18156,6 +18217,153 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
                     .iter()
                     .any(|l| l.contains("Empty.class") && l.contains("truncated header: 0 bytes")),
             "each defect named with its reason: {results:?}"
+        );
+    }
+
+    fn gzip_bytes(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn bzip2_bytes(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn manpage_tag_hits<'a>(
+        results: &'a [(String, String)],
+        tag: &str,
+    ) -> Vec<&'a (String, String)> {
+        results.iter().filter(|(n, _)| n == tag).collect()
+    }
+
+    #[test]
+    fn manpage_gz_without_gzip_magic_fires_mismatch_only() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man1/plain.1.gz",
+                    0o100644,
+                    b".TH plain 1\n".as_slice(),
+                ),
+                (
+                    "/usr/share/man/man1/tiny.1.gz",
+                    0o100644,
+                    b"\x1f".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        let mismatch = manpage_tag_hits(&results, "manpage-gzip-magic-mismatch");
+        assert_eq!(mismatch.len(), 2, "both magic-less pages: {results:?}");
+        assert!(
+            mismatch[0].1.contains(": W: manpage-gzip-magic-mismatch"),
+            "the finding is a warning: {}",
+            mismatch[0].1
+        );
+        assert!(
+            mismatch.iter().any(|(_, line)| line.contains("plain.1.gz"))
+                && mismatch.iter().any(|(_, line)| line.contains("tiny.1.gz")),
+            "both pages named: {results:?}"
+        );
+        assert!(
+            manpage_tag_hits(&results, "manpage-empty-after-decompression").is_empty(),
+            "a page without magic fails decompression, so it does not also read as empty: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_gz_empty_after_decompression_fires_empty_only() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let good = gzip_bytes(b".TH good 1\n");
+        let empty = gzip_bytes(b"");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                ("/usr/share/man/man1/good.1.gz", 0o100644, &good),
+                ("/usr/share/man/man1/empty.1.gz", 0o100644, &empty),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        let empty_hits = manpage_tag_hits(&results, "manpage-empty-after-decompression");
+        assert_eq!(empty_hits.len(), 1, "only the empty page: {results:?}");
+        assert!(
+            empty_hits[0]
+                .1
+                .contains(": W: manpage-empty-after-decompression"),
+            "the finding is a warning: {}",
+            empty_hits[0].1
+        );
+        assert!(
+            empty_hits[0].1.contains("empty.1.gz"),
+            "the detail names the page: {}",
+            empty_hits[0].1
+        );
+        assert!(
+            manpage_tag_hits(&results, "manpage-gzip-magic-mismatch").is_empty(),
+            "valid magic stays quiet on mismatch: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_uncompressed_and_non_man_gz_pages_do_not_double_fire() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/man/man1/plain.1",
+                    0o100644,
+                    b".TH plain 1\n".as_slice(),
+                ),
+                (
+                    "/usr/share/doc/foo.txt.gz",
+                    0o100644,
+                    b"plain text, not gzip\n".as_slice(),
+                ),
+                (
+                    "/usr/share/foo.1.gz",
+                    0o100644,
+                    b"plain text, not gzip\n".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        assert!(
+            manpage_tag_hits(&results, "manpage-gzip-magic-mismatch").is_empty()
+                && manpage_tag_hits(&results, "manpage-empty-after-decompression").is_empty(),
+            "neither new tag fires outside .gz man pages: {results:?}"
+        );
+        assert_eq!(
+            manpage_tag_hits(&results, "manpage-not-compressed").len(),
+            1,
+            "the uncompressed page stays under the existing rule: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_bz2_empty_after_decompression_fires_without_mismatch() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let empty = bzip2_bytes(b"");
+        let pkg = manpage_pkg(
+            &dir,
+            &[("/usr/share/man/man1/empty.1.bz2", 0o100644, &empty)],
+        );
+        let results = run_check_binary(&pkg);
+        assert_eq!(
+            manpage_tag_hits(&results, "manpage-empty-after-decompression").len(),
+            1,
+            "the empty predicate covers every compressed suffix: {results:?}"
+        );
+        assert!(
+            manpage_tag_hits(&results, "manpage-gzip-magic-mismatch").is_empty(),
+            "the magic predicate is .gz-only: {results:?}"
         );
     }
 

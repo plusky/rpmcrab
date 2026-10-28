@@ -1016,3 +1016,11 @@ kind = "behaviour"
 reason = "Fix-and-diverge (issue #1224): a new `corrupt-class-file` warning fires when a shipped regular `.class` payload file has a corrupt or truncated 8-byte header: bad magic (first four bytes not `CAFEBABE`) or fewer than 8 bytes actually read. Only the header is judged: the major version is not floored, since no openSUSE policy floor exists for it. Classes inside archives are judged by the archive check, not here. The frozen 2.10.0 reference has no such check."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1224"
+
+[[divergence]]
+case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1222): two new man page compression warnings in FilesCheck. `manpage-gzip-magic-mismatch` fires when a `.gz`-suffixed man page's first two bytes are not the gzip magic (read directly from the file, no decompressor needed); `manpage-empty-after-decompression` fires when a compressed man page (any suffix with a decompressor) decompresses to empty through the shared decompressed cache. Only man-root pages that are regular files are judged: an uncompressed page stays under the existing `manpage-not-compressed` rule and never double-fires, and a page whose decompressor is absent or fails is skipped rather than judged -- a failed decompression is not an empty page. The frozen 2.10.0 reference has no such checks: its `manpage-not-compressed` trusts the extension."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1222"
