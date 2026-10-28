@@ -14513,6 +14513,40 @@ mod tests {
     }
 
     #[test]
+    fn pyc_sibling_source_cycle_fires_on_complete_build() {
+        // The undecidable-chain pin: the mapped source symlinks in a
+        // cycle inside the package, so the exit walk never steps to a
+        // path no package file ships and the candidate never reaches
+        // the run decision -- it fires even on a complete build, where
+        // a leaving chain would be credited.
+        let d0 = tempfile::TempDir::new().expect("tmpdir");
+        let d1 = tempfile::TempDir::new().expect("tmpdir");
+        let src = pybc_src_pkg(&d0);
+        let cand = pybc_run_pkg(
+            &d1,
+            "python313-cyc",
+            &[
+                (
+                    "/usr/lib/python3.13/site-packages/cyc/__pycache__/mod.cpython-313.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages/cyc/mod.py",
+                    b"",
+                    Some("mod2.py"),
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages/cyc/mod2.py",
+                    b"",
+                    Some("mod.py"),
+                ),
+            ],
+        );
+        assert_eq!(run_without_source_count(&[src, cand]), 1);
+    }
+
+    #[test]
     fn duplicate_executable_fires_for_two_real_executables() {
         // Drives check_binary (the real emission path): two regular executable
         // files sharing a basename across bindirs. FilesCheck.py:1171.
