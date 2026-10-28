@@ -2770,7 +2770,13 @@ fn scriptlet_appends_tail(text: &str, base: &str) -> bool {
             .is_none_or(|c| !is_path_token_char(c));
         if after_ok {
             let before = &text[..start];
-            if before.ends_with('}') {
+            // The braced form: the closing brace must close a `${`
+            // expansion -- a bare `}` in the text credits nothing.
+            if before.ends_with('}')
+                && let Some(open) = before.rfind("${")
+                && !before[open + 2..before.len() - 1].is_empty()
+                && !before[open + 2..before.len() - 1].contains(['{', '}'])
+            {
                 return true;
             }
             // The unbraced form: the variable name runs back to
@@ -4177,6 +4183,13 @@ fn license_id_covered(declared: &LicenseId, tag_ids: &[LicenseId]) -> bool {
         let (Some(dv), Some(tv)) = (&declared.version, &t.version) else {
             return false;
         };
+        // A declaration and a tag that both range upward from a
+        // floor always overlap: each names every version from its
+        // own floor up, so the ranges share every version at or
+        // above the higher floor, whichever floor is lower.
+        if declared.suffix == LicenseSuffix::OrLater && t.suffix == LicenseSuffix::OrLater {
+            return true;
+        }
         match declared.suffix {
             LicenseSuffix::OrLater => license_version_cmp(tv, dv) != std::cmp::Ordering::Less,
             // The tag's own or-later range covers a declaration at
@@ -20052,6 +20065,18 @@ x /etc/sysconfig/f - - - -
     }
 
     #[test]
+    fn scriptlet_tail_credit_requires_braced_opener_1175() {
+        // The braced tail credit hangs off a `${` expansion: a bare
+        // closing brace in the scriptlet text credits nothing
+        // (issue #1175).
+        assert!(scriptlet_appends_tail("echo x > ${dir}/ls-R", "ls-R"));
+        assert!(scriptlet_appends_tail("echo x > ${dir:-/def}/ls-R", "ls-R"));
+        assert!(scriptlet_appends_tail("echo x > $dir/ls-R", "ls-R"));
+        assert!(!scriptlet_appends_tail("echo x > }/ls-R", "ls-R"));
+        assert!(!scriptlet_appends_tail("echo x > ${dir}/other", "ls-R"));
+    }
+
+    #[test]
     fn license_coverage_tag_range_and_versionless() {
         let covered = |declared: &str, tag: &str| {
             license_id_covered(&canonical_license_id(declared), &parse_license_tag(tag))
@@ -20060,6 +20085,10 @@ x /etc/sysconfig/f - - - -
         // above its floor version (issue #1159).
         assert!(covered("GPL-3.0-only", "GPL-2.0-or-later"));
         assert!(!covered("GPL-1.0-only", "GPL-2.0-or-later"));
+        // Both sides or-later: the ranges overlap whichever floor
+        // is lower (issue #1175).
+        assert!(covered("GPL-3.0-or-later", "GPL-2.0-or-later"));
+        assert!(covered("GPL-2.0-or-later", "GPL-3.0-or-later"));
         // A version-less plus form and the bare tag name the same
         // license, in both directions.
         assert!(covered("MIT+", "MIT"));
