@@ -7348,7 +7348,20 @@ impl FilesCheck {
                 fd.nonexec_file = name_based || text_gate;
                 renamed_from_sws = text_gate && !name_based;
             }
-            if fd.nonexec_file && !mingw_dll_a_perm_exempt(&pkg.name, fname) {
+            // Vendored source payload is read or built from, not
+            // executed in place, so a stray exec bit on one of its
+            // text files is not the defect this finding names: the
+            // renamed population (marked by the text gate alone) is
+            // covered by `script_is_source_data`, the gate the
+            // interpreter findings in source trees use, with its
+            // bounds -- a file directly in a script directory and
+            // a %doc row never count. The name-based setters and
+            // the doc/log paths are the reference's own
+            // spurious-executable-perm population and stay ungated.
+            let source_credited = renamed_from_sws
+                && !pkg.doc_files.iter().any(|d| d == fname)
+                && script_is_source_data(&pkg.name, fname);
+            if fd.nonexec_file && !source_credited && !mingw_dll_a_perm_exempt(&pkg.name, fname) {
                 if renamed_from_sws {
                     let mut finding = make_finding(
                         &pkg.name,
@@ -9517,6 +9530,208 @@ mod tests {
                     .to_string(),
             )],
             "exactly one pinned (name, Level, detail) triple"
+        );
+    }
+
+    #[test]
+    fn spurious_executable_perm_silent_in_source_packages() {
+        // Vendored source payload: a source tree's text files are
+        // read or built from, not executed in place, so the stray
+        // exec bit the text gate marks is not a defect there --
+        // `script_is_source_data` carries the shapes, the same gate
+        // the interpreter findings in source trees use. The package
+        // arm covers the payload wherever it sits in the tree.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = spurious_exec_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/src/kafka/config/example.yml",
+                    "ASCII text",
+                    b"key: value\n",
+                ),
+                (
+                    "/usr/share/kafka-source/notes.txt",
+                    "ASCII text",
+                    b"release notes\n",
+                ),
+            ],
+        );
+        pkg.name = "kafka-source".to_string();
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(findings, [], "no finding for source package payload");
+        // The rust standard-library trees live under
+        // /usr/lib/rustlib/src/ in *-src packages: the same credit.
+        let dir2 = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = spurious_exec_pkg(
+            &dir2,
+            &[(
+                "/usr/lib/rustlib/src/rust/library/core/notes.txt",
+                "ASCII text",
+                b"library notes\n",
+            )],
+        );
+        pkg.name = "rust1.97-src".to_string();
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(findings, [], "no finding for rust source payload");
+    }
+
+    #[test]
+    fn spurious_executable_perm_silent_in_go_source_tree() {
+        // The Go source tree is source payload the same way: the
+        // go1.* packages are not source-named, but
+        // /usr/share/go/<version>/src/ is Go's own shipped source
+        // tree, at any depth below `src`.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = spurious_exec_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/go/1.24/src/README.txt",
+                    "ASCII text",
+                    b"go source tree\n",
+                ),
+                (
+                    "/usr/share/go/1.24/src/cmd/compile/notes.txt",
+                    "ASCII text",
+                    b"compiler notes\n",
+                ),
+            ],
+        );
+        pkg.name = "go1.24".to_string();
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(findings, [], "no finding for Go source payload");
+    }
+
+    #[test]
+    fn spurious_executable_perm_still_fires_at_source_gate_bounds() {
+        // The bounds of the source credit, each pinned with the
+        // identical text file shape the silent cases above use.
+        let config = test_config();
+        let fires = |pkg: &Pkg, path: &str| {
+            check_spurious_script(pkg, &config)
+                .iter()
+                .any(|(name, _, detail)| {
+                    name == "spurious-executable-perm" && detail.contains(path)
+                })
+        };
+        // An ordinary package's /usr/src payload is not covered:
+        // the gate has no /usr/src path arm of its own.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(
+            &dir,
+            &[("/usr/src/myapp/data.txt", "ASCII text", b"payload\n")],
+        );
+        assert!(
+            fires(&pkg, "/usr/src/myapp/data.txt"),
+            "plain package /usr/src payload keeps firing"
+        );
+        // A `src` directory component inside a plain package is
+        // not covered either -- only the package-name arm and the
+        // Go tree are.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(
+            &dir,
+            &[("/usr/share/foo/src/data.txt", "ASCII text", b"payload\n")],
+        );
+        assert!(
+            fires(&pkg, "/usr/share/foo/src/data.txt"),
+            "src-named directory in a plain package keeps firing"
+        );
+        // A `src`/`source` component in a non-final package-name
+        // position carries no source fact, and neither does a
+        // fused name.
+        for name in ["source-highlight", "myresource"] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let mut pkg = spurious_exec_pkg(
+                &dir,
+                &[("/usr/share/tool/data.txt", "ASCII text", b"payload\n")],
+            );
+            pkg.name = name.to_string();
+            assert!(
+                fires(&pkg, "/usr/share/tool/data.txt"),
+                "{name} keeps firing"
+            );
+        }
+        // A %doc row in a source package never counts as source
+        // payload.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = spurious_exec_pkg(
+            &dir,
+            &[("/usr/src/kafka/docs/notes.txt", "ASCII text", b"docs\n")],
+        );
+        pkg.name = "kafka-source".to_string();
+        pkg.doc_files = vec!["/usr/src/kafka/docs/notes.txt".to_string()];
+        assert!(
+            fires(&pkg, "/usr/src/kafka/docs/notes.txt"),
+            "%doc row in a source package keeps firing"
+        );
+        // The Go arm needs the digit-led version component and the
+        // `src` directory itself.
+        for path in [
+            "/usr/share/go/1.24/misc/wasm/notes.txt",
+            "/usr/share/go/latest/src/notes.txt",
+        ] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let mut pkg = spurious_exec_pkg(&dir, &[(path, "ASCII text", b"payload\n")]);
+            pkg.name = "go1.24".to_string();
+            assert!(fires(&pkg, path), "Go bound {path} keeps firing");
+        }
+        // The name-based setters are the reference's own
+        // spurious-executable-perm population and stay ungated,
+        // even inside a source package.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = spurious_exec_pkg(
+            &dir,
+            &[(
+                "/usr/src/kafka/lib/pkgconfig/kafka.pc",
+                "ASCII text",
+                b"prefix=/usr\n",
+            )],
+        );
+        pkg.name = "kafka-source".to_string();
+        assert!(
+            fires(&pkg, "/usr/src/kafka/lib/pkgconfig/kafka.pc"),
+            "name-arm finding in a source package keeps firing"
+        );
+        // The doc path is likewise ungated.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = spurious_exec_pkg(
+            &dir,
+            &[(
+                "/usr/share/doc/packages/kafka-source/notes.txt",
+                "ASCII text",
+                b"docs\n",
+            )],
+        );
+        pkg.name = "kafka-source".to_string();
+        assert!(
+            fires(&pkg, "/usr/share/doc/packages/kafka-source/notes.txt"),
+            "doc-arm finding in a source package keeps firing"
+        );
+        // A source package's entry point in a script directory is
+        // outside the text gate entirely: it keeps the script
+        // finding and never flips to spurious-executable-perm.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = spurious_exec_pkg(
+            &dir,
+            &[("/usr/bin/kafka-helper", "ASCII text", b"echo hi\n")],
+        );
+        pkg.name = "kafka-source".to_string();
+        let findings = check_spurious_script(&pkg, &config);
+        assert!(
+            findings
+                .iter()
+                .any(|(name, _, _)| name == "script-without-shebang"),
+            "script-dir entry point keeps script-without-shebang: {findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|(name, _, _)| name == "spurious-executable-perm"),
+            "script-dir entry point never draws spurious-executable-perm: {findings:?}"
         );
     }
 
