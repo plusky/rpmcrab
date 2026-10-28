@@ -2279,116 +2279,175 @@ impl SpecCheck {
     /// `%make_build`, `${RPM_BUILD_NCPUS}` in shell) only resolve when
     /// the build script runs. To tell the two apart the spec is parsed
     /// once more with the three macros defined to a sentinel value:
-    /// each line of the parsed spec text that contains the sentinel
-    /// stored a parse-time CPU count. Parsing (rather than scanning the
-    /// raw text) is what keeps dead `%if` branches, `%define` bodies,
-    /// escaped `%%jobs` and constant `%{?jobs:-n 4}` bodies silent.
+    /// each line of the parsed spec text that carries the sentinel as
+    /// a token stored a parse-time CPU count. Parsing (rather than
+    /// scanning the raw text) is what keeps dead `%if` branches,
+    /// `%define` bodies, escaped `%%jobs` and constant `%{?jobs:-n 4}`
+    /// bodies silent.
     fn check_parse_time_cpu_count(&self, pkg: &SpecPkg, out: &mut Filter) {
         use librpm::build::SpecFlags;
+        // A spec whose raw text never names one of the judged macros
+        // cannot store a parse-time count through them, so the probe
+        // parse is skipped for it.
+        if !pkg.lines.iter().any(|line| {
+            line.contains("%jobs")
+                || line.contains("%{jobs")
+                || line.contains("%{?jobs")
+                || line.contains("_smp_build_ncpus")
+                || line.contains("_smp_build_nthreads")
+        }) {
+            return;
+        }
+        let Some(spec_file) = self.spec_file.as_deref().filter(|f| !f.is_empty()) else {
+            return;
+        };
         // A sentinel already present in the raw spec would also match
         // the literal text, not just macro expansions, so use the first
-        // candidate the raw spec does not contain.
+        // candidate the raw spec does not carry as a token.
         let sentinel = [
-            "7919", "17919", "27919", "37919", "47919", "57919", "67919", "77919", "87919", "97919",
+            "7182818284",
+            "17182818284",
+            "27182818284",
+            "37182818284",
+            "47182818284",
+            "57182818284",
+            "67182818284",
+            "77182818284",
+            "87182818284",
+            "97182818284",
         ]
         .into_iter()
-        .find(|cand| !pkg.lines.iter().any(|line| line.contains(*cand)))
-        .unwrap_or("7919");
-        let spec_file = self.spec_file.as_deref().unwrap_or("");
-        let _ = pkg_init();
-        // The probe, the defines, the parse, the section read, the
-        // pops and the parsed spec's drop all touch process-global
-        // librpm state, so the macro lock is held for the whole
-        // sequence, exactly as in `check_invalid_url`. `parsed` is
-        // declared after the guard so it drops first.
-        let _macro_guard = crate::pkg::global_macro_lock();
-        // The re-parse is internal machinery: its only output is the
-        // findings below, and the spec's parse diagnostics are already
-        // reported from the `rpm` child's output in
-        // `check_specfile_error`. librpm logs through rpmlog while
-        // parsing -- a macro a previous parse left defined in the
-        // global context makes it warn about macros expanded in
-        // comments, for example -- so the whole sequence runs with
-        // rpmlog masked to critical, the treatment
-        // `SignatureCheck`'s verified reads use. The mask is declared
-        // after the macro guard so it drops before the lock is
-        // released.
-        let _rpmlog_mask = crate::pkg::RpmlogMask::hush();
-        let macros = librpm::macro_context::MacroContext::default();
-        let _ = macros.define(&format!("_sourcedir {}", self.spec_file_dir()), 0);
-        // Snapshot the effective state of the three judged macros.
-        // A parse pushes the spec's own defines of them into the
-        // global context, where they outlive the parse, and one of
-        // this check's pops could then remove the spec's entry
-        // instead of the sentinel, stranding the sentinel in the
-        // context. The state found here is restored before leaving,
-        // so the check leaves the context as it found it.
-        let expansion = |name: &str| macros.expand(&format!("%{{?{name}}}")).unwrap_or_default();
-        let before = [
-            ("jobs", expansion("jobs")),
-            ("_smp_build_ncpus", expansion("_smp_build_ncpus")),
-            ("_smp_build_nthreads", expansion("_smp_build_nthreads")),
-        ];
-        // A distribution macro file may already map `%jobs` to the
-        // run-time `${RPM_BUILD_NCPUS}`; a sentinel define would shadow
-        // that mapping and report the run-time form as a parse-time
-        // one. Probe the expansion before defining anything and leave
-        // `jobs` alone when it already expands to `${RPM_BUILD_NCPUS}`.
-        // A spec's own `%define jobs ...` needs no probe: defined at
-        // spec level, it overrides the sentinel (see below) by itself.
-        let jobs_is_run_time = before[0].1.trim() == "${RPM_BUILD_NCPUS}";
-        // Level -7 is RMIL_CMDLINE, the level `rpmspec --define`
-        // uses: above the macro files (-13), so the sentinel replaces
-        // the host's own job-count definitions, but below the spec's
-        // `%define` (-3) and `%global` (0), so a spec that defines
-        // these macros itself keeps its own expansion.
-        let _ = macros.define(&format!("_smp_build_ncpus {sentinel}"), -7);
-        let _ = macros.define(&format!("_smp_build_nthreads {sentinel}"), -7);
-        if !jobs_is_run_time {
-            let _ = macros.define(&format!("jobs {sentinel}"), -7);
-        }
-        let parsed =
-            librpm::build::Spec::parse(spec_file, SpecFlags::ANYARCH | SpecFlags::FORCE, None);
-        if !jobs_is_run_time {
-            let _ = macros.pop("jobs");
-        }
-        let _ = macros.pop("_smp_build_nthreads");
-        let _ = macros.pop("_smp_build_ncpus");
-        // Restore the snapshotted state of the judged macros: pop
-        // entries the sequence added (a spec define of one of them,
-        // or a sentinel the pops above did not reach) until the
-        // incoming expansion is effective again.
-        for (name, target) in &before {
-            for _ in 0..16 {
-                if expansion(name) == *target || !macros.is_defined(name) {
-                    break;
+        .find(|cand| {
+            !pkg.lines
+                .iter()
+                .any(|line| Self::sentinel_in_line(line, cand))
+        })
+        .unwrap_or("7182818284");
+        // The probe sequence touches process-global librpm state, so
+        // it runs in a block holding the macro lock and the rpmlog
+        // mask; both guards are released before any finding is
+        // emitted.
+        let matched: Vec<String> = {
+            let _ = pkg_init();
+            // The probe, the defines, the parse, the section read, the
+            // pops and the parsed spec's drop all touch process-global
+            // librpm state, so the macro lock is held for the whole
+            // sequence, exactly as in `check_invalid_url`. `parsed` is
+            // declared after the guard so it drops first.
+            let _macro_guard = crate::pkg::global_macro_lock();
+            // The re-parse is internal machinery: its only output is
+            // the findings below, and the spec's parse diagnostics are
+            // already reported from the `rpm` child's output in
+            // `check_specfile_error`. librpm logs through rpmlog while
+            // parsing -- a macro a previous parse left defined in the
+            // global context makes it warn about macros expanded in
+            // comments, for example -- so the whole sequence runs with
+            // rpmlog masked to critical, the treatment
+            // `SignatureCheck`'s verified reads use. The mask is
+            // declared after the macro guard so it drops before the
+            // lock is released.
+            let _rpmlog_mask = crate::pkg::RpmlogMask::hush();
+            let macros = librpm::macro_context::MacroContext::default();
+            // Snapshot the effective state of the judged macros and
+            // of the `_sourcedir` define below. A parse pushes the
+            // spec's own defines of them into the global context,
+            // where they outlive the parse, and one of this check's
+            // pops could then remove the spec's entry instead of the
+            // sentinel, stranding the sentinel in the context. The
+            // state found here is restored before leaving, so the
+            // check leaves the context as it found it.
+            let expansion =
+                |name: &str| macros.expand(&format!("%{{?{name}}}")).unwrap_or_default();
+            let before = [
+                ("_sourcedir", expansion("_sourcedir")),
+                ("jobs", expansion("jobs")),
+                ("_smp_build_ncpus", expansion("_smp_build_ncpus")),
+                ("_smp_build_nthreads", expansion("_smp_build_nthreads")),
+            ];
+            let _ = macros.define(&format!("_sourcedir {}", self.spec_file_dir()), 0);
+            // A distribution macro file may already map a judged
+            // macro to the run-time `${RPM_BUILD_NCPUS}`; a sentinel
+            // define would shadow that mapping and report the run-time
+            // form as a parse-time one. Probe every judged macro's
+            // expansion before defining anything and leave the
+            // run-time-mapped ones alone. A spec's own `%define` of a
+            // judged macro needs no probe: defined at spec level, it
+            // overrides the sentinel (see below) by itself.
+            let is_run_time = |idx: usize| before[idx].1.trim() == "${RPM_BUILD_NCPUS}";
+            // Level -7 is RMIL_CMDLINE, the level `rpmspec --define`
+            // uses: above the macro files (-13), so the sentinel
+            // replaces the host's own job-count definitions, but below
+            // the spec's `%define` (-3) and `%global` (0), so a spec
+            // that defines these macros itself keeps its own
+            // expansion.
+            let mut defined: Vec<&str> = Vec::new();
+            for (idx, (name, _)) in before.iter().enumerate().skip(1) {
+                if !is_run_time(idx) {
+                    let _ = macros.define(&format!("{name} {sentinel}"), -7);
+                    defined.push(name);
                 }
+            }
+            let parsed =
+                librpm::build::Spec::parse(spec_file, SpecFlags::ANYARCH | SpecFlags::FORCE, None);
+            for name in defined.iter().rev() {
                 let _ = macros.pop(name);
             }
-            if expansion(name) != *target && !target.is_empty() {
-                let _ = macros.define(&format!("{name} {target}"), -7);
+            // Restore the snapshotted state: pop entries the sequence
+            // added (a spec define of one of the names, or a sentinel
+            // the pops above did not reach) until the incoming
+            // expansion is effective again. A pop that fails leaves
+            // the context as it stands and ends that name's restore:
+            // the comparison cannot be driven further.
+            for (name, target) in &before {
+                for _ in 0..16 {
+                    if expansion(name) == *target || !macros.is_defined(name) {
+                        break;
+                    }
+                    if macros.pop(name).is_err() {
+                        log::debug!("restoring macro {name}: pop failed");
+                        break;
+                    }
+                }
+                if expansion(name) != *target && !target.is_empty() {
+                    // The level the value was defined at is not
+                    // readable back from the context, so the value
+                    // returns at command-line level: above the macro
+                    // files it may have come from, still below a
+                    // spec's own `%define` and `%global`. The value is
+                    // exact; only its precedence can rise.
+                    let _ = macros.define(&format!("{name} {target}"), -7);
+                }
             }
-        }
-        let _ = macros.pop("_sourcedir");
-        let Some(parsed) = parsed else {
             // A spec that does not parse is already reported through
             // `specfile-error`; there is no parsed text to judge.
-            return;
-        };
-        let Some(text) = parsed.get_section(librpm::build::Section::NONE) else {
-            return;
-        };
-        for line in text.lines() {
-            if line.contains(sentinel) {
-                self.info(
-                    out,
-                    pkg,
-                    Level::Warning,
-                    "parse-time-cpu-count",
-                    &[line.trim()],
-                );
+            let mut matched = Vec::new();
+            if let Some(parsed) = parsed
+                && let Some(text) = parsed.get_section(librpm::build::Section::NONE)
+            {
+                matched = text
+                    .lines()
+                    .filter(|line| Self::sentinel_in_line(line, sentinel))
+                    .map(|line| line.trim().to_string())
+                    .collect();
             }
+            matched
+        };
+        for line in matched {
+            self.info(out, pkg, Level::Warning, "parse-time-cpu-count", &[&line]);
         }
+    }
+
+    /// Whether `line` carries `sentinel` as a token: an occurrence
+    /// flanked by non-alphanumeric characters or the line's edges.
+    /// An unrelated longer number merely containing the sentinel's
+    /// digits is not a stored expansion.
+    fn sentinel_in_line(line: &str, sentinel: &str) -> bool {
+        line.match_indices(sentinel).any(|(i, _)| {
+            let before_ok = i == 0 || !line.as_bytes()[i - 1].is_ascii_alphanumeric();
+            let end = i + sentinel.len();
+            let after_ok = end == line.len() || !line.as_bytes()[end].is_ascii_alphanumeric();
+            before_ok && after_ok
+        })
     }
 
     fn check_line(&mut self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
@@ -6542,7 +6601,7 @@ exit 1"#,
             let results = run_with(&cpu_count_spec("", form), &Config::default());
             let hits = cpu_count_lines(&results);
             assert_eq!(hits.len(), 1, "form {form:?}: {hits:?}");
-            assert!(hits[0].contains("7919"), "form {form:?}: {}", hits[0]);
+            assert!(hits[0].contains("7182818284"), "form {form:?}: {}", hits[0]);
         }
 
         // A spec's own `%define jobs ${RPM_BUILD_NCPUS}` is the
@@ -6555,6 +6614,30 @@ exit 1"#,
             &Config::default(),
         );
         assert!(cpu_count_lines(&results).is_empty(), "{results:?}");
+
+        // The `%global` form of a spec's own define sits above the
+        // sentinel too: the stored expansion is the spec's own value.
+        let results = run_with(
+            &cpu_count_spec("%global _smp_build_ncpus 42\n", "echo %{_smp_build_ncpus}"),
+            &Config::default(),
+        );
+        assert!(cpu_count_lines(&results).is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn parse_time_cpu_count_embedded_sentinel_number_is_silent() {
+        // A longer number merely containing the sentinel's digits is
+        // not a stored expansion: the sentinel matches as a token
+        // only, in the raw-spec disqualification and in the parsed
+        // text alike. The real expansion on the next line still
+        // fires, under the first candidate.
+        let results = run_with(
+            &cpu_count_spec("", "echo 97182818284\necho %{_smp_build_ncpus}"),
+            &Config::default(),
+        );
+        let hits = cpu_count_lines(&results);
+        assert_eq!(hits.len(), 1, "{results:?}");
+        assert!(hits[0].contains("7182818284"), "{}", hits[0]);
     }
 
     #[test]
@@ -6604,20 +6687,20 @@ exit 1"#,
     #[test]
     fn parse_time_cpu_count_literal_sentinel_in_spec_does_not_fire() {
         // The sentinel is chosen outside the raw spec's own text: a
-        // literal 7919 is not a finding, and a real expansion in the
-        // same spec is reported under the bumped sentinel instead.
-        let literal_only = run_with(&cpu_count_spec("", "echo 7919"), &Config::default());
+        // literal 7182818284 is not a finding, and a real expansion in
+        // the same spec is reported under the bumped sentinel instead.
+        let literal_only = run_with(&cpu_count_spec("", "echo 7182818284"), &Config::default());
         assert!(
             cpu_count_lines(&literal_only).is_empty(),
             "{literal_only:?}"
         );
         let mixed = run_with(
-            &cpu_count_spec("", "echo 7919\necho %{_smp_build_ncpus}"),
+            &cpu_count_spec("", "echo 7182818284\necho %{_smp_build_ncpus}"),
             &Config::default(),
         );
         let hits = cpu_count_lines(&mixed);
         assert_eq!(hits.len(), 1, "{mixed:?}");
-        assert!(hits[0].contains("17919"), "{}", hits[0]);
+        assert!(hits[0].contains("17182818284"), "{}", hits[0]);
     }
 
     #[test]

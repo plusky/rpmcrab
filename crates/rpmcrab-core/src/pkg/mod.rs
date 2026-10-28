@@ -171,28 +171,53 @@ pub fn global_macro_lock() -> MutexGuard<'static, ()> {
 }
 
 /// RAII guard for librpm's rpmlog verbosity: `hush` narrows it to
-/// critical-only and dropping restores the default (messages up to
-/// notice).
+/// critical-only and dropping the last live guard restores the
+/// default (messages up to notice).
 ///
 /// rpmlog is librpm's diagnostics channel to stderr. A caller whose
 /// librpm work is internal machinery -- its result already carried in
 /// structured form, so the diagnostics would only duplicate it -- runs
 /// that work under the mask. The mask is process-global: while one is
 /// held, librpm diagnostics from other checks running concurrently are
-/// masked along with it, because rpmlog offers no per-call sink.
-pub struct RpmlogMask;
+/// masked along with it, because rpmlog offers no per-call sink. Live
+/// guards are therefore counted under one lock: an overlapping `hush`
+/// neither re-narrows nor restores early, and only the last drop
+/// restores. librpm exposes no verbosity getter, so the value the
+/// last drop restores is the default the process starts with.
+#[must_use = "the mask ends when the guard drops"]
+pub struct RpmlogMask {
+    _private: (),
+}
 
 impl RpmlogMask {
     pub fn hush() -> Self {
-        librpm::logging::set_verbosity(librpm::logging::LogLevel::Critical);
-        Self
+        let mut count = rpmlog_mask_count();
+        if *count == 0 {
+            librpm::logging::set_verbosity(librpm::logging::LogLevel::Critical);
+        }
+        *count += 1;
+        Self { _private: () }
     }
 }
 
 impl Drop for RpmlogMask {
     fn drop(&mut self) {
-        librpm::logging::set_verbosity(librpm::logging::LogLevel::Notice);
+        let mut count = rpmlog_mask_count();
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            librpm::logging::set_verbosity(librpm::logging::LogLevel::Notice);
+        }
     }
+}
+
+/// The number of live [`RpmlogMask`] guards, under the one lock that
+/// serialises narrowing and restoring.
+fn rpmlog_mask_count() -> MutexGuard<'static, usize> {
+    static COUNT: OnceLock<Mutex<usize>> = OnceLock::new();
+    COUNT
+        .get_or_init(|| Mutex::new(0))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// Where a [`Pkg`]'s bytes come from. The reference distinguishes exactly these
