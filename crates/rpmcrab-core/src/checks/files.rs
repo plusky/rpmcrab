@@ -22500,13 +22500,16 @@ x /etc/sysconfig/f - - - -
 
     /// The test-log credit is narrow: a CRLF log in an ordinary
     /// package, a CRLF log in another test-results family, a CRLF
-    /// text file inside a compiler test-results package, and a
-    /// log in the compiler package without the -testresults
-    /// suffix all keep firing.
+    /// text file inside a compiler test-results package, a log in
+    /// the compiler package without the -testresults suffix, and
+    /// a CRLF log in a package whose name carries no digit run
+    /// (gcc-testresults itself) or a non-digit version
+    /// (gccAB-testresults) all keep firing -- the credited shape
+    /// needs gcc plus a non-empty ASCII-digit run.
     #[test]
     fn doc_eol_still_fires_outside_the_test_log_shape() {
         let config = test_config();
-        let cases: [(&str, &str); 4] = [
+        let cases: [(&str, &str); 6] = [
             ("demo", "/usr/share/doc/packages/demo/results.log"),
             (
                 "gdb-testresults",
@@ -22517,6 +22520,14 @@ x /etc/sysconfig/f - - - -
                 "/usr/share/doc/packages/gcc16-testresults/README.txt",
             ),
             ("gcc16", "/usr/share/doc/packages/gcc16/build.log"),
+            (
+                "gcc-testresults",
+                "/usr/share/doc/packages/gcc-testresults/session.log",
+            ),
+            (
+                "gccAB-testresults",
+                "/usr/share/doc/packages/gccAB-testresults/session.log",
+            ),
         ];
         for (pkg_name, fname) in cases {
             let dir = tempfile::TempDir::new().expect("tmpdir");
