@@ -2318,7 +2318,7 @@ since = "0.4.1"
 case = "global"
 check = "wrong-file-end-of-line-encoding"
 kind = "behaviour"
-reason = "Fix-and-diverge: wrong-file-end-of-line-encoding also stays quiet on doc files whose format requires or tolerates CRLF as its line ending, credited by the file name's final suffix alone, matched case-insensitively: .bat and .cmd (the cmd.exe interpreter requires CRLF), .ics and .eml (their formats delimit lines with CRLF), .ps1 (the PowerShell interpreter tolerates CRLF). The credit covers the CRLF shape only -- a CR-only file fires even under a credited suffix, because no credited format terminates lines with a bare carriage return. 48 corpus files leave the finding set on this account. Pinned by doc_eol_silent_for_content_cr_and_crlf_native_formats and doc_eol_still_fires_for_wrong_encodings in files.rs."
+reason = "Fix-and-diverge: wrong-file-end-of-line-encoding also stays quiet on doc files whose format requires or tolerates CRLF as its line ending, credited by the file name's final suffix alone, matched case-insensitively: .bat and .cmd (the cmd.exe interpreter requires CRLF), .ics and .eml (their formats delimit lines with CRLF), .ps1 (the PowerShell interpreter tolerates CRLF). The MSBuild project formats are credited on the same final-suffix basis -- .proj, .props, .vcxproj and .sln, recorded in the MSBuild entry below -- bringing the credited suffix set to nine. The credit covers the CRLF shape only -- a CR-only file fires even under a credited suffix, because no credited format terminates lines with a bare carriage return. 48 corpus files leave the finding set on this account. Pinned by doc_eol_silent_for_content_cr_and_crlf_native_formats and doc_eol_still_fires_for_wrong_encodings in files.rs."
 since = "0.4.1"
 
 [[divergence]]
@@ -2340,6 +2340,20 @@ case = "global"
 check = "symlink-to-binary-with-shebang"
 kind = "behaviour"
 reason = "A symlink whose target script carries a #!/bin/false or #!/usr/bin/false shebang is not reported. The false shebang is the deliberate inert-file marker: uwsm ships its sourced session-plugin fragments this way so they cannot be executed directly, and there is no interpreter dependency to demand for a file whose design is that nothing runs it. The reference has no such exemption and reports the links. Measured over the Factory corpus (51,589 RPMs, isolated config): 63 findings in 14 binary packages become 61; the removed pair is exactly uwsm's niri_session.sh and start_hyprland.sh links, and no other finding moves (verified over the complete baseline-firing package set; the check reads only the firing package's own files and requires)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "wrong-file-end-of-line-encoding"
+kind = "behaviour"
+reason = "Fix-and-diverge: wrong-file-end-of-line-encoding also stays quiet on doc files in MSBuild and Visual Studio project formats, whose final extensions are .proj, .props, .vcxproj and .sln: the toolchain writes those formats with CRLF line endings. The match is on the final extension only, so lookalike names keep firing. 66 corpus files leave the finding set on this account. Pinned by doc_eol_silent_for_msbuild_project_files and doc_eol_still_fires_for_lookalike_extensions in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "wrong-file-end-of-line-encoding"
+kind = "behaviour"
+reason = "Fix-and-diverge: wrong-file-end-of-line-encoding also stays quiet on .log doc files shipped by a gcc<version>-testresults package: the logs are byte records of the compiler's own ACATS and DejaGnu test runs, whose report generators emit CRLF and whose tested programs keep their own output endings, so the findings describe the test record rather than a packaging error. Both halves of the shape are required: a log in any other package, and a non-log file in the same packages, keep firing. 2,592 corpus files leave the finding set on this account. Pinned by doc_eol_silent_for_compiler_test_logs and doc_eol_still_fires_outside_the_test_log_shape in files.rs."
 since = "0.4.1"
 
 [[divergence]]
