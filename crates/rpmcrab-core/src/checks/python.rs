@@ -9,8 +9,9 @@
 //!
 //! The require/metadata coherence tags — `python-unflavoured-require`,
 //! `python-dist-info-version-mismatch`,
-//! `python-require-floor-below-metadata` and
-//! `python-require-unversioned-despite-metadata-floor`, plus the
+//! `python-require-floor-below-metadata`,
+//! `python-require-unversioned-despite-metadata-floor` and
+//! `python-require-upper-bound-contradicts-metadata` (#1232), plus the
 //! `python-missing-require` satisfaction changes they ride on — are
 //! crab-only (#1024, ledgered in
 //! `data/divergences/PythonCheck.toml`): the package's own
@@ -1354,6 +1355,40 @@ enum LeafFloor {
     Floor(Pep440Version),
 }
 
+/// An upper bound on a version range: its value, and whether the
+/// bound itself is admitted (`<=`, an exact pin) or excluded (`<`).
+#[derive(Clone)]
+struct CeilingBound {
+    version: Pep440Version,
+    inclusive: bool,
+    text: String,
+}
+
+/// The ceiling state of one RPM require leaf, the mirror of
+/// `LeafFloor`: a leaf whose constraint yields no usable ceiling
+/// (a lower bound only, or an upper-bound version that does not
+/// parse) is `Versioned`; only a leaf with no version constraint
+/// at all is `Unversioned`.
+enum LeafCeiling {
+    /// No version constraint on the leaf.
+    Unversioned,
+    /// A version constraint is present but yields no usable ceiling.
+    Versioned,
+    /// A usable ceiling.
+    Ceiling(CeilingBound),
+}
+
+/// Order two ceilings by restrictiveness: the lower version is the
+/// more restrictive bound, and at equal versions the exclusive
+/// bound is more restrictive than the inclusive one.
+fn ceiling_cmp(a: &CeilingBound, b: &CeilingBound) -> std::cmp::Ordering {
+    pep440_cmp(&a.version, &b.version).then(match (a.inclusive, b.inclusive) {
+        (false, true) => std::cmp::Ordering::Less,
+        (true, false) => std::cmp::Ordering::Greater,
+        _ => std::cmp::Ordering::Equal,
+    })
+}
+
 impl PythonCheck {
     /// `python-missing-require`: declared requirements the RPM requires
     /// do not satisfy. A requirement met only by a bare `python-<name>`
@@ -1406,6 +1441,7 @@ impl PythonCheck {
                 }
             }
             Self::check_require_floor(pkg, out, req);
+            Self::check_require_ceiling(pkg, out, req);
         }
     }
 
@@ -1898,6 +1934,290 @@ impl PythonCheck {
             return LeafFloor::Versioned;
         };
         rpm_to_pep440(version, leaf.epoch).map_or(LeafFloor::Versioned, LeafFloor::Floor)
+    }
+
+    /// The ceiling comparison (#1232), the upper-bound mirror of
+    /// the floor comparison: a kept requirement whose declared
+    /// range the matching RPM Requires cut from above. The verdict
+    /// is computed per require entry first, exactly as the floor
+    /// verdict is: each `or` branch of a rich entry is judged on
+    /// its own leaves — a branch's ceiling is the lowest ceiling
+    /// its matching leaves carry (a branch mixing ceilinged and
+    /// unversioned matching leaves counts as ceilinged), an entry
+    /// with an unversioned branch is an open entry whose own
+    /// ceilings are not credited, and a branch carrying only lower
+    /// bounds does not veto a sibling branch's ceiling. Separate
+    /// entries are conjunctive, so the credited entry ceilings
+    /// join by minimum. The finding fires when the joined ceiling
+    /// cuts the declared range: below the range's upper end, or —
+    /// against an inclusive upper end — exclusive at the same
+    /// version, which excludes a version the metadata itself
+    /// admits; a metadata range with no upper end is cut by any
+    /// RPM ceiling. The finding is informational: an upper bound
+    /// the metadata does not declare records a packaging-intent
+    /// divergence, not a defect. A requirement no RPM Require
+    /// names at all is `python-missing-require`'s finding, not
+    /// this one's, and a requirement met by the package's own
+    /// Provides has no RPM ceiling to compare.
+    fn check_require_ceiling(pkg: &Pkg, out: &mut Filter, req: &Requirement) {
+        let meta = Self::metadata_ceiling(req);
+        let variants = Self::module_names(&req.name, &req.extras);
+        let mut any_match = false;
+        let mut joined_ceiling: Option<CeilingBound> = None;
+        for dep in pkg.requires.iter().chain(&pkg.prereq) {
+            let mut entry_match = false;
+            let mut entry_open = false;
+            let mut entry_ceiling: Option<CeilingBound> = None;
+            for branch in Self::require_branches(dep) {
+                let mut branch_match = false;
+                let mut branch_unversioned = false;
+                let mut branch_lowest: Option<CeilingBound> = None;
+                for leaf in &branch {
+                    if Self::classify_atom(&Self::leaf_capability(leaf), &variants).is_none() {
+                        continue;
+                    }
+                    branch_match = true;
+                    match Self::leaf_ceiling(leaf) {
+                        LeafCeiling::Unversioned => branch_unversioned = true,
+                        LeafCeiling::Versioned => {}
+                        LeafCeiling::Ceiling(c) => {
+                            if branch_lowest
+                                .as_ref()
+                                .is_none_or(|b| ceiling_cmp(&c, b) == std::cmp::Ordering::Less)
+                            {
+                                branch_lowest = Some(c);
+                            }
+                        }
+                    }
+                }
+                if !branch_match {
+                    continue;
+                }
+                entry_match = true;
+                match branch_lowest {
+                    Some(c) => {
+                        if entry_ceiling
+                            .as_ref()
+                            .is_none_or(|b| ceiling_cmp(&c, b) == std::cmp::Ordering::Greater)
+                        {
+                            entry_ceiling = Some(c);
+                        }
+                    }
+                    None if branch_unversioned => entry_open = true,
+                    None => {}
+                }
+            }
+            if !entry_match {
+                continue;
+            }
+            any_match = true;
+            if !entry_open
+                && let Some(c) = entry_ceiling
+                && joined_ceiling
+                    .as_ref()
+                    .is_none_or(|b| ceiling_cmp(&c, b) == std::cmp::Ordering::Less)
+            {
+                joined_ceiling = Some(c);
+            }
+        }
+        if !any_match {
+            return;
+        }
+        let Some(joined) = joined_ceiling else {
+            return;
+        };
+        let cuts = match &meta {
+            None => true,
+            Some(m) => ceiling_cmp(&joined, m) == std::cmp::Ordering::Less,
+        };
+        if cuts {
+            let meta_text = match &meta {
+                Some(m) => m.text.clone(),
+                None => "none".to_string(),
+            };
+            add_info(
+                out,
+                Level::Info,
+                pkg,
+                "python-require-upper-bound-contradicts-metadata",
+                &[
+                    &req.name,
+                    "metadata-ceiling",
+                    &meta_text,
+                    "rpm-upper-bound",
+                    &joined.text,
+                ],
+            );
+        }
+    }
+
+    /// The upper end of the range a requirement's specifier
+    /// declares (#1232): the most restrictive of its explicit
+    /// `<` / `<=` clauses, a bare `==` clause (the range's only
+    /// point is its own upper end, admitted), and the exclusive
+    /// ceilings a `== v.*` wildcard or a `~= v` compatible-release
+    /// clause implies under PEP 440 (the prefix bump: `== 1.2.*`
+    /// ends below 1.3, `~= 1.4.5` below 1.5, `~= 1.4` below 2).
+    /// `None` when the specifier declares no upper constraint at
+    /// all — the range is unbounded above — and clauses whose
+    /// version does not parse contribute nothing, as on the floor
+    /// side.
+    fn metadata_ceiling(req: &Requirement) -> Option<CeilingBound> {
+        let mut best: Option<CeilingBound> = None;
+        let offer = |c: CeilingBound, best: &mut Option<CeilingBound>| {
+            if best
+                .as_ref()
+                .is_none_or(|b| ceiling_cmp(&c, b) == std::cmp::Ordering::Less)
+            {
+                *best = Some(c);
+            }
+        };
+        for clause in req.specifier.split(',') {
+            let clause = clause.trim();
+            let Some((op, ver)) = ["===", "==", ">=", "<=", "!=", "~=", ">", "<"]
+                .iter()
+                .find_map(|op| clause.strip_prefix(op).map(|v| (*op, v.trim())))
+            else {
+                continue;
+            };
+            match op {
+                "<" | "<=" => {
+                    let Some(v) = pep440_parse(ver) else {
+                        continue;
+                    };
+                    offer(
+                        CeilingBound {
+                            version: v,
+                            inclusive: op == "<=",
+                            text: format!("{op} {ver}"),
+                        },
+                        &mut best,
+                    );
+                }
+                "==" | "===" => {
+                    if let Some(prefix) = ver.strip_suffix(".*") {
+                        let Some(base) = pep440_parse(prefix) else {
+                            continue;
+                        };
+                        let Some(v) = Self::prefix_bump(&base, false) else {
+                            continue;
+                        };
+                        offer(
+                            CeilingBound {
+                                version: v,
+                                inclusive: false,
+                                text: format!("{op} {ver}"),
+                            },
+                            &mut best,
+                        );
+                    } else {
+                        let Some(v) = pep440_parse(ver) else {
+                            continue;
+                        };
+                        offer(
+                            CeilingBound {
+                                version: v,
+                                inclusive: true,
+                                text: format!("{op} {ver}"),
+                            },
+                            &mut best,
+                        );
+                    }
+                }
+                "~=" => {
+                    let Some(base) = pep440_parse(ver) else {
+                        continue;
+                    };
+                    let Some(v) = Self::prefix_bump(&base, true) else {
+                        continue;
+                    };
+                    offer(
+                        CeilingBound {
+                            version: v,
+                            inclusive: false,
+                            text: format!("{op} {ver}"),
+                        },
+                        &mut best,
+                    );
+                }
+                _ => {}
+            }
+        }
+        best
+    }
+
+    /// The exclusive version a prefix clause ends below. A
+    /// wildcard's prefix is the whole version (`== 1.2.*` ends
+    /// below `[1, 3]`, `== 1.*` below `[2]`); a compatible-release
+    /// clause's prefix drops the last segment (`~= 1.4.5` ends
+    /// below `[1, 5]`, `~= 1.4` below `[2]`), and over a single
+    /// segment it pins no prefix and implies no ceiling. The
+    /// ceiling is the prefix with its last segment incremented.
+    /// The epoch carries over; pre/post/dev do not participate in
+    /// a prefix.
+    fn prefix_bump(base: &Pep440Version, compatible: bool) -> Option<Pep440Version> {
+        let rel = &base.release;
+        let keep = if compatible {
+            if rel.len() < 2 {
+                return None;
+            }
+            rel.len() - 1
+        } else {
+            if rel.is_empty() {
+                return None;
+            }
+            rel.len()
+        };
+        let mut release: Vec<u64> = rel[..keep].to_vec();
+        *release.last_mut()? += 1;
+        Some(Pep440Version {
+            epoch: base.epoch,
+            release,
+            pre: None,
+            post: None,
+            dev: None,
+        })
+    }
+
+    /// The ceiling state of one RPM require leaf, the mirror of
+    /// `leaf_floor`: a `<` constraint yields an exclusive ceiling,
+    /// a `<=` constraint or an exact `=` pin an inclusive one; a
+    /// lower-bound-only constraint yields no ceiling but is still
+    /// `Versioned`, as is an upper-bound constraint whose version
+    /// does not parse. Only a leaf with no version constraint at
+    /// all is `Unversioned`.
+    fn leaf_ceiling(leaf: &crate::pkg::dep::DepLeaf) -> LeafCeiling {
+        use crate::pkg::dep::{RPMSENSE_EQUAL, RPMSENSE_GREATER, RPMSENSE_LESS};
+        let sense = leaf.flags & (RPMSENSE_LESS | RPMSENSE_GREATER | RPMSENSE_EQUAL);
+        if sense == 0 {
+            return LeafCeiling::Unversioned;
+        }
+        let inclusive = if sense & RPMSENSE_LESS != 0 {
+            sense & RPMSENSE_EQUAL != 0
+        } else if sense & RPMSENSE_EQUAL != 0 && sense & RPMSENSE_GREATER == 0 {
+            true
+        } else {
+            return LeafCeiling::Versioned;
+        };
+        let Some(version) = leaf.version.as_deref() else {
+            return LeafCeiling::Versioned;
+        };
+        let op = if sense & RPMSENSE_LESS != 0 {
+            if inclusive { "<=" } else { "<" }
+        } else {
+            "="
+        };
+        let ver_text = match leaf.epoch {
+            Some(e) if e > 0 => format!("{e}:{version}"),
+            _ => version.to_string(),
+        };
+        rpm_to_pep440(version, leaf.epoch).map_or(LeafCeiling::Versioned, |v| {
+            LeafCeiling::Ceiling(CeilingBound {
+                version: v,
+                inclusive,
+                text: format!("{op} {ver_text}"),
+            })
+        })
     }
 
     /// `python-dist-info-version-mismatch` (#1024 §3.2): the version
@@ -3311,6 +3631,417 @@ mod tests {
             line,
             "python-test.noarch: W: python-require-unversioned-despite-metadata-floor dulwich metadata-floor 0.22 rpm-floor unversioned"
         );
+    }
+
+    #[test]
+    fn ceiling_below_metadata_ceiling_fires() {
+        // #1232: the metadata declares `>=0.20,<0.24`; the RPM
+        // Require caps at 0.23, cutting the declared range.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.20,<0.24\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) < 0.23".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_LESS,
+                Some("0.23"),
+            )];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-require-upper-bound-contradicts-metadata");
+        assert_eq!(*level, Level::Info);
+        assert_eq!(
+            line,
+            "python-test.noarch: I: python-require-upper-bound-contradicts-metadata dulwich metadata-ceiling < 0.24 rpm-upper-bound < 0.23"
+        );
+    }
+
+    #[test]
+    fn ceiling_without_metadata_ceiling_fires() {
+        // #1232: the metadata declares no upper end; any RPM upper
+        // bound narrows the declared range.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.20\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) < 2".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_LESS,
+                Some("2"),
+            )];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-require-upper-bound-contradicts-metadata");
+        assert_eq!(*level, Level::Info);
+        assert_eq!(
+            line,
+            "python-test.noarch: I: python-require-upper-bound-contradicts-metadata dulwich metadata-ceiling none rpm-upper-bound < 2"
+        );
+    }
+
+    #[test]
+    fn ceiling_negating_metadata_floor_fires() {
+        // #1232: the RPM cap sits at the metadata floor itself, so
+        // no version satisfies both sides.
+        let reqs = PythonCheck::parse_requirements("dulwich>=2\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) < 2".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_LESS,
+                Some("2"),
+            )];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, _, line) = &findings[0];
+        assert_eq!(name, "python-require-upper-bound-contradicts-metadata");
+        assert!(line.contains("rpm-upper-bound < 2"), "line: {line}");
+    }
+
+    #[test]
+    fn ceiling_consistent_with_metadata_stays_quiet() {
+        // #1232 near misses: an RPM upper bound equal to the
+        // declared ceiling, looser than it, or inclusive at the
+        // declared (exclusive) ceiling cuts nothing the metadata
+        // admits.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.20,<0.24\n", false, "3.13");
+        for (flags, ver) in [
+            (crate::pkg::dep::RPMSENSE_LESS, "0.24"),
+            (crate::pkg::dep::RPMSENSE_LESS, "0.25"),
+            (
+                crate::pkg::dep::RPMSENSE_LESS | crate::pkg::dep::RPMSENSE_EQUAL,
+                "0.24",
+            ),
+        ] {
+            let findings = findings_with_pkg(&reqs, |pkg| {
+                pkg.req_names = vec![format!("python3.13dist(dulwich) {ver}")];
+                pkg.requires = vec![dep("python3.13dist(dulwich)", flags, Some(ver))];
+            });
+            assert!(
+                !tags_of(&findings).contains(&"python-require-upper-bound-contradicts-metadata"),
+                "{ver}: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ceiling_exclusive_at_metadata_pin_fires_inclusive_quiet() {
+        // #1232: the metadata pins `==1.2`; an exclusive RPM cap at
+        // 1.2 excludes the pinned version itself, an inclusive one
+        // admits exactly it.
+        let reqs = PythonCheck::parse_requirements("dulwich==1.2\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) < 1.2".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_LESS,
+                Some("1.2"),
+            )];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, _, line) = &findings[0];
+        assert_eq!(name, "python-require-upper-bound-contradicts-metadata");
+        assert!(line.contains("metadata-ceiling == 1.2"), "line: {line}");
+
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) <= 1.2".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_LESS | crate::pkg::dep::RPMSENSE_EQUAL,
+                Some("1.2"),
+            )];
+        });
+        assert!(
+            !tags_of(&findings).contains(&"python-require-upper-bound-contradicts-metadata"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn ceiling_wildcard_metadata_range_fires_and_matches() {
+        // #1232: `==1.2.*` declares the range [1.2, 1.3); a cap
+        // below 1.2 cuts it, a cap at the implied end matches it.
+        let reqs = PythonCheck::parse_requirements("dulwich==1.2.*\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) < 1.2".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_LESS,
+                Some("1.2"),
+            )];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, _, line) = &findings[0];
+        assert_eq!(name, "python-require-upper-bound-contradicts-metadata");
+        assert!(line.contains("metadata-ceiling == 1.2.*"), "line: {line}");
+
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) < 1.3".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_LESS,
+                Some("1.3"),
+            )];
+        });
+        assert!(
+            !tags_of(&findings).contains(&"python-require-upper-bound-contradicts-metadata"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn ceiling_tilde_metadata_range_fires_and_matches() {
+        // #1232: `~=1.4.5` declares [1.4.5, 1.5); a cap inside it
+        // cuts it, a cap at 1.5 matches it.
+        let reqs = PythonCheck::parse_requirements("dulwich~=1.4.5\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) < 1.4.9".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_LESS,
+                Some("1.4.9"),
+            )];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(
+            findings[0].0,
+            "python-require-upper-bound-contradicts-metadata"
+        );
+
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) < 1.5".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_LESS,
+                Some("1.5"),
+            )];
+        });
+        assert!(
+            !tags_of(&findings).contains(&"python-require-upper-bound-contradicts-metadata"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn ceiling_lower_bound_only_and_other_distribution_stay_quiet() {
+        // #1232 near misses: a floor-only Require carries no upper
+        // bound to contradict with, and an upper bound on a
+        // distribution the metadata does not declare is not this
+        // finding's business.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.20\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec![
+                "python3.13dist(dulwich) >= 0.21".to_string(),
+                "python3.13dist(otherlib) < 2".to_string(),
+            ];
+            pkg.requires = vec![
+                dep(
+                    "python3.13dist(dulwich)",
+                    crate::pkg::dep::RPMSENSE_GREATER | crate::pkg::dep::RPMSENSE_EQUAL,
+                    Some("0.21"),
+                ),
+                dep(
+                    "python3.13dist(otherlib)",
+                    crate::pkg::dep::RPMSENSE_LESS,
+                    Some("2"),
+                ),
+            ];
+        });
+        assert!(
+            !tags_of(&findings).contains(&"python-require-upper-bound-contradicts-metadata"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn ceiling_rich_branches_join_by_max() {
+        // #1232: alternatives widen the permitted range - the
+        // entry's ceiling is its loosest branch. Both branches
+        // below the declared ceiling: the entry fires, naming the
+        // loosest (0.23). One branch at the declared ceiling: the
+        // entry admits everything the metadata does - quiet.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.20,<0.24\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec![
+                "(python3.13dist(dulwich) < 0.22 or python3.13dist(dulwich) < 0.23)".to_string(),
+            ];
+            pkg.requires = vec![dep(
+                "(python3.13dist(dulwich) < 0.22 or python3.13dist(dulwich) < 0.23)",
+                0,
+                None,
+            )];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, _, line) = &findings[0];
+        assert_eq!(name, "python-require-upper-bound-contradicts-metadata");
+        assert!(line.contains("rpm-upper-bound < 0.23"), "line: {line}");
+
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec![
+                "(python3.13dist(dulwich) < 0.22 or python3.13dist(dulwich) < 0.24)".to_string(),
+            ];
+            pkg.requires = vec![dep(
+                "(python3.13dist(dulwich) < 0.22 or python3.13dist(dulwich) < 0.24)",
+                0,
+                None,
+            )];
+        });
+        assert!(
+            !tags_of(&findings).contains(&"python-require-upper-bound-contradicts-metadata"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn ceiling_unversioned_branch_opens_entry() {
+        // #1232: an unversioned alternative beside the capped one
+        // admits any version, so the entry as a whole cuts nothing.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.20,<0.24\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names =
+                vec!["(python3.13dist(dulwich) < 0.23 or python3.13dist(dulwich))".to_string()];
+            pkg.requires = vec![dep(
+                "(python3.13dist(dulwich) < 0.23 or python3.13dist(dulwich))",
+                0,
+                None,
+            )];
+        });
+        assert!(
+            !tags_of(&findings).contains(&"python-require-upper-bound-contradicts-metadata"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn ceiling_entries_join_by_min() {
+        // #1232: separate entries are conjunctive - the tightest
+        // entry ceiling is the effective one and is named.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.20,<0.24\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec![
+                "python3.13dist(dulwich) < 0.25".to_string(),
+                "python3.13dist(dulwich) <= 0.23".to_string(),
+            ];
+            pkg.requires = vec![
+                dep(
+                    "python3.13dist(dulwich)",
+                    crate::pkg::dep::RPMSENSE_LESS,
+                    Some("0.25"),
+                ),
+                dep(
+                    "python3.13dist(dulwich)",
+                    crate::pkg::dep::RPMSENSE_LESS | crate::pkg::dep::RPMSENSE_EQUAL,
+                    Some("0.23"),
+                ),
+            ];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, _, line) = &findings[0];
+        assert_eq!(name, "python-require-upper-bound-contradicts-metadata");
+        assert!(line.contains("rpm-upper-bound <= 0.23"), "line: {line}");
+    }
+
+    #[test]
+    fn ceiling_exact_pin_caps_range() {
+        // #1232: an exact pin admits one version only, so it caps
+        // the declared range like any other upper bound.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.20\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich)".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_EQUAL,
+                Some("0.21"),
+            )];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, _, line) = &findings[0];
+        assert_eq!(name, "python-require-upper-bound-contradicts-metadata");
+        assert!(line.contains("rpm-upper-bound = 0.21"), "line: {line}");
+    }
+
+    #[test]
+    fn metadata_ceiling_shapes() {
+        // #1232: the declared range's upper end, per specifier shape.
+        let ceil = |spec: &str| {
+            let reqs = PythonCheck::parse_requirements(&format!("dulwich{spec}\n"), false, "3.13");
+            PythonCheck::metadata_ceiling(&reqs[0])
+                .map(|c| (c.version.release, c.inclusive, c.text))
+        };
+        assert_eq!(ceil(">=1,<3"), Some((vec![3], false, "< 3".to_string())));
+        assert_eq!(ceil("<=3"), Some((vec![3], true, "<= 3".to_string())));
+        // The most restrictive of several ceilings wins; at equal
+        // versions the exclusive one does.
+        assert_eq!(
+            ceil("<3,<=2.5"),
+            Some((vec![2, 5], true, "<= 2.5".to_string()))
+        );
+        assert_eq!(ceil("<=3,<3"), Some((vec![3], false, "< 3".to_string())));
+        assert_eq!(
+            ceil("==1.2"),
+            Some((vec![1, 2], true, "== 1.2".to_string()))
+        );
+        assert_eq!(
+            ceil("==1.2.*"),
+            Some((vec![1, 3], false, "== 1.2.*".to_string()))
+        );
+        assert_eq!(
+            ceil("~=1.4.5"),
+            Some((vec![1, 5], false, "~= 1.4.5".to_string()))
+        );
+        assert_eq!(ceil("~=1.4"), Some((vec![2], false, "~= 1.4".to_string())));
+        // No upper constraint at all: floors, exclusions and bare
+        // names leave the range unbounded above.
+        assert_eq!(ceil(">=1"), None);
+        assert_eq!(ceil("!=2"), None);
+        assert_eq!(ceil(""), None);
+    }
+
+    #[test]
+    fn leaf_ceiling_shapes() {
+        // #1232: one RPM leaf's ceiling state per sense shape.
+        use crate::pkg::dep::{RPMSENSE_EQUAL, RPMSENSE_GREATER, RPMSENSE_LESS};
+        let leaf = |flags: u32, version: Option<&str>| crate::pkg::dep::DepLeaf {
+            name: "python3.13dist(dulwich)".to_string(),
+            qualifier: None,
+            flags,
+            epoch: None,
+            version: version.map(str::to_string),
+            release: None,
+        };
+        assert!(matches!(
+            PythonCheck::leaf_ceiling(&leaf(0, None)),
+            LeafCeiling::Unversioned
+        ));
+        assert!(matches!(
+            PythonCheck::leaf_ceiling(&leaf(RPMSENSE_GREATER | RPMSENSE_EQUAL, Some("1.0"))),
+            LeafCeiling::Versioned
+        ));
+        assert!(matches!(
+            PythonCheck::leaf_ceiling(&leaf(RPMSENSE_LESS, Some("not-a-version"))),
+            LeafCeiling::Versioned
+        ));
+        match PythonCheck::leaf_ceiling(&leaf(RPMSENSE_LESS, Some("2.0"))) {
+            LeafCeiling::Ceiling(c) => {
+                assert!(!c.inclusive);
+                assert_eq!(c.text, "< 2.0");
+            }
+            _ => panic!("expected a ceiling"),
+        }
+        match PythonCheck::leaf_ceiling(&leaf(RPMSENSE_LESS | RPMSENSE_EQUAL, Some("2.0"))) {
+            LeafCeiling::Ceiling(c) => {
+                assert!(c.inclusive);
+                assert_eq!(c.text, "<= 2.0");
+            }
+            _ => panic!("expected a ceiling"),
+        }
+        match PythonCheck::leaf_ceiling(&leaf(RPMSENSE_EQUAL, Some("2.0"))) {
+            LeafCeiling::Ceiling(c) => {
+                assert!(c.inclusive);
+                assert_eq!(c.text, "= 2.0");
+            }
+            _ => panic!("expected a ceiling"),
+        }
     }
 
     #[test]
