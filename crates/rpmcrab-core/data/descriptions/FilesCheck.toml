@@ -482,3 +482,11 @@ header. The detail names the granted license, the first file granting
 it, and the number of files granting it. Add the license to the
 License tag, or correct the notice if it is wrong.
 """
+
+corrupt-class-file="""
+A Java class file has a corrupt or truncated header: its first four
+bytes are not the class magic (CAFEBABE), or the file holds fewer
+than the 8 header bytes. Such a file cannot load. Ship the real class
+file, or drop it. Only the header is judged here: the major version
+is not floored, since no openSUSE policy floor exists for it.
+"""

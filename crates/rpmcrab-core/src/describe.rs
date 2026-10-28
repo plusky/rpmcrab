@@ -374,7 +374,7 @@ mod tests {
             ),
             (
                 "FilesCheck.toml",
-                "87ff225f50cbbe4a6c95a9a1b25e5e6fd5013ad669185dc621e9d8a00ef24ed9",
+                "c0ad36b3bf7d1d0b2ca3b7fd7716bb1b210c89e32fa4cbef3a5e81f1cf68576b",
             ),
             (
                 "I18NCheck.toml",
@@ -482,7 +482,7 @@ mod tests {
             ),
             (
                 "ZipCheck.toml",
-                "b19fe443d0a90fbd109c5f17444c429fa12beebc804dfd4f2f0987bed9742ea4",
+                "808bf139544f721a1095abbf1ecb00f0f5e7a137313310cbfa891ac6ecc60925",
             ),
             (
                 "ZyppSyntaxCheck.toml",

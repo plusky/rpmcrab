@@ -11,3 +11,11 @@ they are inflexible and usually cause nasty surprises.
 unable-to-read-zip="""
 The zip archive could not be read. The archive may be corrupted.
 """
+
+corrupt-class-file="""
+A Java class file has a corrupt or truncated header: its first four
+bytes are not the class magic (CAFEBABE), or the file holds fewer
+than the 8 header bytes. Such a file cannot load. Ship the real class
+file, or drop it. Only the header is judged here: the major version
+is not floored, since no openSUSE policy floor exists for it.
+"""

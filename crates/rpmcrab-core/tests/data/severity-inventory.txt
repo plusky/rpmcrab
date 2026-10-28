@@ -61,6 +61,7 @@ cmake-dangling-imported-location = W
 comment-in-continued-command = W
 comparison-operator-in-deptoken = W
 compressed-symlink-with-wrong-ext = E
+corrupt-class-file = W
 dangling-relative-symlink = I
 dangling-symlink = W
 dbus-parsing-exception = E

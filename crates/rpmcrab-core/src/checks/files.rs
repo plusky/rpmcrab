@@ -28,7 +28,9 @@ use indexmap::IndexMap;
 use super::fhs::cross_sysroot_matches;
 use super::filelist::sysconfig_good_matches;
 use super::is_match;
-use super::shared::{devel_regex, is_mingw_package, macro_regex, python_str_repr};
+use super::shared::{
+    class_header_detail, devel_regex, is_mingw_package, macro_regex, python_str_repr,
+};
 use crate::check::{Check, add_info, make_finding};
 use crate::config::Config;
 use crate::filter::Filter;
@@ -3984,6 +3986,7 @@ impl FilesCheck {
                 .push(base.to_string());
         }
         self.check_file_manpage(pkg, fname, pkgfile, st, out);
+        self.check_file_class(pkg, fname, pkgfile, out);
         self.check_file_infopage_compressed(pkg, fname, out);
         self.check_file_unexpanded_macro(pkg, fname, out);
         self.check_file_non_standard_uid(pkg, fname, pkgfile);
@@ -5812,6 +5815,36 @@ impl FilesCheck {
                 pkg,
                 "infopage-not-compressed",
                 &[&self.compress_ext, fname],
+            );
+        }
+    }
+
+    /// A shipped `.class` file whose 8-byte header is corrupt
+    /// (bad magic) or truncated (fewer than 8 bytes): the class
+    /// cannot load, so the file is dead weight at best. Only
+    /// regular files are judged, and only the header: the major
+    /// version is not floored here, since no openSUSE policy floor
+    /// exists for it. Classes inside archives are judged by the
+    /// archive check, not here.
+    fn check_file_class(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
+        use std::io::Read as _;
+        if !is_reg(pkgfile.mode) || !fname.ends_with(".class") {
+            return;
+        }
+        let mut head = Vec::new();
+        let Ok(file) = std::fs::File::open(&pkgfile.path) else {
+            return;
+        };
+        if file.take(8).read_to_end(&mut head).is_err() {
+            return;
+        }
+        if let Some(detail) = class_header_detail(&head) {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "corrupt-class-file",
+                &[fname, &detail],
             );
         }
     }
@@ -17975,6 +18008,75 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
         assert!(
             so_ref_hits(&results).is_empty(),
             "the /usr/man root candidate resolves: {results:?}"
+        );
+    }
+
+    fn class_tag_hits(results: &[(String, String)]) -> Vec<&(String, String)> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "corrupt-class-file")
+            .collect()
+    }
+
+    #[test]
+    fn standalone_class_header_defects_fire() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = manpage_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/share/java/Good.class",
+                    0o100644,
+                    b"\xCA\xFE\xBA\xBE\x00\x00\x00\x34good-body".as_slice(),
+                ),
+                (
+                    "/usr/share/java/Bad.class",
+                    0o100644,
+                    b"NOPE-not-a-class-file-body".as_slice(),
+                ),
+                (
+                    "/usr/share/java/Short.class",
+                    0o100644,
+                    b"\xCA\xFE\xBA\xBE\x00\x00".as_slice(),
+                ),
+                ("/usr/share/java/Empty.class", 0o100644, b"".as_slice()),
+                (
+                    "/usr/share/java/Old.class",
+                    0o100644,
+                    b"\xCA\xFE\xBA\xBE\x00\x00\x00\x2Bold-body".as_slice(),
+                ),
+                (
+                    "/usr/share/java/Fake.class.txt",
+                    0o100644,
+                    b"NOPE-not-a-class-file-body".as_slice(),
+                ),
+                (
+                    "/usr/share/java/Link.class",
+                    0o120777,
+                    b"NOPE-not-a-class-file-body".as_slice(),
+                ),
+            ],
+        );
+        let results = run_check_binary(&pkg);
+        let hits = class_tag_hits(&results);
+        assert_eq!(hits.len(), 3, "bad, short and empty only: {results:?}");
+        assert!(
+            hits.iter()
+                .all(|(_, line)| line.contains(": W: corrupt-class-file")),
+            "the findings are warnings: {results:?}"
+        );
+        let lines: Vec<&str> = hits.iter().map(|(_, line)| line.as_str()).collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Bad.class") && l.contains("bad magic"))
+                && lines
+                    .iter()
+                    .any(|l| l.contains("Short.class") && l.contains("truncated header: 6 bytes"))
+                && lines
+                    .iter()
+                    .any(|l| l.contains("Empty.class") && l.contains("truncated header: 0 bytes")),
+            "each defect named with its reason: {results:?}"
         );
     }
 
