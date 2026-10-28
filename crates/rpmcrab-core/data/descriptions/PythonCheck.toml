@@ -72,6 +72,20 @@ does this), or, when the metadata floor itself is wrong for this
 package, correct the metadata in the spec.
 """
 
+python-require-upper-bound-contradicts-metadata="""
+The package's Python metadata declares the range of versions it
+accepts for this requirement, but the matching RPM Require carries
+an upper bound that cuts into that range, so a version the metadata
+itself accepts cannot satisfy the RPM dependency. The dependency
+graph and the metadata disagree, and either side can be the wrong
+one: drop or raise the RPM upper bound so it no longer cuts the
+declared range (regenerating the Requires with the current Python
+macros usually does this), or, when the declared range itself is
+wrong for this package, correct the metadata in the spec. The
+finding is informational: an upper bound the metadata does not
+declare is often a deliberate packaging decision.
+"""
+
 python-pyc-multiple-versions="""
 There are .pyc files in the rpm that are from different Python
 interpreters. Please, verify that all files are needed for this package.
