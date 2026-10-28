@@ -109,17 +109,47 @@ impl SystemdInstallCheck {
                 continue;
             }
             let re = Regex::new(pattern).expect("unit pattern");
-            if !script.lines().any(|line| is_match(&re, line)) {
-                // The reference accepts `%service_del_postun_without_restart`.
-                if *finding == "systemd-service-without-service_del_postun"
-                    && postun.lines().any(|l| l.trim() == ":")
-                {
-                    continue;
-                }
-                missing.push(*finding);
+            if script.lines().any(|line| is_match(&re, line)) {
+                continue;
             }
+            // Del_postun-only credits, none of which apply to the sibling
+            // tags: the reference accepts
+            // `%service_del_postun_without_restart`, and a bare service
+            // stem in a mark-restart line marks the unit (see
+            // `postun_marks_bare_service`).
+            if *finding == "systemd-service-without-service_del_postun"
+                && (postun.lines().any(|l| l.trim() == ":")
+                    || Self::postun_marks_bare_service(basename, postun))
+            {
+                continue;
+            }
+            missing.push(*finding);
         }
         missing
+    }
+
+    /// Whether a `mark-restart-system-units` line in `%postun` names a
+    /// `.service` unit by its bare stem. The helper passes each argument
+    /// verbatim to `systemctl set-property`, and systemctl appends
+    /// `.service` to a suffix-less name, so `mark-restart-system-units
+    /// foo` marks `foo.service` exactly as the suffixed spelling does.
+    /// Only a whole whitespace-separated argument counts: a longer name
+    /// sharing the stem, a different suffix, or a template stem does
+    /// not. Other unit types get no such credit, since a bare name
+    /// never resolves to them.
+    fn postun_marks_bare_service(basename: &str, postun: &str) -> bool {
+        let Some(stem) = basename.strip_suffix(".service") else {
+            return false;
+        };
+        postun.lines().any(|line| {
+            let Some((_, args)) = line.split_once("mark-restart-system-units") else {
+                return false;
+            };
+            args.split_whitespace().any(|arg| {
+                arg.trim_matches(|c| c == ';' || c == ',' || c == '|' || c == '"' || c == '\'')
+                    == stem
+            })
+        })
     }
 }
 
@@ -219,6 +249,76 @@ mod tests {
     fn postun_without_restart_is_accepted() {
         let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", ":\n");
         assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
+        assert_eq!(missing.len(), 3);
+    }
+
+    #[test]
+    fn postun_bare_service_stem_is_accepted() {
+        let postun = "systemd-update-helper mark-restart-system-units pmcd pmlogger || :";
+        let missing = SystemdInstallCheck::check_unit("pmcd.service", "", "", "", postun);
+        assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
+        assert_eq!(missing.len(), 3);
+    }
+
+    #[test]
+    fn postun_bare_instantiated_template_stem_is_accepted() {
+        let postun = "systemd-update-helper mark-restart-system-units foo@bar";
+        let missing = SystemdInstallCheck::check_unit("foo@bar.service", "", "", "", postun);
+        assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
+    }
+
+    #[test]
+    fn postun_bare_stem_near_misses_still_fire() {
+        // Longer name sharing the stem.
+        let missing = SystemdInstallCheck::check_unit(
+            "foo.service",
+            "",
+            "",
+            "",
+            "systemd-update-helper mark-restart-system-units foobar.service",
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+        // Different suffix: marking the timer does not mark the service.
+        let missing = SystemdInstallCheck::check_unit(
+            "foo.service",
+            "",
+            "",
+            "",
+            "systemd-update-helper mark-restart-system-units foo.timer",
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+        // Bare names never resolve to non-service types.
+        let missing = SystemdInstallCheck::check_unit(
+            "foo.socket",
+            "",
+            "",
+            "",
+            "systemd-update-helper mark-restart-system-units foo",
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+        // Template stem names the template, not the instance.
+        let missing = SystemdInstallCheck::check_unit(
+            "foo@bar.service",
+            "",
+            "",
+            "",
+            "systemd-update-helper mark-restart-system-units foo@",
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+    }
+
+    #[test]
+    fn sibling_tags_ignore_bare_stems() {
+        let script = "systemd-update-helper mark-install-system-units foo\n\
+                      systemd-update-helper install-system-units foo\n\
+                      systemd-update-helper remove-system-units foo\n\
+                      systemd-update-helper mark-restart-system-units foo";
+        let missing =
+            SystemdInstallCheck::check_unit("foo.service", script, script, script, script);
+        assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
+        assert!(missing.contains(&"systemd-service-without-service_add_pre"));
+        assert!(missing.contains(&"systemd-service-without-service_add_post"));
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
         assert_eq!(missing.len(), 3);
     }
 
