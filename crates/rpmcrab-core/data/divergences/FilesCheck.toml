@@ -985,14 +985,14 @@ since = "0.4.1"
 case = "global"
 check = "wrong-file-end-of-line-encoding"
 kind = "behaviour"
-reason = "Fix-and-diverge: wrong-file-end-of-line-encoding also stays quiet on doc files in MSBuild and Visual Studio project formats, whose final extensions are .proj, .props, .vcxproj and .sln: the toolchain writes those formats with CRLF line endings. The match is on the final extension only, so lookalike names keep firing. 66 corpus files leave the finding set on this account. Pinned by doc_eol_silent_for_msbuild_project_files and doc_eol_still_fires_for_lookalike_extensions in files.rs."
+reason = "Fix-and-diverge: wrong-file-end-of-line-encoding also stays quiet on doc files in MSBuild and Visual Studio project formats, whose final extensions are .proj, .props, .vcxproj and .sln: the toolchain writes those formats with CRLF line endings. The match is on the final extension only, matched case-insensitively, so lookalike names keep firing. 66 corpus files leave the finding set on this account. Pinned by doc_eol_silent_for_msbuild_project_files and doc_eol_still_fires_for_lookalike_extensions in files.rs."
 since = "0.4.1"
 
 [[divergence]]
 case = "global"
 check = "wrong-file-end-of-line-encoding"
 kind = "behaviour"
-reason = "Fix-and-diverge: wrong-file-end-of-line-encoding also stays quiet on .log doc files shipped by a gcc<version>-testresults package: the logs are byte records of the compiler's own ACATS and DejaGnu test runs, whose report generators emit CRLF and whose tested programs keep their own output endings, so the findings describe the test record rather than a packaging error. Both halves of the shape are required: a log in any other package, and a non-log file in the same packages, keep firing. 2,592 corpus files leave the finding set on this account. Pinned by doc_eol_silent_for_compiler_test_logs and doc_eol_still_fires_outside_the_test_log_shape in files.rs."
+reason = "Fix-and-diverge: wrong-file-end-of-line-encoding also stays quiet on .log doc files shipped by a gcc<digits>-testresults package, where <digits> is a non-empty run of ASCII digits (gcc-testresults itself and non-digit variants keep firing): the logs are byte records of the compiler's own ACATS and DejaGnu test runs, whose report generators emit CRLF and whose tested programs keep their own output endings, so the findings describe the test record rather than a packaging error. Both halves of the shape are required: a log in any other package, and a non-log file in the same package, keep firing. 2,592 corpus files leave the finding set on this account. Pinned by doc_eol_silent_for_compiler_test_logs and doc_eol_still_fires_outside_the_test_log_shape in files.rs."
 since = "0.4.1"
 
 [[divergence]]
