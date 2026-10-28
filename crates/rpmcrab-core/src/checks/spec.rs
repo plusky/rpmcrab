@@ -1658,11 +1658,14 @@ pub struct SpecCheck {
     sc_files_unresolved: bool,
     sc_kmp: bool,
     sc_section: String,
+    sc_non_shell_scriptlet: bool,
+    sc_name_toks: [Option<String>; 3],
+    sc_name_conflict: [bool; 3],
     sc_in_single: bool,
     sc_single_ansi: bool,
     sc_in_double: bool,
     sc_ctx: Vec<bool>,
-    sc_heredocs: Vec<(String, bool)>,
+    sc_heredocs: Vec<(String, bool, bool)>,
     sc_continuation: bool,
     sc_if_stack: Vec<bool>,
     sc_macro_open: bool,
@@ -1785,6 +1788,9 @@ impl SpecCheck {
             sc_files_unresolved: false,
             sc_kmp: false,
             sc_section: "package".to_string(),
+            sc_non_shell_scriptlet: false,
+            sc_name_toks: [None, None, None],
+            sc_name_conflict: [false; 3],
             sc_in_single: false,
             sc_single_ansi: false,
             sc_in_double: false,
@@ -2073,6 +2079,9 @@ impl Check for SpecCheck {
         self.sc_files_unresolved = false;
         self.sc_kmp = false;
         self.sc_section = "package".to_string();
+        self.sc_non_shell_scriptlet = false;
+        self.sc_name_toks = [None, None, None];
+        self.sc_name_conflict = [false; 3];
         self.sc_reset_shell();
         self.sc_candidates.clear();
         self.sc_assigned.clear();
@@ -3306,6 +3315,51 @@ fn sc_is_scriptlet(section: &str) -> bool {
     RPM_SCRIPTLETS.contains(&section)
 }
 
+/// Whether the occurrence at byte `i` of `code` sits at command
+/// position in its segment: every word before it in the segment is an
+/// environment assignment or a shell keyword, so the word itself is
+/// the command (or one of its leading assignments).
+fn sc_at_command_position(code: &str, i: usize) -> bool {
+    let seg_start = code[..i]
+        .rfind([';', '&', '|', '('])
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    code[seg_start..i].split_whitespace().all(|w| {
+        matches!(
+            w,
+            "while" | "until" | "do" | "then" | "else" | "elif" | "!" | "{" | "}"
+        ) || w.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+    })
+}
+
+/// The interpreter a scriptlet header's `-p` flag names, when it
+/// names one: `%post -p /bin/sh`, the glued `-p/bin/sh` included.
+fn sc_header_interpreter(line: &str) -> Option<&str> {
+    let mut words = line.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "-p" {
+            return words.next();
+        }
+        if let Some(rest) = w.strip_prefix("-p")
+            && !rest.is_empty()
+        {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+/// Whether `full` is a Python-flavoured package name for the no-arg
+/// `%{python_files}` credit: `python-...`, or `python` followed by a
+/// digit (`python3-...`, `python311-...`, `python3.11-...`).
+fn sc_python_flavour_name(full: &str) -> bool {
+    full.strip_prefix("python").is_some_and(|rest| {
+        rest.starts_with('-') || rest.as_bytes().first().is_some_and(u8::is_ascii_digit)
+    })
+}
+
 /// Whether `section` carries shell text: a build section or a
 /// scriptlet.
 fn sc_is_shell(section: &str) -> bool {
@@ -3336,8 +3390,9 @@ impl SpecCheck {
         let mut i = 0;
         while i < bytes.len() {
             if bytes[i] != b'%' {
-                out.push(bytes[i] as char);
-                i += 1;
+                let ch = s[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
                 continue;
             }
             if i + 1 < bytes.len() && bytes[i + 1] == b'%' {
@@ -3393,7 +3448,7 @@ impl SpecCheck {
         let mut cur = token.to_string();
         for _ in 0..10 {
             if !cur.contains('%') {
-                return Some(cur);
+                return Some(cur.replace('\u{1}', "%"));
             }
             cur = self.sc_expand_once(&cur)?;
         }
@@ -3579,6 +3634,16 @@ impl SpecCheck {
     /// opens a multi-line body, tracked by the caller.
     fn sc_collect_define(&mut self, line: &str) -> bool {
         let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("%undefine")
+            && (rest.is_empty() || rest.starts_with([' ', '\t']))
+        {
+            let name_tok = rest.split_whitespace().next().unwrap_or("");
+            let name = name_tok.split('(').next().unwrap_or("");
+            if !name.is_empty() {
+                self.sc_defines.retain(|(n, _)| n != name);
+            }
+            return true;
+        }
         let rest = trimmed
             .strip_prefix("%define")
             .or_else(|| trimmed.strip_prefix("%global"));
@@ -3611,29 +3676,29 @@ impl SpecCheck {
     /// Collect the main `Name:`/`Version:`/`Release:` tags, the base
     /// the subpackage names expand from.
     fn sc_collect_name_tags(&mut self, line: &str) {
-        for (tag, slot) in [("Name:", 0), ("Version:", 1), ("Release:", 2)] {
+        for (tag, slot) in [("Name:", 0usize), ("Version:", 1), ("Release:", 2)] {
             if let Some(v) = line.strip_prefix(tag) {
                 let tok = v.split_whitespace().next().unwrap_or("");
                 if tok.is_empty() {
                     return;
                 }
                 let expanded = self.sc_expand(tok);
-                match slot {
-                    0 => {
-                        if self.sc_main_name.is_none() {
-                            self.sc_main_name = expanded;
-                        }
-                    }
-                    1 => {
-                        if self.sc_version.is_none() {
-                            self.sc_version = expanded;
-                        }
-                    }
-                    _ => {
-                        if self.sc_release.is_none() {
-                            self.sc_release = expanded;
-                        }
-                    }
+                if self.sc_name_conflict[slot] || self.sc_name_toks[slot].as_deref() == Some(tok) {
+                    return;
+                }
+                let value = match slot {
+                    0 => &mut self.sc_main_name,
+                    1 => &mut self.sc_version,
+                    _ => &mut self.sc_release,
+                };
+                if self.sc_name_toks[slot].is_none() {
+                    *value = expanded;
+                    self.sc_name_toks[slot] = Some(tok.to_string());
+                } else if *value != expanded {
+                    // A second, different header for the same tag: the
+                    // base value is undecidable, not the first header's.
+                    *value = None;
+                    self.sc_name_conflict[slot] = true;
                 }
                 return;
             }
@@ -3700,17 +3765,22 @@ impl SpecCheck {
                 let before_ok =
                     i == 0 || matches!(bytes[i - 1], b' ' | b'\t' | b';' | b'&' | b'|' | b'(');
                 let after = i + var.len();
-                if before_ok
-                    && after < bytes.len()
-                    && bytes[after] == b'='
-                    && bytes.get(after + 1) != Some(&b'=')
-                {
+                let is_assign = after < bytes.len()
+                    && ((bytes[after] == b'=' && bytes.get(after + 1) != Some(&b'='))
+                        || (bytes[after] == b'+' && bytes.get(after + 1) == Some(&b'=')));
+                if before_ok && is_assign && sc_at_command_position(code, i) {
                     found = true;
                 }
                 if before_ok {
-                    // `for var in ...`
+                    // `for var in ...`: the last shell word before the
+                    // variable is `for`, whatever precedes it.
                     let back = code[..i].trim_end();
-                    if back == "for" || back.ends_with("; for") || back.ends_with("& for") {
+                    if back
+                        .split_whitespace()
+                        .last()
+                        .map(|w| w.trim_start_matches('('))
+                        == Some("for")
+                    {
                         found = true;
                     }
                     if sc_word_at(code, i, var) {
@@ -3722,7 +3792,13 @@ impl SpecCheck {
                         for seg in code.split([';', '&', '|']) {
                             let words: Vec<&str> = seg.split_whitespace().collect();
                             let mut k = 0;
-                            while k < words.len() && words[k].contains('=') {
+                            while k < words.len()
+                                && (words[k].contains('=')
+                                    || matches!(
+                                        words[k],
+                                        "while" | "until" | "do" | "then" | "else" | "!"
+                                    ))
+                            {
                                 k += 1;
                             }
                             if k < words.len()
@@ -3754,7 +3830,12 @@ impl SpecCheck {
         let bytes = line.as_bytes();
         let scriptlet = sc_is_scriptlet(&self.sc_section);
         if bytes.get(i + 1) == Some(&b'{') {
-            let start = i + 2;
+            let mut start = i + 2;
+            // `${#name}` is the length of `name`, `${!name}` an
+            // indirect expansion of it: both read the tag variable.
+            if matches!(bytes.get(start), Some(b'#') | Some(b'!')) {
+                start += 1;
+            }
             let mut end = start;
             while end < bytes.len()
                 && matches!(bytes[end], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_')
@@ -3919,12 +4000,19 @@ impl SpecCheck {
                 continue;
             }
             if c == b')' {
+                if bytes.get(i + 1) == Some(&b')') && self.sc_ctx.last() == Some(&true) {
+                    // `))` is the single closer of an arithmetic
+                    // context, not two nested closers.
+                    self.sc_ctx.pop();
+                    i += 2;
+                    continue;
+                }
                 self.sc_ctx.pop();
                 i += 1;
                 continue;
             }
             if c == b'<' && bytes.get(i + 1) == Some(&b'<') {
-                if self.sc_ctx.last() == Some(&true) {
+                if self.sc_ctx.iter().any(|ctx| *ctx) {
                     // `<<` inside arithmetic is a shift, no heredoc.
                     i += 2;
                     continue;
@@ -3937,7 +4025,9 @@ impl SpecCheck {
                 // Parse the heredoc operator: optional `-`, blanks,
                 // an optional quote, the delimiter word.
                 let mut j = i + 2;
+                let mut dash = false;
                 if bytes.get(j) == Some(&b'-') {
+                    dash = true;
                     j += 1;
                 }
                 while bytes.get(j) == Some(&b' ') || bytes.get(j) == Some(&b'\t') {
@@ -3967,7 +4057,7 @@ impl SpecCheck {
                     if quote.is_some() && bytes.get(j) == quote.as_ref() {
                         j += 1;
                     }
-                    self.sc_heredocs.push((delim, quoted));
+                    self.sc_heredocs.push((delim, quoted, dash));
                     i = j;
                     continue;
                 }
@@ -3978,12 +4068,12 @@ impl SpecCheck {
         }
         let code = &line[..comment_start.unwrap_or(bytes.len())];
         self.sc_collect_assignments(code);
-        let trailing = code
-            .trim_end()
-            .bytes()
-            .rev()
-            .take_while(|b| *b == b'\\')
-            .count();
+        // Counted on the raw slice (bar the line terminator): a
+        // backslash followed by blanks is an escaped blank, not a
+        // continuation.
+        let code = code.strip_suffix('\n').unwrap_or(code);
+        let code = code.strip_suffix('\r').unwrap_or(code);
+        let trailing = code.bytes().rev().take_while(|b| *b == b'\\').count();
         self.sc_continuation = !self.sc_in_single && trailing % 2 == 1;
     }
 
@@ -3994,6 +4084,18 @@ impl SpecCheck {
         let linenum = pkg.current_linenum.get().unwrap_or(0);
         if line.contains("%kernel_module_package") {
             self.sc_kmp = true;
+        }
+        // A multi-line macro body is literal text until its last
+        // continuation line: a header-shaped line inside it is body
+        // text, so the body is consumed before headers are recognised.
+        if self.sc_macro_open {
+            if line.contains("%files") {
+                self.sc_files_generated = true;
+            }
+            if !line.trim_end().ends_with('\\') {
+                self.sc_macro_open = false;
+            }
+            return;
         }
         // A section header is recognised regardless of shell quote or
         // heredoc state, and it resets that state.
@@ -4013,18 +4115,14 @@ impl SpecCheck {
             }
             self.sc_flush_tag_vars(pkg, out);
             self.sc_reset_shell();
+            self.sc_non_shell_scriptlet = sc_is_scriptlet(&sec)
+                && sc_header_interpreter(line).is_some_and(|interp| {
+                    !matches!(
+                        interp.rsplit('/').next().unwrap_or(interp),
+                        "sh" | "bash" | "dash" | "ash" | "ksh" | "mksh" | "zsh" | "pdksh"
+                    )
+                });
             self.sc_section = sec;
-            return;
-        }
-        // A multi-line macro body is literal text until its last
-        // continuation line.
-        if self.sc_macro_open {
-            if line.contains("%files") {
-                self.sc_files_generated = true;
-            }
-            if !line.trim_end().ends_with('\\') {
-                self.sc_macro_open = false;
-            }
             return;
         }
         if self.sc_collect_define(line) {
@@ -4035,7 +4133,7 @@ impl SpecCheck {
             self.sc_has_include = true;
             return;
         }
-        if !sc_is_shell(&self.sc_section) {
+        if !sc_is_shell(&self.sc_section) || self.sc_non_shell_scriptlet {
             self.sc_collect_name_tags(line);
             return;
         }
@@ -4044,12 +4142,15 @@ impl SpecCheck {
         let first_word = trimmed.split_whitespace().next().unwrap_or("");
         if matches!(
             first_word,
-            "%if" | "%ifarch" | "%ifnarch" | "%ifos" | "%ifnos"
+            "%if" | "%ifarch" | "%ifnarch" | "%ifos" | "%ifnos" | "%ifdef" | "%ifndef" | "%ifexpr"
         ) {
             self.sc_if_stack.push(self.sc_continuation);
             return;
         }
-        if matches!(first_word, "%else" | "%elif") {
+        if matches!(
+            first_word,
+            "%else" | "%elif" | "%elifarch" | "%elifnarch" | "%elifos" | "%elifnos"
+        ) {
             if let Some(saved) = self.sc_if_stack.last() {
                 self.sc_continuation = *saved;
             }
@@ -4062,8 +4163,15 @@ impl SpecCheck {
         // Heredoc bodies: the terminator line is consumed as such; a
         // quoted body is literal, an unquoted body still expands.
         if !self.sc_heredocs.is_empty() {
-            let (delim, quoted) = self.sc_heredocs[0].clone();
-            if line.trim() == delim {
+            let (delim, quoted, dash) = self.sc_heredocs[0].clone();
+            let body = line.strip_suffix('\n').unwrap_or(line);
+            let body = body.strip_suffix('\r').unwrap_or(body);
+            let is_terminator = if dash {
+                body.trim_start_matches('\t') == delim
+            } else {
+                body == delim
+            };
+            if is_terminator {
                 self.sc_heredocs.remove(0);
                 self.sc_continuation = false;
                 return;
@@ -4086,7 +4194,8 @@ impl SpecCheck {
                     &[&detail],
                 );
             }
-            self.sc_continuation = false;
+            let trailing = trimmed.bytes().rev().take_while(|b| *b == b'\\').count();
+            self.sc_continuation = trailing % 2 == 1;
             return;
         }
         self.sc_scan_shell_line(line, linenum);
@@ -4122,9 +4231,7 @@ impl SpecCheck {
             // With the main name itself unresolvable, a `-n` header
             // ending in a declared short files name may be that very
             // subpackage; coverage is then undecidable.
-            let covered = covered
-                || (self.sc_python_files_all
-                    && (full.starts_with("python-") || full.starts_with("python3-")));
+            let covered = covered || (self.sc_python_files_all && sc_python_flavour_name(full));
             let covered = covered
                 || (self.sc_main_name.is_none()
                     && self
@@ -6918,6 +7025,200 @@ exit 1"#,
             !has(&results, "comment-in-continued-command"),
             "unexpected: {results:?}"
         );
+    }
+
+    #[test]
+    fn silent_constructs_gap_fixes_1164() {
+        // Item 1: the `for` credit reads the last shell word before
+        // the variable, whatever precedes it on the line.
+        let results =
+            run_mini("Name: foo\n%prep\nif true; then for name in a; do echo ${name}; done; fi\n");
+        assert!(
+            !has(&results, "spec-tag-as-shell-variable"),
+            "unexpected: {results:?}"
+        );
+        // Item 6: `while read` credits the loop variable.
+        let results =
+            run_mini("Name: foo\n%prep\nwhile read name; do echo $name; done < /dev/null\n");
+        assert!(
+            !has(&results, "spec-tag-as-shell-variable"),
+            "unexpected: {results:?}"
+        );
+        // Item 9: `echo name=...` is not an assignment; `name+=...`
+        // at command position is.
+        let results = run_mini("Name: foo\n%prep\necho name=text\necho $name\n");
+        assert_eq!(
+            lines_for(&results, "spec-tag-as-shell-variable").len(),
+            1,
+            "{results:?}"
+        );
+        let results = run_mini("Name: foo\n%prep\nname+=x\necho $name\n");
+        assert!(
+            !has(&results, "spec-tag-as-shell-variable"),
+            "unexpected: {results:?}"
+        );
+        // Item 14: `${#name}` and `${!name}` read the tag variables.
+        let results = run_mini("Name: foo\n%prep\necho ${#name} ${!version}\n");
+        assert_eq!(
+            lines_for(&results, "spec-tag-as-shell-variable").len(),
+            2,
+            "{results:?}"
+        );
+        // Item 3: the full conditional family saves and restores the
+        // continuation state.
+        let results = run_mini("Name: foo\n%prep\n%ifdef %{x}\ncmd \\\n%else\n# c\n%endif\n");
+        assert!(
+            !has(&results, "comment-in-continued-command"),
+            "unexpected: {results:?}"
+        );
+        let results =
+            run_mini("Name: foo\n%prep\n%ifarch x86_64\ncmd \\\n%elifarch aarch64\n# c\n%endif\n");
+        assert!(
+            !has(&results, "comment-in-continued-command"),
+            "unexpected: {results:?}"
+        );
+        // Item 7: a backslash followed by a blank is an escaped
+        // blank, not a continuation.
+        let results = run_mini("Name: foo\n%prep\ncmd \\ \n# c\n");
+        assert!(
+            !has(&results, "comment-in-continued-command"),
+            "unexpected: {results:?}"
+        );
+        // Item 15: a backslash-terminated comment keeps the
+        // continuation state, so the next comment line is still
+        // inside the continued command.
+        let results = run_mini("Name: foo\n%prep\ncmd \\\n# c \\\n# d\n");
+        assert_eq!(
+            lines_for(&results, "comment-in-continued-command").len(),
+            2,
+            "{results:?}"
+        );
+        // Item 11: a shift inside arithmetic nested in a subshell is
+        // not a heredoc; the comment after the continued line fires.
+        let results = run_mini("Name: foo\n%prep\n( echo $(( (1 << 2) )) ) \\\n# comment\n");
+        assert_eq!(
+            lines_for(&results, "comment-in-continued-command").len(),
+            1,
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn silent_constructs_heredoc_terminator_1164() {
+        // Item 10: a plain heredoc terminator is the exact line; a
+        // blank-padded line does not end a quoted heredoc.
+        let results = run_mini("Name: foo\n%prep\ncat <<'EOF'\nbody\n EOF\necho $name\nEOF\n");
+        assert!(
+            !has(&results, "spec-tag-as-shell-variable"),
+            "unexpected: {results:?}"
+        );
+        // The `<<-` form strips leading tabs, and only tabs.
+        let results = run_mini("Name: foo\n%prep\ncat <<-EOF\nbody\n\tEOF\necho $name\n");
+        assert_eq!(
+            lines_for(&results, "spec-tag-as-shell-variable").len(),
+            1,
+            "{results:?}"
+        );
+        let results = run_mini("Name: foo\n%prep\ncat <<-'EOF'\nbody\n  EOF\necho $name\nEOF\n");
+        assert!(
+            !has(&results, "spec-tag-as-shell-variable"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn silent_constructs_macro_body_and_undefine_1164() {
+        // Item 2: a header-shaped line inside a macro body is body
+        // text, not a %package header.
+        let results =
+            run_mini("Name: foo\n%define x \\\n%package evil\n%prep\ntrue\n%files\n/usr/bin/foo\n");
+        assert!(
+            !has(&results, "subpackage-without-files"),
+            "unexpected: {results:?}"
+        );
+        // Item 4: `%undefine` removes a collected define, so the
+        // subpackage name built from it is undecidable and skipped;
+        // without the undefine the same shape fires.
+        let results = run_mini(
+            "Name: foo\n%define suffix bar\n%package %{suffix}\nSummary: s\n%description %{suffix}\nd\n%files baz\n/usr/bin/x\n",
+        );
+        assert_eq!(
+            lines_for(&results, "subpackage-without-files").len(),
+            1,
+            "{results:?}"
+        );
+        let results = run_mini(
+            "Name: foo\n%define suffix bar\n%undefine suffix\n%package %{suffix}\nSummary: s\n%description %{suffix}\nd\n%files baz\n/usr/bin/x\n",
+        );
+        assert!(
+            !has(&results, "subpackage-without-files"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn silent_constructs_name_conflict_and_python_family_1164() {
+        // Item 12: conflicting Name: headers make the base name
+        // undecidable; an identical duplicate does not.
+        let results = run_mini(
+            "Name: foo\nName: bar\n%package sub\nSummary: s\n%description sub\nd\n%files\n/usr/bin/foo\n",
+        );
+        assert!(
+            !has(&results, "subpackage-without-files"),
+            "unexpected: {results:?}"
+        );
+        let results = run_mini(
+            "Name: foo\nName: foo\n%package sub\nSummary: s\n%description sub\nd\n%files\n/usr/bin/foo\n",
+        );
+        assert_eq!(
+            lines_for(&results, "subpackage-without-files").len(),
+            1,
+            "{results:?}"
+        );
+        // Item 5: the no-arg %{python_files} credit covers the
+        // python-digit flavour family, not just python-/python3-.
+        let results = run_mini(
+            "Name: python-foo\n%package -n python311-bar\nSummary: s\n%description -n python311-bar\nd\n%files %{python_files}\n",
+        );
+        assert!(
+            !has(&results, "subpackage-without-files"),
+            "unexpected: {results:?}"
+        );
+        let results = run_mini(
+            "Name: python-foo\n%package -n ruby-bar\nSummary: s\n%description -n ruby-bar\nd\n%files %{python_files}\n",
+        );
+        assert_eq!(
+            lines_for(&results, "subpackage-without-files").len(),
+            1,
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn silent_constructs_scriptlet_interpreter_1164() {
+        // Item 13: a scriptlet whose -p interpreter is not a shell
+        // is not shell-scanned; a shell interpreter still is.
+        let results = run_mini("Name: foo\n%post -p /usr/bin/python3\nprint($name)\n");
+        assert!(
+            !has(&results, "spec-tag-as-shell-variable"),
+            "unexpected: {results:?}"
+        );
+        let results = run_mini("Name: foo\n%post -p /bin/sh\necho $name\n");
+        assert_eq!(
+            lines_for(&results, "spec-tag-as-shell-variable").len(),
+            1,
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn sc_expand_placeholder_and_utf8_1164() {
+        // Items 8 and 16: the %% placeholder never leaks into an
+        // expansion result, and non-ASCII text survives expansion.
+        let check = SpecCheck::new(&config_mini());
+        assert_eq!(check.sc_expand("foo%%bar"), Some("foo%bar".to_string()));
+        assert_eq!(check.sc_expand("100%%"), Some("100%".to_string()));
+        assert_eq!(check.sc_expand("föö%{nil}"), Some("föö".to_string()));
     }
 
     #[test]
