@@ -7384,12 +7384,16 @@ impl FilesCheck {
             // covered by `script_is_source_data`, the gate the
             // interpreter findings in source trees use, with its
             // bounds -- a file directly in a script directory and
-            // a %doc row never count. The name-based setters and
-            // the doc/log paths are the reference's own
+            // a %doc row never count. This emission adds one arm
+            // the interpreter findings do not take: a file under
+            // /usr/src/ is source payload by place, whatever the
+            // shipping package is called, because that tree is
+            // where shipped source code lives. The name-based
+            // setters and the doc/log paths are the reference's own
             // spurious-executable-perm population and stay ungated.
             let source_credited = renamed_from_sws
                 && !pkg.doc_files.iter().any(|d| d == fname)
-                && script_is_source_data(&pkg.name, fname);
+                && (script_is_source_data(&pkg.name, fname) || fname.starts_with("/usr/src/"));
             if fd.nonexec_file && !source_credited && !mingw_dll_a_perm_exempt(&pkg.name, fname) {
                 if renamed_from_sws {
                     let mut finding = make_finding(
@@ -9682,6 +9686,72 @@ mod tests {
     }
 
     #[test]
+    fn spurious_executable_perm_silent_under_usr_src_in_plain_package() {
+        // The /usr/src path arm: that tree is where shipped
+        // source code lives, so a text file under it is source
+        // payload by place, whatever the shipping package is
+        // called -- `spurious_exec_pkg` carries an ordinary name
+        // with no src/source component, so the shared gate alone
+        // would not credit these rows. The identical file
+        // outside the tree keeps firing.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = spurious_exec_pkg(
+            &dir,
+            &[
+                ("/usr/src/myapp/data.txt", "ASCII text", b"payload\n"),
+                ("/usr/src/myapp/sub/notes.txt", "ASCII text", b"notes\n"),
+                ("/usr/share/myapp/data.txt", "ASCII text", b"payload\n"),
+            ],
+        );
+        let findings = check_spurious_script(&pkg, &config);
+        assert!(
+            !findings
+                .iter()
+                .any(|(_, _, d)| d.contains("/usr/src/myapp/data.txt")),
+            "no finding for /usr/src payload in a plain package: {findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|(_, _, d)| d.contains("/usr/src/myapp/sub/notes.txt")),
+            "no finding for nested /usr/src payload: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|(n, _, d)| {
+                n == "spurious-executable-perm" && d.contains("/usr/share/myapp/data.txt")
+            }),
+            "identical payload outside /usr/src keeps firing: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn usr_src_path_arm_does_not_reach_interpreter_findings() {
+        // The /usr/src arm belongs to the spurious emission
+        // alone: the interpreter findings keep the shared
+        // `script_is_source_data` gate, so an env interpreter
+        // line under /usr/src in an ordinary package (named
+        // nonexec-demo by the helper) draws env-script-interpreter
+        // exactly as it did before the arm existed.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[(
+                "/usr/src/myapp/run.sh",
+                0o100755,
+                "Bourne-Again shell script, ASCII text executable",
+                b"#!/usr/bin/env bash\n",
+            )],
+        );
+        let lines = script_finding_lines(&pkg, &config);
+        assert!(
+            flagged(&lines, "env-script-interpreter", "/usr/src/myapp/run.sh"),
+            "env finding under /usr/src in a plain package stands: {lines:?}"
+        );
+    }
+
+    #[test]
     fn spurious_executable_perm_still_fires_at_source_gate_bounds() {
         // The bounds of the source credit, each pinned with the
         // identical text file shape the silent cases above use.
@@ -9693,16 +9763,25 @@ mod tests {
                     name == "spurious-executable-perm" && detail.contains(path)
                 })
         };
-        // An ordinary package's /usr/src payload is not covered:
-        // the gate has no /usr/src path arm of its own.
+        // The /usr/src path arm needs the tree itself: a
+        // lookalike prefix is not the source tree.
+        for path in ["/usr/srcfoo/data.txt", "/usr/src-other/data.txt"] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let pkg = spurious_exec_pkg(&dir, &[(path, "ASCII text", b"payload\n")]);
+            assert!(fires(&pkg, path), "lookalike prefix {path} keeps firing");
+        }
+        // A %doc row under /usr/src never counts as source
+        // payload either -- the doc bound applies to the path
+        // arm the same way it applies to the shared gate.
         let dir = tempfile::TempDir::new().expect("tmpdir");
-        let pkg = spurious_exec_pkg(
+        let mut pkg = spurious_exec_pkg(
             &dir,
-            &[("/usr/src/myapp/data.txt", "ASCII text", b"payload\n")],
+            &[("/usr/src/myapp/docs/notes.txt", "ASCII text", b"docs\n")],
         );
+        pkg.doc_files = vec!["/usr/src/myapp/docs/notes.txt".to_string()];
         assert!(
-            fires(&pkg, "/usr/src/myapp/data.txt"),
-            "plain package /usr/src payload keeps firing"
+            fires(&pkg, "/usr/src/myapp/docs/notes.txt"),
+            "%doc row under /usr/src keeps firing"
         );
         // A `src` directory component inside a plain package is
         // not covered either -- only the package-name arm and the
