@@ -28,6 +28,7 @@ use librpm::Tag;
 
 pub struct SystemdInstallCheck {
     unit_regex: Regex,
+    unit_dir: String,
 }
 
 impl SystemdInstallCheck {
@@ -45,7 +46,10 @@ impl SystemdInstallCheck {
             fancy_regex::escape(&unit_dir)
         ))
         .expect("unit regex");
-        Self { unit_regex }
+        Self {
+            unit_regex,
+            unit_dir,
+        }
     }
 
     /// The unit types the reference checks (compiled once in [`Self::new`];
@@ -55,8 +59,16 @@ impl SystemdInstallCheck {
     }
 
     /// `(finding, ok)` for one unit file against the four scriptlets.
+    ///
+    /// `pre_direct` records whether the candidate sits directly under the
+    /// unit directory: a path below a subdirectory (a `.wants` or
+    /// `.requires` enablement link, or any other subdir entry) is not a
+    /// unit definition systemd loads from the unit directory, so it draws
+    /// no `add_pre` finding. The other three findings are evaluated for
+    /// it unchanged.
     fn check_unit(
         basename: &str,
+        pre_direct: bool,
         pre: &str,
         post: &str,
         preun: &str,
@@ -93,6 +105,9 @@ impl SystemdInstallCheck {
         ];
         let mut missing = Vec::new();
         for (pattern, script, finding) in &patterns {
+            if *finding == "systemd-service-without-service_add_pre" && !pre_direct {
+                continue;
+            }
             let re = Regex::new(pattern).expect("unit pattern");
             if !script.lines().any(|line| is_match(&re, line)) {
                 // The reference accepts `%service_del_postun_without_restart`.
@@ -139,7 +154,7 @@ impl Check for SystemdInstallCheck {
         // cyclic, or a mask link to /dev/null) names no evaluable unit and
         // is skipped; the dangling-symlink findings own that defect.
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut units: Vec<String> = Vec::new();
+        let mut units: Vec<(String, bool)> = Vec::new();
         for file in &pkg.files {
             if !is_match(unit_re, &file.name) {
                 continue;
@@ -156,16 +171,22 @@ impl Check for SystemdInstallCheck {
             if !seen.insert(candidate.name.as_str()) {
                 continue;
             }
-            units.push(
+            let pre_direct = candidate
+                .name
+                .strip_prefix(&format!("{}/", self.unit_dir))
+                .map(|rest| !rest.contains('/'))
+                .unwrap_or(true);
+            units.push((
                 Path::new(&candidate.name)
                     .file_name()
                     .map(|b| b.to_string_lossy().into_owned())
                     .unwrap_or_default(),
-            );
+                pre_direct,
+            ));
         }
 
-        for basename in &units {
-            for finding in Self::check_unit(basename, &pre, &post, &preun, &postun) {
+        for (basename, pre_direct) in &units {
+            for finding in Self::check_unit(basename, *pre_direct, &pre, &post, &preun, &postun) {
                 add_info(out, Level::Warning, pkg, finding, &[basename]);
             }
         }
@@ -183,20 +204,20 @@ mod tests {
                       systemd-update-helper remove-system-units foo.service\n\
                       systemd-update-helper mark-restart-system-units foo.service";
         let missing =
-            SystemdInstallCheck::check_unit("foo.service", script, script, script, script);
+            SystemdInstallCheck::check_unit("foo.service", true, script, script, script, script);
         assert!(missing.is_empty(), "{missing:?}");
     }
 
     #[test]
     fn missing_pre_is_flagged() {
-        let missing = SystemdInstallCheck::check_unit("foo.service", "", "", "", "");
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", "");
         assert_eq!(missing.len(), 4);
         assert!(missing.contains(&"systemd-service-without-service_add_pre"));
     }
 
     #[test]
     fn postun_without_restart_is_accepted() {
-        let missing = SystemdInstallCheck::check_unit("foo.service", "", "", "", ":\n");
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", ":\n");
         assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
         assert_eq!(missing.len(), 3);
     }
@@ -370,5 +391,144 @@ mod tests {
         ]));
         let results = run(&pkg);
         assert!(results.is_empty(), "{results:?}");
+    }
+    /// Per-tag count for a detail in `check_binary` results.
+    fn on_tag(results: &[(String, String)], tag: &str, detail: &str) -> usize {
+        results
+            .iter()
+            .filter(|(check, line)| check == tag && line.contains(detail))
+            .count()
+    }
+
+    #[test]
+    fn non_direct_candidate_suppresses_add_pre_only() {
+        let missing = SystemdInstallCheck::check_unit("foo.service", false, "", "", "", "");
+        assert!(!missing.contains(&"systemd-service-without-service_add_pre"));
+        assert!(missing.contains(&"systemd-service-without-service_add_post"));
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+        assert_eq!(missing.len(), 3, "{missing:?}");
+    }
+
+    #[test]
+    fn wants_link_duplicate_suppresses_add_pre_only() {
+        // The dracut shape: a direct unit-dir link to a shipped non-unit
+        // file, plus the same unit name as a `.wants` enablement link.
+        // The direct candidate still fires `add_pre`; the `.wants`
+        // candidate fires the other three findings unchanged.
+        let pkg = alias_pkg(Some(vec![
+            reg("/usr/lib/dracut/modules.d/77dracut-systemd/dracut-cmdline.service"),
+            link(
+                &format!("{UNIT}/dracut-cmdline.service"),
+                "../../dracut/modules.d/77dracut-systemd/dracut-cmdline.service",
+            ),
+            link(
+                &format!("{UNIT}/initrd.target.wants/dracut-cmdline.service"),
+                "../dracut-cmdline.service",
+            ),
+        ]));
+        let results = run(&pkg);
+        assert_eq!(results.len(), 7, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_pre",
+                "dracut-cmdline.service"
+            ),
+            1
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "dracut-cmdline.service"
+            ),
+            2
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_del_preun",
+                "dracut-cmdline.service"
+            ),
+            2
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_del_postun",
+                "dracut-cmdline.service"
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn subdir_unit_file_suppresses_add_pre_only() {
+        // The blog shape: the only candidate is a regular file below a
+        // `.wants` directory, not a unit definition directly under the
+        // unit directory. No `add_pre` finding; the other three stand.
+        let pkg = alias_pkg(Some(vec![reg(&format!(
+            "{UNIT}/systemd-ask-password-blog.service.wants/systemd-vconsole-setup.service"
+        ))]));
+        let results = run(&pkg);
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_pre",
+                "systemd-vconsole-setup.service"
+            ),
+            0
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "systemd-vconsole-setup.service"
+            ),
+            1
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_del_preun",
+                "systemd-vconsole-setup.service"
+            ),
+            1
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_del_postun",
+                "systemd-vconsole-setup.service"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn wants_alias_to_shipped_unit_still_fires_add_pre() {
+        // Near miss: a `.wants` link that resolves to a shipped direct
+        // unit is deduped onto that unit, whose candidate is direct, so
+        // `add_pre` still fires. Suppression is judged on the candidate
+        // path, not on the link that led to it.
+        let pkg = alias_pkg(Some(vec![
+            reg(&format!("{UNIT}/bare720.service")),
+            link(
+                &format!("{UNIT}/multi-user.target.wants/bare720.service"),
+                "../bare720.service",
+            ),
+        ]));
+        let results = run(&pkg);
+        assert_eq!(results.len(), 4, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_pre",
+                "bare720.service"
+            ),
+            1
+        );
     }
 }
