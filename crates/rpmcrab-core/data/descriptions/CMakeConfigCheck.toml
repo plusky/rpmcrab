@@ -15,10 +15,12 @@ finding is a warning. Install the file at the imported location
 export file so it names the location the build actually ships.
 
 This check is run-scoped: it judges a build only when the lint run
-also contains the build's source package, as a lint run over a
-finished build does, and stays silent on partial or single-package
-input, where the imported files are expected to sit in packages
-that were not linted. Exports that no config file of their package
+also contains the build's source package (identified by header
+name-version-release plus .src.rpm/.nosrc.rpm, equal to the
+binaries' SOURCERPM), as a lint run over a finished build does,
+and stays silent on partial or single-package input, where the
+imported files are expected to sit in packages that were not
+linted. Exports that no config file of their package
 reaches are not judged, and imported values that are not absolute
 or still carry a ${...} variable or $<...> generator expression
 are skipped as undecidable.

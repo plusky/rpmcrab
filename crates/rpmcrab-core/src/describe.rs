@@ -330,7 +330,7 @@ mod tests {
             ),
             (
                 "CMakeConfigCheck.toml",
-                "b6ad5ab2c7064211d0709c43f0c2b0e8d485ce7522fe47ea44bf67e223092bb2",
+                "5a055c82c9294d4fcda17948989492be17c18dee0c68b2fe1cce3a5e261cbe0b",
             ),
             (
                 "CheckForXinetd.toml",
@@ -414,7 +414,7 @@ mod tests {
             ),
             (
                 "PkgConfigCheck.toml",
-                "e33a5d675f489bc206d9dff23a4cda34251e792e3d8c629772d9c501a77dbc0d",
+                "2974050e95a10a27117f23e09b6aa0fd9e13d112f8053c80623a16017f4e95bb",
             ),
             (
                 "PolkitCheck.toml",
