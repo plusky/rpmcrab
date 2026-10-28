@@ -441,7 +441,7 @@ mod tests {
             ),
             (
                 "SpecCheck.toml",
-                "7db237878bf86acadc562cdc290068c3a52803da4e82dbaebc0ffee9b883c5e3",
+                "35f93ca11fe08f2aa4158b019cfeb4410dd32c16eab0de40de402c11c809280c",
             ),
             (
                 "SysVInitOnSystemdCheck.toml",

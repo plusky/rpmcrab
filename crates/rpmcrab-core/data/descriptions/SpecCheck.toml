@@ -9,6 +9,9 @@ The spec file name (without the .spec suffix) must match the package name
 non-utf8-spec-file="""
 The character encoding of the spec file is not UTF-8.
 """
+parse-time-cpu-count="""
+`%jobs` and `%_smp_build_ncpus` expand to the build machine's CPU count while the spec is parsed. rpm stores that number in the source rpm, and the binary rpms record the source rpm's digest, so the packages differ between build hosts (boo#1237231). Use `%{?_smp_mflags}`, `%make_build`, or `${RPM_BUILD_NCPUS}` in shell, which are resolved when the build runs.
+"""
 patch-not-applied="""
 A patch is included in your package but was not applied.
 """

@@ -248,6 +248,7 @@ optflags-not-applied = W
 package-supports-libalternatives = I
 package-supports-update-alternatives = I
 package-with-huge-docs = W
+parse-time-cpu-count = W
 partial-relro = W
 patch-fuzz-is-changed = W
 patch-macro-old-format = E

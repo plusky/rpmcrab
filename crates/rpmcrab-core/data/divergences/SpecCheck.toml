@@ -358,3 +358,10 @@ check = "spec-tag-as-shell-variable"
 kind = "behaviour"
 reason = "New port-only Warning: $name, $version or $release used as a shell variable in a shell section that never assigns the variable emits spec-tag-as-shell-variable, because rpm sets no shell variables with those names and the expansion is empty. The reference has no such finding. Occurrences inside single quotes, inside quoted-delimiter heredoc bodies and escaped occurrences are quiet, as are sections that assign the variable by =, for, read or local. In build sections the finding names %{name} (respectively %{version}, %{release}) or $RPM_PACKAGE_NAME (_VERSION, _RELEASE); in install-time scriptlets it names the macro only, because rpm exports no RPM_PACKAGE_* variables there. Over the 16,501 spec files of the Factory corpus the scan fires 17 times."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "parse-time-cpu-count"
+kind = "behaviour"
+reason = "New check with no reference counterpart: the spec is parsed a second time with the parse-time job-count macros (`%jobs`, `%_smp_build_ncpus`, `%_smp_build_nthreads`) defined to a sentinel value at command-line level, and each line of the parsed spec text containing the sentinel is reported -- such a line stored the parsing machine's CPU count, which rpm records in the source rpm and, through the source digest, in every binary rpm. Judging the parsed text (not the raw spec) keeps dead `%if` branches, `%define` bodies, escaped `%%jobs` and constant `%{?jobs:...}` bodies silent; a spec's own `%define` of a job-count macro overrides the sentinel, and `%jobs` is left undefined-by-sentinel when the host's macros already expand it to `${RPM_BUILD_NCPUS}`."
+since = "0.4.1"
