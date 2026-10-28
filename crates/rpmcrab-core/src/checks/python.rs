@@ -1098,7 +1098,6 @@ impl Check for PythonCheck {
                 let content = pkg.read_file(filename);
                 let python_version = self.marker_python_version(&pkg.requires, filename);
                 let reqs = Self::parse_requirements(&content, false, &python_version);
-                self.check_missing_requirements(pkg, out, &reqs, &python_version);
                 let dir = filename
                     .rsplit_once('/')
                     .map(|(d, _)| d.to_string())
@@ -1117,7 +1116,6 @@ impl Check for PythonCheck {
                 let content = pkg.read_file(filename);
                 let python_version = self.marker_python_version(&pkg.requires, filename);
                 let reqs = Self::parse_requirements(&content, true, &python_version);
-                self.check_missing_requirements(pkg, out, &reqs, &python_version);
                 let dir = filename
                     .rsplit_once('/')
                     .map(|(d, _)| d.to_string())
@@ -1217,6 +1215,31 @@ impl Check for PythonCheck {
         }
         if dist_infos.is_empty() {
             return;
+        }
+        // `python-missing-require` is judged only once every dist-info
+        // of the package is known: a declared requirement is also
+        // satisfied by a distribution the package itself ships in the
+        // same Python tree — vendored and bundled distributions carry
+        // no `python3.Xdist()` Provides for the own-Provides credit in
+        // `require_satisfaction` to see (setuptools' `_vendor` tree,
+        // rpmlint-mini's bundled tree).
+        let shipped: Vec<(String, String)> = dist_infos
+            .iter()
+            .filter_map(|di| {
+                di.dist_name
+                    .as_ref()
+                    .map(|n| (pep503(n), Self::python_tree_key(&di.dir)))
+            })
+            .collect();
+        for di in &dist_infos {
+            self.check_missing_requirements(
+                pkg,
+                out,
+                &di.reqs,
+                &di.python_version,
+                &shipped,
+                &Self::python_tree_key(&di.dir),
+            );
         }
         // Dist-info version coherence (#1024 §3.2): the package's own
         // dist-info version against the RPM version.
@@ -1403,6 +1426,8 @@ impl PythonCheck {
         out: &mut Filter,
         reqs: &[Requirement],
         python_version: &str,
+        shipped: &[(String, String)],
+        tree: &str,
     ) {
         // The reference returns early when the distribution declares no
         // requirements; without the guard every pythonX-* require would be
@@ -1419,7 +1444,7 @@ impl PythonCheck {
             {
                 continue;
             }
-            match Self::require_satisfaction(pkg, req) {
+            match Self::require_satisfaction(pkg, req, shipped, tree) {
                 Satisfaction::Satisfied => {}
                 Satisfaction::BareOnly(bare) => {
                     add_info(
@@ -1449,23 +1474,42 @@ impl PythonCheck {
     /// §3.1): by one of its own `python3.Xdist()` Provides, by a
     /// flavoured or dist-spelled RPM Require, only by a bare
     /// `python-<name>` Require, or not at all.
-    fn require_satisfaction(pkg: &Pkg, req: &Requirement) -> Satisfaction {
+    fn require_satisfaction(
+        pkg: &Pkg,
+        req: &Requirement,
+        shipped: &[(String, String)],
+        tree: &str,
+    ) -> Satisfaction {
         let variants = Self::module_names(&req.name, &req.extras);
         // The package's own `python3.Xdist()` Provides satisfy: the
         // reference ignores them, so a package shipping the very dist
         // it declares a requirement on (python313-ua-parser on
-        // `ua-parser-builtins`) warned on itself.
+        // `ua-parser-builtins`) warned on itself. The comparison is
+        // PEP 503: `-`, `_` and `.` are the same separator in a
+        // distribution name.
         let own_provides = pkg.provides.iter().flat_map(|p| p.leaves()).any(|leaf| {
             Self::dist_provide_inner(&Self::leaf_capability(&leaf))
-                .is_some_and(|inner| variants.iter().any(|v| v.eq_ignore_ascii_case(inner)))
+                .is_some_and(|inner| variants.iter().any(|v| pep503(v) == pep503(inner)))
         });
         if own_provides {
             return Satisfaction::Satisfied;
         }
-        if !Self::require_satisfied(&pkg.req_names, req) {
+        // A distribution the package itself ships in the same Python
+        // tree satisfies the requirement: vendored and bundled
+        // dist-infos generate no `python3.Xdist()` Provides, but the
+        // named distribution is present in the tree the requirement
+        // was declared for.
+        if shipped
+            .iter()
+            .any(|(name, t)| *name == pep503(&req.name) && t == tree)
+        {
+            return Satisfaction::Satisfied;
+        }
+        let class = Self::classify_matches(pkg, &variants);
+        if !Self::require_satisfied(&pkg.req_names, req) && matches!(class, MatchClass::Unknown) {
             return Satisfaction::Missing;
         }
-        match Self::classify_matches(pkg, &variants) {
+        match class {
             MatchClass::Full | MatchClass::Unknown => Satisfaction::Satisfied,
             MatchClass::BareOnly(bare) => Satisfaction::BareOnly(bare),
         }
@@ -1615,7 +1659,15 @@ impl PythonCheck {
         if name.is_empty() {
             return None;
         }
-        let in_variants = |n: &str| variants.iter().any(|v| v.eq_ignore_ascii_case(n));
+        // The comparison is PEP 503: `-`, `_` and `.` are the same
+        // separator in a distribution name, so a Require on
+        // `python3-jaraco.classes` names the declared `jaraco-classes`
+        // (the require regex's raw `-`/`_` variants cannot express
+        // this; `classify_matches` is the canonical route).
+        let in_variants = |n: &str| {
+            let cn = pep503(n);
+            variants.iter().any(|v| pep503(v) == cn)
+        };
         if let Some(inner) = Self::dist_provide_inner(name) {
             return in_variants(inner).then_some(AtomMatch::Full);
         }
@@ -1654,6 +1706,26 @@ impl PythonCheck {
             Some(q) if !leaf.name.contains('(') => format!("{}({})", leaf.name, q),
             _ => leaf.name.clone(),
         }
+    }
+
+    /// The Python tree a dist-info directory belongs to: the path
+    /// prefix ending at the first `pythonX.Y` or `site-packages`
+    /// component, or the directory itself when it has neither (a
+    /// dist-info outside any Python tree is its own tree, so only a
+    /// same-directory neighbour can credit it).
+    fn python_tree_key(dir: &str) -> String {
+        let parts: Vec<&str> = dir.split('/').collect();
+        for (i, part) in parts.iter().enumerate() {
+            let is_version = part.strip_prefix("python").is_some_and(|v| {
+                let mut it = v.splitn(2, '.');
+                let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+                it.next().is_some_and(digits) && it.next().is_some_and(digits)
+            });
+            if is_version || *part == "site-packages" {
+                return parts[..=i].join("/");
+            }
+        }
+        dir.to_string()
     }
 
     /// The inner name of a `python3.Xdist(<name>)` capability, if the
@@ -3405,7 +3477,7 @@ mod tests {
         let check = PythonCheck::new(&config);
         // The single-dist-info flow of `check_binary`: missing inline,
         // leftover over this dist-info alone, emitted unsuppressed.
-        check.check_missing_requirements(&pkg, &mut out, reqs, "3.12");
+        check.check_missing_requirements(&pkg, &mut out, reqs, "3.12", &[], "");
         for req in PythonCheck::leftover_require_strings(&pkg.req_names, &[(reqs, "3.12")]) {
             add_info(
                 &mut out,
@@ -3488,7 +3560,7 @@ mod tests {
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let check = PythonCheck::new(&config);
-        check.check_missing_requirements(&pkg, &mut out, reqs, "3.13");
+        check.check_missing_requirements(&pkg, &mut out, reqs, "3.13", &[], "");
         let levels = out.result_levels().to_vec();
         out.results()
             .iter()
@@ -3519,6 +3591,279 @@ mod tests {
             )];
         });
         assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    /// Run `check_missing_requirements` with an explicit shipped set:
+    /// (PEP 503 name, tree key) pairs plus the declaring tree key.
+    fn missing_findings_shipped(
+        reqs: &[Requirement],
+        req_names: &[&str],
+        shipped: &[(&str, &str)],
+        tree: &str,
+    ) -> Vec<(String, Level, String)> {
+        use crate::color::Color;
+        let pkg = fixture_pkg_with_requires(req_names);
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = PythonCheck::new(&config);
+        let shipped: Vec<(String, String)> = shipped
+            .iter()
+            .map(|(n, t)| (n.to_string(), t.to_string()))
+            .collect();
+        check.check_missing_requirements(&pkg, &mut out, reqs, "3.13", &shipped, tree);
+        let levels = out.result_levels().to_vec();
+        out.results()
+            .iter()
+            .zip(levels)
+            .map(|((name, line), level)| (name.clone(), level, line.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn missing_require_pep503_dot_named_require_satisfies() {
+        // PEP 503: `-`, `_` and `.` are the same separator in a
+        // distribution name. openSUSE package names keep the dot
+        // (`python3-jaraco.classes`) while the metadata declares the
+        // dash form (`jaraco-classes`); the require regex's raw
+        // `-`/`_` variants cannot express the equivalence.
+        let reqs = PythonCheck::parse_requirements("jaraco-classes\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3-jaraco.classes".to_string()];
+            pkg.requires = vec![dep("python3-jaraco.classes", 0, None)];
+        });
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn missing_require_pep503_versioned_dot_require_satisfies() {
+        // The matrix-synapse shape: `python313-zope.interface` for
+        // the declared `zope-interface`.
+        let reqs = PythonCheck::parse_requirements("zope-interface\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python313-zope.interface".to_string()];
+            pkg.requires = vec![dep("python313-zope.interface", 0, None)];
+        });
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn missing_require_pep503_dot_named_declaration_satisfies() {
+        // The mirror image: the metadata itself carries the dot
+        // (`straight.plugin`) and the RPM Require the dash form.
+        let reqs = PythonCheck::parse_requirements("straight.plugin\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3-straight-plugin".to_string()];
+            pkg.requires = vec![dep("python3-straight-plugin", 0, None)];
+        });
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn missing_require_pep503_namespace_near_miss_still_fires() {
+        // Canonicalisation equates separators, not names: a different
+        // distribution under the same namespace project does not
+        // satisfy the declared one.
+        let reqs = PythonCheck::parse_requirements("jaraco-classes\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3-jaraco.context".to_string()];
+            pkg.requires = vec![dep("python3-jaraco.context", 0, None)];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(findings[0].0, "python-missing-require");
+    }
+
+    #[test]
+    fn missing_require_pep503_unflavoured_require_is_bare_only() {
+        // A canonically matching but unflavoured Require routes to
+        // the unflavoured arm, not the satisfied one.
+        let reqs = PythonCheck::parse_requirements("zope-interface\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python-zope.interface".to_string()];
+            pkg.requires = vec![dep("python-zope.interface", 0, None)];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(findings[0].0, "python-unflavoured-require");
+    }
+
+    #[test]
+    fn own_dist_provide_pep503_inner_satisfies() {
+        // The own-Provides credit compares canonically too: the
+        // generator writes the metadata name into the capability,
+        // whose spelling may use the other separator.
+        let reqs = PythonCheck::parse_requirements("jaraco-text\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = Vec::new();
+            pkg.requires = Vec::new();
+            pkg.provides = vec![dep(
+                "python3.13dist(jaraco.text)",
+                crate::pkg::dep::RPMSENSE_EQUAL,
+                Some("3.0.0"),
+            )];
+        });
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn floor_pep503_named_require_carries_the_floor_check() {
+        // A Require recognised only through the canonical comparison
+        // is also the branch the floor tags judge: unversioned, it
+        // fires the unversioned tag instead of the missing one.
+        let reqs = PythonCheck::parse_requirements("zope-interface>=5.0\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python313-zope.interface".to_string()];
+            pkg.requires = vec![dep("python313-zope.interface", 0, None)];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(
+            findings[0].0,
+            "python-require-unversioned-despite-metadata-floor"
+        );
+    }
+
+    #[test]
+    fn missing_require_coshipped_dist_in_same_tree_satisfies() {
+        // The setuptools shape: the outer dist-info declares
+        // requirements on distributions vendored under its own
+        // `_vendor` tree; the vendored dist-infos ship in the same
+        // Python tree but generate no `python3.Xdist()` Provides.
+        let reqs = PythonCheck::parse_requirements("zipp\n", false, "3.13");
+        let findings = missing_findings_shipped(
+            &reqs,
+            &[],
+            &[("zipp", "usr/lib/python3.13")],
+            "usr/lib/python3.13",
+        );
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn missing_require_coshipped_dist_in_other_tree_still_fires() {
+        // The credit is tree-scoped: a same-named dist-info in a
+        // different interpreter's tree does not prove the declaring
+        // tree can import it.
+        let reqs = PythonCheck::parse_requirements("zipp\n", false, "3.13");
+        let findings = missing_findings_shipped(
+            &reqs,
+            &[],
+            &[("zipp", "usr/lib/python3.11")],
+            "usr/lib/python3.13",
+        );
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(findings[0].0, "python-missing-require");
+    }
+
+    #[test]
+    fn missing_require_coshipped_other_dist_still_fires() {
+        // A co-shipped distribution with a different name proves
+        // nothing about the declared one.
+        let reqs = PythonCheck::parse_requirements("jaraco-classes\n", false, "3.13");
+        let findings = missing_findings_shipped(
+            &reqs,
+            &[],
+            &[("jaraco-context", "usr/lib/python3.13")],
+            "usr/lib/python3.13",
+        );
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(findings[0].0, "python-missing-require");
+    }
+
+    #[test]
+    fn python_tree_key_scopes() {
+        // Vendored and outer dist-infos of one tree share a key.
+        assert_eq!(
+            PythonCheck::python_tree_key(
+                "usr/lib/python3.13/site-packages/setuptools/_vendor/zipp-3.20.dist-info"
+            ),
+            "usr/lib/python3.13"
+        );
+        assert_eq!(
+            PythonCheck::python_tree_key(
+                "usr/lib/python3.13/site-packages/setuptools-80.9.0.dist-info"
+            ),
+            "usr/lib/python3.13"
+        );
+        // A bundled tree outside the site-packages layout keys by its
+        // interpreter component (the rpmlint-mini shape).
+        assert_eq!(
+            PythonCheck::python_tree_key(
+                "opt/testing/lib/python3.13/site-packages/pybeam-0.8.1.dist-info"
+            ),
+            "opt/testing/lib/python3.13"
+        );
+        assert_eq!(
+            PythonCheck::python_tree_key("opt/testing/lib/python3.13/rpmlint-2.10.0.dist-info"),
+            "opt/testing/lib/python3.13"
+        );
+        // Different interpreters are different trees.
+        assert_ne!(
+            PythonCheck::python_tree_key("usr/lib/python3.11/site-packages/zipp-3.20.dist-info"),
+            PythonCheck::python_tree_key("usr/lib/python3.13/site-packages/zipp-3.20.dist-info")
+        );
+        // No Python component at all: the directory is its own tree.
+        assert_eq!(
+            PythonCheck::python_tree_key("usr/share/doc/foo-1.0.dist-info"),
+            "usr/share/doc/foo-1.0.dist-info"
+        );
+    }
+
+    #[test]
+    fn coshipped_vendored_dist_satisfies_through_check_binary() {
+        use crate::color::Color;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+
+        // The outer distribution declares a requirement on a
+        // distribution vendored beneath it; both dist-infos ship in
+        // the package and the vendored one generates no
+        // `python3.Xdist()` Provide. Same tree: satisfied. A
+        // different interpreter's tree: still missing.
+        let outer =
+            "Metadata-Version: 2.1\nName: outer\nVersion: 1.0\nRequires-Dist: vendored-dep\n";
+        let vendored = "Metadata-Version: 2.1\nName: vendored-dep\nVersion: 2.0\n";
+        for (vendored_tree, expect_finding) in [("python3.13", false), ("python3.11", true)] {
+            let config = Config::default();
+            let mut check = PythonCheck::new(&config);
+            let mut pkg = fixture_pkg_with_requires(&[]);
+            pkg.requires = Vec::new();
+            pkg.provides = Vec::new();
+            let root = format!("coship-{n}-{vendored_tree}");
+            let files = [
+                (
+                    format!("{root}/usr/lib/python3.13/site-packages/outer-1.0.dist-info/METADATA"),
+                    outer,
+                ),
+                (
+                    format!(
+                        "{root}/usr/lib/{vendored_tree}/site-packages/vendored_dep-2.0.dist-info/METADATA"
+                    ),
+                    vendored,
+                ),
+            ];
+            for (rel, content) in &files {
+                let disk = pkg.dir_name().join(rel);
+                std::fs::create_dir_all(disk.parent().unwrap()).expect("test dirs");
+                std::fs::write(&disk, content).expect("test METADATA");
+                let mut pf = pkg.files[0].clone();
+                pf.name = format!("/{rel}");
+                pf.path = disk.to_string_lossy().into_owned();
+                pkg.files.push(pf);
+            }
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_binary(&pkg, &config, &mut out);
+            let missing: Vec<_> = out
+                .results()
+                .iter()
+                .filter(|(name, _)| name == "python-missing-require")
+                .collect();
+            if expect_finding {
+                assert_eq!(missing.len(), 1, "results: {:?}", out.results());
+            } else {
+                assert!(missing.is_empty(), "results: {:?}", out.results());
+            }
+            std::fs::remove_dir_all(pkg.dir_name().join(&root)).ok();
+        }
     }
 
     #[test]
