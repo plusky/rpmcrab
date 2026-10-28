@@ -1945,8 +1945,11 @@ impl PythonCheck {
     /// its matching leaves carry (a branch mixing ceilinged and
     /// unversioned matching leaves counts as ceilinged), an entry
     /// with an unversioned branch is an open entry whose own
-    /// ceilings are not credited, and a branch carrying only lower
-    /// bounds does not veto a sibling branch's ceiling. Separate
+    /// ceilings are not credited, and so is an entry with a branch
+    /// carrying no usable ceiling at all (floor-only or unparsable
+    /// leaves): such a branch admits versions above a sibling
+    /// branch's ceiling, so crediting that ceiling would claim a
+    /// cap the entry does not impose. Separate
     /// entries are conjunctive, so the credited entry ceilings
     /// join by minimum. The finding fires when the joined ceiling
     /// cuts the declared range: below the range's upper end, or —
@@ -1961,6 +1964,15 @@ impl PythonCheck {
     /// Provides has no RPM ceiling to compare.
     fn check_require_ceiling(pkg: &Pkg, out: &mut Filter, req: &Requirement) {
         let meta = Self::metadata_ceiling(req);
+        // A declared-but-garbled upper end is not an unbounded range:
+        // when the specifier carries an upper clause but none of them
+        // parses, there is no usable ceiling to cut against, so the
+        // check stays quiet -- as the floor side does when the
+        // metadata declares no usable floor -- instead of firing on
+        // any RPM ceiling for a range the metadata never left open.
+        if meta.is_none() && Self::metadata_ceiling_has_unparsable(req) {
+            return;
+        }
         let variants = Self::module_names(&req.name, &req.extras);
         let mut any_match = false;
         let mut joined_ceiling: Option<CeilingBound> = None;
@@ -1971,6 +1983,7 @@ impl PythonCheck {
             for branch in Self::require_branches(dep) {
                 let mut branch_match = false;
                 let mut branch_unversioned = false;
+                let mut branch_versioned = false;
                 let mut branch_lowest: Option<CeilingBound> = None;
                 for leaf in &branch {
                     if Self::classify_atom(&Self::leaf_capability(leaf), &variants).is_none() {
@@ -1979,7 +1992,7 @@ impl PythonCheck {
                     branch_match = true;
                     match Self::leaf_ceiling(leaf) {
                         LeafCeiling::Unversioned => branch_unversioned = true,
-                        LeafCeiling::Versioned => {}
+                        LeafCeiling::Versioned => branch_versioned = true,
                         LeafCeiling::Ceiling(c) => {
                             if branch_lowest
                                 .as_ref()
@@ -2003,7 +2016,7 @@ impl PythonCheck {
                             entry_ceiling = Some(c);
                         }
                     }
-                    None if branch_unversioned => entry_open = true,
+                    None if branch_unversioned || branch_versioned => entry_open = true,
                     None => {}
                 }
             }
@@ -2049,6 +2062,36 @@ impl PythonCheck {
                 ],
             );
         }
+    }
+
+    /// Whether the specifier declares an upper clause whose version
+    /// does not parse (#1243): the mirror of `metadata_ceiling`'s
+    /// clause classification, so a garbled upper end is visible
+    /// separately from a genuinely unbounded range. A compatible
+    /// release over a single segment parses fine and implies no
+    /// ceiling by design, so it is not unparsable here.
+    fn metadata_ceiling_has_unparsable(req: &Requirement) -> bool {
+        for clause in req.specifier.split(',') {
+            let clause = clause.trim();
+            let Some((op, ver)) = ["===", "==", ">=", "<=", "!=", "~=", ">", "<"]
+                .iter()
+                .find_map(|op| clause.strip_prefix(op).map(|v| (*op, v.trim())))
+            else {
+                continue;
+            };
+            let unparsable = match op {
+                "<" | "<=" | "~=" => pep440_parse(ver).is_none(),
+                "==" | "===" => match ver.strip_suffix(".*") {
+                    Some(prefix) => pep440_parse(prefix).is_none(),
+                    None => pep440_parse(ver).is_none(),
+                },
+                _ => false,
+            };
+            if unparsable {
+                return true;
+            }
+        }
+        false
     }
 
     /// The upper end of the range a requirement's specifier
@@ -2152,7 +2195,8 @@ impl PythonCheck {
     /// clause's prefix drops the last segment (`~= 1.4.5` ends
     /// below `[1, 5]`, `~= 1.4` below `[2]`), and over a single
     /// segment it pins no prefix and implies no ceiling. The
-    /// ceiling is the prefix with its last segment incremented.
+    /// ceiling is the prefix with its last segment incremented; an
+    /// increment that overflows degrades to no ceiling.
     /// The epoch carries over; pre/post/dev do not participate in
     /// a prefix.
     fn prefix_bump(base: &Pep440Version, compatible: bool) -> Option<Pep440Version> {
@@ -2169,7 +2213,8 @@ impl PythonCheck {
             rel.len()
         };
         let mut release: Vec<u64> = rel[..keep].to_vec();
-        *release.last_mut()? += 1;
+        let last = release.last_mut()?;
+        *last = last.checked_add(1)?;
         Some(Pep440Version {
             epoch: base.epoch,
             release,
@@ -3910,6 +3955,66 @@ mod tests {
             !tags_of(&findings).contains(&"python-require-upper-bound-contradicts-metadata"),
             "findings: {findings:?}"
         );
+    }
+
+    #[test]
+    fn ceiling_no_usable_ceiling_branch_opens_entry() {
+        // #1243 item 1: a branch carrying no usable ceiling admits
+        // versions above its sibling branch's ceiling, so the entry
+        // as a whole caps nothing -- whether the branch is
+        // floor-only or carries only an unparsable ceiling clause.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.20,<0.24\n", false, "3.13");
+        for rich in [
+            "(python3.13dist(dulwich) < 0.23 or python3.13dist(dulwich) >= 0.20)",
+            "(python3.13dist(dulwich) < 0.23 or python3.13dist(dulwich) < not-a-version)",
+        ] {
+            let findings = findings_with_pkg(&reqs, |pkg| {
+                pkg.req_names = vec![rich.to_string()];
+                pkg.requires = vec![dep(rich, 0, None)];
+            });
+            assert!(
+                !tags_of(&findings).contains(&"python-require-upper-bound-contradicts-metadata"),
+                "rich {rich} must stay quiet: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ceiling_garbled_metadata_ceiling_stays_quiet() {
+        // #1243 item 2: a metadata range whose only upper clause is
+        // garbled declares no usable ceiling, but it is not an
+        // unbounded range -- an RPM ceiling does not fire for it.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.20,<garbled\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13dist(dulwich) < 0.23".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13dist(dulwich)",
+                crate::pkg::dep::RPMSENSE_LESS,
+                Some("0.23"),
+            )];
+        });
+        assert!(
+            !tags_of(&findings).contains(&"python-require-upper-bound-contradicts-metadata"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn prefix_bump_overflow_degrades_to_no_ceiling() {
+        // #1243 item 3: incrementing a u64::MAX segment must not
+        // panic (debug) or wrap (release); it yields no ceiling.
+        let base = Pep440Version {
+            epoch: 0,
+            release: vec![u64::MAX],
+            pre: None,
+            post: None,
+            dev: None,
+        };
+        assert_eq!(PythonCheck::prefix_bump(&base, false), None);
+        assert_eq!(PythonCheck::prefix_bump(&base, true), None);
+        let reqs =
+            PythonCheck::parse_requirements("dulwich==18446744073709551615.*\n", false, "3.13");
+        assert!(PythonCheck::metadata_ceiling(&reqs[0]).is_none());
     }
 
     #[test]
