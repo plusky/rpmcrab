@@ -490,7 +490,7 @@ impl DepLeaf {
 ///
 /// The bound also caps the `Box` tree depth, so the drop glue
 /// can never recurse into an overflow either.
-const MAX_RICH_DEP_DEPTH: usize = 64;
+pub(crate) const MAX_RICH_DEP_DEPTH: usize = 64;
 
 /// A parsed RPM rich (boolean) dependency expression (rpm.org, RPM >= 4.13),
 /// including RPM >= 4.16 dependency qualifiers (`foo(meta)`).
