@@ -3040,9 +3040,18 @@ fn sysconfig_environment_file(content: &str) -> Option<String> {
             continue;
         };
         for token in value.split_whitespace() {
-            let (target, _) = env_file_token(token);
+            let (target, mandatory) = env_file_token(token);
             if target.starts_with("/etc/sysconfig/") {
-                return Some(token.trim_matches(['"', '\'']).to_string());
+                // The witness is rebuilt from the cleaned target and
+                // its mandatory flag: re-trimming the raw token keeps
+                // a stray opening quote on a dashed quoted token,
+                // whose leading `-` stops the trim.
+                let witness = if mandatory {
+                    target.to_string()
+                } else {
+                    format!("-{target}")
+                };
+                return Some(witness);
             }
         }
     }
@@ -19027,7 +19036,7 @@ reason = "warning hook: executable and %config by design"
         // strip, since systemd applies the `-` to the unquoted value.
         assert_eq!(
             sysconfig_environment_file("EnvironmentFile=-\"/etc/sysconfig/demo\"\n"),
-            Some("-\"/etc/sysconfig/demo".to_string())
+            Some("-/etc/sysconfig/demo".to_string())
         );
         assert_eq!(
             sysconfig_environment_file("EnvironmentFile=\"-/etc/sysconfig/demo\"\n"),

@@ -15628,6 +15628,30 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn pie_suggested_quiet_for_debug_image_when_analysis_failed() {
+        // The debuginfo gate is name-only, so it also quiets when an
+        // ELF analysis exists but failed -- the combination the
+        // sibling pins leave open: a shipped name charges on a failed
+        // analysis (pie_suggested_charges_when_analysis_failed),
+        // while a debug name is quiet on a successful parse and with
+        // no analysis at all (pie_suggested_quiet_for_debug_image).
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        for name in ["/usr/bin/probe.debug", "/usr/lib/debug/usr/bin/probe"] {
+            let mut info = syn_info();
+            info.failed = Some("synthetic parse failure".to_string());
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_non_pie(&pkg, name, Some(&info), &mut out);
+            assert!(
+                lines_for(out.results(), "position-independent-executable-suggested").is_empty(),
+                "{name} must be quiet on a failed analysis: {:?}",
+                out.results()
+            );
+        }
+    }
+
+    #[test]
     fn pie_suggested_quiet_for_static_exec() {
         use goblin::elf::header::{ET_DYN, ET_EXEC};
         let run = |elf_type: u16, has_dynamic: bool| {
