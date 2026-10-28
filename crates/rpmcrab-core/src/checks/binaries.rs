@@ -671,7 +671,10 @@ struct ReadelfInfo {
     /// engages on the printed form, so that finder reads this set
     /// instead of `functions`.
     functions_printed: Vec<String>,
-    /// The undefined subset of `functions_printed`.
+    /// The undefined subset of `functions_printed`, plus the decorated
+    /// printed forms of STT_NOTYPE undefined imports, which
+    /// `functions_printed` never carries (that view stays FUNC-only).
+    /// The printed-form finders read this set for the call side.
     undefined_function_refs_printed: Vec<String>,
     is_shlib: bool,
     is_debug: bool,
@@ -1097,7 +1100,12 @@ impl ReadelfInfo {
         // Undefined imports are collected for STT_NOTYPE symbols too: modern
         // toolchains emit many of them as NOTYPE (`__cxa_finalize` is one),
         // and the loader-shim predicate over `undefined_functions` must see
-        // the binary's full import set.
+        // the binary's full import set. A NOTYPE undefined import also
+        // gains a decorated printed form in `undefined_function_refs_printed`
+        // (its needed-version decoration, or the bare name when
+        // unversioned), so the printed-form finders see the call;
+        // `functions`, `functions_printed` and `undefined_function_refs`
+        // stay FUNC-only.
         for (idx, sym) in elf.dynsyms.iter().enumerate() {
             let ty = sym.st_type();
             if ty != goblin::elf::sym::STT_FUNC && ty != goblin::elf::sym::STT_NOTYPE {
@@ -1105,9 +1113,9 @@ impl ReadelfInfo {
             }
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                 if !name.is_empty() {
+                    let is_undef = sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize;
                     let printed = if ty == goblin::elf::sym::STT_FUNC {
-                        let defined =
-                            sym.st_shndx != goblin::elf::section_header::SHN_UNDEF as usize;
+                        let defined = !is_undef;
                         Some(format!(
                             "{name}{}",
                             dynsym_version_decoration(
@@ -1118,17 +1126,32 @@ impl ReadelfInfo {
                                 &verneed_names
                             )
                         ))
+                    } else if is_undef {
+                        Some(format!(
+                            "{name}{}",
+                            dynsym_version_decoration(
+                                elf,
+                                idx,
+                                false,
+                                &verdef_names,
+                                &verneed_names
+                            )
+                        ))
                     } else {
                         None
                     };
-                    if let Some(printed) = &printed {
+                    if ty == goblin::elf::sym::STT_FUNC
+                        && let Some(printed) = &printed
+                    {
                         self.functions.push(name.to_string());
                         self.functions_printed.push(printed.clone());
                     }
-                    if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize {
+                    if is_undef {
                         self.undefined_functions.push(name.to_string());
                         if let Some(printed) = printed {
-                            self.undefined_function_refs.push(name.to_string());
+                            if ty == goblin::elf::sym::STT_FUNC {
+                                self.undefined_function_refs.push(name.to_string());
+                            }
                             self.undefined_function_refs_printed.push(printed);
                         }
                     }
@@ -6534,7 +6557,14 @@ impl BinariesCheck {
         // is not the legacy call, while an unversioned wrapper
         // reference (`net_gethostbyname`, `ares_gethostbyname`)
         // still matches at the end of the name, as in the reference.
-        let gethostbyname = info.has_printed_function_matching(&self.gethostbyname_call_regex);
+        let gethostbyname = info.has_printed_function_matching(&self.gethostbyname_call_regex)
+            // Second disjunct covers dynsym imports typed STT_NOTYPE:
+            // fill_from_elf files those only under the printed
+            // undefined view, never under the FUNC-only
+            // `functions_printed` -- the disjunct shape the
+            // gets/unbounded_copy/shell finders use over
+            // `undefined_functions` (#1045).
+            || info.has_undefined_printed_function_matching(&self.gethostbyname_call_regex);
         // Legacy crypto primitives (#972 candidate 6): undefined
         // references to the low-level OpenSSL-style entry points.
         // The reference is the predicate -- the implementing
@@ -6614,7 +6644,9 @@ impl BinariesCheck {
             // capabilities), or the package ships systemd service or
             // socket units, i.e. the caller runs as a daemon. The
             // Error form also requires a call — an undefined reference
-            // to the family. A file that only defines the symbols
+            // to the family, FUNC or NOTYPE alike: a NOTYPE import
+            // lands in the printed undefined view the gate reads, so
+            // it promotes exactly like a FUNC call. A file that only defines the symbols
             // (an NSS module implementing the legacy entry points, a
             // bundled replacement) carries the pattern without making
             // the call and stays in the Warning population: the same
@@ -10455,6 +10487,27 @@ mod tests {
         assert!(info.functions.iter().any(|f| f == "exported_fn"));
         assert!(!info.functions.iter().any(|f| f == "__cxa_finalize"));
         assert!(!info.undefined_functions.iter().any(|u| u == "some_data"));
+        // NOTYPE undefined imports gain decorated printed forms in
+        // the printed undefined view (bare here: the crafted ELF
+        // carries no version sections), while staying out of the
+        // FUNC-only printed view; a defined NOTYPE symbol gains none.
+        assert!(
+            info.undefined_function_refs_printed
+                .iter()
+                .any(|u| u == "dlopen")
+        );
+        assert!(
+            info.undefined_function_refs_printed
+                .iter()
+                .any(|u| u == "__cxa_finalize")
+        );
+        assert!(!info.functions_printed.iter().any(|f| f == "__cxa_finalize"));
+        assert!(
+            !info
+                .undefined_function_refs_printed
+                .iter()
+                .any(|u| u == "some_data")
+        );
 
         // End to end through the parsed vector: a shim whose imports are
         // all NOTYPE is still a shim, so the stack-protector finding
@@ -20729,6 +20782,19 @@ description = "explicit priority string bypasses the system crypto policy"
         let lines = run(&bare_pkg, &plain, &["gethostbyname"], &[]);
         assert_eq!(lines.len(), 1, "one finding: {lines:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // A NOTYPE undefined import reaches the finder only through
+        // the printed undefined view (no FUNC printed form at all):
+        // Warning bare, Error inside the daemon gate.
+        let lines = run(&bare_pkg, &plain, &[], &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        let lines = run(&svc_pkg, &plain, &[], &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        // A NOTYPE namesake reference stays silent even in the gate.
+        let lines = run(&svc_pkg, &plain, &[], &["sysdb_gethostbyname@V_2.13.1"]);
+        assert_eq!(lines.len(), 0, "no finding: {lines:?}");
 
         // The gate reads the printed forms too: a definition plus a
         // namesake reference inside the gate stays a Warning -- the
