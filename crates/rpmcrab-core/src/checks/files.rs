@@ -7637,13 +7637,18 @@ impl FilesCheck {
     /// content (a recorded progress marker, a data byte), not an
     /// encoding. Formats whose own specification or interpreter
     /// makes CRLF the correct encoding are out of the finding's
-    /// scope; see `crlf_is_native`.
+    /// scope for the CRLF shape; see `crlf_is_native`. The credit
+    /// does not extend to CR-only endings — no credited format
+    /// terminates lines with a bare carriage return — so a CR-only
+    /// chunk fires whatever the file's name.
     fn doc_eol_is_wrong(fname: &str, chunk: &[u8]) -> bool {
+        if chunk.contains(&b'\r') && !chunk.contains(&b'\n') {
+            return true;
+        }
         if Self::crlf_is_native(fname, chunk) {
             return false;
         }
         chunk.windows(2).any(|w| w == b"\r\n")
-            || (chunk.contains(&b'\r') && !chunk.contains(&b'\n'))
     }
 
     /// Whether CRLF is the correct end-of-line encoding for a file
@@ -7654,15 +7659,18 @@ impl FilesCheck {
     /// message files (their formats delimit lines with CRLF), and
     /// shipped HTTP response messages (the HTTP message format
     /// delimits its lines with CRLF; the name alone does not
-    /// decide — the content must open with the status line).
-    /// Name matching is case-insensitive.
+    /// decide -- the content must open with the status line,
+    /// `HTTP/` followed by a version digit).
+    /// Name matching is on the final suffix, case-insensitive.
     fn crlf_is_native(fname: &str, chunk: &[u8]) -> bool {
         let lower = fname.to_lowercase();
         const CRLF_NATIVE_EXTS: [&str; 5] = [".bat", ".cmd", ".ps1", ".ics", ".eml"];
         if CRLF_NATIVE_EXTS.iter().any(|e| lower.ends_with(e)) {
             return true;
         }
-        lower.ends_with(".http") && chunk.starts_with(b"HTTP/")
+        lower.ends_with(".http")
+            && chunk.starts_with(b"HTTP/")
+            && chunk.get(5).is_some_and(|b| b.is_ascii_digit())
     }
 
     fn check_normal_text(
@@ -20919,12 +20927,16 @@ x /etc/sysconfig/f - - - -
     /// all have a wrong end-of-line encoding. A native-format name
     /// that is not the file's final suffix (.ics.txt, .bat.txt)
     /// and an .http file that does not open with an HTTP status
-    /// line earn no credit.
+    /// line earn no credit. A file under a native-format suffix
+    /// whose endings are CR-only fires too -- the native credit
+    /// covers the CRLF shape only -- and an .http opener whose
+    /// `HTTP/` is not followed by a version digit is not a status
+    /// line and earns no credit.
     #[test]
     fn doc_eol_still_fires_for_wrong_encodings() {
         let config = test_config();
         let dir = tempfile::TempDir::new().expect("tmpdir");
-        let files: [(&str, u32, &str, &[u8]); 6] = [
+        let files: [(&str, u32, &str, &[u8]); 10] = [
             (
                 "/usr/share/doc/packages/demo/README.txt",
                 0o100644,
@@ -20960,6 +20972,30 @@ x /etc/sysconfig/f - - - -
                 0o100644,
                 "ASCII text",
                 b"@echo off\r\necho hi\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/legacy.bat",
+                0o100644,
+                "ASCII text",
+                b"@echo off\recho hi\r",
+            ),
+            (
+                "/usr/share/doc/packages/demo/oldcal.ics",
+                0o100644,
+                "ASCII text",
+                b"BEGIN:VCALENDAR\rEND:VCALENDAR\r",
+            ),
+            (
+                "/usr/share/doc/packages/demo/badversion.http",
+                0o100644,
+                "ASCII text",
+                b"HTTP/x 400 Bad request\r\n\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/noversion.http",
+                0o100644,
+                "ASCII text",
+                b"HTTP/ 400 Bad request\r\n\r\n",
             ),
         ];
         let mut pkg = script_mode_pkg(&dir, &files);
