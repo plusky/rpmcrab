@@ -1967,6 +1967,12 @@ pub struct FilesCheck {
     /// is decided in `after_checks`, once every package of the run has
     /// been seen.
     session_files: HashSet<String>,
+    /// Session state for the run-scoped `python-bytecode-without-source`
+    /// credit: the names shipped as regular, non-ghost files by every
+    /// package seen since the last export. The credit keys on this set,
+    /// not on `session_files`, whose name-only contents also cover
+    /// directories, symlinks and ghost entries that ship no source.
+    session_regular_files: HashSet<String>,
     dangling_candidates: Vec<DanglingCandidate>,
     /// Session state for the run-scoped `python-bytecode-without-source`
     /// credit: the candidates whose mapped source ships only as a
@@ -2113,6 +2119,7 @@ impl FilesCheck {
             decompressors: ["gzip", "bzip2", "xz", "zstd"]
                 .map(|name| Tool::probe(&source, name, &[]).0),
             session_files: HashSet::new(),
+            session_regular_files: HashSet::new(),
             dangling_candidates: Vec::new(),
             bytecode_candidates: Vec::new(),
             bytecode_sources: HashSet::new(),
@@ -2423,6 +2430,12 @@ impl Check for FilesCheck {
 
         self.session_files
             .extend(pkg.files.iter().map(|f| f.name.clone()));
+        self.session_regular_files.extend(
+            pkg.files
+                .iter()
+                .filter(|f| !f.is_ghost() && is_reg(f.mode))
+                .map(|f| f.name.clone()),
+        );
         self.note_declared_owners(pkg);
         self.pkg_deps
             .entry(pkg.name.clone())
@@ -2543,7 +2556,9 @@ impl Check for FilesCheck {
                 .build_key
                 .as_ref()
                 .is_some_and(|key| self.bytecode_sources.contains(key));
-            if complete && cand.target.ends_with(".py") && self.session_files.contains(&cand.target)
+            if complete
+                && cand.target.ends_with(".py")
+                && self.session_regular_files.contains(&cand.target)
             {
                 continue;
             }
@@ -2560,6 +2575,7 @@ impl Check for FilesCheck {
 
     fn reset(&mut self) {
         self.session_files.clear();
+        self.session_regular_files.clear();
         self.dangling_candidates.clear();
         self.bytecode_candidates.clear();
         self.bytecode_sources.clear();
@@ -2573,6 +2589,7 @@ impl Check for FilesCheck {
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
         if self.session_files.is_empty()
+            && self.session_regular_files.is_empty()
             && self.dangling_candidates.is_empty()
             && self.bytecode_candidates.is_empty()
             && self.bytecode_sources.is_empty()
@@ -2586,6 +2603,7 @@ impl Check for FilesCheck {
         }
         Some(Box::new(FilesSessionState {
             session_files: std::mem::take(&mut self.session_files),
+            session_regular_files: std::mem::take(&mut self.session_regular_files),
             dangling_candidates: std::mem::take(&mut self.dangling_candidates),
             bytecode_candidates: std::mem::take(&mut self.bytecode_candidates),
             bytecode_sources: std::mem::take(&mut self.bytecode_sources),
@@ -2600,6 +2618,8 @@ impl Check for FilesCheck {
     fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
         if let Ok(state) = state.downcast::<FilesSessionState>() {
             self.session_files.extend(state.session_files);
+            self.session_regular_files
+                .extend(state.session_regular_files);
             self.dangling_candidates.extend(state.dangling_candidates);
             self.bytecode_candidates.extend(state.bytecode_candidates);
             self.bytecode_sources.extend(state.bytecode_sources);
@@ -2629,6 +2649,7 @@ impl Check for FilesCheck {
 /// `python-bytecode-without-source` credit.
 struct FilesSessionState {
     session_files: HashSet<String>,
+    session_regular_files: HashSet<String>,
     dangling_candidates: Vec<DanglingCandidate>,
     bytecode_candidates: Vec<BytecodeCandidate>,
     bytecode_sources: HashSet<String>,
@@ -14431,6 +14452,64 @@ mod tests {
             )],
         );
         assert_eq!(run_without_source_count(&[src, cand, sib]), 0);
+    }
+
+    #[test]
+    fn pyc_sibling_source_fires_when_target_shipped_only_as_directory() {
+        // The run credit requires a regular file: a sibling shipping
+        // the resolved target only as a directory ships no source.
+        let d0 = tempfile::TempDir::new().expect("tmpdir");
+        let d1 = tempfile::TempDir::new().expect("tmpdir");
+        let d2 = tempfile::TempDir::new().expect("tmpdir");
+        let src = pybc_src_pkg(&d0);
+        let cand = caca_candidate(&d1);
+        let mut sib = caca_sibling(&d2);
+        for f in sib.files.iter_mut() {
+            if f.name.ends_with(".py") {
+                f.mode = 0o040755;
+            }
+        }
+        assert_eq!(run_without_source_count(&[src, cand, sib]), 1);
+    }
+
+    #[test]
+    fn pyc_sibling_source_fires_when_target_shipped_only_as_ghost() {
+        // The run credit requires a non-ghost file: a sibling shipping
+        // the resolved target only as a %ghost entry ships no source.
+        use crate::pkg::pkgfile::RPMFILE_GHOST;
+        let d0 = tempfile::TempDir::new().expect("tmpdir");
+        let d1 = tempfile::TempDir::new().expect("tmpdir");
+        let d2 = tempfile::TempDir::new().expect("tmpdir");
+        let src = pybc_src_pkg(&d0);
+        let cand = caca_candidate(&d1);
+        let mut sib = caca_sibling(&d2);
+        for f in sib.files.iter_mut() {
+            if f.name.ends_with(".py") {
+                f.flags = RPMFILE_GHOST;
+            }
+        }
+        assert_eq!(run_without_source_count(&[src, cand, sib]), 1);
+    }
+
+    #[test]
+    fn pyc_sibling_source_fires_when_target_shipped_only_as_symlink() {
+        // The run credit requires a regular file: a sibling shipping
+        // the resolved target only as a further symlink ships no source.
+        let d0 = tempfile::TempDir::new().expect("tmpdir");
+        let d1 = tempfile::TempDir::new().expect("tmpdir");
+        let d2 = tempfile::TempDir::new().expect("tmpdir");
+        let src = pybc_src_pkg(&d0);
+        let cand = caca_candidate(&d1);
+        let sib = pybc_run_pkg(
+            &d2,
+            "python314-caca",
+            &[(
+                "/usr/lib/python3.14/site-packages/caca/__init__.py",
+                b"",
+                Some("/usr/lib/python3.14/site-packages/caca/__init__.py.real"),
+            )],
+        );
+        assert_eq!(run_without_source_count(&[src, cand, sib]), 1);
     }
 
     #[test]
