@@ -1968,6 +1968,14 @@ pub struct FilesCheck {
     /// been seen.
     session_files: HashSet<String>,
     dangling_candidates: Vec<DanglingCandidate>,
+    /// Session state for the run-scoped `python-bytecode-without-source`
+    /// credit: the candidates whose mapped source ships only as a
+    /// symlink whose chain leaves the package, and the `SOURCERPM`
+    /// spellings of the source packages the run holds. The finding
+    /// is decided in `after_checks`, once the run's file set and the
+    /// completeness of the candidate's build are known.
+    bytecode_candidates: Vec<BytecodeCandidate>,
+    bytecode_sources: HashSet<String>,
     /// Session state for `non-standard-uid` / `non-standard-gid` (issue
     /// #756): the files whose owner sits outside the standard registry,
     /// held as candidates, and the user/group names the run's packages
@@ -2106,6 +2114,8 @@ impl FilesCheck {
                 .map(|name| Tool::probe(&source, name, &[]).0),
             session_files: HashSet::new(),
             dangling_candidates: Vec::new(),
+            bytecode_candidates: Vec::new(),
+            bytecode_sources: HashSet::new(),
             owner_candidates: Vec::new(),
             declared_users: HashMap::new(),
             declared_groups: HashMap::new(),
@@ -2276,6 +2286,10 @@ struct PkgState {
     /// (see `FilesCheck::interpreter_lib_trees`); a bytecode file
     /// inside one is the shipped interpreter's own payload.
     bytecode_interpreter_trees: Vec<String>,
+    /// `python-bytecode-without-source` run-scope candidates this
+    /// package recorded, drained into the check's session state by
+    /// `check_binary`.
+    bytecode_candidates: Vec<BytecodeCandidate>,
     /// The parsed `License` tag identifiers for the license-coverage
     /// tags (issue #1033); empty when the package carries no usable
     /// License tag, which disables the coverage scan for the package.
@@ -2332,6 +2346,12 @@ impl Check for FilesCheck {
         // `check_binary`, so there is no `is_source` guard there.
         Self::register_error_details(config, out);
         self.check_bidi_controls(pkg, out);
+        // A source package opens the completeness gate of its build
+        // for the run-scoped `python-bytecode-without-source` credit:
+        // the run judges a build complete when it holds the build's
+        // source package.
+        self.bytecode_sources
+            .extend(crate::checks::shared::source_package_keys(pkg));
     }
 
     fn check_binary(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
@@ -2423,6 +2443,7 @@ impl Check for FilesCheck {
         self.check_fillup_usage_discouraged(pkg, out);
         self.check_license_coverage(pkg, &st, out);
         self.nodep_candidates.append(&mut st.nodep_candidates);
+        self.bytecode_candidates.append(&mut st.bytecode_candidates);
     }
 
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
@@ -2510,11 +2531,38 @@ impl Check for FilesCheck {
                 ));
             }
         }
+        // The run-scoped `python-bytecode-without-source` decision:
+        // a candidate is credited only when its build is complete in
+        // this run -- the run holds the build's source package -- and
+        // a package of the run ships the file the source symlink
+        // resolves to, under a `.py` name. Every other candidate
+        // fires, so partial and single-package runs report exactly
+        // the per-package verdict.
+        for cand in &self.bytecode_candidates {
+            let complete = cand
+                .build_key
+                .as_ref()
+                .is_some_and(|key| self.bytecode_sources.contains(key));
+            if complete && cand.target.ends_with(".py") && self.session_files.contains(&cand.target)
+            {
+                continue;
+            }
+            out.add_info(make_finding(
+                &cand.name,
+                &cand.arch,
+                Level::Warning,
+                "python-bytecode-without-source",
+                vec![cand.fname.clone()],
+                None,
+            ));
+        }
     }
 
     fn reset(&mut self) {
         self.session_files.clear();
         self.dangling_candidates.clear();
+        self.bytecode_candidates.clear();
+        self.bytecode_sources.clear();
         self.owner_candidates.clear();
         self.declared_users.clear();
         self.declared_groups.clear();
@@ -2526,6 +2574,8 @@ impl Check for FilesCheck {
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
         if self.session_files.is_empty()
             && self.dangling_candidates.is_empty()
+            && self.bytecode_candidates.is_empty()
+            && self.bytecode_sources.is_empty()
             && self.owner_candidates.is_empty()
             && self.declared_users.is_empty()
             && self.declared_groups.is_empty()
@@ -2537,6 +2587,8 @@ impl Check for FilesCheck {
         Some(Box::new(FilesSessionState {
             session_files: std::mem::take(&mut self.session_files),
             dangling_candidates: std::mem::take(&mut self.dangling_candidates),
+            bytecode_candidates: std::mem::take(&mut self.bytecode_candidates),
+            bytecode_sources: std::mem::take(&mut self.bytecode_sources),
             owner_candidates: std::mem::take(&mut self.owner_candidates),
             declared_users: std::mem::take(&mut self.declared_users),
             declared_groups: std::mem::take(&mut self.declared_groups),
@@ -2549,6 +2601,8 @@ impl Check for FilesCheck {
         if let Ok(state) = state.downcast::<FilesSessionState>() {
             self.session_files.extend(state.session_files);
             self.dangling_candidates.extend(state.dangling_candidates);
+            self.bytecode_candidates.extend(state.bytecode_candidates);
+            self.bytecode_sources.extend(state.bytecode_sources);
             self.owner_candidates.extend(state.owner_candidates);
             for (source, names) in state.declared_users {
                 self.declared_users.entry(source).or_default().extend(names);
@@ -2571,10 +2625,13 @@ impl Check for FilesCheck {
 /// before `after_checks` (`rpmlint#1595`): the session-aware
 /// `dangling-relative-symlink` (issue #547), `non-standard-uid` /
 /// `non-standard-gid` (issue #756) and `no-dependency-on`
-/// (issue #862) decisions.
+/// (issue #862) decisions and the run-scoped
+/// `python-bytecode-without-source` credit.
 struct FilesSessionState {
     session_files: HashSet<String>,
     dangling_candidates: Vec<DanglingCandidate>,
+    bytecode_candidates: Vec<BytecodeCandidate>,
+    bytecode_sources: HashSet<String>,
     owner_candidates: Vec<OwnerCandidate>,
     declared_users: HashMap<String, HashSet<String>>,
     declared_groups: HashMap<String, HashSet<String>>,
@@ -3255,6 +3312,24 @@ struct DanglingCandidate {
     /// The normalised absolute target path.
     target: String,
     disposition: DanglingDisposition,
+}
+
+/// One `python-bytecode-without-source` candidate whose mapped
+/// source ships only as a symlink whose chain leaves the package,
+/// held until `after_checks` knows the run's file set and whether
+/// the candidate's build is complete in the run.
+struct BytecodeCandidate {
+    name: String,
+    arch: String,
+    /// The bytecode file the finding names.
+    fname: String,
+    /// The absolute path the source symlink's chain resolves to
+    /// outside the package.
+    target: String,
+    /// The candidate's build key (its `SOURCERPM` spelling); `None`
+    /// when the package carries none -- such a candidate belongs to
+    /// no build the run can judge and always fires.
+    build_key: Option<String>,
 }
 
 /// One file whose owner sits outside the standard registry, held until
@@ -7321,6 +7396,35 @@ impl FilesCheck {
             && min.bytes().all(|b| b.is_ascii_digit())
     }
 
+    /// The absolute path a symlink chain resolves to when it leaves
+    /// the package: follows `Pkg::readlink`'s walk, but where
+    /// `readlink` reports `None` because the next path is not
+    /// shipped, that path is the chain's resolution. Returns `None`
+    /// when the chain resolves inside the package or cycles without
+    /// leaving it.
+    fn symlink_exit_path(pkg: &Pkg, src: &PkgFile) -> Option<String> {
+        let mut current = pkg.files.iter().find(|f| f.name == src.name)?;
+        for _ in 0..pkg.files.len() {
+            if current.linkto.is_empty() {
+                return None;
+            }
+            let joined = if current.linkto.starts_with('/') {
+                current.linkto.clone()
+            } else {
+                match current.name.rfind('/') {
+                    Some(i) => format!("{}/{}", &current.name[..i], current.linkto),
+                    None => current.linkto.clone(),
+                }
+            };
+            let linkpath = crate::pkg::normalize_path(&joined);
+            match pkg.files.iter().find(|f| f.name == linkpath) {
+                Some(next) => current = next,
+                None => return Some(linkpath),
+            }
+        }
+        None
+    }
+
     fn python_bytecode_to_script(&self, path: &str) -> Option<String> {
         if let Ok(Some(caps)) = self.python_bytecode_pep3147_re.captures(path) {
             return Some(format!(
@@ -7383,13 +7487,36 @@ impl FilesCheck {
                     Some(s) => s,
                     None => {
                         if !below_cache_dir && !in_shipped_tree {
-                            add_info(
-                                out,
-                                Level::Warning,
-                                pkg,
-                                "python-bytecode-without-source",
-                                &[fname],
-                            );
+                            // The source ships only as a symlink whose
+                            // chain leaves the package; a package of
+                            // the same build may ship the file the
+                            // chain resolves to (singlespec
+                            // cross-flavour dedup). Record the
+                            // candidate and decide in `after_checks`,
+                            // when the run's file set and the build's
+                            // completeness are known. A chain with no
+                            // decidable exit path (a cycle) fires here,
+                            // as today.
+                            match Self::symlink_exit_path(pkg, src) {
+                                Some(target) => {
+                                    st.bytecode_candidates.push(BytecodeCandidate {
+                                        name: pkg.name.clone(),
+                                        arch: pkg.arch.clone(),
+                                        fname: fname.to_string(),
+                                        target,
+                                        build_key: crate::checks::shared::binary_source_key(pkg),
+                                    });
+                                }
+                                None => {
+                                    add_info(
+                                        out,
+                                        Level::Warning,
+                                        pkg,
+                                        "python-bytecode-without-source",
+                                        &[fname],
+                                    );
+                                }
+                            }
                         }
                         return;
                     }
@@ -14083,6 +14210,218 @@ mod tests {
         }
         assert!(without_source_lines(&pkg).is_empty());
         assert_eq!(inconsistent_mtime_lines(&pkg).len(), 1);
+    }
+
+    /// A run member for the cross-package bytecode credit, built on
+    /// the fsf fixture: its header `SOURCERPM` is
+    /// `fsf-address-fixture-1.0-1.src.rpm`.
+    fn pybc_run_pkg(
+        dir: &tempfile::TempDir,
+        name: &str,
+        entries: &[(&str, &[u8], Option<&str>)],
+    ) -> Pkg {
+        let mut pkg = pybc_pkg(dir, entries);
+        pkg.name = name.to_string();
+        pkg
+    }
+
+    /// The fsf fixture as the run's source package: the identity it
+    /// derives (`fsf-address-fixture-1.0-1.src.rpm`) is the
+    /// `SOURCERPM` every run member carries, so its presence makes
+    /// the build complete.
+    fn pybc_src_pkg(dir: &tempfile::TempDir) -> Pkg {
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        pkg.is_source = true;
+        pkg.files = Vec::new();
+        pkg
+    }
+
+    fn run_without_source_count(pkgs: &[Pkg]) -> usize {
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(pkgs, &config);
+        results
+            .iter()
+            .filter(|(n, _)| n == "python-bytecode-without-source")
+            .count()
+    }
+
+    /// The singlespec dedup shape: the candidate's `caca/__init__.py`
+    /// is a symlink into the sibling flavour package's tree, and its
+    /// cache entry maps to that symlink.
+    fn caca_candidate(dir: &tempfile::TempDir) -> Pkg {
+        pybc_run_pkg(
+            dir,
+            "python313-caca",
+            &[
+                (
+                    "/usr/lib/python3.13/site-packages/caca/__pycache__/__init__.cpython-313.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages/caca/__init__.py",
+                    b"",
+                    Some("../../../python3.14/site-packages/caca/__init__.py"),
+                ),
+            ],
+        )
+    }
+
+    fn caca_sibling(dir: &tempfile::TempDir) -> Pkg {
+        pybc_run_pkg(
+            dir,
+            "python314-caca",
+            &[(
+                "/usr/lib/python3.14/site-packages/caca/__init__.py",
+                b"x = 1\n",
+                None,
+            )],
+        )
+    }
+
+    #[test]
+    fn pyc_sibling_source_credited_on_complete_build() {
+        // Complete build: the run holds the source package and the
+        // sibling flavour ships the file the source symlink resolves
+        // to, so the candidate is credited.
+        let d0 = tempfile::TempDir::new().expect("tmpdir");
+        let d1 = tempfile::TempDir::new().expect("tmpdir");
+        let d2 = tempfile::TempDir::new().expect("tmpdir");
+        let src = pybc_src_pkg(&d0);
+        let cand = caca_candidate(&d1);
+        let sib = caca_sibling(&d2);
+        assert_eq!(run_without_source_count(&[src, cand, sib]), 0);
+    }
+
+    #[test]
+    fn pyc_sibling_source_fires_on_partial_build() {
+        // The sibling ships the target, but the run holds no source
+        // package: the build is not judged complete and the
+        // candidate fires as the per-package verdict.
+        let d1 = tempfile::TempDir::new().expect("tmpdir");
+        let d2 = tempfile::TempDir::new().expect("tmpdir");
+        let cand = caca_candidate(&d1);
+        let sib = caca_sibling(&d2);
+        assert_eq!(run_without_source_count(&[cand, sib]), 1);
+    }
+
+    #[test]
+    fn pyc_sibling_source_fires_for_foreign_source() {
+        // A source package of another build does not open the gate.
+        let d0 = tempfile::TempDir::new().expect("tmpdir");
+        let d1 = tempfile::TempDir::new().expect("tmpdir");
+        let d2 = tempfile::TempDir::new().expect("tmpdir");
+        let mut src = pybc_src_pkg(&d0);
+        src.name = "otherbuild".to_string();
+        let cand = caca_candidate(&d1);
+        let sib = caca_sibling(&d2);
+        assert_eq!(run_without_source_count(&[src, cand, sib]), 1);
+    }
+
+    #[test]
+    fn pyc_sibling_source_fires_when_target_not_in_run() {
+        // Complete build, but no package of the run ships the file
+        // the symlink resolves to.
+        let d0 = tempfile::TempDir::new().expect("tmpdir");
+        let d1 = tempfile::TempDir::new().expect("tmpdir");
+        let src = pybc_src_pkg(&d0);
+        let cand = caca_candidate(&d1);
+        assert_eq!(run_without_source_count(&[src, cand]), 1);
+    }
+
+    #[test]
+    fn pyc_sibling_source_single_package_fires_with_exact_line() {
+        // A single-package run reports exactly the per-package
+        // verdict, in the per-package rendering.
+        let d1 = tempfile::TempDir::new().expect("tmpdir");
+        let cand = caca_candidate(&d1);
+        let config = test_config();
+        let (results, _levels) = run_files_check_pkgs(&[cand], &config);
+        let lines: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "python-bytecode-without-source")
+            .map(|(_, l)| l.as_str())
+            .collect();
+        assert_eq!(lines.len(), 1, "got: {results:?}");
+        assert_eq!(
+            lines[0],
+            "python313-caca.noarch: W: python-bytecode-without-source /usr/lib/python3.13/site-packages/caca/__pycache__/__init__.cpython-313.pyc"
+        );
+    }
+
+    #[test]
+    fn pyc_sibling_link_to_non_py_fires_on_complete_build() {
+        // The chain resolves to a file the run ships, but not under
+        // a `.py` name: not a shipped source.
+        let d0 = tempfile::TempDir::new().expect("tmpdir");
+        let d1 = tempfile::TempDir::new().expect("tmpdir");
+        let d2 = tempfile::TempDir::new().expect("tmpdir");
+        let src = pybc_src_pkg(&d0);
+        let cand = pybc_run_pkg(
+            &d1,
+            "python313-caca",
+            &[
+                (
+                    "/usr/lib/python3.13/site-packages/caca/__pycache__/__init__.cpython-313.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages/caca/__init__.py",
+                    b"",
+                    Some("../../../python3.14/site-packages/caca/__init__.txt"),
+                ),
+            ],
+        );
+        let sib = pybc_run_pkg(
+            &d2,
+            "python314-caca",
+            &[(
+                "/usr/lib/python3.14/site-packages/caca/__init__.txt",
+                b"x = 1\n",
+                None,
+            )],
+        );
+        assert_eq!(run_without_source_count(&[src, cand, sib]), 1);
+    }
+
+    #[test]
+    fn pyc_direct_sibling_link_credited_on_complete_build() {
+        // The arcconf shape: the module itself (legacy layout) maps
+        // to a source that is a direct symlink into the sibling
+        // plugin package.
+        let d0 = tempfile::TempDir::new().expect("tmpdir");
+        let d1 = tempfile::TempDir::new().expect("tmpdir");
+        let d2 = tempfile::TempDir::new().expect("tmpdir");
+        let src = pybc_src_pkg(&d0);
+        let cand = pybc_run_pkg(
+            &d1,
+            "libstoragemgmt-arcconf-plugin",
+            &[
+                (
+                    "/usr/lib/python3.13/site-packages/arcconf_plugin/utils.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+                (
+                    "/usr/lib/python3.13/site-packages/arcconf_plugin/utils.py",
+                    b"",
+                    Some("../hpsa_plugin/utils.py"),
+                ),
+            ],
+        );
+        let sib = pybc_run_pkg(
+            &d2,
+            "libstoragemgmt-hpsa-plugin",
+            &[(
+                "/usr/lib/python3.13/site-packages/hpsa_plugin/utils.py",
+                b"x = 1\n",
+                None,
+            )],
+        );
+        assert_eq!(run_without_source_count(&[src, cand, sib]), 0);
     }
 
     #[test]
