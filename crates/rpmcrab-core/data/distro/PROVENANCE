@@ -14,6 +14,7 @@
 # Extra Checks appended (not from upstream; see EXTRA_CHECKS):
 #   Checks: added 'XinetdDepCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)
 #   Checks: added 'PAMModulesCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)
+#   Checks: added 'CMakeConfigCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)
 #
 # Extra AtomicAllowedDirs entries appended (not from upstream; see EXTRA_ATOMIC_ALLOWED_DIRS):
 #   AtomicAllowedDirs: added '/srv/' (whitelist with a known regression: the distro places service payload under /srv (apache_serverroot mandates /srv/www as the web root) while the atomic packaging guideline forbids applications outside the root subvolume, and no packaged application complies -- genuine violations under /srv go unflagged while this stands; tightened when openSUSE settles application packaging under the atomic rules; ledgered in tests/parity/divergences.toml)

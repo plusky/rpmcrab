@@ -825,7 +825,7 @@ anyway (registered in `crates/rpmcrab-core/src/checks/`, selectable via
 divergences (ledgered in `tests/parity/divergences.toml`): the Xinetd
 deprecation message is the point of that check, and the PAM authorized
 set is derived from the `FileDigestGroup` data `FileDigestCheck`
-already consumes — a default rpmcrab run therefore reports `checks: 45`.
+already consumes. A default rpmcrab run reports `checks: 46`: the 43, those two, and `CMakeConfigCheck`, a port-only check with no reference module (run-scoped reconciliation of CMake imported locations against the files of the whole build), enabled in the bundled configs as a deliberate divergence (ledgered in `tests/parity/divergences.toml`).
 (`InitScriptCheck` was deleted: systemd-only world, issue #214;
 `deprecated-init-script` from `SysVInitOnSystemdCheck` remains the deprecation
 signal. `LSBCheck` was deleted too: the LSB effort is defunct and no shipped

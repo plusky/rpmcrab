@@ -235,6 +235,9 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
         "PkgConfigCheck" => Some(Box::new(crate::checks::pkg_config::PkgConfigCheck::new(
             config,
         ))),
+        "CMakeConfigCheck" => Some(Box::new(
+            crate::checks::cmake_config::CMakeConfigCheck::new(config),
+        )),
         "AtomicUpdateCheck" => Some(Box::new(
             crate::checks::atomic_update::AtomicUpdateCheck::new(config),
         )),

@@ -7,7 +7,61 @@
 use fancy_regex::Regex;
 
 use crate::pkg::Pkg;
+use crate::pkg::pkgfile::PkgFile;
 use std::sync::OnceLock;
+
+/// The run-scope key of a binary package: its `SOURCERPM` header
+/// value (the `Pkg.source_rpm` field carries the same value when the
+/// header was read through it). Run-scoped checks group the packages
+/// of one build by this key; a package without one belongs to no
+/// build the run can judge.
+pub(crate) fn binary_source_key(pkg: &Pkg) -> Option<String> {
+    if let Some(srpm) = pkg.tag_str(librpm::Tag::SOURCERPM)
+        && !srpm.is_empty()
+    {
+        return Some(srpm);
+    }
+    pkg.source_rpm.clone().filter(|s| !s.is_empty())
+}
+
+/// The `SOURCERPM` spellings a source package answers to: its header
+/// name-version-release plus the `.src.rpm` / `.nosrc.rpm` suffix. A
+/// run-scoped check judges a build only when the run holds a source
+/// package whose spelling equals the build's key — file names are
+/// not consulted, only header identity.
+pub(crate) fn source_package_keys(pkg: &Pkg) -> Vec<String> {
+    let version = pkg.tag_str(librpm::Tag::VERSION).unwrap_or_default();
+    let release = pkg.tag_str(librpm::Tag::RELEASE).unwrap_or_default();
+    [".src.rpm", ".nosrc.rpm"]
+        .iter()
+        .map(|ext| format!("{}-{}-{}{}", pkg.name, version, release, ext))
+        .collect()
+}
+
+/// Whether a package file entry is a `%ghost`: the header flag on
+/// the entry and the package's ghost list are two spellings of the
+/// same fact, and either marks the entry as not shipped content.
+pub(crate) fn is_ghost_file(pkg: &Pkg, file: &PkgFile) -> bool {
+    file.is_ghost() || pkg.ghost_files.iter().any(|g| g == &file.name)
+}
+
+/// Lexically normalise an absolute path: `.` components drop out,
+/// `..` resolves against the components before it (and above the
+/// root is dropped), duplicate slashes collapse. Pure string
+/// manipulation — no filesystem access.
+pub(crate) fn normalise_absolute_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for comp in path.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
 
 /// `AbstractCheck.macro_regex`: `%+[{(]?[a-zA-Z_]\w{2,}[)}]?`.
 static MACRO_REGEX: OnceLock<Regex> = OnceLock::new();

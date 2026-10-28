@@ -37,3 +37,11 @@ check = "PkgConfigCheck"
 kind = "detail"
 reason = "Staged `--explain` text for `pkgconfig-exception` was ungrammatical (`An exception during parsing of .pc file has occurred`). Reworded: an error occurred while reading or parsing the .pc file — the check fires on read failures as well as parse failures (verified in `checks/pkg_config.rs`)."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "pkgconfig-dangling-library"
+kind = "behaviour"
+reason = "New port-only Warning with no reference counterpart: pkgconfig-dangling-library (PkgConfigCheck, reported from after_checks) fires when a regular non-%ghost .pc file's Libs: carries an own-name -l token — the token whose lowercased form with one leading lib stripped equals the .pc file stem's — and no lib<name>.so, lib<name>.a or lib<name>.dll.a is among the non-%ghost entry basenames of the build. Libs.private is not read, and foreign tokens (-lm, -lz) are never judged: they resolve outside the source by design. Matching is by basename anywhere in the build, so a -L pointing at the wrong directory goes unseen. The verdict is run-scoped: a build is judged only when the run holds its source package (header name-version-release plus .src.rpm/.nosrc.rpm equal to the binaries' SOURCERPM); on partial or single-package input the check is silent, where the reference has no such reconciliation at any scope. The level is Warning: the firing population permanently includes by-design cases one run cannot decide (libraries a -32bit/-64bit sibling ships, .pc files naming a library another source's devel package provides), so the population is not the defect population an Error is reserved for."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1031"

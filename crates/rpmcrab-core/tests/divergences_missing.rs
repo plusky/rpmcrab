@@ -92,12 +92,21 @@ fn missing_entries_exactly_cover_unported_checks() {
     );
     let ported = ported_checks();
     // The registry is keyed by the exact Python module name, so everything
-    // it builds must be a reference check.
-    let mut foreign: Vec<&String> = ported.difference(&reference).collect();
+    // it builds must be a reference check -- except the port-only checks
+    // below, which the reference never had. Each must stay listed here
+    // deliberately (and in PORT_ONLY_CHECKS in
+    // scripts/generate-divergences-ledger.py, which keys the ledger
+    // owner files): an unlisted foreign check is registry drift, such as
+    // a typo'd or renamed module name.
+    const PORT_ONLY_CHECKS: &[&str] = &["CMakeConfigCheck"];
+    let mut foreign: Vec<&String> = ported
+        .difference(&reference)
+        .filter(|name| !PORT_ONLY_CHECKS.contains(&name.as_str()))
+        .collect();
     foreign.sort();
     assert!(
         foreign.is_empty(),
-        "check::build constructs checks the reference never had: {foreign:?}"
+        "check::build constructs checks the reference never had and that are not declared port-only: {foreign:?}"
     );
 
     let missing = ledger_missing_checks(&reference);
