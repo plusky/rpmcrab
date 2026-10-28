@@ -220,7 +220,10 @@ fn resolve_source_date_epoch(
     missing: ReproducibleNoBuildtime,
 ) -> Option<i64> {
     match (buildhost, buildtime) {
-        (Some("reproducible"), Some(buildtime)) => Some(buildtime),
+        (Some("reproducible"), Some(buildtime)) if buildtime >= 0 => Some(buildtime),
+        // A negative BUILDTIME is no value: it would make every
+        // embedded timestamp read as after the epoch.
+        (Some("reproducible"), Some(_)) => None,
         (Some("reproducible"), None) => match missing {
             ReproducibleNoBuildtime::Unknown => None,
             ReproducibleNoBuildtime::UseEnvironment => env_sde,
@@ -230,7 +233,7 @@ fn resolve_source_date_epoch(
 }
 
 /// `$SOURCE_DATE_EPOCH` from the environment, parsed once per
-/// process. A value that is not an integer epoch is ignored, as if
+/// process. A value that is not a valid epoch is ignored, as if
 /// unset.
 fn env_source_date_epoch() -> Option<i64> {
     static ENV_SDE: OnceLock<Option<i64>> = OnceLock::new();
@@ -239,11 +242,23 @@ fn env_source_date_epoch() -> Option<i64> {
     })
 }
 
-/// The pure parse behind [`env_source_date_epoch`]: surrounding
-/// whitespace is ignored; anything that is not an integer epoch is
-/// no value.
+/// The pure parse behind [`env_source_date_epoch`]: the
+/// reproducible-builds value is a non-negative decimal integer,
+/// digits only -- no sign and no surrounding whitespace. Anything
+/// else is no value; a negative epoch in particular would turn the
+/// embedded-timestamp comparisons into mass positives.
 fn parse_env_source_date_epoch(raw: Option<&str>) -> Option<i64> {
-    raw.and_then(|v| v.trim().parse::<i64>().ok())
+    raw.and_then(parse_source_date_epoch_value)
+}
+
+/// A `SOURCE_DATE_EPOCH` value per the reproducible-builds spec: a
+/// non-negative decimal integer, digits only -- no sign and no
+/// surrounding whitespace. Anything else is no value.
+fn parse_source_date_epoch_value(v: &str) -> Option<i64> {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    v.parse::<i64>().ok()
 }
 
 /// One scriptlet of a package: its `%`-label, its interpreter (the `-p`
@@ -472,6 +487,27 @@ mod tests {
         );
         assert_eq!(
             resolve_source_date_epoch(None, None, None, ReproducibleNoBuildtime::Unknown),
+            None
+        );
+    }
+
+    #[test]
+    fn source_date_epoch_negative_or_padded_values_are_unknown() {
+        // The reproducible-builds value is a non-negative decimal
+        // integer: a sign, a negative value or padding is no value,
+        // on the environment path and the header path alike.
+        assert_eq!(parse_env_source_date_epoch(Some("-222")), None);
+        assert_eq!(parse_env_source_date_epoch(Some("+222")), None);
+        assert_eq!(parse_env_source_date_epoch(Some(" 222")), None);
+        assert_eq!(parse_env_source_date_epoch(Some("222 ")), None);
+        assert_eq!(parse_env_source_date_epoch(Some("222")), Some(222));
+        assert_eq!(
+            resolve_source_date_epoch(
+                Some("reproducible"),
+                Some(-1),
+                Some(222),
+                ReproducibleNoBuildtime::UseEnvironment
+            ),
             None
         );
     }
