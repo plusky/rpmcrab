@@ -12536,8 +12536,23 @@ mod tests {
                 0o100644,
             ));
         }
+        // Control: one scalable icon alongside the non-scalable
+        // population. It must be the only finding -- the 120
+        // non-scalable icons neither fire nor build theme credit,
+        // so the single scalable icon (below the theme threshold)
+        // still fires on its own.
+        files.push(mode_file(
+            "/usr/share/icons/hicolor/scalable/apps/icon.svgz",
+            0o100644,
+        ));
         let (pkg, _dir) = pkg_with_files(files);
-        assert!(svgz_findings(&pkg).is_empty());
+        let hits = svgz_findings(&pkg);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            hits[0].contains("/usr/share/icons/hicolor/scalable/apps/icon.svgz"),
+            "the finding names the scalable icon: {}",
+            hits[0]
+        );
     }
 
     #[test]
