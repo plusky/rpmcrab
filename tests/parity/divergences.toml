@@ -747,6 +747,27 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "position-independent-executable-suggested"
+kind = "behaviour"
+reason = "Fix-and-diverge: position-independent-executable-suggested also stays quiet for a binary whose ELF machine is not the package architecture's own machine (the host_elf_machines map check_binary_without_debuginfo uses; an unmapped arch charges as there). The suggestion judges whether this distro's PIE flags reached the link; a foreign-machine binary -- a firmware or helper image built for another target, a foreign test fixture -- is compiled by that target's toolchain under that target's flags, so its link shape states nothing about this package's build. The reference applies no machine test. The PieExecutables error is not gated. Measured over the full Factory corpus (51,589 RPMs): 12 findings removed, the removed set exactly the foreign-machine files (qemu ROM helpers, the 32-bit preload helper in rr, an i386 fixture in afl), zero added. Pinned by pie_suggested_quiet_for_foreign_machine and non_pie_error_not_quieted_by_the_suggestion_gates in binaries.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "position-independent-executable-suggested"
+kind = "behaviour"
+reason = "Fix-and-diverge: position-independent-executable-suggested also stays quiet when the binary's .comment carries the GHC producer stamp (ReadelfInfo.ghc_comment, the signal binary-or-shlib-without-debuginfo already trusts). A statically linked Haskell executable carries no libHS* DT_NEEDED, so the Haskell skip misses it, but its code is GHC output all the same: GHC's code generator does not take the distro's -fPIE, and the executable's link shape is the toolchain's own arrangement. The reference has no Haskell skip at all. Measured over the full Factory corpus (51,589 RPMs): 44 findings removed, the removed set exactly the GHC-stamped files (the statically linked Haskell tools the compile-time findings also skip), zero added. Pinned by pie_suggested_quiet_for_ghc_comment in binaries.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "position-independent-executable-suggested"
+kind = "behaviour"
+reason = "Fix-and-diverge: position-independent-executable-suggested also stays quiet for a separate-debuginfo image -- ReadelfInfo.is_debug (the .debug name suffix) or a path under /usr/lib/debug/. Such an image is never loaded by the dynamic linker: where it copies a shipped binary, its link shape restates that binary's own and the position is stated there; a firmware debug tree's images ship only as PE, so no shipped ELF carries the position at all. The missing-PT_GNU_STACK finding already skips the same shape on the same basis. The reference applies no debuginfo test. Measured over the full Factory corpus (51,589 RPMs): 568 findings removed, every one in the EDK2 debug tree of qemu-ovmf-x86_64-debug, zero added. Pinned by pie_suggested_quiet_for_debug_image in binaries.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "branding-requires-unversioned"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #857): branding-requires-unversioned is charged only when the require name is the generic branding name in full — <base>-branding or <base>-theme, with nothing before it or after it — and the name is not an icon-theme name (<base>-icon-theme; the reference defines re_icon_theme for the same distinction and leaves it unused). The reference matches the generic pattern as a prefix, so it charges concrete data packages whose names merely contain the pattern: the icon themes the desktop packages integrate with, plural and suffixed theme packages (gnome-themes, kalpa-themes-sddm, ocean-sound-theme6) and non-name require forms (a soname, a config() name). A version on a require of a concrete data package pins no flavour, so the finding's rationale — the version pins the flavour of a branding virtual — reaches only the generic name itself, on the theme arm as on the branding arm. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 108 affected source packages re-measured before and after the fix): 133 E in 108 source packages before, 21 E in 19 after, and no other finding changed in those packages. The residue is 15 findings on branding virtuals (wallpaper-branding 2; compiz-branding, distrobox-branding, gcin-branding, libpurple-branding, lxde-common-branding, mate-menus-branding, plymouth-branding, pw3270-branding, systemd-default-settings-branding, systemd-presets-branding, xfce4-notifyd-branding, xfce4-session-branding and yast2-qt-branding 1 each) and 6 on concrete data packages whose names are exactly generic-shaped and so are indistinguishable from a theme virtual by name: yast2-theme 4 and python313/python314-pydata-sphinx-theme 1 each. Pinned by unversioned_requires_scoped_to_generic_branding_names in branding_policy.rs."
