@@ -159,7 +159,11 @@ stack-protector or fortify symbol: the distribution flags never
 reached the compiler for any judged file in the package. The judged
 population is the package's C-judged EXEC/DYN ELF files: archives,
 Go and Zig binaries, debuginfo files and other ELF types are
-outside it, and noarch packages are exempt. One build defect
+outside it, and noarch packages are exempt. Each arm is counted
+over its own applicable population -- the files applicable for
+the stack-protector arm, the fortify arm and the cf-protection
+arm do not in general coincide -- and the detail names each
+arm's count over its own population. One build defect
 strips both mitigations from every binary at once -- a spec that
 overrides `CFLAGS`/`CXXFLAGS` without `%{optflags}`, or a build
 system that drops them (for example a `%install` step that rebuilds
@@ -285,8 +289,8 @@ instead of the vendored copy; the vendored copy can always be
 declared instead: add Provides: bundled(<source package>), with
 `= <version>` naming the version of the library that is actually
 linked where the binary names one. The finding fires only when the library's own
-byte pattern is present in the binary; a crate that was resolved
-but not linked stays silent. A binary that links the system
+byte pattern is present in the binary's read-only sections; a
+crate that was resolved but not linked stays silent. A binary that links the system
 library and carries the vendored code as well fires: the linked
 copy does not replace the vendored one, which is declared (or
 patched out) like any other.

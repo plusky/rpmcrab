@@ -155,8 +155,9 @@ content is host-specific, secret or generated (a per-host key, a cache, a
 compiled index), delete it from the buildroot in `%install`, keep an empty
 `touch`ed `%ghost`, and create it at install time. Otherwise drop `%ghost`
 and ship the content instead: as `%config(noreplace)` under `/etc`; as a
-plain file under `/usr/etc`; and anywhere else as a plain file without the
-`%config` flag -- a `%config` flag outside `/etc` is itself charged by the
+plain file under `/usr/etc`; under `/var` as `%config(noreplace)` or a plain
+file; and anywhere else as a plain file without the `%config` flag -- a
+`%config` flag outside `/etc` and `/var` is itself charged by the
 config-location findings, so keeping the flag there still fires those.
 """
 

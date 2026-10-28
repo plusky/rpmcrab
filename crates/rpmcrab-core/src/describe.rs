@@ -317,7 +317,7 @@ mod tests {
             ),
             (
                 "BinariesCheck.toml",
-                "1ebd61288f3157bd25d305aba3c5754cbbbde391748db379cd96d440442638e6",
+                "64b777090d87778202d6cf97a3ced0a536a458c68c8ace624aced5780198b8dc",
             ),
             (
                 "BrandingPolicyCheck.toml",
@@ -369,7 +369,7 @@ mod tests {
             ),
             (
                 "FilesCheck.toml",
-                "94d48a350fae58e5c5911267cbb994b8cb8adeff45baf6d0282965dca9aa8167",
+                "e30a70955d5db8c4cfe8bd9cf65638dd5fe200e1adb9cdd0781b950def6114a7",
             ),
             (
                 "I18NCheck.toml",
