@@ -31,3 +31,14 @@ the build gets the pointer text, not the content, and fails. Report
 the stubs upstream and remove them (and the tests that need them), or
 ship the real files.
 """
+
+source-archive-contains-bidi-control="""
+A text file inside a source archive contains a Unicode bidirectional
+control character (U+202A-U+202E, U+2066-U+2069). Such characters can
+make source code render differently from how it executes
+(trojan-source, CVE-2021-42574). Remove the control unless it is
+intentional (e.g. a test demonstrating the attack). The finding names
+the first control in the member and its line and column; one finding
+per member. Plain payload files, including the spec, are covered by
+the bidi-control-character scan instead.
+"""

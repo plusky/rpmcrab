@@ -48,3 +48,11 @@ kind = "behaviour"
 reason = "Fix-and-diverge (issue #1022): a new `source-archive-contains-lfs-pointer` warning fires when a direct member of a source archive is a git-lfs pointer stub: a regular member of 1-1023 bytes -- judged on the bytes actually read, not the archive's declared size -- that starts with the pointer version line (`version https://git-lfs.github.com/spec/v1`, or the legacy hawser URL, LF- or CRLF-terminated) and carries an `oid sha256:` line. A document quoting the version line after offset 0 is not a pointer and stays quiet. Nested archives are not opened. The frozen 2.10.0 reference has no such check."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1022"
+
+[[divergence]]
+case = "global"
+check = "SourceCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1220): a new `source-archive-contains-bidi-control` warning fires when a text member of a source archive (tar, compressed tar, zip, nested archives, or a compressed single file) contains one of the nine Unicode bidirectional control characters (U+202A-U+202E, U+2066-U+2069), one finding per member naming the first control and its line and column. Members decode as UTF-8 (with an optional byte-order mark) or as UTF-16 behind a byte-order mark; undecodable members are treated as binary and stay quiet. The surveyed exclusions stay quiet: a `.git` path component, `.desktop` and `.txt` suffixes, `Changelog` and `NEWS` basenames, and the `.po`, `.tex`, `.html`, `.htm` and `.roff` suffixes. Plain payload files, including the spec, are not scanned here: the `bidi-control-character` payload scan already covers them. The frozen 2.10.0 reference has no such check."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1220"

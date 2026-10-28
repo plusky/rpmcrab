@@ -4,8 +4,9 @@
 //! `inconsistent-file-extension`, `strange-permission` and
 //! `source-not-compressed` (warnings), plus the rpmcrab-new archive
 //! content warnings `prebuilt-binary-in-sources`,
-//! `source-archive-contains-vcs-metadata` and
-//! `source-archive-contains-lfs-pointer`.
+//! `source-archive-contains-vcs-metadata`,
+//! `source-archive-contains-lfs-pointer` and
+//! `source-archive-contains-bidi-control`.
 //!
 //! `prebuilt-binary-in-sources` is rpmcrab-new (upstream rpmlint#4, still
 //! open): the reference never unpacks source archives.
@@ -260,6 +261,44 @@ impl SourceCheck {
                     pkg,
                     "source-archive-contains-lfs-pointer",
                     &[&path],
+                );
+            }
+        }
+    }
+
+    /// `source-archive-contains-bidi-control`: scan the text members
+    /// of each source archive for the nine Unicode bidirectional
+    /// control characters (trojan-source, CVE-2021-42574), one finding
+    /// per member naming the first control and its line and column.
+    /// Direct payload files are not scanned here: the payload text
+    /// scan covers them, including the spec itself. A member is
+    /// scanned only when its bytes decode as UTF-8, or as UTF-16
+    /// behind a byte-order mark; undecodable members are binary and
+    /// stay quiet. Members under the surveyed exclusions stay quiet:
+    /// a `.git` path component, `.desktop` and `.txt` suffixes,
+    /// `Changelog` and `NEWS` basenames, and the `.po`, `.tex`,
+    /// `.html`, `.htm` and `.roff` suffixes.
+    fn check_bidi_controls(&self, pkg: &Pkg, out: &mut Filter) {
+        for f in &pkg.files {
+            let size = std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0);
+            if size > prebuilt::MAX_ARCHIVE_BYTES as u64 {
+                continue;
+            }
+            let data = match std::fs::read(&f.path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            for hit in prebuilt::bidi_hits(&f.name, &data, &f.name) {
+                let detail = format!(
+                    "{} line {}, column {} {}",
+                    hit.path, hit.line, hit.column, hit.control
+                );
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "source-archive-contains-bidi-control",
+                    &[&detail],
                 );
             }
         }
@@ -851,6 +890,271 @@ mod prebuilt {
             .is_some_and(|rest| rest.starts_with(b"\n") || rest.starts_with(b"\r\n"))
     }
 
+    /// One bidirectional-control hit inside a source archive:
+    /// the display path (`archive: member`, nested archives joined
+    /// the same way), and the 1-based line and character column of
+    /// the first control in that member.
+    pub struct BidiHit {
+        pub path: String,
+        pub line: u32,
+        pub column: u32,
+        pub control: &'static str,
+    }
+
+    /// The nine Unicode bidirectional control characters
+    /// (U+202A-U+202E, U+2066-U+2069) with their Unicode names.
+    const BIDI_CONTROLS: [(char, &str); 9] = [
+        ('\u{202A}', "U+202A LEFT-TO-RIGHT EMBEDDING"),
+        ('\u{202B}', "U+202B RIGHT-TO-LEFT EMBEDDING"),
+        ('\u{202C}', "U+202C POP DIRECTIONAL FORMATTING"),
+        ('\u{202D}', "U+202D LEFT-TO-RIGHT OVERRIDE"),
+        ('\u{202E}', "U+202E RIGHT-TO-LEFT OVERRIDE"),
+        ('\u{2066}', "U+2066 LEFT-TO-RIGHT ISOLATE"),
+        ('\u{2067}', "U+2067 RIGHT-TO-LEFT ISOLATE"),
+        ('\u{2068}', "U+2068 FIRST STRONG ISOLATE"),
+        ('\u{2069}', "U+2069 POP DIRECTIONAL ISOLATE"),
+    ];
+
+    /// The Unicode name of a bidirectional control character, or
+    /// `None` for any other character.
+    fn bidi_control_name(c: char) -> Option<&'static str> {
+        BIDI_CONTROLS
+            .iter()
+            .find(|(cp, _)| *cp == c)
+            .map(|(_, name)| *name)
+    }
+
+    /// The first bidirectional control in decoded text, with its
+    /// 1-based line and character column, or `None` when the bytes
+    /// hold no control. UTF-8, with an optional byte-order mark, is
+    /// tried first; a UTF-16 byte-order mark selects UTF-16LE or
+    /// UTF-16BE. Bytes that decode neither way are binary, not
+    /// text, and stay quiet; unpaired surrogates fail the UTF-16
+    /// decode the same way.
+    fn first_bidi_control_in_text(data: &[u8]) -> Option<(u32, u32, &'static str)> {
+        let text: Vec<char> = if data.starts_with(b"\xEF\xBB\xBF") {
+            std::str::from_utf8(&data[3..]).ok()?.chars().collect()
+        } else if data.starts_with(b"\xFF\xFE") {
+            decode_utf16(&data[2..], true)?
+        } else if data.starts_with(b"\xFE\xFF") {
+            decode_utf16(&data[2..], false)?
+        } else {
+            std::str::from_utf8(data).ok()?.chars().collect()
+        };
+        let mut line = 1u32;
+        let mut column = 1u32;
+        for c in text {
+            if let Some(name) = bidi_control_name(c) {
+                return Some((line, column, name));
+            }
+            if c == '\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
+        }
+        None
+    }
+
+    /// Decode UTF-16 units from `data` (little-endian when `le`),
+    /// failing on a trailing byte or any unpaired surrogate.
+    fn decode_utf16(data: &[u8], le: bool) -> Option<Vec<char>> {
+        if !data.len().is_multiple_of(2) {
+            return None;
+        }
+        let units: Vec<u16> = data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                if le {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect();
+        char::decode_utf16(units)
+            .collect::<Result<Vec<char>, _>>()
+            .ok()
+    }
+
+    /// Whether an archive member is outside the bidi scan: a `.git`
+    /// path component, a `.desktop` or `.txt` suffix, a `Changelog`
+    /// or `NEWS` basename (with or without a dotted suffix), or one
+    /// of the excluded text formats (`.po`, `.tex`, `.html`, `.htm`,
+    /// `.roff`).
+    fn bidi_excluded(name: &str) -> bool {
+        if name.split('/').any(|part| part == ".git") {
+            return true;
+        }
+        let basename = name.rsplit('/').next().unwrap_or(name);
+        if basename == "Changelog"
+            || basename == "NEWS"
+            || basename.starts_with("Changelog.")
+            || basename.starts_with("NEWS.")
+        {
+            return true;
+        }
+        let lower = name.to_ascii_lowercase();
+        [".po", ".tex", ".html", ".htm", ".roff", ".desktop", ".txt"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+    }
+
+    /// Scan one member's bytes as text, unless excluded, pushing at
+    /// most one hit (the first control) for the member.
+    fn scan_bidi_member(name: &str, data: &[u8], ctx: &str, hits: &mut Vec<BidiHit>) {
+        if bidi_excluded(name) {
+            return;
+        }
+        if let Some((line, column, control)) = first_bidi_control_in_text(data) {
+            hits.push(BidiHit {
+                path: ctx.to_string(),
+                line,
+                column,
+                control,
+            });
+        }
+    }
+
+    /// A decompressed member is either a tarball (walked) or a
+    /// single file (scanned under the member name without its
+    /// compression suffix, so a compressed excluded type stays
+    /// excluded).
+    fn scan_bidi_decompressed(
+        name: &str,
+        data: &[u8],
+        ctx: &str,
+        depth: u8,
+        hits: &mut Vec<BidiHit>,
+    ) {
+        if is_tar(data) {
+            walk_bidi_tar(data, ctx, depth, hits);
+        } else {
+            scan_bidi_member(strip_compression_suffix(name), data, ctx, hits);
+        }
+    }
+
+    /// The member name without one compression suffix (`.gz`,
+    /// `.xz`, `.zst`, `.bz2`), or the name unchanged.
+    fn strip_compression_suffix(name: &str) -> &str {
+        for suffix in [".gz", ".xz", ".zst", ".bz2"] {
+            if let Some(stripped) = name.strip_suffix(suffix) {
+                return stripped;
+            }
+        }
+        name
+    }
+
+    /// Inspect one archive member for bidi controls: archives
+    /// recurse, compressed members decompress, anything else scans
+    /// as text. Nesting past the archive depth cap stops the walk.
+    fn inspect_bidi_entry(name: &str, data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<BidiHit>) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        if data.starts_with(b"\x1f\x8b") {
+            if let Some(d) = decompress_gzip(data) {
+                scan_bidi_decompressed(name, &d, ctx, depth, hits);
+            }
+        } else if data.starts_with(b"\xfd7zXZ\x00") {
+            if let Some(d) = decompress_xz(data) {
+                scan_bidi_decompressed(name, &d, ctx, depth, hits);
+            }
+        } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
+            if let Some(d) = decompress_zstd(data) {
+                scan_bidi_decompressed(name, &d, ctx, depth, hits);
+            }
+        } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
+            if let Some(d) = decompress_bzip2(data) {
+                scan_bidi_decompressed(name, &d, ctx, depth, hits);
+            }
+        } else if data.starts_with(b"PK\x03\x04") {
+            walk_bidi_zip(data, ctx, depth, hits);
+        } else if is_tar(data) {
+            walk_bidi_tar(data, ctx, depth, hits);
+        } else {
+            scan_bidi_member(name, data, ctx, hits);
+        }
+    }
+
+    /// The members of one tarball, each inspected for bidi controls.
+    fn walk_bidi_tar(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<BidiHit>) {
+        for (name, off, len, _size) in read_tar(data) {
+            let entry = &data[off..off + len];
+            inspect_bidi_entry(&name, entry, &format!("{ctx}: {name}"), depth + 1, hits);
+        }
+    }
+
+    /// The members of one zip archive, each inspected for bidi
+    /// controls. Unreadable or oversized members are skipped, like
+    /// the prebuilt walk.
+    fn walk_bidi_zip(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<BidiHit>) {
+        let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(data)) {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        for i in 0..archive.len() {
+            let entry = match archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.is_file() {
+                continue;
+            }
+            let name = match entry.name() {
+                Ok(name) => name.into_owned(),
+                Err(_) => continue,
+            };
+            if entry.size() > MAX_ENTRY_BYTES as u64 {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            if entry
+                .take(MAX_ENTRY_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .is_err()
+                || bytes.len() > MAX_ENTRY_BYTES
+            {
+                continue;
+            }
+            inspect_bidi_entry(&name, &bytes, &format!("{ctx}: {name}"), depth + 1, hits);
+        }
+    }
+
+    /// Bidi-control hits in one source payload file: the members of
+    /// a source archive (tar, compressed tar, zip, nested up to the
+    /// archive depth cap), or a compressed single file scanned as
+    /// itself. A plain payload file yields nothing: the payload text
+    /// scan already covers it.
+    pub fn bidi_hits(name: &str, data: &[u8], ctx: &str) -> Vec<BidiHit> {
+        let mut hits = Vec::new();
+        if data.starts_with(b"\x1f\x8b") {
+            if let Some(d) = decompress_gzip(data) {
+                scan_bidi_decompressed(name, &d, ctx, 0, &mut hits);
+            }
+        } else if data.starts_with(b"\xfd7zXZ\x00") {
+            if let Some(d) = decompress_xz(data) {
+                scan_bidi_decompressed(name, &d, ctx, 0, &mut hits);
+            }
+        } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
+            if let Some(d) = decompress_zstd(data) {
+                scan_bidi_decompressed(name, &d, ctx, 0, &mut hits);
+            }
+        } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
+            if let Some(d) = decompress_bzip2(data) {
+                scan_bidi_decompressed(name, &d, ctx, 0, &mut hits);
+            }
+        } else if data.starts_with(b"PK\x03\x04") {
+            walk_bidi_zip(data, ctx, 0, &mut hits);
+        } else if is_tar(data) {
+            walk_bidi_tar(data, ctx, 0, &mut hits);
+        }
+        hits
+    }
+
     /// Capped decompression: one byte past the cap means "too big".
     fn capped<R: Read>(r: R) -> Option<Vec<u8>> {
         let mut out = Vec::new();
@@ -1210,6 +1514,7 @@ impl Check for SourceCheck {
         }
         self.check_rpmlintrc_setbadness(pkg, config, out);
         self.check_archive_contents(pkg, out);
+        self.check_bidi_controls(pkg, out);
     }
 }
 
@@ -2280,6 +2585,135 @@ mod prebuilt_tests {
         );
         assert!(
             archive_lines(&findings, "source-archive-contains-lfs-pointer").is_empty(),
+            "{findings:?}"
+        );
+    }
+
+    /// UTF-16 bytes for `text` behind the matching byte-order mark.
+    fn utf16_bytes(text: &str, le: bool) -> Vec<u8> {
+        let mut out = if le {
+            vec![0xFF, 0xFE]
+        } else {
+            vec![0xFE, 0xFF]
+        };
+        for unit in text.encode_utf16() {
+            out.extend_from_slice(&if le {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn bidi_controls_in_tarball_members_fire_with_line_and_column() {
+        let inner = tarball(&[("nested/evil.rs", "\u{202B}fn main() {}\n".as_bytes())]);
+        let tar = tarball(&[
+            (
+                "src/main.c",
+                "int a;\n/* \u{3b1}\u{3b2}\u{3b3} \u{202E}evil */\n".as_bytes(),
+            ),
+            (
+                "src/clean.c",
+                "/* \u{3b1}\u{3b2}\u{3b3} \u{2192} \u{3bb} */\nint b;\n".as_bytes(),
+            ),
+            ("deep/inner.tar.gz", &gzip_bytes(&inner)),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("bidi-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-bidi-control"),
+            [
+                "prebuilt-test.src: W: source-archive-contains-bidi-control \
+                 bidi-1.0.tar.gz: deep/inner.tar.gz: nested/evil.rs line 1, column 1 \
+                 U+202B RIGHT-TO-LEFT EMBEDDING",
+                "prebuilt-test.src: W: source-archive-contains-bidi-control \
+                 bidi-1.0.tar.gz: src/main.c line 2, column 8 \
+                 U+202E RIGHT-TO-LEFT OVERRIDE",
+            ]
+        );
+    }
+
+    #[test]
+    fn bidi_excluded_members_and_binary_members_stay_quiet() {
+        let tar = tarball(&[
+            ("docs/notes.txt", "x \u{202E}y\n".as_bytes()),
+            ("docs/guide.desktop", "x \u{202E}y\n".as_bytes()),
+            ("pkg/.git/config", "x \u{202E}y\n".as_bytes()),
+            ("Changelog", "x \u{202E}y\n".as_bytes()),
+            ("NEWS.md", "x \u{202E}y\n".as_bytes()),
+            ("locale/fr.po", "x \u{202E}y\n".as_bytes()),
+            ("doc/manual.tex", "x \u{202E}y\n".as_bytes()),
+            ("doc/page.html", "x \u{202E}y\n".as_bytes()),
+            ("doc/page.htm", "x \u{202E}y\n".as_bytes()),
+            ("doc/page.roff", "x \u{202E}y\n".as_bytes()),
+            ("src/binary.dat", b"\x89PNG\r\n\x1a\n\xe2\x80\xae"),
+            ("src/surrogate.c", &[0xFF, 0xFE, 0x61, 0x00, 0x00, 0xD8]),
+            ("src/edge.c", "\u{2029}\u{2060}\u{202F}\n".as_bytes()),
+            (
+                "src/clean.c",
+                "/* \u{3b1}\u{3b2}\u{3b3} \u{2192} \u{3bb} */\n".as_bytes(),
+            ),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("bidi-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(
+            archive_lines(&findings, "source-archive-contains-bidi-control").is_empty(),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn bidi_controls_in_zip_utf16_and_compressed_single_fire() {
+        let z = zip_bytes(&[
+            ("src/evil.c", "int a; \u{202A}int b;\n".as_bytes()),
+            ("src/utf16.c", &utf16_bytes("ab\u{202E}cd\n", true)),
+            ("src/be.c", &utf16_bytes("q\u{2069}\n", false)),
+            ("src/clean.c", "int c;\n".as_bytes()),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("bidi-1.0.zip", z),
+            ("single.c.gz", gzip_bytes("x\u{202D}y\n".as_bytes())),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-bidi-control"),
+            [
+                "prebuilt-test.src: W: source-archive-contains-bidi-control \
+                 bidi-1.0.zip: src/be.c line 1, column 2 \
+                 U+2069 POP DIRECTIONAL ISOLATE",
+                "prebuilt-test.src: W: source-archive-contains-bidi-control \
+                 bidi-1.0.zip: src/evil.c line 1, column 8 \
+                 U+202A LEFT-TO-RIGHT EMBEDDING",
+                "prebuilt-test.src: W: source-archive-contains-bidi-control \
+                 bidi-1.0.zip: src/utf16.c line 1, column 3 \
+                 U+202E RIGHT-TO-LEFT OVERRIDE",
+                "prebuilt-test.src: W: source-archive-contains-bidi-control \
+                 single.c.gz line 1, column 2 U+202D LEFT-TO-RIGHT OVERRIDE",
+            ]
+        );
+    }
+
+    #[test]
+    fn bidi_control_in_plain_payload_stays_quiet_in_sourcecheck() {
+        let (pkg, _src, _extract) = source_pkg(&[
+            (
+                "prebuilt-test.spec",
+                "Name: prebuilt-test\n# \u{202E}\n".as_bytes().to_vec(),
+            ),
+            ("loose.c", "int a; \u{202E}int b;\n".as_bytes().to_vec()),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(
+            archive_lines(&findings, "source-archive-contains-bidi-control").is_empty(),
             "{findings:?}"
         );
     }
