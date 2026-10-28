@@ -2952,9 +2952,23 @@ fn fillup_template_paths(pkg: &Pkg) -> Vec<&str> {
         .collect()
 }
 
+/// One whitespace-separated `EnvironmentFile` token cleaned to the
+/// path it names and whether the reference is mandatory: surrounding
+/// single or double quotes and the optional-file `-` prefix are
+/// stripped (the `-` applies to the unquoted value, so the quote trim
+/// runs again after the `-` strip).
+fn env_file_token(token: &str) -> (&str, bool) {
+    let unquoted = token.trim_matches(['"', '\'']);
+    match unquoted.strip_prefix('-') {
+        Some(rest) => (rest.trim_matches(['"', '\'']), false),
+        None => (unquoted, true),
+    }
+}
+
 /// The first `EnvironmentFile` target in a systemd unit that points into
 /// `/etc/sysconfig/`, spelled as written (including the optional-file
-/// `-` prefix), or `None`.
+/// `-` prefix), or `None`. A line names a whitespace-separated list of
+/// paths, so every token counts, not only the first.
 fn sysconfig_environment_file(content: &str) -> Option<String> {
     for line in content.lines() {
         let Some(rest) = line.trim_start().strip_prefix("EnvironmentFile") else {
@@ -2963,14 +2977,11 @@ fn sysconfig_environment_file(content: &str) -> Option<String> {
         let Some(value) = rest.trim_start().strip_prefix('=') else {
             continue;
         };
-        let token = value
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_matches('"');
-        let target = token.strip_prefix('-').unwrap_or(token).trim_matches('"');
-        if target.starts_with("/etc/sysconfig/") {
-            return Some(token.to_string());
+        for token in value.split_whitespace() {
+            let (target, _) = env_file_token(token);
+            if target.starts_with("/etc/sysconfig/") {
+                return Some(token.trim_matches(['"', '\'']).to_string());
+            }
         }
     }
     None
@@ -2990,7 +3001,8 @@ struct SysconfigEnvTarget {
 /// `/etc/sysconfig/`, in file order. `sysconfig_environment_file`
 /// returns only the first target (the migration nudge needs one
 /// witness); the fillup-template check gates on any
-/// unit that reads the template's target, so all lines count.
+/// unit that reads the template's target, so every token of every
+/// line counts.
 fn sysconfig_environment_targets(content: &str) -> Vec<SysconfigEnvTarget> {
     let mut targets = Vec::new();
     for line in content.lines() {
@@ -3000,20 +3012,14 @@ fn sysconfig_environment_targets(content: &str) -> Vec<SysconfigEnvTarget> {
         let Some(value) = rest.trim_start().strip_prefix('=') else {
             continue;
         };
-        let token = value
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_matches('"');
-        let (target, mandatory) = match token.strip_prefix('-') {
-            Some(stripped) => (stripped.trim_matches('"'), false),
-            None => (token, true),
-        };
-        if target.starts_with("/etc/sysconfig/") {
-            targets.push(SysconfigEnvTarget {
-                path: target.to_string(),
-                mandatory,
-            });
+        for token in value.split_whitespace() {
+            let (target, mandatory) = env_file_token(token);
+            if target.starts_with("/etc/sysconfig/") {
+                targets.push(SysconfigEnvTarget {
+                    path: target.to_string(),
+                    mandatory,
+                });
+            }
         }
     }
     targets
@@ -3053,9 +3059,9 @@ fn env_target_names_template(target: &str, name: &str) -> bool {
     }
 }
 
-/// The paths tmpfiles.d snippet contents create as a file, copy or
-/// symlink (the `f`, `C` and `L` line types, trailing modifiers
-/// ignored). A sysconfig target a snippet creates at boot needs no
+/// The paths tmpfiles.d snippet contents create or write as a file,
+/// copy or symlink (the `f`, `F`, `w`, `C` and `L` line types,
+/// trailing modifiers ignored). A sysconfig target a snippet creates at boot needs no
 /// fillup call, so the fillup-template check exempts it. Comment and
 /// blank lines are skipped; only the literal path column counts.
 fn tmpfiles_created_paths(contents: &str) -> HashSet<&str> {
@@ -3070,7 +3076,7 @@ fn tmpfiles_created_paths(contents: &str) -> HashSet<&str> {
             continue;
         };
         let mut chars = kind.chars();
-        if !matches!(chars.next(), Some('f' | 'C' | 'L'))
+        if !matches!(chars.next(), Some('f' | 'F' | 'w' | 'C' | 'L'))
             || !chars.all(|c| matches!(c, '+' | '-' | '~' | '=' | '!'))
         {
             continue;
@@ -3102,8 +3108,8 @@ struct FillupTemplateReport {
 /// `/systemd/system/` or `/systemd/user/` names the target
 /// (`/etc/sysconfig/<name>`, or one directory below it for the
 /// `%fillup_only -d` form), unless the package ships the target as a
-/// non-`%ghost` payload file or a tmpfiles.d snippet creates it (`f`,
-/// `C` or `L` line). The level hangs on the read's form: an optional
+/// non-`%ghost` payload file or a tmpfiles.d snippet creates it (an `f`,
+/// `F`, `w`, `C` or `L` line). The level hangs on the read's form: an optional
 /// `-` read is a Warning (the file is absent, runtime unchanged), a
 /// mandatory read is an Error (the unit cannot start on a fresh
 /// install -- the xsp shape).
@@ -3158,7 +3164,7 @@ fn fillup_template_without_call_reports(pkg: &Pkg) -> Vec<FillupTemplateReport> 
                     && !pkg
                         .files
                         .iter()
-                        .any(|f| f.name == target.path && !f.is_ghost())
+                        .any(|f| f.name == target.path && !f.is_ghost() && is_reg(f.mode))
             })
             .collect();
         if live.is_empty() {
@@ -18607,6 +18613,12 @@ x /etc/sysconfig/f - - - -
         assert!(paths.contains("/etc/sysconfig/d"));
         assert!(!paths.contains("/etc/sysconfig/e"));
         assert!(!paths.contains("/etc/sysconfig/f"));
+        // F truncates-or-creates the file and w writes its content:
+        // both materialise the target like f does.
+        let conf = "F /etc/sysconfig/g 0644 root root -\nw /etc/sysconfig/h - - - - FOO=1\n";
+        let paths = tmpfiles_created_paths(conf);
+        assert!(paths.contains("/etc/sysconfig/g"));
+        assert!(paths.contains("/etc/sysconfig/h"));
     }
 
     #[test]
@@ -18831,6 +18843,107 @@ x /etc/sysconfig/f - - - -
             },
         );
         assert!(fillup_findings(&pkg).is_empty());
+    }
+
+    #[test]
+    fn fillup_env_file_list_second_token_gates() {
+        // systemd accepts a whitespace-separated list of paths: a
+        // template target in second position gates like a first one,
+        // and its own `-` prefix sets the level.
+        let unit = "[Service]\nEnvironmentFile=/etc/sysconfig/other -/etc/sysconfig/demo\n";
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[
+                ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                ("/usr/lib/systemd/system/demo.service", unit),
+            ],
+            &[],
+            &|_| {},
+        );
+        let found = fillup_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+        // A single-quoted token resolves the same way.
+        let unit = "[Service]\nEnvironmentFile='-/etc/sysconfig/demo'\n";
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[
+                ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                ("/usr/lib/systemd/system/demo.service", unit),
+            ],
+            &[],
+            &|_| {},
+        );
+        let found = fillup_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert_eq!(found[0].2, Level::Warning);
+    }
+
+    #[test]
+    fn fillup_tmpfiles_truncate_and_write_are_quiet() {
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\n";
+        for kind in ["F", "w"] {
+            let tmpfiles = format!(
+                "{kind} /etc/sysconfig/demo - - - - /usr/share/fillup-templates/sysconfig.demo\n"
+            );
+            let (pkg, _src, _extract) = fillup_test_pkg(
+                "demo",
+                &[
+                    ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                    ("/usr/lib/systemd/system/demo.service", unit),
+                    ("/usr/lib/tmpfiles.d/demo.conf", tmpfiles.as_str()),
+                ],
+                &[],
+                &|_| {},
+            );
+            assert!(
+                fillup_findings(&pkg).is_empty(),
+                "tmpfiles type {kind} materialises the target"
+            );
+        }
+    }
+
+    #[test]
+    fn fillup_shipped_target_directory_still_fires() {
+        // The shipped-target exemption covers payload files only: a
+        // directory entry at the target path ships no content.
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\n";
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[
+                ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                ("/usr/lib/systemd/system/demo.service", unit),
+            ],
+            &[],
+            &|b| {
+                b.with_dir_entry(rpm::FileOptions::dir("/etc/sysconfig/demo"))
+                    .unwrap();
+            },
+        );
+        assert_eq!(fillup_findings(&pkg).len(), 1);
+    }
+
+    #[test]
+    fn fillup_shipped_target_symlink_still_fires() {
+        // A symlink at the target path ships no payload content
+        // either, so it earns no exemption.
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\n";
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[
+                ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                ("/usr/lib/systemd/system/demo.service", unit),
+            ],
+            &[],
+            &|b| {
+                b.with_symlink(rpm::FileOptions::symlink(
+                    "/etc/sysconfig/demo",
+                    "/usr/share/fillup-templates/sysconfig.demo",
+                ))
+                .unwrap();
+            },
+        );
+        assert_eq!(fillup_findings(&pkg).len(), 1);
     }
 
     #[test]
