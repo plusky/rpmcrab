@@ -8,15 +8,18 @@
 //! `python-leftover-require`.
 //!
 //! The require/metadata coherence tags — `python-unflavoured-require`,
-//! `python-dist-info-version-mismatch` and
-//! `python-require-floor-below-metadata`, plus the `python-missing-require`
-//! satisfaction changes they ride on — are crab-only (#1024, ledgered in
+//! `python-dist-info-version-mismatch`,
+//! `python-require-floor-below-metadata` and
+//! `python-require-unversioned-despite-metadata-floor`, plus the
+//! `python-missing-require` satisfaction changes they ride on — are
+//! crab-only (#1024, ledgered in
 //! `data/divergences/PythonCheck.toml`): the package's own
 //! `python3.Xdist()` Provides satisfy its declared requirements, a
 //! requirement met only by a bare `python-<name>` Require is reported
 //! under its own tag, the shipped dist-info version is compared against
-//! the RPM version under PEP 440, and an RPM Require whose floor sits
-//! below the floor the shipped metadata declares is reported.
+//! the RPM version under PEP 440, and an RPM Require that carries
+//! no version, or whose floor sits below the floor the shipped
+//! metadata declares, is reported under its own tag.
 //!
 //! Requirement metadata is read from `egg-info/requires.txt` or
 //! `dist-info/METADATA` natively (no `importlib.metadata`); environment
@@ -1300,8 +1303,9 @@ impl PythonCheck {
     /// do not satisfy. A requirement met only by a bare `python-<name>`
     /// Require is reported as `python-unflavoured-require` instead
     /// (#1024 §3.1), and every kept requirement also goes through the
-    /// floor comparison (`python-require-floor-below-metadata`,
-    /// #1024 §3.3).
+    /// floor comparison (`python-require-floor-below-metadata` and
+    /// `python-require-unversioned-despite-metadata-floor`, #1024
+    /// §3.3).
     fn check_missing_requirements(
         &self,
         pkg: &Pkg,
@@ -1541,13 +1545,15 @@ impl PythonCheck {
         caps.get(2).map(|m| m.as_str())
     }
 
-    /// `python-require-floor-below-metadata` (#1024 §3.3): a kept
-    /// requirement whose declared lower bound the matching RPM
-    /// Requires do not carry — they are unversioned, or their highest
-    /// floor sits below the metadata's. A requirement no RPM Require
-    /// names at all is `python-missing-require`'s finding, not this
-    /// one's, and a requirement met by the package's own Provides has
-    /// no RPM floor to compare.
+    /// The floor comparison (#1024 §3.3): a kept requirement whose
+    /// declared lower bound the matching RPM Requires do not carry.
+    /// Matching Requires carrying no version at all fire
+    /// `python-require-unversioned-despite-metadata-floor`; ones whose
+    /// highest floor sits below the metadata's fire
+    /// `python-require-floor-below-metadata`. A requirement no RPM
+    /// Require names at all is `python-missing-require`'s finding,
+    /// not these ones', and a requirement met by the package's own
+    /// Provides has no RPM floor to compare.
     fn check_require_floor(pkg: &Pkg, out: &mut Filter, req: &Requirement) {
         let Some((floor, floor_text)) = Self::metadata_floor(req) else {
             return;
@@ -1584,7 +1590,7 @@ impl PythonCheck {
                 out,
                 Level::Warning,
                 pkg,
-                "python-require-floor-below-metadata",
+                "python-require-unversioned-despite-metadata-floor",
                 &[
                     &req.name,
                     "metadata-floor",
@@ -2936,9 +2942,12 @@ mod tests {
             pkg.requires = vec![dep("python3-dulwich", 0, None)];
         });
         assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-require-unversioned-despite-metadata-floor");
+        assert_eq!(*level, Level::Warning);
         assert_eq!(
-            findings[0].2,
-            "python-test.noarch: W: python-require-floor-below-metadata dulwich metadata-floor 0.22 rpm-floor unversioned"
+            line,
+            "python-test.noarch: W: python-require-unversioned-despite-metadata-floor dulwich metadata-floor 0.22 rpm-floor unversioned"
         );
     }
 

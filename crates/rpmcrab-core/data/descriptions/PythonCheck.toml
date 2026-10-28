@@ -50,12 +50,26 @@ RPM version.
 
 python-require-floor-below-metadata="""
 The package's Python metadata declares a minimum version for this
-requirement, but the matching RPM Require carries a lower floor (or
-no version at all), so the RPM dependency can be satisfied by a
-version the metadata itself rejects. Raise the RPM Require floor to
-at least the version the metadata declares (regenerating the
-Requires with the current Python macros usually does this), or relax
-the metadata.
+requirement, but the matching RPM Require carries a lower floor, so
+the RPM dependency can be satisfied by a version the metadata
+itself rejects. The dependency graph and the metadata disagree,
+and either side can be the wrong one: raise the RPM Require floor
+to at least the version the metadata declares (regenerating the
+Requires with the current Python macros usually does this), or,
+when the metadata floor itself is wrong for this package, correct
+the metadata in the spec.
+"""
+
+python-require-unversioned-despite-metadata-floor="""
+The package's Python metadata declares a minimum version for this
+requirement, but the matching RPM Require carries no version at
+all, so the RPM dependency can be satisfied by any version,
+including ones the metadata itself rejects. The dependency graph
+and the metadata disagree, and either side can be the wrong one:
+give the RPM Require at least the floor the metadata declares
+(regenerating the Requires with the current Python macros usually
+does this), or, when the metadata floor itself is wrong for this
+package, correct the metadata in the spec.
 """
 
 python-pyc-multiple-versions="""
