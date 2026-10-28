@@ -323,6 +323,7 @@ shlib-policy-truncated-soname-path = W
 shlib-unversioned-lib = W
 shlib-with-non-pic-code = E
 siteperl-in-perl-module = W
+source-archive-contains-bidi-control = W
 source-archive-contains-lfs-pointer = W
 source-archive-contains-vcs-metadata = W
 sourced-script-with-shebang = E

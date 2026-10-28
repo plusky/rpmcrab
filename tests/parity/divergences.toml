@@ -3289,6 +3289,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1022"
 
 [[divergence]]
 case = "global"
+check = "SourceCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1220): a new `source-archive-contains-bidi-control` warning fires when a text member of a source archive (tar, compressed tar, zip, nested archives, or a compressed single file) contains one of the nine Unicode bidirectional control characters (U+202A-U+202E, U+2066-U+2069), one finding per member naming the first control and its line and column. Members decode as UTF-8 (with an optional byte-order mark) or as UTF-16 behind a byte-order mark; undecodable members are treated as binary and stay quiet. The surveyed exclusions stay quiet: a `.git` path component, `.desktop` and `.txt` suffixes, `Changelog` and `NEWS` basenames, and the `.po`, `.tex`, `.html`, `.htm` and `.roff` suffixes. Plain payload files, including the spec, are not scanned here: the `bidi-control-character` payload scan already covers them. The frozen 2.10.0 reference has no such check."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1220"
+
+[[divergence]]
+case = "global"
 check = "buildarch-instead-of-exclusivearch-tag"
 kind = "behaviour"
 reason = "Fixed behaviour per rpmlint#1600 (fixes rpmlint#698): a trailing line-continuation backslash is stripped before comparing, so 'BuildArch: noarch \\' inside a multi-line macro is not reported as a real architecture. The frozen 2.10.0 reference reports it."
