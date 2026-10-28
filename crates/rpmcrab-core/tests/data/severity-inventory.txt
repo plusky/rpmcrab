@@ -108,6 +108,7 @@ ghost-file-with-buildroot-content = W
 ghost-files-without-postin = W
 ghost-outside-snapshot = W
 go-toolchain-outdated = W
+gzip-mtime-after-source-date-epoch = W
 gzipped-svg-icon = W
 hardcoded-packager-tag = W
 hardcoded-path-in-menu-icon = W

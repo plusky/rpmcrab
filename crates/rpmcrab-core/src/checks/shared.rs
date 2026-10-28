@@ -87,6 +87,36 @@ pub(crate) fn script_body_or_prog(pkg: &Pkg, tag: librpm::Tag, prog: librpm::Tag
     }
 }
 
+/// The package's SOURCE_DATE_EPOCH, when one is known. A package whose
+/// BUILDHOST is `reproducible` was built by the configuration that sets
+/// `%use_source_date_epoch_as_buildtime`, so its BUILDTIME is the
+/// SOURCE_DATE_EPOCH. Otherwise the `SOURCE_DATE_EPOCH` environment
+/// variable, when set to an integer, is the only known value; with
+/// neither, there is nothing to compare embedded timestamps against.
+pub(crate) fn source_date_epoch(pkg: &Pkg) -> Option<i64> {
+    resolve_source_date_epoch(
+        pkg.tag_str(librpm::Tag::BUILDHOST).as_deref(),
+        pkg.tag_i64(librpm::Tag::BUILDTIME),
+        std::env::var("SOURCE_DATE_EPOCH").ok().as_deref(),
+    )
+}
+
+/// The sourcing rule of [`source_date_epoch`], pure so tests can pin the
+/// whole matrix: a `reproducible` BUILDHOST names the BUILDTIME and
+/// nothing else (a missing BUILDTIME there leaves no known value, the
+/// environment is not consulted); any other BUILDHOST consults the
+/// environment value alone, and an unparsable one is no value.
+fn resolve_source_date_epoch(
+    buildhost: Option<&str>,
+    buildtime: Option<i64>,
+    env: Option<&str>,
+) -> Option<i64> {
+    if buildhost == Some("reproducible") {
+        return buildtime;
+    }
+    env.and_then(|v| v.parse::<i64>().ok())
+}
+
 /// One scriptlet of a package: its `%`-label, its interpreter (the `-p`
 /// program string, empty when the header carries none) and one body.
 /// Checks that scan scriptlets take their slots from here instead of each
@@ -241,6 +271,63 @@ mod tests {
         assert!(
             script_body_or_prog(&pkg, librpm::Tag::PREUN, librpm::Tag::PREUNPROG)
                 .contains("echo preun-body")
+        );
+    }
+
+    #[test]
+    fn source_date_epoch_reproducible_buildhost_names_buildtime() {
+        // The env value is deliberately different: under a reproducible
+        // BUILDHOST the BUILDTIME is the SOURCE_DATE_EPOCH, full stop.
+        assert_eq!(
+            resolve_source_date_epoch(Some("reproducible"), Some(111), Some("222")),
+            Some(111)
+        );
+        assert_eq!(
+            resolve_source_date_epoch(Some("reproducible"), Some(111), None),
+            Some(111)
+        );
+    }
+
+    #[test]
+    fn source_date_epoch_reproducible_without_buildtime_is_unknown() {
+        // No fallback to the environment: the reproducible configuration
+        // guarantees a BUILDTIME, so its absence leaves nothing known.
+        assert_eq!(
+            resolve_source_date_epoch(Some("reproducible"), None, Some("222")),
+            None
+        );
+    }
+
+    #[test]
+    fn source_date_epoch_other_buildhost_uses_environment() {
+        assert_eq!(
+            resolve_source_date_epoch(Some("builder.example.com"), Some(111), Some("222")),
+            Some(222)
+        );
+        assert_eq!(
+            resolve_source_date_epoch(None, Some(111), Some("222")),
+            Some(222)
+        );
+    }
+
+    #[test]
+    fn source_date_epoch_other_buildhost_without_environment_is_unknown() {
+        assert_eq!(
+            resolve_source_date_epoch(Some("builder.example.com"), Some(111), None),
+            None
+        );
+        assert_eq!(resolve_source_date_epoch(None, None, None), None);
+    }
+
+    #[test]
+    fn source_date_epoch_unparsable_environment_is_unknown() {
+        assert_eq!(
+            resolve_source_date_epoch(Some("builder.example.com"), None, Some("abc")),
+            None
+        );
+        assert_eq!(
+            resolve_source_date_epoch(Some("builder.example.com"), None, Some("")),
+            None
         );
     }
 
