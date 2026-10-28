@@ -334,6 +334,12 @@ gzipped-svg-icon="""
 Not all desktop environments that support SVG icons support them gzipped
 (.svgz). Install the icon as plain uncompressed SVG.
 """
+gzip-mtime-after-source-date-epoch="""
+This gzip file stores a timestamp later than SOURCE_DATE_EPOCH, most likely
+the mtime of a file created during the build, so the package differs between
+rebuilds. Compress with `gzip -n` (or `--no-name`), or set the input file's
+mtime to SOURCE_DATE_EPOCH first.
+"""
 pem-certificate="""
 Shipping a PEM certificate is likely wrong. If used for the default
 configuration, this is insecure ( since the certificate is public ). If this

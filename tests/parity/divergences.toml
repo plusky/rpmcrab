@@ -2245,6 +2245,14 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "gzip-mtime-after-source-date-epoch"
+kind = "behaviour"
+reason = "New port-only Warning: a regular *.gz payload file (not .tar.gz) outside /usr/share/man and /usr/share/info whose gzip header MTIME is non-zero and later than SOURCE_DATE_EPOCH + 2 s; rpm clamps payload file mtimes to SOURCE_DATE_EPOCH but not timestamps stored inside files. The reference has no such check. SOURCE_DATE_EPOCH comes from BUILDTIME when BUILDHOST is reproducible, else the SOURCE_DATE_EPOCH environment variable; with neither known the check stays silent. Factory sweep of 51,589 RPMs: 717 findings in 3 packages (erlang 595, R-grDevices 106, erlang27 16) out of 470 packages shipping in-scope *.gz files."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1181"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."

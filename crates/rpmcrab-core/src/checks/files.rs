@@ -2288,6 +2288,10 @@ struct PkgState {
     /// package ships (issue #569): together with the standard libdirs,
     /// the only directories ldconfig scans.
     ldconfig_dirs: std::collections::HashSet<String>,
+    /// The package's SOURCE_DATE_EPOCH when one is known (see
+    /// `crate::checks::shared::source_date_epoch`); without it the
+    /// gzip-header MTIME comparison has nothing to compare against.
+    source_date_epoch: Option<i64>,
     bindir_exes: IndexMap<String, Vec<String>>,
     man_basenames: std::collections::HashSet<String>,
     /// The subset of `man_basenames` prefixes a `-<version>` tail
@@ -2386,6 +2390,7 @@ impl Check for FilesCheck {
             librpm::Tag::PREUNPROG,
         );
         st.ldconfig_dirs = ldconfig_conf_dirs(pkg);
+        st.source_date_epoch = crate::checks::shared::source_date_epoch(pkg);
         st.license_tag_ids = pkg
             .tag_str(librpm::Tag::LICENSE)
             .map(|t| parse_license_tag(&t))
@@ -6677,6 +6682,7 @@ impl FilesCheck {
         self.check_normal_non_conf_in_etc(pkg, fname, pkgfile, out);
         self.check_normal_python_noarch(pkg, fname, out);
         self.check_normal_gzipped_svg(pkg, fname, st, out);
+        self.check_normal_gzip_mtime(pkg, fname, &fd, st, out);
         self.check_normal_pem(pkg, fname, out);
         self.check_normal_tcl(pkg, fname, out);
         self.check_normal_text(pkg, fname, pkgfile, &mut fd, out);
@@ -7494,6 +7500,50 @@ impl FilesCheck {
             }
         }
         svgz >= SVGZ_THEME_MIN_GZIPPED && svgz >= 9 * svg
+    }
+
+    /// The reproducibility comparison for `gzip-mtime-after-source-date-epoch`:
+    /// a regular `*.gz` file (not `.tar.gz`; `.tgz` does not end in `.gz`)
+    /// outside the `/usr/share/man` and `/usr/share/info` trees, starting
+    /// with the gzip magic, whose header MTIME (bytes 4-7, little-endian)
+    /// is non-zero and later than SOURCE_DATE_EPOCH plus 2 s. The 2 s
+    /// slack absorbs the rounding of the two clocks being compared.
+    /// Without a known SOURCE_DATE_EPOCH nothing fires.
+    fn gzip_mtime_after_sde(fname: &str, chunk: &[u8], sde: Option<i64>) -> bool {
+        let Some(sde) = sde else { return false };
+        if !fname.ends_with(".gz") || fname.ends_with(".tar.gz") {
+            return false;
+        }
+        if fname.starts_with("/usr/share/man/") || fname.starts_with("/usr/share/info/") {
+            return false;
+        }
+        if chunk.len() < 10 || chunk[0] != 0x1f || chunk[1] != 0x8b {
+            return false;
+        }
+        let mtime = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+        mtime != 0 && i64::from(mtime) > sde.saturating_add(2)
+    }
+
+    fn check_normal_gzip_mtime(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        fd: &FileData,
+        st: &PkgState,
+        out: &mut Filter,
+    ) {
+        // rpm clamps the payload's file mtimes to SOURCE_DATE_EPOCH but
+        // not timestamps stored inside files, so a file the build
+        // generated and gzipped without -n embeds the build wall clock.
+        if Self::gzip_mtime_after_sde(fname, &fd.chunk, st.source_date_epoch) {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "gzip-mtime-after-source-date-epoch",
+                &[fname],
+            );
+        }
     }
 
     fn check_normal_gzipped_svg(&self, pkg: &Pkg, fname: &str, st: &PkgState, out: &mut Filter) {
@@ -15363,6 +15413,231 @@ mod tests {
         assert!(
             line.contains("Permission denied (os error 13)"),
             "unexpected detail: {line}"
+        );
+    }
+
+    /// A minimal gzip header (magic, deflate, no flags) carrying the
+    /// given MTIME, plus the two trailing header bytes.
+    fn gzip_header(mtime: u32) -> Vec<u8> {
+        let mut v = vec![0x1f, 0x8b, 0x08, 0x00];
+        v.extend_from_slice(&mtime.to_le_bytes());
+        v.extend_from_slice(&[0x00, 0x03]);
+        v
+    }
+
+    const GZIP_SDE: i64 = 1_785_909_409;
+
+    #[test]
+    fn gzip_mtime_after_sde_fires() {
+        let chunk = gzip_header((GZIP_SDE + 3) as u32);
+        assert!(FilesCheck::gzip_mtime_after_sde(
+            "/usr/share/data/table.gz",
+            &chunk,
+            Some(GZIP_SDE)
+        ));
+        let chunk = gzip_header((GZIP_SDE + 86_400) as u32);
+        assert!(FilesCheck::gzip_mtime_after_sde(
+            "/usr/lib64/erlang/man/man1/erl.gz",
+            &chunk,
+            Some(GZIP_SDE)
+        ));
+    }
+
+    #[test]
+    fn gzip_mtime_at_or_below_sde_plus_slack_stays_silent() {
+        // The boundary is exact: SDE + 2 s is the last silent value.
+        for mtime in [GZIP_SDE + 2, GZIP_SDE + 1, GZIP_SDE, GZIP_SDE - 100] {
+            let chunk = gzip_header(mtime as u32);
+            assert!(
+                !FilesCheck::gzip_mtime_after_sde(
+                    "/usr/share/data/table.gz",
+                    &chunk,
+                    Some(GZIP_SDE)
+                ),
+                "mtime {mtime} must stay silent"
+            );
+        }
+    }
+
+    #[test]
+    fn gzip_mtime_zero_stays_silent() {
+        // A zero MTIME is what compressing from a pipe (or with -n)
+        // stores: no timestamp at all, nothing to compare.
+        let chunk = gzip_header(0);
+        assert!(!FilesCheck::gzip_mtime_after_sde(
+            "/usr/share/data/table.gz",
+            &chunk,
+            Some(GZIP_SDE)
+        ));
+    }
+
+    #[test]
+    fn gzip_mtime_without_known_sde_stays_silent() {
+        let chunk = gzip_header(u32::MAX);
+        assert!(!FilesCheck::gzip_mtime_after_sde(
+            "/usr/share/data/table.gz",
+            &chunk,
+            None
+        ));
+    }
+
+    #[test]
+    fn gzip_mtime_man_and_info_trees_stay_silent() {
+        let chunk = gzip_header((GZIP_SDE + 86_400) as u32);
+        for fname in [
+            "/usr/share/man/man1/tool.1.gz",
+            "/usr/share/man/de/man1/tool.1.gz",
+            "/usr/share/info/tool.info.gz",
+        ] {
+            assert!(
+                !FilesCheck::gzip_mtime_after_sde(fname, &chunk, Some(GZIP_SDE)),
+                "{fname} is in an excluded tree"
+            );
+        }
+        // Near miss: only the two named trees are excluded -- a man tree
+        // elsewhere (the erlang shape) and a lookalike prefix still fire.
+        assert!(FilesCheck::gzip_mtime_after_sde(
+            "/usr/lib64/erlang/man/man1/erl.gz",
+            &chunk,
+            Some(GZIP_SDE)
+        ));
+        assert!(FilesCheck::gzip_mtime_after_sde(
+            "/usr/share/manual/table.gz",
+            &chunk,
+            Some(GZIP_SDE)
+        ));
+    }
+
+    #[test]
+    fn gzip_mtime_archive_and_other_names_stay_silent() {
+        let chunk = gzip_header((GZIP_SDE + 86_400) as u32);
+        for fname in [
+            "/usr/share/data/archive.tar.gz",
+            "/usr/share/data/archive.tgz",
+            "/usr/share/data/table.gzip",
+            "/usr/share/data/table.gz.bak",
+            "/usr/share/icons/icon.svgz",
+            "/usr/share/data/TABLE.GZ",
+        ] {
+            assert!(
+                !FilesCheck::gzip_mtime_after_sde(fname, &chunk, Some(GZIP_SDE)),
+                "{fname} is not a plain *.gz name"
+            );
+        }
+    }
+
+    #[test]
+    fn gzip_mtime_bad_magic_or_short_header_stays_silent() {
+        let late = (GZIP_SDE + 86_400) as u32;
+        // Plain text that merely carries a .gz name.
+        assert!(!FilesCheck::gzip_mtime_after_sde(
+            "/usr/share/data/table.gz",
+            b"not a gzip stream at all",
+            Some(GZIP_SDE)
+        ));
+        // One magic byte wrong.
+        let mut chunk = gzip_header(late);
+        chunk[1] = 0x8c;
+        assert!(!FilesCheck::gzip_mtime_after_sde(
+            "/usr/share/data/table.gz",
+            &chunk,
+            Some(GZIP_SDE)
+        ));
+        // Truncated before the MTIME field ends, and empty.
+        let chunk = gzip_header(late);
+        assert!(!FilesCheck::gzip_mtime_after_sde(
+            "/usr/share/data/table.gz",
+            &chunk[..7],
+            Some(GZIP_SDE)
+        ));
+        assert!(!FilesCheck::gzip_mtime_after_sde(
+            "/usr/share/data/table.gz",
+            &[],
+            Some(GZIP_SDE)
+        ));
+    }
+
+    /// Drive the emission seam with an explicit SOURCE_DATE_EPOCH, the
+    /// fixture headers carrying neither a reproducible BUILDHOST nor a
+    /// usable BUILDTIME for this comparison.
+    fn gzip_mtime_findings(fname: &str, chunk: &[u8], sde: Option<i64>) -> Vec<(String, String)> {
+        let (pkg, _dir) = pkg_with_files(vec![PkgFile {
+            name: fname.to_string(),
+            ..Default::default()
+        }]);
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let fd = FileData {
+            chunk: chunk.to_vec(),
+            ..Default::default()
+        };
+        let st = PkgState {
+            source_date_epoch: sde,
+            ..Default::default()
+        };
+        check.check_normal_gzip_mtime(&pkg, fname, &fd, &st, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn gzip_mtime_emission_fires_once_at_warning() {
+        let chunk = gzip_header((GZIP_SDE + 3600) as u32);
+        let results = gzip_mtime_findings("/usr/share/data/table.gz", &chunk, Some(GZIP_SDE));
+        let hits: Vec<&(String, String)> = results
+            .iter()
+            .filter(|(n, _)| n == "gzip-mtime-after-source-date-epoch")
+            .collect();
+        assert_eq!(hits.len(), 1, "exactly one finding: {results:?}");
+        assert!(
+            hits[0].1.contains(": W: ") && hits[0].1.contains("/usr/share/data/table.gz"),
+            "warning naming the file: {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
+    fn gzip_mtime_emission_silent_for_excluded_paths() {
+        let chunk = gzip_header((GZIP_SDE + 3600) as u32);
+        for fname in ["/usr/share/man/man1/tool.1.gz", "/usr/share/data/a.tar.gz"] {
+            let results = gzip_mtime_findings(fname, &chunk, Some(GZIP_SDE));
+            assert!(
+                results
+                    .iter()
+                    .all(|(n, _)| n != "gzip-mtime-after-source-date-epoch"),
+                "{fname} must not fire: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gzip_mtime_check_binary_silent_without_late_mtime() {
+        // End to end through check_binary: an MTIME of 1 can only fire
+        // against a negative SOURCE_DATE_EPOCH, so the tag stays silent
+        // whatever SDE the ambient environment or fixture header yields.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        let root = pkg
+            .extracted_dir()
+            .expect("extracted fixture")
+            .to_path_buf();
+        let path = root.join("usr/share/data/table.gz");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+        std::fs::write(&path, gzip_header(1)).expect("write gzip header");
+        pkg.files = vec![PkgFile {
+            name: "/usr/share/data/table.gz".to_string(),
+            path: path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        }];
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .all(|(n, _)| n != "gzip-mtime-after-source-date-epoch"),
+            "no gzip-mtime finding expected: {results:?}"
         );
     }
 
