@@ -170,6 +170,31 @@ pub fn global_macro_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// RAII guard for librpm's rpmlog verbosity: `hush` narrows it to
+/// critical-only and dropping restores the default (messages up to
+/// notice).
+///
+/// rpmlog is librpm's diagnostics channel to stderr. A caller whose
+/// librpm work is internal machinery -- its result already carried in
+/// structured form, so the diagnostics would only duplicate it -- runs
+/// that work under the mask. The mask is process-global: while one is
+/// held, librpm diagnostics from other checks running concurrently are
+/// masked along with it, because rpmlog offers no per-call sink.
+pub struct RpmlogMask;
+
+impl RpmlogMask {
+    pub fn hush() -> Self {
+        librpm::logging::set_verbosity(librpm::logging::LogLevel::Critical);
+        Self
+    }
+}
+
+impl Drop for RpmlogMask {
+    fn drop(&mut self) {
+        librpm::logging::set_verbosity(librpm::logging::LogLevel::Notice);
+    }
+}
+
 /// Where a [`Pkg`]'s bytes come from. The reference distinguishes exactly these
 /// situations, so they are a closed set: separate `dir_name`/`extracted`
 /// fields cannot express an impossible combination, and a read can never
