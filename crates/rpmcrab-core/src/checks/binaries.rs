@@ -4681,6 +4681,42 @@ fn parse_arch_format_magics(raw: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Whether `pkgfile` is a compressed kernel module: a regular file
+/// under a kernel-module tree (`/lib/modules/` or `/usr/lib/modules/`)
+/// whose name carries the `.ko` suffix plus one of the compressors the
+/// kernel build supports (gzip, bzip2, lzma, xz, lz4, lzo, zstd). The
+/// payload of such a file is an ELF relocatable; only the compressor
+/// wrapper keeps it out of the magic-based binary class, whose test
+/// sees the wrapper's magic instead. A `%ghost` entry counts the way a
+/// binary-class ghost counts in the package accounting: the header
+/// name is the evidence and no payload bytes are read. Directories
+/// and symlinks do not count -- the name must belong to the module
+/// file itself.
+fn is_compressed_kernel_module(fname: &str, pkgfile: &PkgFile) -> bool {
+    if !crate::pkg::pkgfile::is_reg(pkgfile.mode) {
+        return false;
+    }
+    if !fname.starts_with("/lib/modules/") && !fname.starts_with("/usr/lib/modules/") {
+        return false;
+    }
+    const SUFFIXES: [&str; 7] = [
+        ".ko.gz", ".ko.bz2", ".ko.lzma", ".ko.xz", ".ko.lz4", ".ko.lzo", ".ko.zst",
+    ];
+    SUFFIXES.iter().any(|suffix| fname.ends_with(suffix))
+}
+
+/// Whether the file magic describes a UEFI executable: a PE32 or
+/// PE32+ image whose subsystem is EFI (an application, a boot or
+/// runtime driver, or a ROM). The image is machine code bound to its
+/// target firmware architecture; only the PE wrapper keeps it out of
+/// the ELF-based binary class. Other PE payloads are not credited --
+/// a Windows DLL or a .NET assembly is not bound to the package's
+/// architecture the way a firmware executable is.
+fn is_efi_executable(magic: &str) -> bool {
+    (magic.starts_with("PE32+") || magic.starts_with("PE32 "))
+        && magic.contains(" executable for EFI ")
+}
+
 /// Whether any payload file of `pkg` is data in a known native-layout
 /// format (see `data/arch-format-magics.toml`). Such a file is bound
 /// to the architecture class of the machine that wrote it, so its
@@ -5207,7 +5243,9 @@ impl BinariesCheck {
         // Payload in a known native-layout data format (an X11
         // compose cache, a GDBM database) is bound to the build
         // architecture, so a package shipping it is arch-specific by
-        // design even without binaries (boo#1110020).
+        // design even without binaries (boo#1110020). Compressed
+        // kernel modules reach the accounting through
+        // `is_compressed_kernel_module` in the per-file loop.
         if !has_binary
             && !has_file_in_libdir
             && pkg.arch != "noarch"
@@ -7058,6 +7096,14 @@ impl Check for BinariesCheck {
                 || is_ocaml_native
                 || is_lua_bytecode;
             if !is_binary_class {
+                // A compressed kernel module and a UEFI executable
+                // are binary payload under a non-ELF wrapper: they
+                // count toward the package's binary accounting even
+                // though their magic misses the binary class.
+                if is_compressed_kernel_module(fname, pkgfile) || is_efi_executable(&pkgfile.magic)
+                {
+                    pkg_has_binary = true;
+                }
                 continue;
             }
 
@@ -13969,6 +14015,169 @@ description = "explicit priority string bypasses the system crypto policy"
             1,
             "symlink to XimC must still fire: {results:?}"
         );
+    }
+
+    #[test]
+    fn no_binary_quiet_for_compressed_kernel_module() {
+        // Kernel packages and KMPs ship their modules compressed:
+        // the payload is an ELF relocatable whose libmagic view is
+        // the compressor wrapper, so the magic-based binary class
+        // misses it. The module tree and name carry the accounting.
+        let config = test_config();
+        for (path, magic) in [
+            (
+                "/usr/lib/modules/6.18.54-1-default/kernel/drivers/apex.ko.zst",
+                "Zstandard compressed data",
+            ),
+            (
+                "/usr/lib/modules/6.18.54-1-default/updates/gasket.ko.xz",
+                "XZ compressed data",
+            ),
+            (
+                "/lib/modules/6.18.54-1-default/kernel/drivers/legacy.ko.gz",
+                "gzip compressed data",
+            ),
+        ] {
+            let pkg = synthetic_pkg(
+                "foo-kmp-default",
+                "x86_64",
+                vec![
+                    syn_file(path, magic),
+                    syn_file("/usr/share/doc/foo-kmp/README", "ASCII text"),
+                ],
+            );
+            let results = driver_results(&pkg, &config);
+            assert!(
+                lines_for(&results, "no-binary").is_empty(),
+                "compressed module {path} must exempt from no-binary: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_binary_quiet_for_ghost_compressed_kernel_module() {
+        // A %ghost module entry counts the way a binary-class ghost
+        // counts in the package accounting: the header name is the
+        // evidence, no payload bytes are read.
+        let config = test_config();
+        let mut ghost = syn_file(
+            "/usr/lib/modules/6.18.54-1-default/kernel/drivers/apex.ko.zst",
+            "Zstandard compressed data",
+        );
+        ghost.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        let pkg = synthetic_pkg("foo-kmp-default", "x86_64", vec![ghost]);
+        let results = driver_results(&pkg, &config);
+        assert!(
+            lines_for(&results, "no-binary").is_empty(),
+            "ghost compressed module must exempt from no-binary: {results:?}"
+        );
+    }
+
+    #[test]
+    fn no_binary_still_fires_for_compressed_module_lookalikes() {
+        // The credit needs the module tree, a supported compressor
+        // suffix at the very end of the name, and the module file
+        // itself -- not a fixture lookalike, a directory entry, or a
+        // symlink wearing the name.
+        let config = test_config();
+        let mut dir_entry = syn_file("/usr/lib/modules/6.18.54-1-default/kernel", "directory");
+        dir_entry.mode = 0o40755;
+        let mut link = syn_file(
+            "/usr/lib/modules/6.18.54-1-default/kernel/apex.ko.zst",
+            "symbolic link",
+        );
+        link.mode = 0o120777;
+        link.linkto = "apex-real.ko.zst".to_string();
+        for files in [
+            // Module name outside a module tree (a shipped fixture).
+            vec![syn_file(
+                "/usr/share/kernel-fixtures/apex.ko.zst",
+                "Zstandard compressed data",
+            )],
+            // A compressor the kernel build does not use for modules.
+            vec![syn_file(
+                "/usr/lib/modules/6.18.54-1-default/kernel/apex.ko.zip",
+                "Zip archive data",
+            )],
+            // The module suffix is not at the end of the name.
+            vec![syn_file(
+                "/usr/lib/modules/6.18.54-1-default/kernel/apex.ko.zst.bak",
+                "Zstandard compressed data",
+            )],
+            // Compressor suffix without the module suffix.
+            vec![syn_file(
+                "/usr/lib/modules/6.18.54-1-default/kernel/apex.zst",
+                "Zstandard compressed data",
+            )],
+            // A directory entry in the module tree.
+            vec![dir_entry],
+            // A symlink wearing a module name.
+            vec![link],
+        ] {
+            let pkg = synthetic_pkg("foopkg", "x86_64", files);
+            let results = driver_results(&pkg, &config);
+            assert_eq!(
+                lines_for(&results, "no-binary").len(),
+                1,
+                "lookalike must still fire no-binary: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_binary_quiet_for_efi_executable() {
+        // Firmware packages ship only UEFI executables: PE images
+        // whose subsystem is EFI. The image is arch-bound machine
+        // code, so the package is arch-specific by construction.
+        let config = test_config();
+        for (path, magic) in [
+            (
+                "/usr/lib/edk2/Shell.efi",
+                "PE32+ executable for EFI (application), x86-64, 3 sections",
+            ),
+            (
+                "/usr/share/ipxe/ipxe-i386.efi",
+                "PE32 executable for EFI (application), Intel i386, 7 sections",
+            ),
+        ] {
+            let pkg = synthetic_pkg(
+                "edk2-shell",
+                "x86_64",
+                vec![
+                    syn_file(path, magic),
+                    syn_file("/usr/share/doc/edk2/README", "ASCII text"),
+                ],
+            );
+            let results = driver_results(&pkg, &config);
+            assert!(
+                lines_for(&results, "no-binary").is_empty(),
+                "EFI executable {path} must exempt from no-binary: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_binary_still_fires_for_non_efi_pe_payload() {
+        // PE payloads that are not firmware executables do not
+        // credit: a Windows DLL and a .NET assembly are not bound to
+        // the package's architecture.
+        let config = test_config();
+        for magic in [
+            "PE32+ executable for MS Windows 5.02 (DLL), x86-64 (stripped to external PDB), 12 sections",
+            "PE32 executable for MS Windows 4.00 (console), Intel i386, Mono/.Net assembly, 3 sections",
+        ] {
+            let pkg = synthetic_pkg(
+                "foopkg",
+                "x86_64",
+                vec![syn_file("/usr/lib/foo/payload.bin", magic)],
+            );
+            let results = driver_results(&pkg, &config);
+            assert_eq!(
+                lines_for(&results, "no-binary").len(),
+                1,
+                "{magic} must still fire no-binary: {results:?}"
+            );
+        }
     }
 
     #[test]
