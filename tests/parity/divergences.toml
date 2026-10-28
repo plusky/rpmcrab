@@ -2874,6 +2874,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/562"
 
 [[divergence]]
 case = "global"
+check = "ghost-files-without-postin"
+kind = "behaviour"
+reason = "Fixed behaviour: a %ghost of /usr/share/icons/<theme>/icon-theme.cache (exactly one path component between the icons directory and the cache file) does not count toward the finding -- openSUSE creates icon-theme caches with the gtk3-tools file trigger over /usr/share/icons and the icon_theme_cache_post macros expand to %nil, so no %post of the owning package ever creates the cache. The reference has no such exemption and warns. Measured over the Factory corpus (51,589 binary RPMs): the tag drops 238 -> 194 findings; the 44 removed findings are 25 binary packages, all icon themes, whose only ghosts are icon-theme caches; nothing is added and no other PostCheck tag moves."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1172"
+
+[[divergence]]
+case = "global"
 check = "PythonCheck"
 kind = "behaviour"
 reason = "For a requires.txt requirement that already carries a marker inside a named extra section, the reference (`_convert_egg_info_reqs_to_simple_reqs` in CPython's importlib.metadata, still used by rpmlint 2.10.0's `Distribution.requires` for egg-info) appends the section condition as a second `;`-part verbatim: `w6extra; python_version > \"3.9\"; (sys_platform == \"linux\") and extra == \"extra\"` (verified against CPython 3.13.14). The port stores the post-first-`;` marker text verbatim instead of merging everything into one `and`ed marker. Parity, not a logical divergence: both forms carry the `extra ==` condition, which the leftover evaluator treats as not holding (`extra` is never provided), and the reference itself drops the double-semicolon string as InvalidRequirement, so findings are unaffected either way. Pinned by emission-path tests."

@@ -1631,12 +1631,33 @@ impl Check for PostCheck {
                 if pkg.missingok_files.iter().any(|m| m == f) {
                     continue;
                 }
+                if is_icon_theme_cache(f) {
+                    continue;
+                }
                 if postin.is_empty() && prein.is_empty() {
                     add_info(out, Level::Warning, pkg, "ghost-files-without-postin", &[]);
                 }
             }
         }
     }
+}
+
+/// The icon-theme cache ghost: `/usr/share/icons/<theme>/icon-theme.cache`,
+/// with exactly one path component (the theme name) between the icons
+/// directory and the cache file. openSUSE creates these caches with a
+/// file trigger (gtk3-tools, over `/usr/share/icons`); the package's
+/// own `%post` never creates them, so the cache ghost is the
+/// trigger's to create and does not count toward
+/// `ghost-files-without-postin` (#1172). Deeper or shallower shapes
+/// are ordinary ghosts.
+fn is_icon_theme_cache(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/usr/share/icons/") else {
+        return false;
+    };
+    let Some(theme) = rest.strip_suffix("/icon-theme.cache") else {
+        return false;
+    };
+    !theme.is_empty() && !theme.contains('/')
 }
 
 #[cfg(test)]
@@ -2086,6 +2107,83 @@ mod tests {
             check_fixture_names("postcheck-ghost-parity-1.0-1.noarch.rpm"),
             vec!["ghost-files-without-postin"]
         );
+    }
+
+    /// Run the check over the ghost fixture (no %prein/%postin at
+    /// all) with its ghost set replaced by `ghosts`.
+    fn ghost_fixture_results(ghosts: &[&str]) -> Vec<String> {
+        let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/postcheck-ghost-parity-1.0-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open fixture pkg");
+        pkg.ghost_files = ghosts.iter().map(|g| g.to_string()).collect();
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = PostCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        out.results().iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    /// #1172: a package whose only ghosts are icon-theme caches
+    /// stays silent -- the caches are created by the gtk3-tools file
+    /// trigger, not by any %post of the owning package.
+    #[test]
+    fn icon_theme_cache_ghost_is_quiet_1172() {
+        assert_eq!(
+            ghost_fixture_results(&["/usr/share/icons/hicolor/icon-theme.cache"]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            ghost_fixture_results(&[
+                "/usr/share/icons/hicolor/icon-theme.cache",
+                "/usr/share/icons/Adwaita/icon-theme.cache",
+            ]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// #1172 near-misses: lookalike shapes are ordinary ghosts and
+    /// keep firing, and an ordinary ghost beside a cache still
+    /// carries the finding.
+    #[test]
+    fn icon_theme_cache_lookalikes_still_fire_1172() {
+        for ghosts in [
+            // No theme component.
+            vec!["/usr/share/icons/icon-theme.cache"],
+            // Two components below the icons directory.
+            vec!["/usr/share/icons/hicolor/48x48/icon-theme.cache"],
+            // Not the icons directory.
+            vec!["/usr/share/pixmaps/hicolor/icon-theme.cache"],
+            // Not the cache file name.
+            vec!["/usr/share/icons/hicolor/other.cache"],
+        ] {
+            assert_eq!(
+                ghost_fixture_results(&ghosts),
+                vec!["ghost-files-without-postin"],
+                "ghosts: {ghosts:?}"
+            );
+        }
+        assert_eq!(
+            ghost_fixture_results(&[
+                "/usr/share/icons/hicolor/icon-theme.cache",
+                "/var/lib/foo/state",
+            ]),
+            vec!["ghost-files-without-postin"]
+        );
+    }
+
+    #[test]
+    fn is_icon_theme_cache_shape_1172() {
+        assert!(is_icon_theme_cache(
+            "/usr/share/icons/openSUSE-halloween/icon-theme.cache"
+        ));
+        assert!(!is_icon_theme_cache("/usr/share/icons/icon-theme.cache"));
+        assert!(!is_icon_theme_cache(
+            "/usr/share/icons/a/b/icon-theme.cache"
+        ));
+        assert!(!is_icon_theme_cache("/usr/share/icons//icon-theme.cache"));
+        assert!(!is_icon_theme_cache(
+            "/usr/share/icons/hicolor/icon-theme.cache.bak"
+        ));
     }
 
     #[test]
