@@ -845,12 +845,12 @@ def test_append_extra_checks_lands_inside_checks_list():
     )
     out = gen.append_extra_checks(text, gen.EXTRA_CHECKS)
     checks_part, filters_part = out.split("Filters = [", 1)
-    for check in ("XinetdDepCheck", "PAMModulesCheck"):
+    for check in ("XinetdDepCheck", "PAMModulesCheck", "CMakeConfigCheck"):
         assert f'"{check}",' in checks_part, checks_part
         assert check not in filters_part, filters_part
         # The entry is inside the list: it precedes the closing bracket.
         assert checks_part.index(f'"{check}",') < checks_part.index("]"), checks_part
-    assert gen.EXTRA_CHECKS == ["XinetdDepCheck", "PAMModulesCheck"], gen.EXTRA_CHECKS
+    assert gen.EXTRA_CHECKS == ["XinetdDepCheck", "PAMModulesCheck", "CMakeConfigCheck"], gen.EXTRA_CHECKS
 
 
 def test_append_extra_checks_without_checks_list_raises():
