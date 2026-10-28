@@ -1411,9 +1411,9 @@ impl PythonCheck {
         let own_provides = pkg
             .provides
             .iter()
-            .flat_map(|p| p.leaf_names())
-            .any(|name| {
-                Self::dist_provide_inner(&name)
+            .flat_map(|p| p.leaves())
+            .any(|leaf| {
+                Self::dist_provide_inner(&Self::leaf_capability(&leaf))
                     .is_some_and(|inner| variants.iter().any(|v| v.eq_ignore_ascii_case(inner)))
             });
         if own_provides {
@@ -3100,6 +3100,26 @@ mod tests {
     }
 
     #[test]
+    fn own_dist_provides_in_rich_expression_satisfy_requirements() {
+        // A rich Provides entry's leaves split the capability into
+        // name and qualifier (`python3.13dist` / `ua-parser-builtins`);
+        // the satisfaction test must reconstruct the `name(qualifier)`
+        // spelling, as the floor path does, or the split leaf reads
+        // as a bare `python3.13dist` and satisfies nothing.
+        let reqs = PythonCheck::parse_requirements("ua-parser-builtins\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = Vec::new();
+            pkg.requires = Vec::new();
+            pkg.provides = vec![dep(
+                "(python3.13dist(ua-parser-builtins) or python3.13dist(ua-parser))",
+                0,
+                None,
+            )];
+        });
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
     fn bare_python_require_moves_to_unflavoured_tag() {
         // #1024 §3.1: satisfaction via a bare `python-<name>` Require
         // (the in-toto shape) is reported on the new tag, with the
@@ -3540,6 +3560,14 @@ mod tests {
         });
         assert!(
             !tags_of(&findings).contains(&"python-require-floor-below-metadata"),
+            "findings: {findings:?}"
+        );
+        // The reconstructed floor is a floor: the unversioned tag,
+        // which fires only when no usable floor exists, stays quiet
+        // as well -- neither floor tag may fire on the caret shape.
+        assert!(
+            !tags_of(&findings)
+                .contains(&"python-require-unversioned-despite-metadata-floor"),
             "findings: {findings:?}"
         );
     }
