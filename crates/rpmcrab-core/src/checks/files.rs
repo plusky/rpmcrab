@@ -6619,6 +6619,15 @@ impl FilesCheck {
         let Some(interpreter) = interpreter else {
             return;
         };
+        // A `#!/bin/false` shebang marks a file that must never be
+        // executed directly (uwsm ships its sourced session-plugin
+        // fragments this way: the false interpreter keeps them inert
+        // when reached by name). There is no interpreter dependency
+        // to demand for a file whose design is that nothing runs it,
+        // so the idiom stays quiet.
+        if interpreter == "/bin/false" || interpreter == "/usr/bin/false" {
+            return;
+        }
         // If the shebang interpreter is a dependency, it's okay
         if pkg.requires.iter().any(|d| d.name == interpreter) {
             return;
@@ -12811,6 +12820,86 @@ mod tests {
             linkto: target.to_string(),
             ..Default::default()
         }
+    }
+
+    /// Run FilesCheck over a synthetic package holding one regular
+    /// script file under /usr/share/probe and one symlink to it, and
+    /// return the `symlink-to-binary-with-shebang` findings.
+    fn bindir_shebang_findings(
+        target_content: &[u8],
+        linkto: &str,
+        requires: &[&str],
+    ) -> (Vec<(String, String)>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rpm = fixture_path("fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        let root = pkg
+            .extracted_dir()
+            .expect("extracted fixture")
+            .to_path_buf();
+        let target_name = "/usr/share/probe/target.sh";
+        let target_path = root.join(target_name.trim_start_matches('/'));
+        std::fs::create_dir_all(target_path.parent().unwrap()).expect("mkdirs");
+        std::fs::write(&target_path, target_content).expect("write target");
+        let target = PkgFile {
+            name: target_name.to_string(),
+            path: target_path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        };
+        let link = PkgFile {
+            name: "/usr/share/probe/link.sh".to_string(),
+            path: "/usr/share/probe/link.sh".to_string(),
+            mode: 0o120777,
+            linkto: linkto.to_string(),
+            ..Default::default()
+        };
+        pkg.files = vec![target, link];
+        pkg.ghost_files = vec![];
+        pkg.requires = requires.iter().map(|n| dep_named(n)).collect();
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let hits = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "symlink-to-binary-with-shebang")
+            .cloned()
+            .collect();
+        (hits, dir)
+    }
+
+    #[test]
+    fn symlink_to_false_shebang_script_is_quiet() {
+        // uwsm's shape: the plugin fragments are sourced by the
+        // session manager and carry a /bin/false shebang so they stay
+        // inert when reached by name; there is no interpreter
+        // dependency to demand for them.
+        for content in [
+            b"#!/bin/false\n# plugin fragment\n".as_slice(),
+            b"#!/usr/bin/false\n".as_slice(),
+            b"#!/bin/false --\n".as_slice(),
+        ] {
+            let (hits, _dir) = bindir_shebang_findings(content, "target.sh", &[]);
+            assert!(hits.is_empty(), "{content:?} must stay quiet, got {hits:?}");
+        }
+    }
+
+    #[test]
+    fn symlink_to_real_shebang_script_still_fires() {
+        // Near-miss controls: a real interpreter without a matching
+        // requires still fires, and a name that merely starts with
+        // the false path is a different interpreter entirely.
+        let (hits, _dir) = bindir_shebang_findings(b"#!/bin/bash\n", "target.sh", &[]);
+        assert_eq!(hits.len(), 1, "got {hits:?}");
+        let (hits, _dir) = bindir_shebang_findings(b"#!/bin/falsehood\n", "target.sh", &[]);
+        assert_eq!(hits.len(), 1, "got {hits:?}");
+        // The long-standing credit is untouched: a package that does
+        // require its interpreter is quiet.
+        let (hits, _dir) = bindir_shebang_findings(b"#!/bin/bash\n", "target.sh", &["/bin/bash"]);
+        assert!(hits.is_empty(), "got {hits:?}");
     }
 
     fn loop_findings(results: &[(String, String)]) -> Vec<&(String, String)> {

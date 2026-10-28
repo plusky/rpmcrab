@@ -2337,6 +2337,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "symlink-to-binary-with-shebang"
+kind = "behaviour"
+reason = "A symlink whose target script carries a #!/bin/false or #!/usr/bin/false shebang is not reported. The false shebang is the deliberate inert-file marker: uwsm ships its sourced session-plugin fragments this way so they cannot be executed directly, and there is no interpreter dependency to demand for a file whose design is that nothing runs it. The reference has no such exemption and reports the links. Measured over the Factory corpus (51,589 RPMs, isolated config): 63 findings in 14 binary packages become 61; the removed pair is exactly uwsm's niri_session.sh and start_hyprland.sh links, and no other finding moves (verified over the complete baseline-firing package set; the check reads only the firing package's own files and requires)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
