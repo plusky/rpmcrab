@@ -3925,6 +3925,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "systemd-service-without-service_del_preun"
+kind = "behaviour"
+reason = "Fix-and-diverge: the del_preun arm credits two shapes the reference's literal-substring predicate misses. A %preun helper line naming a .service unit by its bare stem credits it: the helper passes its arguments verbatim to systemctl disable, which resolves a bare name with the default .service suffix, so remove-system-units foo removes foo.service. Only .service units: a bare stem for a socket, target or path resolves to the .service of that name, a different unit. A unit whose shipped content carries no [Install] section credits it, unless the package statically enables it with a shipped .wants/ symlink naming the unit or one of its aliases: systemctl enable and preset refuse such a unit, so no enablement symlinks can exist for the helper to remove, while a statically enabled unit still misses the helper stop even though rpm removes the shipped symlink. Unknown content never credits: an unextracted payload, a ghost entry, or an unreadable file keeps firing. The other three arms keep the literal predicate. Factory census 2026-10-28 over the shared corpus (548 del_preun findings): the bare-stem credit removes 4 (pcp pmcd, pmie, pmlogger, pmproxy), the no-[Install] credit removes 265 (136 no-[Install] findings stay firing because the package ships a .wants/ symlink for the unit), leaving 279; no other tag moves. Pinned by bare_stem_service_is_credited, bare_stem_socket_is_not_credited, bare_stem_target_is_not_credited, bare_stem_path_is_not_credited, longer_full_name_does_not_credit_shorter_unit, longer_stem_does_not_credit_shorter_unit, no_argument_helper_does_not_credit, quoted_bare_stem_is_credited, stem_only_in_comment_is_not_credited, backslash_continuation_is_not_joined, no_install_unit_draws_no_del_preun_but_keeps_other_tags, statically_wanted_matches_unit_or_alias_only, planted_no_install_unit_without_wants_draws_no_del_preun, planted_no_install_unit_with_direct_wants_still_fires_del_preun, planted_no_install_unit_with_alias_wants_still_fires_del_preun, has_install_fixture_still_fires_del_preun, no_install_fixture_unit_draws_only_del_postun and no_install_fixture_without_extraction_still_fires_del_preun in systemd_install.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "systemd-tmpfile-parse-error"
 kind = "detail"
 reason = "The reference (TmpfilesParser.warn) formats parse warnings as 'source:line: msg'; the port formats 'source: msg' and passes the line as a separate finding detail. Only the warning string differs ('source: msg' vs 'source:line: msg'); the detail placement is argument-for-argument identical."

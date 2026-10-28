@@ -10,6 +10,16 @@
 //! common case), not an independent unit: it is resolved within the package
 //! and the target unit is evaluated instead, once. A symlink that resolves
 //! to no shipped unit is not evaluated.
+//!
+//! Two `del_preun`-only credits diverge from the reference's literal
+//! substring predicate: a `%preun` helper line naming a `.service` unit
+//! by its bare stem (the helper passes its arguments verbatim to
+//! `systemctl disable`, which resolves a bare name to the `.service`),
+//! and a unit whose shipped content carries no `[Install]` section
+//! and which the package does not statically enable with a shipped
+//! `.wants/` symlink (it cannot be enabled, so there is no enablement
+//! for the helper to remove). Unknown content never credits. The other
+//! three findings keep the literal predicate.
 
 use std::path::Path;
 
@@ -71,6 +81,11 @@ impl SystemdInstallCheck {
     /// under `<unitdir>/*.wants/` resolving to this unit: systemd
     /// enables such a unit by the symlink itself, so no install call
     /// is owed for it.
+    /// `unit_lacks_install` is true only when the unit's shipped content
+    /// was read and carries no `[Install]` section and the package ships
+    /// no `.wants/` symlink naming the unit or one of its aliases;
+    /// unknown content (unextracted payload, ghost entry, unreadable
+    /// file) passes false.
     fn check_unit(
         basename: &str,
         pre_direct: bool,
@@ -79,6 +94,7 @@ impl SystemdInstallCheck {
         preun: &str,
         postun: &str,
         statically_enabled: bool,
+        unit_lacks_install: bool,
     ) -> Vec<&'static str> {
         let escaped = fancy_regex::escape(basename);
         // install-system-units itself runs `systemctl preset` on the
@@ -122,7 +138,13 @@ impl SystemdInstallCheck {
                 continue;
             }
             let re = Regex::new(pattern).expect("unit pattern");
-            if script.lines().any(|line| is_match(&re, line)) {
+            let mut present = script.lines().any(|line| is_match(&re, line));
+            // The del_preun-only credits: the other three arms keep the
+            // literal-substring predicate above.
+            if !present && *finding == "systemd-service-without-service_del_preun" {
+                present = Self::bare_stem_removed(basename, script) || unit_lacks_install;
+            }
+            if present {
                 continue;
             }
             // The add_post credits apply to this arm only: the
@@ -174,6 +196,56 @@ impl SystemdInstallCheck {
             })
         })
     }
+    /// Whether a `%preun` helper line removes `basename` by its bare
+    /// stem: the helper passes its arguments verbatim to `systemctl
+    /// disable`, which resolves a bare name with the default `.service`
+    /// suffix, so `remove-system-units foo` removes `foo.service`
+    /// even though the literal `foo.service` string never appears.
+    /// Only `.service` units: a bare stem for a socket, target or path
+    /// resolves to the `.service` of that name, a different unit, so
+    /// those firings stay real. A token equal to the stem is required:
+    /// a longer name, a longer stem, and a helper call with no unit
+    /// argument all fail to credit, as does a stem appearing only in a
+    /// trailing shell comment.
+    fn bare_stem_removed(basename: &str, preun: &str) -> bool {
+        let Some(stem) = basename.strip_suffix(".service") else {
+            return false;
+        };
+        preun.lines().any(|line| {
+            let Some(at) = line.find("remove-system-units") else {
+                return false;
+            };
+            let mut args = &line[at + "remove-system-units".len()..];
+            let comment_at = args
+                .find('#')
+                .filter(|&hash| hash == 0 || args.as_bytes()[hash - 1].is_ascii_whitespace());
+            if let Some(hash) = comment_at {
+                args = &args[..hash];
+            }
+            args.split_whitespace()
+                .any(|token| token.trim_matches(|c| matches!(c, '"' | '\'' | ';' | ',')) == stem)
+        })
+    }
+
+    /// Whether shipped unit content carries an `[Install]` section. A
+    /// unit without one cannot be enabled (`systemctl enable` and
+    /// `preset` refuse it), so no enablement symlinks can exist for
+    /// the `%preun` helper to remove -- unless the package statically
+    /// enables it with a shipped `.wants/` symlink, which
+    /// [`Self::statically_wanted`] excludes separately.
+    fn has_install_section(content: &str) -> bool {
+        let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+        content.lines().any(|line| line.trim() == "[Install]")
+    }
+
+    /// Whether any of `names` (a unit basename plus the basenames of
+    /// its alias links) is the target of a shipped `.wants/` symlink.
+    /// Such a unit is statically enabled by the package itself, so its
+    /// missing `%preun` helper is not a no-op: the helper's stop is
+    /// still missing even though rpm removes the shipped symlink.
+    fn statically_wanted(wants: &std::collections::HashSet<&str>, names: &[&str]) -> bool {
+        names.iter().any(|name| wants.contains(name))
+    }
 }
 
 impl Check for SystemdInstallCheck {
@@ -206,8 +278,27 @@ impl Check for SystemdInstallCheck {
         // candidate. A link resolving to no shipped regular file (dangling,
         // cyclic, or a mask link to /dev/null) names no evaluable unit and
         // is skipped; the dangling-symlink findings own that defect.
+        // Basenames shipped as `.wants/` entries, and, per resolved
+        // target path, the basenames of the links resolving to it.
+        let mut wants: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut aliases: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for file in &pkg.files {
+            if file.name.contains(".wants/") {
+                if let Some(base) = file.name.rsplit('/').next() {
+                    wants.insert(base);
+                }
+            }
+            if is_symlink(file.mode) {
+                if let Some(target) = pkg.readlink(file) {
+                    if let Some(base) = file.name.rsplit('/').next() {
+                        aliases.entry(target.name.as_str()).or_default().push(base);
+                    }
+                }
+            }
+        }
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut units: Vec<(String, bool)> = Vec::new();
+        let mut units: Vec<(String, bool, bool)> = Vec::new();
         for file in &pkg.files {
             if !is_match(unit_re, &file.name) {
                 continue;
@@ -229,13 +320,25 @@ impl Check for SystemdInstallCheck {
                 .strip_prefix(&format!("{}/", self.unit_dir))
                 .map(|rest| !rest.contains('/'))
                 .unwrap_or(true);
-            units.push((
-                Path::new(&candidate.name)
-                    .file_name()
-                    .map(|b| b.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                pre_direct,
-            ));
+            // The del_preun no-[Install] credit reads the candidate's
+            // shipped content from this package's own extraction: empty
+            // content means unknown (unextracted payload, ghost entry,
+            // unreadable file) and never credits. A shipped `.wants/`
+            // symlink naming the candidate or one of its aliases is
+            // static enablement, so it never credits either.
+            let content = pkg.read_file(&candidate.name);
+            let basename = Path::new(&candidate.name)
+                .file_name()
+                .map(|b| b.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mut names: Vec<&str> = vec![basename.as_str()];
+            if let Some(found) = aliases.get(candidate.name.as_str()) {
+                names.extend(found.iter().copied());
+            }
+            let lacks_install = !content.is_empty()
+                && !Self::has_install_section(&content)
+                && !Self::statically_wanted(&wants, &names);
+            units.push((basename, pre_direct, lacks_install));
         }
 
         // Basenames of units statically enabled by a shipped wants
@@ -265,7 +368,7 @@ impl Check for SystemdInstallCheck {
             }
         }
 
-        for (basename, pre_direct) in &units {
+        for (basename, pre_direct, lacks_install) in &units {
             for finding in Self::check_unit(
                 basename,
                 *pre_direct,
@@ -274,6 +377,7 @@ impl Check for SystemdInstallCheck {
                 &preun,
                 &postun,
                 statically_enabled.contains(basename.as_str()),
+                *lacks_install,
             ) {
                 add_info(out, Level::Warning, pkg, finding, &[basename]);
             }
@@ -387,7 +491,7 @@ mod tests {
     fn sibling_tags_ignore_bare_stems() {
         let script = "systemd-update-helper mark-install-system-units foo\n\
                       systemd-update-helper install-system-units foo\n\
-                      systemd-update-helper remove-system-units foo\n\
+                      systemd-update-helper remove-system-units foobar\n\
                       systemd-update-helper mark-restart-system-units foo";
         let missing = SystemdInstallCheck::check_unit(
             "foo.service",
@@ -880,5 +984,301 @@ mod tests {
             ),
             1
         );
+    }
+
+    /// `del_preun` credits live only on that arm: the other three arms
+    /// keep the literal-substring predicate.
+    fn missing_with(preun: &str, lacks_install: bool) -> Vec<&'static str> {
+        SystemdInstallCheck::check_unit("foo.service", true, "", "", preun, "", lacks_install)
+    }
+
+    #[test]
+    fn bare_stem_service_is_credited() {
+        let missing = missing_with("systemd-update-helper remove-system-units foo || :", false);
+        assert!(
+            !missing.contains(&"systemd-service-without-service_del_preun"),
+            "{missing:?}"
+        );
+        assert_eq!(missing.len(), 3);
+    }
+
+    #[test]
+    fn bare_stem_socket_is_not_credited() {
+        let missing = SystemdInstallCheck::check_unit(
+            "foo.socket",
+            true,
+            "",
+            "",
+            "systemd-update-helper remove-system-units foo || :",
+            "",
+            false,
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+    }
+
+    #[test]
+    fn bare_stem_target_is_not_credited() {
+        let missing = SystemdInstallCheck::check_unit(
+            "foo.target",
+            true,
+            "",
+            "",
+            "systemd-update-helper remove-system-units foo || :",
+            "",
+            false,
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+    }
+
+    #[test]
+    fn bare_stem_path_is_not_credited() {
+        let missing = SystemdInstallCheck::check_unit(
+            "foo.path",
+            true,
+            "",
+            "",
+            "systemd-update-helper remove-system-units foo || :",
+            "",
+            false,
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+    }
+
+    #[test]
+    fn longer_full_name_does_not_credit_shorter_unit() {
+        let missing = missing_with(
+            "systemd-update-helper remove-system-units foobar.service || :",
+            false,
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+    }
+
+    #[test]
+    fn longer_stem_does_not_credit_shorter_unit() {
+        let missing = missing_with(
+            "systemd-update-helper remove-system-units foobar || :",
+            false,
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+    }
+
+    #[test]
+    fn no_argument_helper_does_not_credit() {
+        // The atuin-server shape: a helper call with no unit argument
+        // removes nothing.
+        let missing = missing_with("systemd-update-helper remove-system-units || :", false);
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+    }
+
+    #[test]
+    fn quoted_bare_stem_is_credited() {
+        let missing = missing_with(
+            "systemd-update-helper remove-system-units \"foo\" || :",
+            false,
+        );
+        assert!(
+            !missing.contains(&"systemd-service-without-service_del_preun"),
+            "{missing:?}"
+        );
+    }
+
+    #[test]
+    fn stem_only_in_comment_is_not_credited() {
+        let missing = missing_with("systemd-update-helper remove-system-units bar # foo", false);
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+    }
+
+    #[test]
+    fn backslash_continuation_is_not_joined() {
+        let missing = missing_with(
+            "systemd-update-helper remove-system-units \\\nfoo.service",
+            false,
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+    }
+
+    #[test]
+    fn no_install_unit_draws_no_del_preun_but_keeps_other_tags() {
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", "", true);
+        assert!(
+            !missing.contains(&"systemd-service-without-service_del_preun"),
+            "{missing:?}"
+        );
+        assert_eq!(missing.len(), 3);
+        assert!(missing.contains(&"systemd-service-without-service_add_pre"));
+        assert!(missing.contains(&"systemd-service-without-service_add_post"));
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+    }
+
+    #[test]
+    fn install_flag_false_keeps_del_preun() {
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", "", false);
+        assert_eq!(missing.len(), 4);
+    }
+
+    #[test]
+    fn statically_wanted_matches_unit_or_alias_only() {
+        let wants: std::collections::HashSet<&str> =
+            ["foo.service", "other.service"].into_iter().collect();
+        assert!(SystemdInstallCheck::statically_wanted(
+            &wants,
+            &["foo.service"]
+        ));
+        assert!(SystemdInstallCheck::statically_wanted(
+            &wants,
+            &["real.service", "foo.service"]
+        ));
+        assert!(!SystemdInstallCheck::statically_wanted(
+            &wants,
+            &["real.service", "bar.service"]
+        ));
+        assert!(!SystemdInstallCheck::statically_wanted(
+            &wants,
+            &["foobar.service"]
+        ));
+    }
+
+    /// Run the check over a fixture opened with payload extraction, so
+    /// unit content is visible to the check.
+    fn run_extracted(rpm_name: &str) -> Vec<(String, String)> {
+        let rpm = format!(
+            "{}/../../tests/parity/pkg/inputs/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            rpm_name
+        );
+        let scratch = tempfile::tempdir().expect("scratch");
+        let pkg = Pkg::open(Path::new(&rpm), scratch.path(), true).expect("open fixture");
+        run(&pkg)
+    }
+
+    #[test]
+    fn has_install_fixture_still_fires_del_preun() {
+        // w6si.service carries [Install] and its %preun is absent: the
+        // no-[Install] credit does not apply.
+        let results = run_extracted("w6-systemd-install-1.0-1.noarch.rpm");
+        assert_eq!(results.len(), 2, "{results:?}");
+        assert!(results.iter().any(|(_, line)| {
+            line.contains("systemd-service-without-service_del_preun")
+                && line.contains("w6si.service")
+        }));
+        assert!(results.iter().any(|(_, line)| {
+            line.contains("systemd-service-without-service_del_postun")
+                && line.contains("w6si.service")
+        }));
+    }
+
+    #[test]
+    fn no_install_fixture_unit_draws_only_del_postun() {
+        // w6ni.service ships no [Install] section, w6wi.service ships
+        // one; both lack %preun/%postun. The del_preun credit applies
+        // per unit, and del_postun is untouched by it.
+        let results = run_extracted("w6-systemd-noinstall-1.0-1.noarch.rpm");
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert!(!results.iter().any(|(_, line)| {
+            line.contains("systemd-service-without-service_del_preun")
+                && line.contains("w6ni.service")
+        }));
+        assert!(results.iter().any(|(_, line)| {
+            line.contains("systemd-service-without-service_del_postun")
+                && line.contains("w6ni.service")
+        }));
+        assert!(results.iter().any(|(_, line)| {
+            line.contains("systemd-service-without-service_del_preun")
+                && line.contains("w6wi.service")
+        }));
+        assert!(results.iter().any(|(_, line)| {
+            line.contains("systemd-service-without-service_del_postun")
+                && line.contains("w6wi.service")
+        }));
+    }
+
+    /// A no-`[Install]` unit planted into an extracted fixture, so
+    /// the check reads its content from the package's own extraction.
+    /// The returned tempdir must outlive the package: it owns the
+    /// extraction directory the package reads from.
+    fn planted_pkg(files: Vec<PkgFile>, unit_name: &str) -> (Pkg, tempfile::TempDir) {
+        let rpm = format!(
+            "{}/../../tests/parity/pkg/inputs/w6-systemd-alias-1.0-1.noarch.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut pkg = Pkg::open(Path::new(&rpm), scratch.path(), true).expect("open fixture");
+        pkg.files = files;
+        let dir = pkg.extracted_dir().expect("extracted").to_path_buf();
+        let path = dir.join("usr/lib/systemd/system").join(unit_name);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &path,
+            "[Unit]\nDescription=planted\n\n[Service]\nType=oneshot\nExecStart=/bin/true\n",
+        )
+        .expect("write unit");
+        (pkg, scratch)
+    }
+
+    #[test]
+    fn planted_no_install_unit_without_wants_draws_no_del_preun() {
+        let (pkg, _scratch) = planted_pkg(
+            vec![reg(&format!("{UNIT}/planted.service"))],
+            "planted.service",
+        );
+        let results = run(&pkg);
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert_eq!(on(&results, "planted.service"), 3);
+    }
+
+    #[test]
+    fn planted_no_install_unit_with_direct_wants_still_fires_del_preun() {
+        let (pkg, _scratch) = planted_pkg(
+            vec![
+                reg(&format!("{UNIT}/planted.service")),
+                reg(&format!("{UNIT}/multi-user.target.wants/planted.service")),
+            ],
+            "planted.service",
+        );
+        let results = run(&pkg);
+        // The unit candidate keeps del_preun (static enablement), and
+        // the wants entry itself is a second candidate firing the other
+        // three findings (its add_pre is suppressed as non-direct).
+        assert_eq!(results.len(), 7, "{results:?}");
+        assert_eq!(on(&results, "planted.service"), 7);
+    }
+
+    #[test]
+    fn planted_no_install_unit_with_alias_wants_still_fires_del_preun() {
+        let (pkg, _scratch) = planted_pkg(
+            vec![
+                reg(&format!("{UNIT}/planted.service")),
+                link(&format!("{UNIT}/planted-alias.service"), "planted.service"),
+                reg(&format!(
+                    "{UNIT}/multi-user.target.wants/planted-alias.service"
+                )),
+            ],
+            "planted.service",
+        );
+        let results = run(&pkg);
+        assert_eq!(results.len(), 7, "{results:?}");
+        assert_eq!(on(&results, "planted.service"), 4);
+        assert_eq!(on(&results, "planted-alias.service"), 3);
+    }
+
+    #[test]
+    fn no_install_fixture_without_extraction_still_fires_del_preun() {
+        // Unknown content (no extraction) never credits: both fixture
+        // units fire del_preun as well as del_postun.
+        let rpm = format!(
+            "{}/../../tests/parity/pkg/inputs/w6-systemd-noinstall-1.0-1.noarch.rpm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let pkg = Pkg::open_no_extract(Path::new(&rpm)).expect("open fixture");
+        let results = run(&pkg);
+        assert_eq!(results.len(), 4, "{results:?}");
+        assert!(results.iter().any(|(_, line)| {
+            line.contains("systemd-service-without-service_del_preun")
+                && line.contains("w6ni.service")
+        }));
+        assert!(results.iter().any(|(_, line)| {
+            line.contains("systemd-service-without-service_del_preun")
+                && line.contains("w6wi.service")
+        }));
     }
 }
