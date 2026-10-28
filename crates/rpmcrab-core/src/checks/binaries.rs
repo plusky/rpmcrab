@@ -5145,7 +5145,7 @@ impl BinariesCheck {
                 );
             } else {
                 // The suggestion judges whether the distro's PIE flags
-                // reached the link, and three shapes of file carry no
+                // reached the link, and four shapes of file carry no
                 // such signal. A binary whose ELF machine is not the
                 // package architecture's own is payload built by
                 // another target's toolchain under that target's
@@ -5160,6 +5160,10 @@ impl BinariesCheck {
                 // `/usr/lib/debug/` -- is never loaded by the dynamic
                 // linker: its link shape restates the shipped image's,
                 // and a firmware debug tree's images ship only as PE.
+                // A statically linked executable -- ET_EXEC with no
+                // dynamic section -- has no dynamic link for the flags
+                // to reach: the `-pie` half of the remedy does not
+                // typecheck for a `-static` link.
                 // A listed executable (the error above) is charged
                 // regardless, and without an ELF analysis the
                 // suggestion charges as before.
@@ -5167,9 +5171,12 @@ impl BinariesCheck {
                     let host_machines = host_elf_machines(&pkg.arch);
                     let foreign_machine =
                         !host_machines.is_empty() && !host_machines.contains(&info.elf_machine);
+                    let static_exec =
+                        info.elf_type == goblin::elf::header::ET_EXEC && !info.has_dynamic;
                     foreign_machine
                         || info.ghc_comment
                         || info.is_debug
+                        || static_exec
                         || bin_name.starts_with("/usr/lib/debug/")
                 });
                 if !quiet {
@@ -15176,6 +15183,51 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn pie_suggested_quiet_for_static_exec() {
+        use goblin::elf::header::{ET_DYN, ET_EXEC};
+        let run = |elf_type: u16, has_dynamic: bool| {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let mut info = syn_info();
+            info.elf_type = elf_type;
+            info.has_dynamic = has_dynamic;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_non_pie(&pkg, "/usr/bin/probe", Some(&info), &mut out);
+            out.results().to_vec()
+        };
+        // A dynamically linked non-PIE executable still gets the
+        // suggestion.
+        assert_eq!(
+            lines_for(
+                &run(ET_EXEC, true),
+                "position-independent-executable-suggested"
+            )
+            .len(),
+            1
+        );
+        // A statically linked executable -- ET_EXEC with no dynamic
+        // section -- has no dynamic link for the flags to reach: quiet.
+        assert!(
+            lines_for(
+                &run(ET_EXEC, false),
+                "position-independent-executable-suggested"
+            )
+            .is_empty()
+        );
+        // The gate is scoped to ET_EXEC: an ET_DYN without a dynamic
+        // section still gets the suggestion.
+        assert_eq!(
+            lines_for(
+                &run(ET_DYN, false),
+                "position-independent-executable-suggested"
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
     fn non_pie_error_not_quieted_by_the_suggestion_gates() {
         // A PieExecutables-listed path is an error; the suggestion's
         // gates do not apply to it.
@@ -15187,6 +15239,7 @@ description = "explicit priority string bypasses the system crypto policy"
         info.elf_machine = EM_PPC64;
         info.ghc_comment = true;
         info.is_debug = true;
+        info.has_dynamic = false;
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_non_pie(&pkg, "/usr/bin/probe", Some(&info), &mut out);
         let results = out.results().to_vec();
