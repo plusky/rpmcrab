@@ -7628,6 +7628,43 @@ impl FilesCheck {
         in_script_path && mode_is_exec
     }
 
+    /// Whether `wrong-file-end-of-line-encoding` applies to a doc
+    /// file: its peek chunk must show an end-of-line encoding that
+    /// is wrong on Unix — CRLF line endings, or CR-only line
+    /// endings (the chunk carries carriage returns and no line
+    /// feed, so the carriage returns are the line terminators).
+    /// A carriage return inside an otherwise LF-ended file is
+    /// content (a recorded progress marker, a data byte), not an
+    /// encoding. Formats whose own specification or interpreter
+    /// makes CRLF the correct encoding are out of the finding's
+    /// scope; see `crlf_is_native`.
+    fn doc_eol_is_wrong(fname: &str, chunk: &[u8]) -> bool {
+        if Self::crlf_is_native(fname, chunk) {
+            return false;
+        }
+        chunk.windows(2).any(|w| w == b"\r\n")
+            || (chunk.contains(&b'\r') && !chunk.contains(&b'\n'))
+    }
+
+    /// Whether CRLF is the correct end-of-line encoding for a file
+    /// of this name or content: Windows batch files (the cmd.exe
+    /// interpreter expects CRLF line endings), PowerShell scripts
+    /// (the interpreter accepts CRLF, so the encoding corrupts
+    /// nothing; see `script_eol_applies`), iCalendar and mail
+    /// message files (their formats delimit lines with CRLF), and
+    /// shipped HTTP response messages (the HTTP message format
+    /// delimits its lines with CRLF; the name alone does not
+    /// decide — the content must open with the status line).
+    /// Name matching is case-insensitive.
+    fn crlf_is_native(fname: &str, chunk: &[u8]) -> bool {
+        let lower = fname.to_lowercase();
+        const CRLF_NATIVE_EXTS: [&str; 5] = [".bat", ".cmd", ".ps1", ".ics", ".eml"];
+        if CRLF_NATIVE_EXTS.iter().any(|e| lower.ends_with(e)) {
+            return true;
+        }
+        lower.ends_with(".http") && chunk.starts_with(b"HTTP/")
+    }
+
     fn check_normal_text(
         &self,
         pkg: &Pkg,
@@ -7797,7 +7834,7 @@ impl FilesCheck {
                 );
             }
         } else if is_doc && !is_match(&self.skipdocs_re, fname) {
-            if fd.chunk.contains(&b'\r') {
+            if Self::doc_eol_is_wrong(fname, &fd.chunk) {
                 add_info(
                     out,
                     Level::Warning,
@@ -20863,6 +20900,148 @@ x /etc/sysconfig/f - - - -
             flagged,
             Vec::<&str>::new(),
             "no wrong-script-end-of-line-encoding for non-scripts or batch files: {lines:?}"
+        );
+    }
+
+    fn doc_eol_flagged(pkg: &Pkg, config: &Config) -> Vec<String> {
+        let lines = script_finding_lines(pkg, config);
+        lines
+            .iter()
+            .filter(|(n, _)| n == "wrong-file-end-of-line-encoding")
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
+
+    /// Doc files whose line endings are CRLF or CR-only keep
+    /// drawing `wrong-file-end-of-line-encoding`: a uniform CRLF
+    /// file, a file whose lines end with a bare carriage return,
+    /// and an LF file carrying even a single CRLF-terminated line
+    /// all have a wrong end-of-line encoding. A native-format name
+    /// that is not the file's final suffix (.ics.txt, .bat.txt)
+    /// and an .http file that does not open with an HTTP status
+    /// line earn no credit.
+    #[test]
+    fn doc_eol_still_fires_for_wrong_encodings() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let files: [(&str, u32, &str, &[u8]); 6] = [
+            (
+                "/usr/share/doc/packages/demo/README.txt",
+                0o100644,
+                "ASCII text",
+                b"line one\r\nline two\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/MANUAL.txt",
+                0o100644,
+                "ASCII text",
+                b"line one\rline two\r",
+            ),
+            (
+                "/usr/share/doc/packages/demo/demo.cpp",
+                0o100644,
+                "ASCII text",
+                b"int a;\n#include <x>\r\nint b;\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/notes.http",
+                0o100644,
+                "ASCII text",
+                b"Notes about the protocol\r\nsecond line\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/data.ics.txt",
+                0o100644,
+                "ASCII text",
+                b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/run.bat.txt",
+                0o100644,
+                "ASCII text",
+                b"@echo off\r\necho hi\r\n",
+            ),
+        ];
+        let mut pkg = script_mode_pkg(&dir, &files);
+        pkg.doc_files = files.iter().map(|(n, _, _, _)| n.to_string()).collect();
+        let flagged = doc_eol_flagged(&pkg, &config);
+        assert_eq!(flagged.len(), files.len(), "all fire: {flagged:?}");
+        for (name, _, _, _) in &files {
+            assert!(
+                flagged.iter().any(|l| l.contains(name)),
+                "expected wrong-file-end-of-line-encoding for {name}: {flagged:?}"
+            );
+        }
+    }
+
+    /// Doc files stay silent on `wrong-file-end-of-line-encoding`
+    /// when the carriage returns are not line endings (an LF-ended
+    /// test log whose recorded output carries progress carriage
+    /// returns; a single stray carriage return in an LF file) and
+    /// when CRLF is the file format's own encoding: Windows batch
+    /// files and PowerShell scripts, iCalendar and mail message
+    /// files, and an HTTP response message shipped as a file.
+    #[test]
+    fn doc_eol_silent_for_content_cr_and_crlf_native_formats() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let files: [(&str, u32, &str, &[u8]); 8] = [
+            (
+                "/usr/share/doc/packages/demo/results.txt",
+                0o100644,
+                "ASCII text",
+                b"TEST 1/10 [x]\rPASS\nTEST 2/10 [y]\rPASS\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/changelog.txt",
+                0o100644,
+                "ASCII text",
+                b"2003-02-07\r A Name\n\n  o entry\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/install.bat",
+                0o100644,
+                "ASCII text",
+                b"@echo off\r\necho hi\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/SETUP.CMD",
+                0o100644,
+                "ASCII text",
+                b"@echo off\r\necho hi\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/deploy.ps1",
+                0o100644,
+                "ASCII text",
+                b"Write-Host hi\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/calendar.ics",
+                0o100644,
+                "ASCII text",
+                b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/letter.eml",
+                0o100644,
+                "ASCII text",
+                b"From: a@b.c\r\nSubject: hi\r\n\r\nbody\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/error.http",
+                0o100644,
+                "ASCII text",
+                b"HTTP/1.0 400 Bad request\r\nConnection: close\r\n\r\n<html>\n</html>\n",
+            ),
+        ];
+        let mut pkg = script_mode_pkg(&dir, &files);
+        pkg.doc_files = files.iter().map(|(n, _, _, _)| n.to_string()).collect();
+        let flagged = doc_eol_flagged(&pkg, &config);
+        assert_eq!(
+            flagged,
+            Vec::<String>::new(),
+            "no wrong-file-end-of-line-encoding for content CRs or CRLF-native formats: {flagged:?}"
         );
     }
 
