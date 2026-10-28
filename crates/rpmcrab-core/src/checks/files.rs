@@ -380,13 +380,20 @@ fn devel_component_regex() -> &'static Regex {
     DEVEL_COMPONENT_REGEX.get_or_init(|| Regex::new(r"(.*)-devel-").expect("static regex"))
 }
 
-/// A package name ending in a `-src` or `-sources` component
-/// (`rust1.98-src`, `erlang27-src`, `sdcc-libc-sources`) declares that
-/// the package ships source -- the same fact the devel suffix
-/// grammar's `source` alternative records in its longer spelling.
-static SRC_PACKAGE_REGEX: OnceLock<Regex> = OnceLock::new();
-fn src_package_regex() -> &'static Regex {
-    SRC_PACKAGE_REGEX.get_or_init(|| Regex::new(r"(.*)-(src|sources)$").expect("static regex"))
+/// Whether `name`'s final hyphen component is a source component:
+/// `src`, `source` or `sources`, matched case-insensitively, a bare
+/// name counting as its own final component (`rust1.98-src`,
+/// `erlang27-src`, `sdcc-libc-sources`, a bare `sources`). One
+/// grammar serves every reader of the fact -- the devel-package
+/// credit below and the source-payload gate for script interpreter
+/// findings (`script_is_source_data`) -- so the two cannot drift
+/// apart on case, the `sources` spelling or bare names.
+fn name_has_source_component(name: &str) -> bool {
+    name.rsplit('-').next().is_some_and(|c| {
+        c.eq_ignore_ascii_case("src")
+            || c.eq_ignore_ascii_case("source")
+            || c.eq_ignore_ascii_case("sources")
+    })
 }
 
 static BUILDCONFIGFILE_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -908,9 +915,11 @@ fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
 /// installed entry point's defect there. Every fact is decidable
 /// from the binary package's name and the file's path alone:
 ///
-/// - the package's name ends in a `src` or `source` hyphen
-///   component (a bare `src` or `source` name included, matched
-///   case-insensitively) -- the package exists to carry a source
+/// - the package's name ends in a source hyphen component
+///   (`src`, `source` or `sources`; a bare such name included,
+///   matched case-insensitively -- `name_has_source_component`,
+///   the grammar the devel-package credit shares) -- the package
+///   exists to carry a source
 ///   tree (the rust*-src standard-library trees, the bazel,
 ///   kafka, boringssl and other -source packages, fpc-src),
 ///   wherever in the tree the payload sits (the rust trees live
@@ -947,11 +956,7 @@ fn script_is_source_data(pkg_name: &str, fname: &str) -> bool {
     ) {
         return false;
     }
-    if pkg_name
-        .rsplit('-')
-        .next()
-        .is_some_and(|c| c.eq_ignore_ascii_case("src") || c.eq_ignore_ascii_case("source"))
-    {
+    if name_has_source_component(pkg_name) {
         return true;
     }
     // /usr/share/go/<version>/src/... -- the version component is
@@ -1897,7 +1902,6 @@ pub struct FilesCheck {
     info_re: Regex,
     devel_re: Regex,
     devel_component_re: Regex,
-    src_package_re: Regex,
     kernel_package_re: Regex,
     debuginfo_package_re: Regex,
     debugsource_package_re: Regex,
@@ -2035,7 +2039,6 @@ impl FilesCheck {
             info_re: info_regex().clone(),
             devel_re: devel_regex().clone(),
             devel_component_re: devel_component_regex().clone(),
-            src_package_re: src_package_regex().clone(),
             kernel_package_re: kernel_package_regex().clone(),
             debuginfo_package_re: debuginfo_package_regex().clone(),
             debugsource_package_re: debugsource_package_regex().clone(),
@@ -2328,17 +2331,19 @@ impl Check for FilesCheck {
         // the same component test TagsCheck applies to its
         // dependency findings, scoped to the devel keyword: a
         // `-debug-` component names a debug flavour of a runtime
-        // package, not a devel package. A final `-src`/`-sources`
-        // component declares a source package in the shorter
-        // spelling of the suffix grammar's `source` alternative.
-        // Provides names keep the suffix test: a virtual provide
-        // carrying the keyword mid-name carries no such fact.
+        // package, not a devel package. A final source component
+        // (`name_has_source_component`) declares a source package.
+        // Provides names take the suffix test plus the same
+        // source-component credit: a virtual provide carrying the
+        // devel keyword mid-name carries no such fact, but a
+        // provide whose final component is a source component
+        // declares the same source package the name form does.
         st.devel_pkg = is_match(&self.devel_re, &pkg.name)
             || is_match(&self.devel_component_re, &pkg.name)
-            || is_match(&self.src_package_re, &pkg.name);
+            || name_has_source_component(&pkg.name);
         if !st.devel_pkg {
             for p in &pkg.provides {
-                if is_match(&self.devel_re, &p.name) {
+                if is_match(&self.devel_re, &p.name) || name_has_source_component(&p.name) {
                     st.devel_pkg = true;
                     break;
                 }
@@ -14227,6 +14232,74 @@ mod tests {
                 "genuine finding lost for {name}: {results:?}"
             );
         }
+    }
+
+    #[test]
+    fn devel_file_src_credit_unified_grammar_1173() {
+        // The unified source-component grammar (issue #1173): the
+        // final component src/source/sources credits in any case,
+        // and a bare name is its own final component.
+        for name in ["foo-SRC", "foo-Sources", "foo-Source", "src", "sources"] {
+            let (mut pkg, _dir) = pkg_with_files(vec![PkgFile {
+                ..mkfile("/usr/include/foo.h", 0o100644, 82)
+            }]);
+            pkg.name = name.to_string();
+            let results = run_check_binary(&pkg);
+            assert!(
+                !results
+                    .iter()
+                    .any(|(n, _)| n == "devel-file-in-non-devel-package"),
+                "false positive in source package {name}: {results:?}"
+            );
+        }
+        // The boundary pins, re-derived from the unified grammar:
+        // an infix source component and a fused or near-miss final
+        // component carry no credit, so the finding still fires.
+        for name in ["foo-src-bar", "foo-resource", "resources", "foo-sourcesx"] {
+            let (mut pkg, _dir) = pkg_with_files(vec![PkgFile {
+                ..mkfile("/usr/include/foo.h", 0o100644, 83)
+            }]);
+            pkg.name = name.to_string();
+            let results = run_check_binary(&pkg);
+            assert!(
+                results
+                    .iter()
+                    .any(|(n, _)| n == "devel-file-in-non-devel-package"),
+                "genuine finding lost for {name}: {results:?}"
+            );
+        }
+        // Item 1: the credit reaches Provides names too -- a package
+        // providing a source-component name is a source package.
+        for provide in ["foo-src", "bar-SOURCES"] {
+            let (mut pkg, _dir) = pkg_with_files(vec![PkgFile {
+                ..mkfile("/usr/include/foo.h", 0o100644, 84)
+            }]);
+            pkg.name = "foo".to_string();
+            pkg.provides = vec![dep_named(provide)];
+            let results = run_check_binary(&pkg);
+            assert!(
+                !results
+                    .iter()
+                    .any(|(n, _)| n == "devel-file-in-non-devel-package"),
+                "false positive via provide {provide}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn script_source_gate_unified_grammar_1173() {
+        // The script gate reads the same grammar: `sources` credits
+        // now, case-insensitively, bare names included.
+        let path = "/usr/share/foo/run.py";
+        assert!(script_is_source_data("foo-sources", path));
+        assert!(script_is_source_data("foo-SRC", path));
+        assert!(script_is_source_data("sources", path));
+        // Infix and fused components carry no fact on either check.
+        assert!(!script_is_source_data("foo-src-bar", path));
+        assert!(!script_is_source_data("resource", path));
+        assert!(!script_is_source_data("my-source-tools", path));
+        // The entry-point bound is unchanged.
+        assert!(!script_is_source_data("foo-src", "/usr/bin/run.py"));
     }
 
     #[test]
