@@ -334,7 +334,21 @@ reason = "The reference charges every ELF that is not a shared object and carrie
 case = "global"
 check = "no-binary"
 kind = "behaviour"
-reason = "rpmcrab stays silent when a payload file is data in a known native-layout format (data/arch-format-magics.toml: XimC compose caches, GDBM databases), whose byte layout is bound to the architecture that wrote it, so the arch marking is deliberate; the reference reports such packages (instance: xorg-x11-libX11-ccache, boo#1110020). Corpus 2026-10-26: 1,757 arch packages report no-binary; exactly one carries such payload."
+reason = "rpmcrab stays silent when a payload file is data in a known native-layout format (data/arch-format-magics.toml: XimC compose caches, GDBM databases, glibc compiled locale files, ispell hash files), whose byte layout is bound to the architecture that wrote it, so the arch marking is deliberate; the reference reports such packages (instance: xorg-x11-libX11-ccache, boo#1110020). Corpus 2026-10-26: 1,757 arch packages report no-binary; exactly one carries an XimC or GDBM payload. Corpus 2026-10-28: of 1,756 reporting packages, 2 carry glibc locale payload (glibc-locale, glibc-locale-base) and 24 carry ispell hash payload; the glibc and ispell entries list the little-endian forms verified on x86_64 specimens, so other byte orders keep firing."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "no-binary"
+kind = "behaviour"
+reason = "rpmcrab counts a compressed kernel module toward the package binary accounting for no-binary: a regular file under /lib/modules/ or /usr/lib/modules/ whose name carries .ko plus a kernel-build compressor suffix (gz, bz2, lzma, xz, lz4, lzo, zst) is an ELF relocatable under a compressor wrapper, and the wrapper is all the magic-based binary class can see. %ghost module entries count the way binary-class ghosts count; symlinks and directory entries do not. The reference reports such packages. Corpus 2026-10-28: 12 of the 1,756 no-binary findings are module-only packages (kernel-default, kernel-longterm, kernel-kvmsmall, the signed nvidia KMPs, gasket-driver-kmp-default); the specimens nvidia.ko.zst and gasket.ko.xz decompress to ELF 64-bit LSB relocatables."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "no-binary"
+kind = "behaviour"
+reason = "rpmcrab counts a UEFI executable toward the package binary accounting for no-binary: a PE32 or PE32+ image whose subsystem is EFI is machine code bound to its target firmware architecture, and only the PE wrapper keeps it out of the ELF-based binary class. Other PE payloads (Windows DLLs, .NET assemblies) are not credited. The reference reports such packages. Corpus 2026-10-28: 13 of the 1,756 no-binary findings are packages whose only machine-code payload is UEFI executables (edk2-Shell, fwupd-efi, ipxe-bootimgs, shim, systemd-boot, the unified kernel image packages, the skelcd installer packages, installation-images-MicroOS)."
 since = "0.4.1"
 
 [[divergence]]

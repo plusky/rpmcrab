@@ -13887,6 +13887,24 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(magics.contains(&vec![0x13, 0x57, 0x9a, 0xcf]), "{magics:?}");
         assert!(magics.contains(&vec![0xce, 0x9a, 0x57, 0x13]), "{magics:?}");
         assert!(magics.contains(&vec![0x13, 0x57, 0x9a, 0xce]), "{magics:?}");
+        // glibc locale category magics, little-endian host order.
+        for m in [
+            vec![0x10, 0x11, 0x03, 0x20],
+            vec![0x11, 0x11, 0x03, 0x20],
+            vec![0x12, 0x11, 0x03, 0x20],
+            vec![0x14, 0x11, 0x03, 0x20],
+            vec![0x17, 0x10, 0x05, 0x20],
+            vec![0x17, 0x11, 0x03, 0x20],
+            vec![0x19, 0x11, 0x03, 0x20],
+            vec![0x1c, 0x11, 0x03, 0x20],
+            vec![0x1d, 0x11, 0x03, 0x20],
+            vec![0x1e, 0x11, 0x03, 0x20],
+            vec![0x1f, 0x11, 0x03, 0x20],
+            vec![0x20, 0x07, 0x09, 0x20],
+        ] {
+            assert!(magics.contains(&m), "{m:?} missing: {magics:?}");
+        }
+        assert!(magics.contains(&vec![0x02, 0x96, 0x07, 0x00]), "{magics:?}");
     }
 
     #[test]
@@ -13919,6 +13937,57 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             lines.is_empty(),
             "no-binary must stay quiet for XimC payload: {results:?}"
+        );
+    }
+
+    #[test]
+    fn no_binary_quiet_for_glibc_locale_payload() {
+        // glibc-locale shape: compiled locale files under
+        // /usr/lib/locale. Each opens with its category magic in
+        // host byte order ahead of native-word fields, and the
+        // loader accepts only the host layout, so the payload is
+        // bound to the build architecture.
+        let config = test_config();
+        for (name, magic) in [
+            ("LC_TIME", vec![0x17, 0x11, 0x03, 0x20]),
+            ("LC_CTYPE", vec![0x20, 0x07, 0x09, 0x20]),
+            ("LC_MESSAGES", vec![0x10, 0x11, 0x03, 0x20]),
+        ] {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let f = dir.path().join(name);
+            let mut bytes = magic.clone();
+            bytes.extend_from_slice(&[0u8; 60]);
+            std::fs::write(&f, &bytes).expect("write locale file");
+            let mut pf = syn_file(&format!("/usr/lib/locale/en_US/{name}"), "data");
+            pf.path = f.to_string_lossy().into_owned();
+            let pkg = synthetic_pkg("glibc-locale", "x86_64", vec![pf]);
+            let results = driver_results(&pkg, &config);
+            assert!(
+                lines_for(&results, "no-binary").is_empty(),
+                "no-binary must stay quiet for glibc locale magic {magic:?}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_binary_quiet_for_ispell_hash_payload() {
+        // ispell-* dictionary shape: the .hash file opens with the
+        // format magic in host byte order and its body is built from
+        // native-word fields, so dictionaries are rebuilt per
+        // architecture.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let f = dir.path().join("american.hash");
+        let mut bytes = vec![0x02, 0x96, 0x07, 0x00];
+        bytes.extend_from_slice(&[0u8; 60]);
+        std::fs::write(&f, &bytes).expect("write hash");
+        let mut pf = syn_file("/usr/lib/ispell/american.hash", "data");
+        pf.path = f.to_string_lossy().into_owned();
+        let pkg = synthetic_pkg("ispell-american", "x86_64", vec![pf]);
+        let results = driver_results(&pkg, &config);
+        assert!(
+            lines_for(&results, "no-binary").is_empty(),
+            "no-binary must stay quiet for ispell hash payload: {results:?}"
         );
     }
 
@@ -13963,6 +14032,8 @@ description = "explicit priority string bypasses the system crypto policy"
             ("ximc-truncated", b"Xim".to_vec()),
             ("ximc-wrong-fourth-byte", b"XimD\0\0\0\0".to_vec()),
             ("gdbm-off-by-one", vec![0xcf, 0x9a, 0x57, 0x14]),
+            ("glibc-off-by-one", vec![0x17, 0x11, 0x03, 0x21]),
+            ("ispell-off-by-one", vec![0x02, 0x96, 0x07, 0x01]),
             ("text", b"just some text\n".to_vec()),
         ] {
             let dir = tempfile::TempDir::new().expect("tmpdir");

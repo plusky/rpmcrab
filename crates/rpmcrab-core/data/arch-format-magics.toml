@@ -21,11 +21,35 @@
 # or 0x13579ace (pre-1.15), stored in host byte order ahead of native
 # int/off_t members, so both byte orders are listed.
 #
+# glibc locale evidence: the 2026-10-28 Factory census -- the
+# glibc-locale packages' /usr/lib/locale/<lang>/LC_* files (506
+# locales, 12 categories). Each file opens with its category magic
+# constant in host byte order, ahead of native-word fields, and the
+# loader accepts only the host layout; the little-endian forms are
+# the verified x86_64 specimens, other byte orders stay unlisted.
+# ispell evidence: the same census -- the 24 ispell-* dictionary
+# packages' /usr/lib/ispell/*.hash files. A hash file opens with the
+# format magic in host byte order; buildhash builds the body from
+# native-word fields, so the dictionaries are rebuilt per
+# architecture (little-endian specimen verified).
+#
+# glibc locale evidence: the 2026-10-28 Factory census -- the
+# glibc-locale packages' /usr/lib/locale/<lang>/LC_* files (506
+# locales, 12 categories). Each file opens with its category magic
+# constant in host byte order, ahead of native-word fields, and the
+# loader accepts only the host layout; the little-endian forms are
+# the verified x86_64 specimens, other byte orders stay unlisted.
+# ispell evidence: the same census -- the 24 ispell-* dictionary
+# packages' /usr/lib/ispell/*.hash files. A hash file opens with the
+# format magic in host byte order; buildhash builds the body from
+# native-word fields, so the dictionaries are rebuilt per
+# architecture (little-endian specimen verified).
+#
 # Maintenance: adding a format means adding its [[format]] entries
 # here with a verified specimen recorded in the change that adds it.
 # A stale table only ever under-exempts: an unlisted format leaves
 # `no-binary` firing, never the reverse.
-as_of = "2026-10-26"
+as_of = "2026-10-28"
 
 [[format]]
 name = "XimC"
@@ -46,3 +70,103 @@ magic = "ce9a5713"
 [[format]]
 name = "GDBM (old)"
 magic = "13579ace"
+
+[[format]]
+name = "glibc locale LC_MESSAGES"
+magic = "10110320"
+
+[[format]]
+name = "glibc locale LC_MONETARY"
+magic = "11110320"
+
+[[format]]
+name = "glibc locale LC_PAPER"
+magic = "12110320"
+
+[[format]]
+name = "glibc locale LC_NUMERIC"
+magic = "14110320"
+
+[[format]]
+name = "glibc locale LC_COLLATE"
+magic = "17100520"
+
+[[format]]
+name = "glibc locale LC_IDENTIFICATION"
+magic = "19110320"
+
+[[format]]
+name = "glibc locale LC_ADDRESS"
+magic = "1c110320"
+
+[[format]]
+name = "glibc locale LC_NAME"
+magic = "1d110320"
+
+[[format]]
+name = "glibc locale LC_MEASUREMENT"
+magic = "1e110320"
+
+[[format]]
+name = "glibc locale LC_TELEPHONE"
+magic = "1f110320"
+
+[[format]]
+name = "glibc locale LC_CTYPE"
+magic = "20070920"
+
+[[format]]
+name = "ispell hash"
+magic = "02960700"
+
+[[format]]
+name = "glibc locale LC_MESSAGES"
+magic = "10110320"
+
+[[format]]
+name = "glibc locale LC_MONETARY"
+magic = "11110320"
+
+[[format]]
+name = "glibc locale LC_PAPER"
+magic = "12110320"
+
+[[format]]
+name = "glibc locale LC_NUMERIC"
+magic = "14110320"
+
+[[format]]
+name = "glibc locale LC_COLLATE"
+magic = "17100520"
+
+[[format]]
+name = "glibc locale LC_TIME"
+magic = "17110320"
+
+[[format]]
+name = "glibc locale LC_IDENTIFICATION"
+magic = "19110320"
+
+[[format]]
+name = "glibc locale LC_ADDRESS"
+magic = "1c110320"
+
+[[format]]
+name = "glibc locale LC_NAME"
+magic = "1d110320"
+
+[[format]]
+name = "glibc locale LC_MEASUREMENT"
+magic = "1e110320"
+
+[[format]]
+name = "glibc locale LC_TELEPHONE"
+magic = "1f110320"
+
+[[format]]
+name = "glibc locale LC_CTYPE"
+magic = "20070920"
+
+[[format]]
+name = "ispell hash"
+magic = "02960700"
