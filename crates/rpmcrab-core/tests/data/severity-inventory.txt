@@ -287,6 +287,7 @@ python-missing-require = W
 python-module-def = W
 python-pyc-multiple-versions = W
 python-require-floor-below-metadata = W
+python-require-unversioned-despite-metadata-floor = W
 python-setup-install = W
 python-setup-test = W
 python-sitelib-glob-in-files = W
