@@ -7373,6 +7373,24 @@ impl FilesCheck {
         }
     }
 
+    /// Whether `fname` lies inside a SELinux policy store,
+    /// `/etc/selinux/<policy>/active/…`: the store is libsemanage's
+    /// managed area — compiled policy modules the tooling rewrites on
+    /// every semodule operation, never administrator-edited
+    /// configuration. The policy component is required: files placed
+    /// directly under `/etc/selinux/` or a policy directory do not
+    /// qualify.
+    fn selinux_policy_store_path(fname: &str) -> bool {
+        let Some(rest) = fname.strip_prefix("/etc/selinux/") else {
+            return false;
+        };
+        let mut components = rest.split('/');
+        matches!(
+            (components.next(), components.next(), components.next()),
+            (Some(policy), Some("active"), Some(_)) if !policy.is_empty()
+        )
+    }
+
     fn check_normal_non_conf_in_etc(
         &self,
         pkg: &Pkg,
@@ -7384,11 +7402,14 @@ impl FilesCheck {
         // drop-in directories managed by other tooling are exempt: the
         // reference exempts /etc/ld.so.conf.d/, and /etc/alternatives/ is
         // managed by the alternatives system (upstream rpmlint#1137).
+        // The SELinux policy store is libsemanage's managed area and is
+        // exempt for the same reason.
         if fname.starts_with("/etc/")
             && !pkgfile.is_config()
             && !pkgfile.is_ghost()
             && !fname.starts_with("/etc/ld.so.conf.d/")
             && !fname.starts_with("/etc/alternatives/")
+            && !Self::selinux_policy_store_path(fname)
         {
             add_info(out, Level::Warning, pkg, "non-conffile-in-etc", &[fname]);
         }
@@ -14574,6 +14595,66 @@ mod tests {
                 && d.contains("/etc/foo.conf")),
             "missing W-level non-conffile-in-etc on /etc/foo.conf: {results:?}"
         );
+    }
+
+    #[test]
+    fn non_conf_in_etc_selinux_store_is_exempt() {
+        // Files inside a SELinux policy store
+        // (/etc/selinux/<policy>/active/…) are libsemanage's
+        // compiled module store, not administrator configuration:
+        // no finding. Near misses must still warn: the policy-store
+        // root artefacts, the policy directory itself, and a path
+        // missing the policy component. Drive through check_binary.
+        let config = test_config();
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg =
+            Pkg::open(std::path::Path::new(&rpm), dir.path(), true).expect("open fixture");
+        let entry = |name: &str| PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode: 0o100600,
+            size: Some(100),
+            ..Default::default()
+        };
+        pkg.files = vec![
+            entry("/etc/selinux/targeted/active/modules/400/foo/cil"),
+            entry("/etc/selinux/targeted/active/policy.kern"),
+            entry("/etc/selinux/targeted/policy/policy.35"),
+            entry("/etc/selinux/targeted/semanage.conf"),
+            entry("/etc/selinux/config"),
+            entry("/etc/selinux/active/loose.cil"),
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let hits: Vec<&str> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "non-conffile-in-etc")
+            .map(|(_, d)| d.as_str())
+            .collect();
+        for store in [
+            "/etc/selinux/targeted/active/modules/400/foo/cil",
+            "/etc/selinux/targeted/active/policy.kern",
+        ] {
+            assert!(
+                !hits.iter().any(|d| d.contains(store)),
+                "false positive inside the policy store: {hits:?}"
+            );
+        }
+        for want in [
+            "/etc/selinux/targeted/policy/policy.35",
+            "/etc/selinux/targeted/semanage.conf",
+            "/etc/selinux/config",
+            "/etc/selinux/active/loose.cil",
+        ] {
+            assert!(
+                hits.iter().any(|d| d.contains(want)),
+                "missing non-conffile-in-etc on {want}: {hits:?}"
+            );
+        }
+        assert_eq!(hits.len(), 4, "hits: {hits:?}");
     }
 
     struct CountingReader {
