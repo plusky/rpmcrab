@@ -4056,6 +4056,14 @@ upstream = "https://github.com/plusky/rpmcrab/pull/1063"
 
 [[divergence]]
 case = "global"
+check = "obsolete-not-provided"
+kind = "behaviour"
+reason = "Fix-and-diverge: the verdict is run-scoped. A candidate (an Obsoletes name the package's own Provides do not carry) is credited when the run holds the build's source package — header name-version-release plus .src.rpm/.nosrc.rpm equal to the binaries' SOURCERPM — and any package of that build provides the name under its exact spelling: on such a complete build set the finding does not fire. The reference judges each package alone and fires whenever the package's own Provides lack the name, at any scope. Matching is by exact name only — a sibling Provides differing in case or in separators does not credit. On single-package and partial input every candidate fires, exactly the per-package verdict. Measured on the Factory corpus (51,589 RPMs): 2,820 findings per-package; the complete-build runs credit 85 of them (62 packages — one subpackage provides the name, sibling subpackages carry the Obsoletes), 2,735 fire in both modes and no other TagsCheck finding moves."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1031"
+
+[[divergence]]
+case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
 reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."
