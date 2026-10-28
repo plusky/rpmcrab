@@ -7687,11 +7687,16 @@ impl FilesCheck {
     /// content (a recorded progress marker, a data byte), not an
     /// encoding. Formats whose own specification or interpreter
     /// makes CRLF the correct encoding are out of the finding's
-    /// scope for the CRLF shape; see `crlf_is_native`. The credit
+    /// scope for the CRLF shape; see `crlf_is_native`. That credit
     /// does not extend to CR-only endings — no credited format
     /// terminates lines with a bare carriage return — so a CR-only
-    /// chunk fires whatever the file's name.
-    fn doc_eol_is_wrong(fname: &str, chunk: &[u8]) -> bool {
+    /// chunk fires whatever the file's name. Logs shipped by a
+    /// compiler test-results package are out of scope for every
+    /// ending shape; see `is_compiler_test_log`.
+    fn doc_eol_is_wrong(pkg_name: &str, fname: &str, chunk: &[u8]) -> bool {
+        if Self::is_compiler_test_log(pkg_name, fname) {
+            return false;
+        }
         if chunk.contains(&b'\r') && !chunk.contains(&b'\n') {
             return true;
         }
@@ -7701,12 +7706,39 @@ impl FilesCheck {
         chunk.windows(2).any(|w| w == b"\r\n")
     }
 
+    /// Whether a doc file is a test log shipped by a compiler
+    /// test-results package (named `gcc<version>-testresults`,
+    /// the version a run of ASCII digits): the package's payload
+    /// is the recorded output of the compiler's own test suites
+    /// (the ACATS report generator emits CRLF; DejaGnu logs carry
+    /// the tested programs' own line endings). The log is a byte
+    /// record of a test run — normalising its line endings would
+    /// falsify the record, and a re-run reproduces the same
+    /// bytes. The credit is the package family plus the log name:
+    /// a log shipped anywhere else, and any other file in such a
+    /// package, is judged on its own shape.
+    fn is_compiler_test_log(pkg_name: &str, fname: &str) -> bool {
+        let lower = pkg_name.to_lowercase();
+        let Some(version) = lower
+            .strip_prefix("gcc")
+            .and_then(|rest| rest.strip_suffix("-testresults"))
+        else {
+            return false;
+        };
+        if version.is_empty() || !version.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        fname.to_lowercase().ends_with(".log")
+    }
+
     /// Whether CRLF is the correct end-of-line encoding for a file
     /// of this name or content: Windows batch files (the cmd.exe
     /// interpreter expects CRLF line endings), PowerShell scripts
     /// (the interpreter accepts CRLF, so the encoding corrupts
     /// nothing; see `script_eol_applies`), iCalendar and mail
-    /// message files (their formats delimit lines with CRLF), and
+    /// message files (their formats delimit lines with CRLF),
+    /// MSBuild and Visual Studio project files (the toolchain
+    /// writes them with CRLF line endings), and
     /// shipped HTTP response messages (the HTTP message format
     /// delimits its lines with CRLF; the name alone does not
     /// decide -- the content must open with the status line,
@@ -7714,7 +7746,9 @@ impl FilesCheck {
     /// Name matching is on the final suffix, case-insensitive.
     fn crlf_is_native(fname: &str, chunk: &[u8]) -> bool {
         let lower = fname.to_lowercase();
-        const CRLF_NATIVE_EXTS: [&str; 5] = [".bat", ".cmd", ".ps1", ".ics", ".eml"];
+        const CRLF_NATIVE_EXTS: [&str; 9] = [
+            ".bat", ".cmd", ".ps1", ".ics", ".eml", ".proj", ".props", ".vcxproj", ".sln",
+        ];
         if CRLF_NATIVE_EXTS.iter().any(|e| lower.ends_with(e)) {
             return true;
         }
@@ -7892,7 +7926,7 @@ impl FilesCheck {
                 );
             }
         } else if is_doc && !is_match(&self.skipdocs_re, fname) {
-            if Self::doc_eol_is_wrong(fname, &fd.chunk) {
+            if Self::doc_eol_is_wrong(&pkg.name, fname, &fd.chunk) {
                 add_info(
                     out,
                     Level::Warning,
@@ -21533,6 +21567,174 @@ x /etc/sysconfig/f - - - -
             Vec::<String>::new(),
             "no wrong-file-end-of-line-encoding for content CRs or CRLF-native formats: {flagged:?}"
         );
+    }
+
+    /// Doc files in MSBuild and Visual Studio project formats
+    /// stay silent on `wrong-file-end-of-line-encoding`: the
+    /// toolchain writes .proj, .props, .vcxproj and .sln files
+    /// with CRLF line endings, so the encoding is the formats'
+    /// own. Matching is by final extension, case-insensitive.
+    #[test]
+    fn doc_eol_silent_for_msbuild_project_files() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let files: [(&str, u32, &str, &[u8]); 5] = [
+            (
+                "/usr/share/doc/packages/demo/build.proj",
+                0o100644,
+                "ASCII text",
+                b"<Project>\r\n</Project>\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/Directory.Build.props",
+                0o100644,
+                "ASCII text",
+                b"<Project>\r\n</Project>\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/app.vcxproj",
+                0o100644,
+                "ASCII text",
+                b"<Project>\r\n</Project>\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/APP.VCXPROJ",
+                0o100644,
+                "ASCII text",
+                b"<Project>\r\n</Project>\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/solution.sln",
+                0o100644,
+                "ASCII text",
+                b"Microsoft Visual Studio Solution File\r\n\r\n",
+            ),
+        ];
+        let mut pkg = script_mode_pkg(&dir, &files);
+        pkg.doc_files = files.iter().map(|(n, _, _, _)| n.to_string()).collect();
+        let flagged = doc_eol_flagged(&pkg, &config);
+        assert_eq!(
+            flagged,
+            Vec::<String>::new(),
+            "no wrong-file-end-of-line-encoding for MSBuild project files: {flagged:?}"
+        );
+    }
+
+    /// A name that merely resembles an MSBuild extension earns no
+    /// credit: the match is on the final extension, so a project
+    /// notes file (.proj.txt), a longer extension sharing the
+    /// letters (.project) and a suffixed name (.sln.bak) all keep
+    /// firing.
+    #[test]
+    fn doc_eol_still_fires_for_lookalike_extensions() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let files: [(&str, u32, &str, &[u8]); 3] = [
+            (
+                "/usr/share/doc/packages/demo/notes.proj.txt",
+                0o100644,
+                "ASCII text",
+                b"project notes\r\nsecond line\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/plan.project",
+                0o100644,
+                "ASCII text",
+                b"the plan\r\nsecond line\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/demo/solution.sln.bak",
+                0o100644,
+                "ASCII text",
+                b"backup copy\r\nsecond line\r\n",
+            ),
+        ];
+        let mut pkg = script_mode_pkg(&dir, &files);
+        pkg.doc_files = files.iter().map(|(n, _, _, _)| n.to_string()).collect();
+        let flagged = doc_eol_flagged(&pkg, &config);
+        assert_eq!(flagged.len(), files.len(), "all fire: {flagged:?}");
+        for (name, _, _, _) in &files {
+            assert!(
+                flagged.iter().any(|l| l.contains(name)),
+                "expected wrong-file-end-of-line-encoding for {name}: {flagged:?}"
+            );
+        }
+    }
+
+    /// Logs shipped by a compiler test-results package stay
+    /// silent on `wrong-file-end-of-line-encoding`: the files are
+    /// byte records of the compiler's own test runs, whose
+    /// generators emit CRLF (the uniform ACATS reports; DejaGnu
+    /// logs whose tested programs emitted CRLF). The credit needs
+    /// both halves of the shape — the gcc<version>-testresults
+    /// package name and a .log file name.
+    #[test]
+    fn doc_eol_silent_for_compiler_test_logs() {
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let files: [(&str, u32, &str, &[u8]); 2] = [
+            (
+                "/usr/share/doc/packages/gcc16-testresults/a22006b.log",
+                0o100644,
+                "ASCII text",
+                b"\r\n,.,. A22006B ACATS 4.2A\r\n",
+            ),
+            (
+                "/usr/share/doc/packages/gcc16-testresults/gcc.log",
+                0o100644,
+                "ASCII text",
+                b"Running target unix\noutput\r\nmore\n",
+            ),
+        ];
+        let mut pkg = script_mode_pkg(&dir, &files);
+        pkg.name = "gcc16-testresults".to_string();
+        pkg.doc_files = files.iter().map(|(n, _, _, _)| n.to_string()).collect();
+        let flagged = doc_eol_flagged(&pkg, &config);
+        assert_eq!(
+            flagged,
+            Vec::<String>::new(),
+            "no wrong-file-end-of-line-encoding for compiler test logs: {flagged:?}"
+        );
+    }
+
+    /// The test-log credit is narrow: a CRLF log in an ordinary
+    /// package, a CRLF log in another test-results family, a CRLF
+    /// text file inside a compiler test-results package, and a
+    /// log in the compiler package without the -testresults
+    /// suffix all keep firing.
+    #[test]
+    fn doc_eol_still_fires_outside_the_test_log_shape() {
+        let config = test_config();
+        let cases: [(&str, &str); 4] = [
+            ("demo", "/usr/share/doc/packages/demo/results.log"),
+            (
+                "gdb-testresults",
+                "/usr/share/doc/packages/gdb-testresults/session.log",
+            ),
+            (
+                "gcc16-testresults",
+                "/usr/share/doc/packages/gcc16-testresults/README.txt",
+            ),
+            ("gcc16", "/usr/share/doc/packages/gcc16/build.log"),
+        ];
+        for (pkg_name, fname) in cases {
+            let dir = tempfile::TempDir::new().expect("tmpdir");
+            let files: [(&str, u32, &str, &[u8]); 1] = [(
+                fname,
+                0o100644,
+                "ASCII text",
+                b"recorded output\r\nsecond line\r\n",
+            )];
+            let mut pkg = script_mode_pkg(&dir, &files);
+            pkg.name = pkg_name.to_string();
+            pkg.doc_files = vec![fname.to_string()];
+            let flagged = doc_eol_flagged(&pkg, &config);
+            assert_eq!(
+                flagged.len(),
+                1,
+                "expected wrong-file-end-of-line-encoding for {fname} in {pkg_name}: {flagged:?}"
+            );
+        }
     }
 
     // ---- license coverage (issue #1033) ----
