@@ -66,6 +66,11 @@ impl SystemdInstallCheck {
     /// unit definition systemd loads from the unit directory, so it draws
     /// no `add_pre` finding. The other three findings are evaluated for
     /// it unchanged.
+    ///
+    /// `statically_enabled` is true when the package ships a symlink
+    /// under `<unitdir>/*.wants/` resolving to this unit: systemd
+    /// enables such a unit by the symlink itself, so no install call
+    /// is owed for it.
     fn check_unit(
         basename: &str,
         pre_direct: bool,
@@ -73,8 +78,16 @@ impl SystemdInstallCheck {
         post: &str,
         preun: &str,
         postun: &str,
+        statically_enabled: bool,
     ) -> Vec<&'static str> {
         let escaped = fancy_regex::escape(basename);
+        // install-system-units itself runs `systemctl preset` on the
+        // units it is given, so a %post line that presets or enables
+        // this unit performs the same operation (enable is stronger
+        // than preset). Other verbs, other units, and %posttrans earn
+        // no credit: only the %post scriptlet is examined here.
+        let manual_re = Regex::new(&format!(r"systemctl.*\b(enable|preset)\b.*{}", escaped))
+            .expect("manual systemctl pattern");
         let patterns = [
             (
                 format!(
@@ -111,6 +124,16 @@ impl SystemdInstallCheck {
             let re = Regex::new(pattern).expect("unit pattern");
             if script.lines().any(|line| is_match(&re, line)) {
                 continue;
+            }
+            // The add_post credits apply to this arm only: the
+            // other three scriptlets keep the reference behaviour.
+            if *finding == "systemd-service-without-service_add_post" {
+                if statically_enabled {
+                    continue;
+                }
+                if script.lines().any(|line| is_match(&manual_re, line)) {
+                    continue;
+                }
             }
             // Del_postun-only credits, none of which apply to the sibling
             // tags: the reference accepts
@@ -215,8 +238,43 @@ impl Check for SystemdInstallCheck {
             ));
         }
 
+        // Basenames of units statically enabled by a shipped wants
+        // symlink: a symlink under `<unitdir>/*.wants/` whose target
+        // resolves within the package to a unit file. A regular file
+        // in a wants directory, a wants link outside the unit
+        // directory, and a link resolving to no shipped file earn no
+        // credit. Only the resolved target's basename is credited, so
+        // a wants link for another unit never credits this one.
+        let wants_prefix = format!("{}/", self.unit_dir);
+        let mut statically_enabled: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+        for file in &pkg.files {
+            if !is_symlink(file.mode) {
+                continue;
+            }
+            if !file.name.starts_with(&wants_prefix) {
+                continue;
+            }
+            if !file.name.split('/').any(|seg| seg.ends_with(".wants")) {
+                continue;
+            }
+            if let Some(target) = pkg.readlink(file) {
+                if let Some(basename) = target.name.rsplit('/').next() {
+                    statically_enabled.insert(basename);
+                }
+            }
+        }
+
         for (basename, pre_direct) in &units {
-            for finding in Self::check_unit(basename, *pre_direct, &pre, &post, &preun, &postun) {
+            for finding in Self::check_unit(
+                basename,
+                *pre_direct,
+                &pre,
+                &post,
+                &preun,
+                &postun,
+                statically_enabled.contains(basename.as_str()),
+            ) {
                 add_info(out, Level::Warning, pkg, finding, &[basename]);
             }
         }
@@ -234,20 +292,20 @@ mod tests {
                       systemd-update-helper remove-system-units foo.service\n\
                       systemd-update-helper mark-restart-system-units foo.service";
         let missing =
-            SystemdInstallCheck::check_unit("foo.service", true, script, script, script, script);
+            SystemdInstallCheck::check_unit("foo.service", true, script, script, script, script, false);
         assert!(missing.is_empty(), "{missing:?}");
     }
 
     #[test]
     fn missing_pre_is_flagged() {
-        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", "");
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", "", false);
         assert_eq!(missing.len(), 4);
         assert!(missing.contains(&"systemd-service-without-service_add_pre"));
     }
 
     #[test]
     fn postun_without_restart_is_accepted() {
-        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", ":\n");
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", ":\n", false);
         assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
         assert_eq!(missing.len(), 3);
     }
@@ -255,7 +313,8 @@ mod tests {
     #[test]
     fn postun_bare_service_stem_is_accepted() {
         let postun = "systemd-update-helper mark-restart-system-units pmcd pmlogger || :";
-        let missing = SystemdInstallCheck::check_unit("pmcd.service", true, "", "", "", postun);
+        let missing =
+            SystemdInstallCheck::check_unit("pmcd.service", true, "", "", "", postun, false);
         assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
         assert_eq!(missing.len(), 3);
     }
@@ -263,7 +322,8 @@ mod tests {
     #[test]
     fn postun_bare_instantiated_template_stem_is_accepted() {
         let postun = "systemd-update-helper mark-restart-system-units foo@bar";
-        let missing = SystemdInstallCheck::check_unit("foo@bar.service", true, "", "", "", postun);
+        let missing =
+            SystemdInstallCheck::check_unit("foo@bar.service", true, "", "", "", postun, false);
         assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
     }
 
@@ -277,6 +337,7 @@ mod tests {
             "",
             "",
             "systemd-update-helper mark-restart-system-units foobar.service",
+            false,
         );
         assert!(missing.contains(&"systemd-service-without-service_del_postun"));
         // Different suffix: marking the timer does not mark the service.
@@ -287,6 +348,7 @@ mod tests {
             "",
             "",
             "systemd-update-helper mark-restart-system-units foo.timer",
+            false,
         );
         assert!(missing.contains(&"systemd-service-without-service_del_postun"));
         // Bare names never resolve to non-service types.
@@ -297,6 +359,7 @@ mod tests {
             "",
             "",
             "systemd-update-helper mark-restart-system-units foo",
+            false,
         );
         assert!(missing.contains(&"systemd-service-without-service_del_postun"));
         // Template stem names the template, not the instance.
@@ -307,6 +370,7 @@ mod tests {
             "",
             "",
             "systemd-update-helper mark-restart-system-units foo@",
+            false,
         );
         assert!(missing.contains(&"systemd-service-without-service_del_postun"));
     }
@@ -317,8 +381,15 @@ mod tests {
                       systemd-update-helper install-system-units foo\n\
                       systemd-update-helper remove-system-units foo\n\
                       systemd-update-helper mark-restart-system-units foo";
-        let missing =
-            SystemdInstallCheck::check_unit("foo.service", true, script, script, script, script);
+        let missing = SystemdInstallCheck::check_unit(
+            "foo.service",
+            true,
+            script,
+            script,
+            script,
+            script,
+            false,
+        );
         assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
         assert!(missing.contains(&"systemd-service-without-service_add_pre"));
         assert!(missing.contains(&"systemd-service-without-service_add_post"));
@@ -506,7 +577,7 @@ mod tests {
 
     #[test]
     fn non_direct_candidate_suppresses_add_pre_only() {
-        let missing = SystemdInstallCheck::check_unit("foo.service", false, "", "", "", "");
+        let missing = SystemdInstallCheck::check_unit("foo.service", false, "", "", "", "", false);
         assert!(!missing.contains(&"systemd-service-without-service_add_pre"));
         assert!(missing.contains(&"systemd-service-without-service_add_post"));
         assert!(missing.contains(&"systemd-service-without-service_del_preun"));
@@ -519,7 +590,9 @@ mod tests {
         // The dracut shape: a direct unit-dir link to a shipped non-unit
         // file, plus the same unit name as a `.wants` enablement link.
         // The direct candidate still fires `add_pre`; the `.wants`
-        // candidate fires the other three findings unchanged.
+        // candidate fires the other three findings except `add_post`,
+        // which the shipped `.wants` symlink itself credits for both
+        // candidates (same basename).
         let pkg = alias_pkg(Some(vec![
             reg("/usr/lib/dracut/modules.d/77dracut-systemd/dracut-cmdline.service"),
             link(
@@ -532,7 +605,7 @@ mod tests {
             ),
         ]));
         let results = run(&pkg);
-        assert_eq!(results.len(), 7, "{results:?}");
+        assert_eq!(results.len(), 5, "{results:?}");
         assert_eq!(
             on_tag(
                 &results,
@@ -547,7 +620,7 @@ mod tests {
                 "systemd-service-without-service_add_post",
                 "dracut-cmdline.service"
             ),
-            2
+            0
         );
         assert_eq!(
             on_tag(
@@ -625,12 +698,183 @@ mod tests {
             ),
         ]));
         let results = run(&pkg);
-        assert_eq!(results.len(), 4, "{results:?}");
+        assert_eq!(results.len(), 3, "{results:?}");
         assert_eq!(
             on_tag(
                 &results,
                 "systemd-service-without-service_add_pre",
                 "bare720.service"
+            ),
+            1
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "bare720.service"
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn manual_preset_credits_add_post_only() {
+        let post = "/usr/bin/systemctl --no-reload preset foo.service || :";
+        let missing =
+            SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert_eq!(missing.len(), 3, "{missing:?}");
+        assert!(!missing.contains(&"systemd-service-without-service_add_post"));
+        assert!(missing.contains(&"systemd-service-without-service_add_pre"));
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+    }
+
+    #[test]
+    fn manual_enable_with_flags_credits_add_post_only() {
+        let post = "/usr/bin/systemctl --force enable foo.service || :";
+        let missing =
+            SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert_eq!(missing.len(), 3, "{missing:?}");
+        assert!(!missing.contains(&"systemd-service-without-service_add_post"));
+    }
+
+    #[test]
+    fn manual_handling_of_other_unit_does_not_credit() {
+        let post = "systemctl enable bar.service";
+        let missing =
+            SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert!(missing.contains(&"systemd-service-without-service_add_post"));
+    }
+
+    #[test]
+    fn manual_is_enabled_does_not_credit() {
+        let post = "systemctl --quiet is-enabled foo.service";
+        let missing =
+            SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert!(missing.contains(&"systemd-service-without-service_add_post"));
+    }
+
+    #[test]
+    fn static_enable_credits_add_post_only() {
+        let missing =
+            SystemdInstallCheck::check_unit("foo.service", true, "", "", "", "", true);
+        assert_eq!(missing.len(), 3, "{missing:?}");
+        assert!(!missing.contains(&"systemd-service-without-service_add_post"));
+        let missing =
+            SystemdInstallCheck::check_unit("foo.service", true, "", "", "", "", false);
+        assert_eq!(missing.len(), 4, "{missing:?}");
+    }
+
+    #[test]
+    fn wants_symlink_credits_add_post_only() {
+        let pkg = alias_pkg(Some(vec![
+            reg(&format!("{UNIT}/want720.service")),
+            link(
+                &format!("{UNIT}/multi-user.target.wants/want720.service"),
+                "../want720.service",
+            ),
+        ]));
+        let results = run(&pkg);
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "want720.service"
+            ),
+            0
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_pre",
+                "want720.service"
+            ),
+            1
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_del_preun",
+                "want720.service"
+            ),
+            1
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_del_postun",
+                "want720.service"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn wants_symlink_for_other_unit_does_not_credit() {
+        let pkg = alias_pkg(Some(vec![
+            reg(&format!("{UNIT}/want720.service")),
+            link(
+                &format!("{UNIT}/multi-user.target.wants/other720.service"),
+                "../other720.service",
+            ),
+        ]));
+        let results = run(&pkg);
+        assert_eq!(results.len(), 4, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "want720.service"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn wants_regular_file_does_not_credit() {
+        let pkg = alias_pkg(Some(vec![reg(&format!(
+            "{UNIT}/some720.service.wants/want720.service"
+        ))]));
+        let results = run(&pkg);
+        // The regular file below a `.wants` directory is not a direct
+        // candidate, so it draws no `add_pre` finding; `add_post` still
+        // fires because a regular file earns no wants credit.
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_pre",
+                "want720.service"
+            ),
+            0
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "want720.service"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn wants_symlink_outside_unit_dir_does_not_credit() {
+        let pkg = alias_pkg(Some(vec![
+            reg(&format!("{UNIT}/want720.service")),
+            link(
+                "/usr/lib/systemd/user/sockets.target.wants/want720.service",
+                "../want720.service",
+            ),
+        ]));
+        let results = run(&pkg);
+        assert_eq!(results.len(), 4, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "want720.service"
             ),
             1
         );
