@@ -8903,6 +8903,21 @@ mod tests {
             1,
             "{results:?}"
         );
+
+        // An arch the map does not know charges (issue #1174): the
+        // map is empty for it, so no file counts as foreign and the
+        // flagless shape fires both findings.
+        let results = run("xtensa", EM_X86_64);
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "{results:?}"
+        );
     }
 
     #[test]
