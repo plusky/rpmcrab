@@ -720,7 +720,10 @@ fn scan_comment_text<'a>(
                 // conditional reference (`%?name`, `%!name`) carries
                 // its sigil before the name: the sigil is consumed so
                 // the name is judged exactly as the braced form's is.
-                if matches!(bytes.get(i), Some(b'?' | b'!')) {
+                // A sigil'd name never executes, so the directive
+                // branch below requires that no sigil was present.
+                let sigil = matches!(bytes.get(i), Some(b'?' | b'!'));
+                if sigil {
                     i += 1;
                 }
                 let name_start = i;
@@ -739,6 +742,7 @@ fn scan_comment_text<'a>(
                     found.push(&text[run_start..i]);
                 }
                 if matches!(name, "define" | "global" | "undefine" | "lua" | "load")
+                    && !sigil
                     && percent_run_expands(run, 1 + expand_depth)
                     && let Some(arg_end) = bare_directive_argument(text, i)
                 {
@@ -2332,18 +2336,11 @@ impl SpecCheck {
     /// bodies silent.
     fn check_parse_time_cpu_count(&self, pkg: &SpecPkg, out: &mut Filter) {
         use librpm::build::SpecFlags;
-        // A spec whose raw text never names one of the judged macros
-        // cannot store a parse-time count through them, so the probe
-        // parse is skipped for it.
-        if !pkg.lines.iter().any(|line| {
-            line.contains("%jobs")
-                || line.contains("%{jobs")
-                || line.contains("%{?jobs")
-                || line.contains("_smp_build_ncpus")
-                || line.contains("_smp_build_nthreads")
-        }) {
-            return;
-        }
+        // No raw-text prefilter: the judged macros can also reach the
+        // parse through conditional or spaced spellings the raw lines
+        // do not literally carry, and through `%include`d files whose
+        // content is not in `pkg.lines` at all, so every spec file
+        // gets the probe parse.
         let Some(spec_file) = self.spec_file.as_deref().filter(|f| !f.is_empty()) else {
             return;
         };
@@ -2484,14 +2481,17 @@ impl SpecCheck {
     }
 
     /// Whether `line` carries `sentinel` as a token: an occurrence
-    /// flanked by non-alphanumeric characters or the line's edges.
-    /// An unrelated longer number merely containing the sentinel's
-    /// digits is not a stored expansion.
+    /// flanked by non-digit characters or the line's edges. The
+    /// sentinel is digits-only, so only a digit neighbour can extend
+    /// it into a longer number: an expansion glued to a letter (the
+    /// `-j` of a stored `%jobs` in `-j<sentinel>`) is still a stored
+    /// expansion, while an unrelated longer number merely containing
+    /// the sentinel's digits is not.
     fn sentinel_in_line(line: &str, sentinel: &str) -> bool {
         line.match_indices(sentinel).any(|(i, _)| {
-            let before_ok = i == 0 || !line.as_bytes()[i - 1].is_ascii_alphanumeric();
+            let before_ok = i == 0 || !line.as_bytes()[i - 1].is_ascii_digit();
             let end = i + sentinel.len();
-            let after_ok = end == line.len() || !line.as_bytes()[end].is_ascii_alphanumeric();
+            let after_ok = end == line.len() || !line.as_bytes()[end].is_ascii_digit();
             before_ok && after_ok
         })
     }
@@ -6081,6 +6081,18 @@ mod tests {
     }
 
     #[test]
+    fn bare_sigil_directives_do_not_execute_1229() {
+        // A sigil'd directive name is a conditional reference, not an
+        // executing directive: `# %?define ...` defines nothing, so
+        // it does not draw the executing-directive finding the bare
+        // form draws (bare_directives_in_comment_errors_482).
+        for line in ["# %?define foo 1", "# %!global foo 1", "# %?lua print(1)"] {
+            let results = run_mini(&format!("Name: foo\n{line}\n"));
+            assert!(!has(&results, "macro-in-comment"), "{line}: {results:?}");
+        }
+    }
+
+    #[test]
     fn nested_effectful_in_conditional_text_errors_1176() {
         // Item 6, settled against rpm output: rpm expands a taken
         // conditional branch's text, so the effectful forms nested
@@ -6691,6 +6703,7 @@ exit 1"#,
         // `%jobs`.
         for form in [
             "echo %jobs",
+            "make -j%jobs",
             "echo %{_smp_build_ncpus}",
             "echo %{_smp_build_nthreads}",
             "echo %{?jobs}",
@@ -6715,8 +6728,13 @@ exit 1"#,
 
         // The `%global` form of a spec's own define sits above the
         // sentinel too: the stored expansion is the spec's own value.
+        // The override is confined to `jobs`, the macro this test
+        // already sacrifices: a `%global` lands in the process-global
+        // context and outlives the parse, so overriding
+        // `_smp_build_ncpus` here would leave it redefined for later
+        // tests in the process.
         let results = run_with(
-            &cpu_count_spec("%global _smp_build_ncpus 42\n", "echo %{_smp_build_ncpus}"),
+            &cpu_count_spec("%global jobs 42\n", "echo %jobs"),
             &Config::default(),
         );
         assert!(cpu_count_lines(&results).is_empty(), "{results:?}");

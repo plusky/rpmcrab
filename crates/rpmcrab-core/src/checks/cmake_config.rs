@@ -261,7 +261,8 @@ fn expand_glob_pattern(pattern: &str, from_dir: &str) -> String {
 fn stem_mention(text: &str, stem: &str) -> bool {
     let mut from = 0;
     while let Some(pos) = text[from..].find(stem) {
-        let end = from + pos + stem.len();
+        let start = from + pos;
+        let end = start + stem.len();
         match text[end..].chars().next() {
             None => return true,
             Some(c) if !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '+') => {
@@ -269,7 +270,10 @@ fn stem_mention(text: &str, stem: &str) -> bool {
             }
             _ => {}
         }
-        from += pos + 1;
+        // Rescan from one character past the match start, not one
+        // byte: the byte after a multi-byte character's first byte
+        // is not a char boundary, and slicing there panics.
+        from = start + text[start..].chars().next().map_or(1, |c| c.len_utf8());
     }
     false
 }
@@ -921,6 +925,12 @@ mod tests {
         assert!(!stem_mention("include(FooBarTargets)", "Foo"));
         assert!(!stem_mention("include(FooTargetsExtra)", "FooTargets"));
         assert!(!stem_mention("include(FooTargets-Release)", "FooTargets"));
+        // A multi-byte stem whose first occurrence fails the
+        // delimiter test: the rescan advances by whole characters,
+        // where a one-byte advance would slice inside the character
+        // and panic.
+        assert!(!stem_mention("include(ÜberTargets)", "Über"));
+        assert!(stem_mention("include(Über)", "Über"));
     }
 
     #[test]
