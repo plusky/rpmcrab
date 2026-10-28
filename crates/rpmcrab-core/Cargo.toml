@@ -102,13 +102,13 @@ quick-xml = "0.42"
 md-5 = "0.11"
 sha1 = "0.11"
 sha2 = "0.11"
-# Local civil date for `BuildRootAndDateCheck`: the reference formats "today" with
-# `time.strftime('%b %e %Y')` (local time, C locale). `OffsetDateTime::now_local`
-# reads the system tz database via libc in-process (no subprocess);
-# `today_string` falls back to UTC when the offset cannot be determined,
-# mirroring glibc localtime with no usable TZ. `local-offset` implies `std`
-# and adds only num_threads over the already-present libc; time itself pulls
-# in deranged, powerfmt, num-conv.
+# `BuildRootAndDateCheck` computes its run day in UTC (issue #1180); the
+# reference formats "today" with `time.strftime('%b %e %Y')` in local time.
+# `local-offset` stays for the check's timezone probe test, which uses
+# `OffsetDateTime::now_local` to prove the configured zone resolved before
+# asserting the run day ignores it. `local-offset` implies `std` and adds
+# only num_threads over the already-present libc; time itself pulls in
+# deranged, powerfmt, num-conv.
 time = { version = "0.3", default-features = false, features = ["local-offset"] }
 
 # OpenPGP signature packet parsing for SignatureCheck (sequoia-openpgp's

@@ -325,7 +325,7 @@ mod tests {
             ),
             (
                 "BuildRootAndDateCheck.toml",
-                "e663906b814d43bc97c8e4a19d5004bfcd830ad75bd66aea84ebd98ac1d666af",
+                "8e11397c15b6d8655786752b36477dd47b8db77b77fa572d891c9767832dd364",
             ),
             (
                 "CheckForXinetd.toml",

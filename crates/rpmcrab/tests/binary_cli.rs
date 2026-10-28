@@ -2610,7 +2610,7 @@ fn explain_staged_build_root_and_date_check() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "file-contains-current-date:\nYour file contains the current date. Its content therefore changes with the\nbuild date, so rebuilding the same sources may not produce the same package.\n\n\n",
+        "file-contains-current-date:\nYour file contains the build's wall-clock date. Its content therefore changes\nwith the build date, so rebuilding the same sources may not produce the same\npackage. Stamp it from SOURCE_DATE_EPOCH instead of the current date.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());

@@ -215,6 +215,50 @@ pub fn is_64bit_arch(arch: &str) -> bool {
     )
 }
 
+/// The package's `SOURCE_DATE_EPOCH`, when one is in effect.
+///
+/// Sourcing order (issue #1180): the package header wins. Under the
+/// Factory build configuration (`%use_source_date_epoch_as_buildtime Y`
+/// together with `%_buildhost reproducible`) BUILDTIME is the package's
+/// own SDE, and the header value is per-package where the environment
+/// variable applies to every package in a run. When the header route
+/// does not apply, fall back to `$SOURCE_DATE_EPOCH` from the linter's
+/// environment. When neither is available there is no SDE in effect and
+/// callers keep their default behaviour.
+pub fn source_date_epoch(pkg: &Pkg) -> Option<time::OffsetDateTime> {
+    sde_from_parts(
+        pkg.tag_str(librpm::Tag::BUILDHOST).as_deref(),
+        pkg.tag_i64(librpm::Tag::BUILDTIME),
+        env_source_date_epoch(),
+    )
+}
+
+/// The pure sourcing rule behind [`source_date_epoch`]: BUILDTIME counts
+/// as SDE only when BUILDHOST is exactly `reproducible`; in every other
+/// case the environment value (already parsed, `None` when unset) rules.
+fn sde_from_parts(
+    buildhost: Option<&str>,
+    buildtime: Option<i64>,
+    env_sde: Option<i64>,
+) -> Option<time::OffsetDateTime> {
+    let epoch = match (buildhost, buildtime) {
+        (Some("reproducible"), Some(buildtime)) => Some(buildtime),
+        _ => env_sde,
+    };
+    epoch.and_then(|e| time::OffsetDateTime::from_unix_timestamp(e).ok())
+}
+
+/// `$SOURCE_DATE_EPOCH` from the environment, parsed once per process.
+/// A value that is not an integer epoch is ignored, as if unset.
+fn env_source_date_epoch() -> Option<i64> {
+    static ENV_SDE: OnceLock<Option<i64>> = OnceLock::new();
+    *ENV_SDE.get_or_init(|| {
+        std::env::var("SOURCE_DATE_EPOCH")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +434,51 @@ mod tests {
             "unexpected postun-without-ldconfig: {names:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod sde_tests {
+    use super::sde_from_parts;
+
+    // 2026-10-28 09:30:00 UTC.
+    const SDE: i64 = 1_793_179_800;
+
+    #[test]
+    fn reproducible_header_wins_over_env() {
+        let got = sde_from_parts(Some("reproducible"), Some(SDE), Some(1)).unwrap();
+        assert_eq!(got.unix_timestamp(), SDE);
+        assert_eq!((got.hour(), got.minute(), got.second()), (9, 30, 0));
+    }
+
+    #[test]
+    fn reproducible_header_without_env() {
+        let got = sde_from_parts(Some("reproducible"), Some(SDE), None).unwrap();
+        assert_eq!(got.unix_timestamp(), SDE);
+    }
+
+    #[test]
+    fn other_buildhost_falls_back_to_env() {
+        // A BUILDTIME under any other BUILDHOST is a wall-clock build
+        // time, not SDE: the environment value rules.
+        let got = sde_from_parts(Some("buildhost.example"), Some(SDE), Some(42)).unwrap();
+        assert_eq!(got.unix_timestamp(), 42);
+    }
+
+    #[test]
+    fn reproducible_without_buildtime_falls_back_to_env() {
+        let got = sde_from_parts(Some("reproducible"), None, Some(42)).unwrap();
+        assert_eq!(got.unix_timestamp(), 42);
+    }
+
+    #[test]
+    fn no_source_no_sde() {
+        assert!(sde_from_parts(Some("buildhost.example"), Some(SDE), None).is_none());
+        assert!(sde_from_parts(None, None, None).is_none());
+    }
+
+    #[test]
+    fn out_of_range_epoch_is_no_sde() {
+        assert!(sde_from_parts(Some("reproducible"), Some(i64::MAX), None).is_none());
     }
 }
