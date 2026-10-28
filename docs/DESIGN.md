@@ -458,7 +458,7 @@ was verified against upstream history and Factory content (issue #714):
 |---|-----------|---------|--------|
 | 1 | `post-without-tmpfile-creation` (new W finding) | **REJECTED** | Removed upstream in 2025-12-09 (issue #1374): the `%tmpfiles` macro is now a noop via systemd triggers; the check fires false positives on correct packages. SLFO branches are stale. Do not implement. |
 | 2 | `binary-in-etc` flags `/usr/etc/` | **REJECTED** | The `/usr/etc/` coverage was added to opensuse on 2025-06-06 (mgerstner PR #1357), after the SLFO branches forked (2025-02-04). SLFO is stale; the opensuse behavior is correct. Do not gate. |
-| 3 | `file-contains-date-and-time` / `file-contains-current-date` W→E | **APPROVED** | Build dates embedded in shipped files break the reproducibility image-based installs rely on. Measured over the Factory corpus (issue #759): 578 firings in 259 srcpkgs; a 25-firing hand audit found 23 genuine build-date stamps and 2 bounded release-day cases (0.35% of firings). Both findings are Error under every flavour: the promotion is unconditional. |
+| 3 | `file-contains-date-and-time` / `file-contains-current-date` W→E | **REVERSED** (issue #1180) | The promotion's Factory measurement (issue #759) did not use the check's read path: it counted ELF `__DATE__`/`__TIME__` stamps the check can never see (its read path yields no content for non-UTF-8 files) and stamps honouring SOURCE_DATE_EPOCH. Issue #1180 restores W under every flavour and exempts a package's own SOURCE_DATE_EPOCH stamps. |
 | 4 | LogrotateCheck drops `/usr/etc/logrotate.d/` | **REJECTED** | Same staleness as #2: `/usr/etc/` support added to opensuse after the SLFO fork. Do not gate. |
 
 `missing-call-to-setgroups-before-setuid` carries a uniform `W` in

@@ -70,9 +70,10 @@ emitting check's file in `crates/rpmcrab-core/data/divergences/`
 The SLFO-branch audit (§4.11, issue #714) verified each candidate
 divergence against upstream history and Factory content. The date
 findings (`file-contains-date-and-time`, `file-contains-current-date`)
-are Error under every flavour (issue #759): build dates in shipped
-files break the reproducibility image-based installs rely on, and the
-Factory measurement (578 firings in 259 srcpkgs, hand-audited)
-supports the unconditional promotion. `AtomicUpdateCheck` runs in the
+are Warning under every flavour: the audit's promotion to Error
+(issue #759) was reversed by issue #1180, whose re-measurement uses
+the check's own read path — the #759 count included ELF stamps that
+path can never see, and stamps honouring SOURCE_DATE_EPOCH, which the
+findings now exempt. `AtomicUpdateCheck` runs in the
 bundled defaults and in the vendored config (issue #698):
 transactional updates are mandatory for the whole SUSE family.
