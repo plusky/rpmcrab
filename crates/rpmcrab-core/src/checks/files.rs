@@ -2545,10 +2545,10 @@ impl Check for FilesCheck {
             }
         }
         // The run-scoped `python-bytecode-without-source` decision:
-        // a candidate is credited only when its build is complete in
-        // this run -- the run holds the build's source package -- and
-        // a package of the run ships the file the source symlink
-        // resolves to, under a `.py` name. Every other candidate
+        // A candidate is credited only when the run holds the build's
+        // source package (source presence only, matched by header
+        // identity) and a package of the run ships the file the source
+        // symlink resolves to, under a `.py` name. Every other candidate
         // fires, so partial and single-package runs report exactly
         // the per-package verdict.
         for cand in &self.bytecode_candidates {
