@@ -503,10 +503,14 @@ mod tests {
 
     #[test]
     fn warning_only_checks_report_warning_max_severity() {
-        // Every `add_info` call site in these six passes `Level::Warning`
+        // Every `add_info` call site in these seven passes `Level::Warning`
         // (verified by audit); the annotation must match or `--errors-only`
         // would wrongly keep them.
         let config = Config::default();
+        assert_eq!(
+            crate::checks::cmake_config::CMakeConfigCheck::new(&config).max_severity(),
+            Level::Warning
+        );
         assert_eq!(
             crate::checks::bashisms::BashismsCheck::new(&config).max_severity(),
             Level::Warning
