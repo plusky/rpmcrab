@@ -5979,10 +5979,17 @@ impl FilesCheck {
             .rsplit('/')
             .next()
             .is_some_and(|c| c.starts_with('.') && fname.contains('/'));
+        // /usr/etc/skel/ is the same skeleton directory on usrmerge
+        // layouts, where the skeleton payload ships at the /usr path.
+        // .cargo_vcs_info.json is the second metadata file cargo writes
+        // into a vendored crate tree, next to .cargo-checksum.json: it
+        // records the upstream VCS revision of the vendored sources.
         if is_hidden
             && !fname.starts_with("/etc/skel/")
+            && !fname.starts_with("/usr/etc/skel/")
             && !fname.ends_with("/.build-id")
             && !fname.ends_with("/.cargo-checksum.json")
+            && !fname.ends_with("/.cargo_vcs_info.json")
         {
             add_info(out, Level::Warning, pkg, "hidden-file-or-dir", &[fname]);
         }
@@ -8784,6 +8791,60 @@ mod tests {
             .collect();
         for (name, want) in &extra {
             let got = flagged.iter().any(|f| f.contains(name));
+            assert_eq!(
+                got, *want,
+                "hidden-file-or-dir for {name}: want flagged={want}, got lines {flagged:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_file_or_dir_skel_usrmerge_and_cargo_vcs_info() {
+        // The /etc/skel/ exception covers the same skeleton directory at
+        // its usrmerge location /usr/etc/skel/: the dotfiles there are
+        // the shipped product (a new account's initial home content).
+        // The /.cargo-checksum.json exception extends to the second
+        // cargo metadata file, /.cargo_vcs_info.json, which cargo writes
+        // next to the checksum file in vendored crate trees and which
+        // records the vendored sources' upstream VCS revision. Both
+        // credits are exact-shape: a lookalike prefix or an extended
+        // suffix keeps firing.
+        let extra = [
+            ("/usr/etc/skel/.bashrc", false), // skeleton file, usrmerge path
+            ("/usr/etc/skel/.config", false), // skeleton dir, usrmerge path
+            ("/usr/lib64/crates/foo-1.2.3/.cargo_vcs_info.json", false), // vendored crate metadata
+            ("/usr/share/doc/pkg/.cargo_vcs_info.json", false), // name-exact, as the checksum file
+            ("/usr/etc/skel-other/.bashrc", true), // prefix must end at the slash
+            ("/usr/etc/skell/.profile", true), // lookalike prefix
+            ("/usr/lib64/crates/foo-1.2.3/.cargo_vcs_info.json.bak", true), // suffix must be exact
+            ("/usr/lib64/crates/foo-1.2.3/.cargo_vcs_info", true), // truncated name
+        ];
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = extra
+            .iter()
+            .map(|(name, _)| PkgFile {
+                name: (*name).to_string(),
+                path: (*name).to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let flagged: Vec<&str> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "hidden-file-or-dir")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        for (name, want) in &extra {
+            // Suffix match, not substring match: the firing .json.bak
+            // line contains the credited .cargo_vcs_info.json path as a
+            // substring, so a substring test cannot tell them apart.
+            let got = flagged.iter().any(|f| f.ends_with(name));
             assert_eq!(
                 got, *want,
                 "hidden-file-or-dir for {name}: want flagged={want}, got lines {flagged:?}"
