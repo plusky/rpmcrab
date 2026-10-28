@@ -306,6 +306,41 @@ impl ZipCheck {
                 }
             }
         }
+        // `.class` entries: header validation, corrupt/truncated
+        // only. Names are collected positionally like the CRC pass,
+        // so an entry whose name fails to decode still holds its
+        // position (it cannot end in `.class` under the fallback, so
+        // it is skipped). An entry that fails to read is skipped:
+        // the CRC pass above already reported it.
+        let names: Vec<String> = (0..archive.len())
+            .map(|index| {
+                archive
+                    .name_for_index(index)
+                    .and_then(|name| name.ok())
+                    .map(|name| name.into_owned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        for (index, name) in names.iter().enumerate() {
+            if !name.ends_with(".class") {
+                continue;
+            }
+            let mut head = Vec::new();
+            let read = match archive.by_index(index) {
+                Ok(entry) => entry.take(8).read_to_end(&mut head),
+                Err(_) => continue,
+            };
+            if read.is_err() {
+                continue;
+            }
+            if let Some(detail) = crate::checks::shared::class_header_detail(&head) {
+                out.push((
+                    Level::Warning,
+                    "corrupt-class-file",
+                    vec![format!("{fname}: {name}"), detail],
+                ));
+            }
+        }
         out
     }
 }
@@ -528,7 +563,7 @@ mod tests {
             &[
                 (
                     "A.class",
-                    b"fake class data",
+                    b"\xCA\xFE\xBA\xBE\x00\x00\x00\x34fake-class-body",
                     zip::CompressionMethod::Deflated,
                 ),
                 (
@@ -549,7 +584,7 @@ mod tests {
         let bytes = build_zip(
             &[(
                 "A.class",
-                b"fake class data",
+                b"\xCA\xFE\xBA\xBE\x00\x00\x00\x34fake-class-body",
                 zip::CompressionMethod::Deflated,
             )],
             Some("Manifest-Version: 1.0\nClass-Path: lib/dep.jar\n"),
@@ -569,7 +604,7 @@ mod tests {
         let mut bytes = build_zip(
             &[(
                 "A.class",
-                b"fake class data",
+                b"\xCA\xFE\xBA\xBE\x00\x00\x00\x34fake-class-body",
                 zip::CompressionMethod::Deflated,
             )],
             Some(manifest),
@@ -594,7 +629,7 @@ mod tests {
         let bytes = build_zip(
             &[(
                 "A.class",
-                b"fake class data",
+                b"\xCA\xFE\xBA\xBE\x00\x00\x00\x34fake-class-body",
                 zip::CompressionMethod::Deflated,
             )],
             Some("Manifest-Version: 1.0\n"),
@@ -867,7 +902,7 @@ mod tests {
             &[
                 (
                     "A.class",
-                    b"fake class data",
+                    b"\xCA\xFE\xBA\xBE\x00\x00\x00\x34fake-class-body",
                     zip::CompressionMethod::Deflated,
                 ),
                 (
@@ -896,7 +931,7 @@ mod tests {
         let bytes = build_zip(
             &[(
                 "A.class",
-                b"fake class data",
+                b"\xCA\xFE\xBA\xBE\x00\x00\x00\x34fake-class-body",
                 zip::CompressionMethod::Deflated,
             )],
             Some(&text),
@@ -904,5 +939,89 @@ mod tests {
         let path = write_fixture(dir.path(), "a.jar", &bytes);
         let findings = ZipCheck::inspect(&path, "a.jar");
         assert_eq!(fixture_names(&findings), vec!["class-path-in-manifest"]);
+    }
+
+    #[test]
+    fn class_entries_in_jar_fire_on_bad_magic_and_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = build_zip(
+            &[
+                (
+                    "com/example/Good.class",
+                    b"\xCA\xFE\xBA\xBE\x00\x00\x00\x34good-body",
+                    zip::CompressionMethod::Deflated,
+                ),
+                (
+                    "com/example/Bad.class",
+                    b"NOPE-not-a-class-file-body",
+                    zip::CompressionMethod::Stored,
+                ),
+                (
+                    "com/example/Short.class",
+                    b"\xCA\xFE\xBA\xBE\x00",
+                    zip::CompressionMethod::Stored,
+                ),
+                (
+                    "com/example/Old.class",
+                    b"\xCA\xFE\xBA\xBE\x00\x00\x00\x2Bold-body",
+                    zip::CompressionMethod::Stored,
+                ),
+                (
+                    "com/example/data.bin",
+                    b"NOPE-not-a-class-file-body",
+                    zip::CompressionMethod::Stored,
+                ),
+            ],
+            None,
+        );
+        let path = write_fixture(dir.path(), "a.jar", &bytes);
+        let findings = ZipCheck::inspect(&path, "a.jar");
+        let class: Vec<&(Level, &'static str, Vec<String>)> = findings
+            .iter()
+            .filter(|(_, n, _)| *n == "corrupt-class-file")
+            .collect();
+        assert_eq!(
+            class.len(),
+            2,
+            "only the bad and short classes: {findings:?}"
+        );
+        assert_eq!(class[0].0, Level::Warning);
+        assert_eq!(
+            class[0].2,
+            vec![
+                "a.jar: com/example/Bad.class".to_string(),
+                "bad magic".to_string()
+            ]
+        );
+        assert_eq!(
+            class[1].2,
+            vec![
+                "a.jar: com/example/Short.class".to_string(),
+                "truncated header: 5 bytes".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn class_entries_in_plain_zip_fire_like_jar_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = build_zip(
+            &[(
+                "Bad.class",
+                b"NOPE-not-a-class-file-body",
+                zip::CompressionMethod::Stored,
+            )],
+            None,
+        );
+        let path = write_fixture(dir.path(), "a.zip", &bytes);
+        let findings = ZipCheck::inspect(&path, "a.zip");
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|(_, n, _)| *n == "corrupt-class-file")
+                .count(),
+            1,
+            "a .class entry in a plain zip is a class file: {findings:?}"
+        );
     }
 }

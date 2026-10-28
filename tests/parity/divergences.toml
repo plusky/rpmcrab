@@ -2379,6 +2379,14 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "FilesCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1224): a new `corrupt-class-file` warning fires when a shipped regular `.class` payload file has a corrupt or truncated 8-byte header: bad magic (first four bytes not `CAFEBABE`) or fewer than 8 bytes actually read. Only the header is judged: the major version is not floored, since no openSUSE policy floor exists for it. Classes inside archives are judged by the archive check, not here. The frozen 2.10.0 reference has no such check."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1224"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
@@ -4239,6 +4247,14 @@ kind = "behaviour"
 reason = "An entry whose compression method the reader cannot inflate (the reader supports stored and deflate only; e.g. zstd, method 93) is reported unable-to-read-zip (W), aborting the file, where the pre-change port charged it bad-crc-in-zip (E): no CRC verdict exists in this reader for an entry it cannot inflate, corrupt or not, so a corrupt unsupported-method entry is W here regardless of its stored CRC. Against the reference the split is codec-dependent: on a Python without the codec, testzip() raises NotImplementedError (a RuntimeError subclass) and ZipCheck's outer handler reports the same W; on a Python with the codec (zstd ships with Python 3.14+) the reference verifies the entry and stays silent or reports bad-crc-in-zip (E). Measured on Factory: taisei-data 1.4.6-1.1 ships two archives carrying zstd-method entries — /usr/share/taisei/00-taisei.zip (239 of 1,090 entries) and /usr/share/taisei/10-l10n.zip (3 of 10 entries) — and 7z t verifies both archives intact (Everything is Ok); both fired bad-crc-in-zip before this change."
 since = "0.4.1"
 upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/ZipCheck.py"
+
+[[divergence]]
+case = "global"
+check = "ZipCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1224): a new `corrupt-class-file` warning fires when a `.class` entry of a zip-family archive (zip, jar, war, ear) has a corrupt or truncated 8-byte header: bad magic (first four bytes not `CAFEBABE`) or fewer than 8 bytes actually read. Entries that fail to read are skipped: the CRC pass above already reported them. The major version is not floored: no openSUSE policy floor exists for it, so a well-formed header at any major stays quiet. The frozen 2.10.0 reference has no such check."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1224"
 
 [[divergence]]
 case = "global"

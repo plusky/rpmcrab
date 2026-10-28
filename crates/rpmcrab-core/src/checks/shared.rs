@@ -389,9 +389,53 @@ pub fn is_64bit_arch(arch: &str) -> bool {
     )
 }
 
+/// The header defect of a Java class file, judged on the first
+/// bytes actually read: fewer than 8 bytes is a truncated header,
+/// any other first four bytes are bad magic (`CAFEBABE`).
+/// The major version at bytes 6-7 is deliberately not judged here:
+/// no openSUSE policy floor exists for it, so a well-formed header
+/// at any major version is quiet on this predicate.
+pub(crate) fn class_header_detail(head: &[u8]) -> Option<String> {
+    if head.len() < 8 {
+        Some(format!("truncated header: {} bytes", head.len()))
+    } else if head[..4] != [0xCA, 0xFE, 0xBA, 0xBE] {
+        Some("bad magic".to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn class_header_detail_judges_magic_and_length_only() {
+        assert_eq!(
+            class_header_detail(b""),
+            Some("truncated header: 0 bytes".to_string())
+        );
+        assert_eq!(
+            class_header_detail(b"\xCA\xFE\xBA\xBE\x00\x00"),
+            Some("truncated header: 6 bytes".to_string())
+        );
+        assert_eq!(
+            class_header_detail(b"\xCA\xFE\xBA\xBD\x00\x00\x00\x34"),
+            Some("bad magic".to_string())
+        );
+        assert_eq!(
+            class_header_detail(b"\xCA\xFE\xBA\xBE\x00\x00\x00\x34"),
+            None
+        );
+        assert_eq!(
+            class_header_detail(b"\xCA\xFE\xBA\xBE\x00\x00\x00\x2B"),
+            None
+        );
+        assert_eq!(
+            class_header_detail(b"\xCA\xFE\xBA\xBE\x00\x00\x00\xFF"),
+            None
+        );
+    }
 
     use crate::check::Check;
     use crate::checks::files::FilesCheck;
