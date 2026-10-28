@@ -1410,11 +1410,11 @@ impl PythonCheck {
     /// requirements, and end the list at that nesting level.
     fn split_rich_atoms(req_name: &str) -> Vec<String> {
         let mut out = Vec::new();
-        Self::split_rich_into(req_name.trim(), &mut out);
+        Self::split_rich_into(req_name.trim(), &mut out, 0);
         out
     }
 
-    fn split_rich_into(s: &str, out: &mut Vec<String>) {
+    fn split_rich_into(s: &str, out: &mut Vec<String>, nesting: usize) {
         let mut atoms = Vec::new();
         let mut depth = 0i32;
         let mut current = String::new();
@@ -1466,8 +1466,8 @@ impl PythonCheck {
                         _ => {}
                     }
                 }
-                if spans {
-                    Self::split_rich_into(inner.trim(), out);
+                if spans && nesting < crate::pkg::dep::MAX_RICH_DEP_DEPTH {
+                    Self::split_rich_into(inner.trim(), out, nesting + 1);
                     continue;
                 }
             }
@@ -1517,6 +1517,19 @@ impl PythonCheck {
         None
     }
 
+    /// The full capability a require leaf names. Rich-expression
+    /// leaves split the name from its qualifier
+    /// (`python3.13dist` / `dulwich`), while a plain header leaf
+    /// keeps the whole spelling in its name; reconstruct the
+    /// `name(qualifier)` form for the split shape so classification
+    /// sees the capability it would see in the plain shape.
+    fn leaf_capability(leaf: &crate::pkg::dep::DepLeaf) -> String {
+        match &leaf.qualifier {
+            Some(q) if !leaf.name.contains('(') => format!("{}({})", leaf.name, q),
+            _ => leaf.name.clone(),
+        }
+    }
+
     /// The inner name of a `python3.Xdist(<name>)` capability, if the
     /// string has that shape.
     fn dist_provide_inner(name: &str) -> Option<&str> {
@@ -1544,7 +1557,7 @@ impl PythonCheck {
         let mut highest: Option<(Pep440Version, String)> = None;
         for dep in pkg.requires.iter().chain(&pkg.prereq) {
             for leaf in dep.leaves() {
-                if Self::classify_atom(&leaf.name, &variants).is_none() {
+                if Self::classify_atom(&Self::leaf_capability(&leaf), &variants).is_none() {
                     continue;
                 }
                 any_match = true;
@@ -2869,6 +2882,48 @@ mod tests {
             line,
             "python-test.noarch: W: python-require-floor-below-metadata dulwich metadata-floor 0.22 rpm-floor 0.21"
         );
+    }
+
+    #[test]
+    fn floor_rich_dist_require_below_metadata_fires() {
+        // Rich leaves split the capability name from its qualifier,
+        // so the floor check must reconstruct
+        // `python3.13dist(dulwich)` before classifying; the bare
+        // name alone never matches and the canonical floored rich
+        // shape stayed quiet below the metadata floor.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec![
+                "(python3.13dist(dulwich) >= 0.21 or python3.13dist(dulwich) >= 0.21)".to_string(),
+            ];
+            pkg.requires = vec![dep(
+                "(python3.13dist(dulwich) >= 0.21 or python3.13dist(dulwich) >= 0.21)",
+                0,
+                None,
+            )];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-require-floor-below-metadata");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            "python-test.noarch: W: python-require-floor-below-metadata dulwich metadata-floor 0.22 rpm-floor 0.21"
+        );
+    }
+
+    #[test]
+    fn split_rich_atoms_deeply_nested_beyond_depth_budget_returns() {
+        // A crafted deeply nested require must not recurse without
+        // bound and abort the run: past the shared rich-depth
+        // budget the remaining group is kept as a leaf atom.
+        let nested = format!(
+            "{}python3.13dist(dulwich){}",
+            "(".repeat(200),
+            ")".repeat(200)
+        );
+        let atoms = PythonCheck::split_rich_atoms(&nested);
+        assert!(!atoms.is_empty(), "atoms: {atoms:?}");
     }
 
     #[test]
