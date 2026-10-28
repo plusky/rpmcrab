@@ -3126,7 +3126,7 @@ fn fillup_template_without_call_reports(pkg: &Pkg) -> Vec<FillupTemplateReport> 
     let calls_fillup = crate::pkg::SCRIPT_TAGS.iter().any(|(tag, _, _)| {
         pkg.tag_str_array(*tag)
             .iter()
-            .any(|body| is_match(fillup_invocation_re(), body))
+            .any(|body| scriptlet_invokes_fillup(body))
     });
     if calls_fillup {
         return Vec::new();
@@ -19014,6 +19014,27 @@ x /etc/sysconfig/f - - - -
                 b.post_install_script(
                     "/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo\n",
                 );
+            },
+        );
+        assert!(fillup_findings(&pkg).is_empty());
+    }
+
+    #[test]
+    fn fillup_macro_only_call_is_quiet() {
+        // A scriptlet that invokes fillup only through the literal
+        // macro (an unexpanded build) calls fillup just the same:
+        // the defect helper shares the discouraged check's
+        // invocation predicate, macros included.
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\n";
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[
+                ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                ("/usr/lib/systemd/system/demo.service", unit),
+            ],
+            &[],
+            &|b| {
+                b.post_install_script("%fillup_only -n demo\n");
             },
         );
         assert!(fillup_findings(&pkg).is_empty());
