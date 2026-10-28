@@ -5643,17 +5643,19 @@ impl BinariesCheck {
         let is_rust = info.is_rust_binary();
         let is_haskell = info.is_haskell_binary();
         let is_ocaml = info.is_ocaml_binary();
-        // The two compile-time findings judge code built for the
-        // package's own architecture: a foreign-machine binary (a
+        // The two compile-time findings judge code this distro's
+        // toolchain built: a binary for a different ISA family (a
         // cross-compiler's target libraries, payload for another
         // target) is built by that target's toolchain under that
         // target's flags, so this distro's `%{optflags}` story does
-        // not apply to it -- the host gate
-        // `check_binary_without_debuginfo` applies to its finding.
-        // An unmapped package arch charges, as there.
-        let host_machines = host_elf_machines(&pkg.arch);
-        let foreign_machine =
-            !host_machines.is_empty() && !host_machines.contains(&info.elf_machine);
+        // not apply to it. The test is the ISA-family test
+        // `foreign_elf_machine` the other foreign gates use: a
+        // same-family binary at a different width (a 32-bit EM_386
+        // binary in an x86_64 package) is code the same build
+        // produced for a sibling target under this distro's flags
+        // and charges; an unmapped package arch or an unclassified
+        // machine charges, since the gate cannot classify the file.
+        let foreign_machine = foreign_elf_machine(info.elf_machine, &pkg.arch);
         // A GHC producer stamp in .comment marks Haskell output the
         // libHS* signals cannot see: a statically linked runtime
         // carries no libHS* reference. GHC emits neither
@@ -8953,7 +8955,7 @@ mod tests {
 
     #[test]
     fn hardening_foreign_machine_quiet_for_compile_time_findings() {
-        use goblin::elf::header::{EM_AARCH64, EM_PPC64, EM_X86_64};
+        use goblin::elf::header::{EM_386, EM_AARCH64, EM_ARM, EM_PPC64, EM_X86_64};
         let run = |arch: &str, machine: u16| {
             let config = test_config();
             let check = BinariesCheck::with_tool_dir(&config, None);
@@ -8996,6 +8998,35 @@ mod tests {
         );
         assert_eq!(lines_for(&results, "missing-relro").len(), 1, "{results:?}");
 
+        // A same-family binary at a different width charges: a
+        // 32-bit EM_386 binary in an x86_64 package is code the same
+        // build produced for a sibling target under this distro's
+        // flags, not foreign payload (issue #1174).
+        let results = run("x86_64", EM_386);
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "{results:?}"
+        );
+
+        // The AArch32-in-aarch64 shape of the same rule.
+        let results = run("aarch64", EM_ARM);
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "{results:?}"
+        );
+
         // A machine that is the package arch's own is not foreign.
         let results = run("aarch64", EM_AARCH64);
         assert_eq!(
@@ -9009,10 +9040,24 @@ mod tests {
             "{results:?}"
         );
 
-        // An arch the map does not know charges (issue #1174): the
-        // map is empty for it, so no file counts as foreign and the
-        // flagless shape fires both findings.
+        // An arch the family map does not know charges (issue
+        // #1174): no file counts as foreign for it and the flagless
+        // shape fires both findings.
         let results = run("xtensa", EM_X86_64);
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "{results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "{results:?}"
+        );
+
+        // A machine no family classifies charges the same way: the
+        // gate cannot classify the file (EM_AMDGPU, 224).
+        let results = run("x86_64", 224);
         assert_eq!(
             lines_for(&results, "missing-fortify").len(),
             1,
