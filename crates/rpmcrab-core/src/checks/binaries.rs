@@ -51,24 +51,32 @@ fn soname_tail(soname: &str) -> Option<&str> {
 /// compat tree such as `/usr/lib64/ncurses6nt/`) does not qualify.
 /// Directories a package adds to the dynamic linker's search path
 /// through its own /etc/ld.so.conf or /etc/ld.so.conf.d snippets.
-/// Only plain directory lines count; comments and `include` lines
-/// name no directory.
+/// Snippet selection matches the loader glob, like
+/// `ldconfig_conf_dirs` in files.rs: only top-level `*.conf` files
+/// count -- a README, a non-.conf file, or a nested path under
+/// ld.so.conf.d is not a snippet, so a stray absolute line in one
+/// cannot pull a private directory into scope. Snippets are parsed
+/// with the shared `parse_ldso_conf` (lossy read, `#` comments
+/// stripped, the root directory kept as `/`), and every directory
+/// is normalised, so both sides of the scope comparison below are
+/// compared in the same form.
 fn shipped_ldconf_dirs(pkg: &Pkg) -> std::collections::HashSet<String> {
     let mut dirs = std::collections::HashSet::new();
     for f in &pkg.files {
-        if f.name != "/etc/ld.so.conf" && !f.name.starts_with("/etc/ld.so.conf.d/") {
-            continue;
-        }
-        if let Ok(text) = std::fs::read_to_string(&f.path) {
-            for line in text.lines() {
-                let line = line.trim();
-                if line.starts_with('/') {
-                    dirs.insert(line.trim_end_matches('/').to_string());
-                }
+        if f.name != "/etc/ld.so.conf" {
+            let Some(rest) = f.name.strip_prefix("/etc/ld.so.conf.d/") else {
+                continue;
+            };
+            if rest.contains('/') || !rest.ends_with(".conf") {
+                continue;
             }
         }
+        if let Ok(bytes) = std::fs::read(&f.path) {
+            let text = String::from_utf8_lossy(&bytes);
+            crate::checks::files::parse_ldso_conf(&text, &mut dirs);
+        }
     }
-    dirs
+    dirs.into_iter().map(|d| normalize_dotdot(&d)).collect()
 }
 
 fn in_lib_dir(path: &str) -> bool {
@@ -3774,6 +3782,10 @@ pub struct BinariesCheck {
     // (rpmcrab#1025): reset by `check_binary`, fed by
     // `run_elf_checks` from `check_hardening`'s return value.
     hardening_rollup: HardeningRollup,
+    // The current package's ld.so.conf snippet directories, computed
+    // once per package by `check_binary` instead of once per
+    // shared-library file by the scope gate below.
+    ldconf_dirs: HashSet<String>,
 }
 
 /// A `_FORTIFY_SOURCE` wrapper from libc, i.e. a `__foo_chk` symbol
@@ -5089,6 +5101,7 @@ impl BinariesCheck {
             deferred_state: BinariesState::default(),
             defer_undefined: false,
             hardening_rollup: HardeningRollup::default(),
+            ldconf_dirs: HashSet::new(),
         }
     }
 
@@ -6297,16 +6310,25 @@ impl BinariesCheck {
     /// by path -- dlopen, an rpath, or a runtime's own module search --
     /// and the recorded name the linker would use is the file name
     /// either way, so a missing SONAME there is not a defect.
-    fn no_soname_in_linker_scope(&self, pkg: &Pkg, pkgfile: &PkgFile) -> bool {
-        let parent = pkgfile.name.rsplit_once('/').map_or("", |(p, _)| p);
+    /// Scope note: the system paths are the configured SystemLibPaths,
+    /// not ldconfig's compiled-in STANDARD_LIBDIRS (files.rs, issue
+    /// #569) -- SystemLibPaths include /usr/X11R6/lib{,64} and exclude
+    /// /usr/local/lib{,64}, STANDARD_LIBDIRS the reverse -- so a
+    /// library in /usr/local/lib stays out of scope unless a snippet
+    /// adds its directory. The split is documented, not reconciled
+    /// by widening the firing set on an unmeasured guess.
+    /// Both sides are compared normalised, and the snippet set is
+    /// the per-package precompute from `check_binary`.
+    fn no_soname_in_linker_scope(&self, pkgfile: &PkgFile) -> bool {
+        let parent = normalize_dotdot(pkgfile.name.rsplit_once('/').map_or("", |(p, _)| p));
         if self
             .system_lib_paths
             .iter()
-            .any(|d| d.trim_end_matches('/') == parent)
+            .any(|d| normalize_dotdot(d) == parent)
         {
             return true;
         }
-        shipped_ldconf_dirs(pkg).contains(parent)
+        self.ldconf_dirs.contains(&parent)
     }
 
     fn check_shared_library(
@@ -6322,7 +6344,7 @@ impl BinariesCheck {
         }
         match &info.soname {
             None => {
-                if self.no_soname_in_linker_scope(pkg, pkgfile) {
+                if self.no_soname_in_linker_scope(pkgfile) {
                     add_info(out, Level::Warning, pkg, "no-soname", &[&pkgfile.name]);
                 }
             }
@@ -7218,6 +7240,7 @@ impl Check for BinariesCheck {
 
     fn check_binary(&mut self, pkg: &Pkg, config: &Config, out: &mut Filter) {
         self.hardening_rollup = HardeningRollup::default();
+        self.ldconf_dirs = shipped_ldconf_dirs(pkg);
         let mut pkg_has_binary = false;
         let mut pkg_has_file_in_lib64 = false;
         // The no-binary exemption covers the package's native libdir only:
@@ -16001,18 +16024,16 @@ description = "explicit priority string bypasses the system crypto policy"
     #[test]
     fn no_soname_ldconf_covered_dir_fires() {
         let config = test_config();
-        let check = BinariesCheck::with_tool_dir(&config, None);
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
         // The package puts its private directory into the linker
         // search path itself, so the missing SONAME is a defect again.
-        let dir =
-            std::env::temp_dir().join(format!("rpmcrab-nosoname-ldconf-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let conf = dir.join("R.conf");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let conf = dir.path().join("R.conf");
         std::fs::write(&conf, "/usr/lib64/R/lib\n").unwrap();
         let mut ldconf = syn_file("/etc/ld.so.conf.d/R.conf", "");
         ldconf.path = conf.to_string_lossy().into_owned();
         let pkg = synthetic_pkg("R-core-libs", "x86_64", vec![ldconf]);
+        check.ldconf_dirs = shipped_ldconf_dirs(&pkg);
         let pkgfile = syn_file("/usr/lib64/R/lib/libR.so", "ELF 64-bit LSB shared object");
         let mut info = syn_info();
         info.is_shlib = true;
@@ -16021,26 +16042,21 @@ description = "explicit priority string bypasses the system crypto policy"
         let results = out.results().to_vec();
         let lines = lines_for(&results, "no-soname");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn no_soname_unrelated_ldconf_dir_quiet() {
         let config = test_config();
-        let check = BinariesCheck::with_tool_dir(&config, None);
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
         // An ld.so.conf snippet naming a DIFFERENT directory does not
         // bring this file's directory into the search path.
-        let dir = std::env::temp_dir().join(format!(
-            "rpmcrab-nosoname-ldconf-other-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let conf = dir.join("other.conf");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let conf = dir.path().join("other.conf");
         std::fs::write(&conf, "# comment\n/usr/lib64/other/lib\n").unwrap();
         let mut ldconf = syn_file("/etc/ld.so.conf.d/other.conf", "");
         ldconf.path = conf.to_string_lossy().into_owned();
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![ldconf]);
+        check.ldconf_dirs = shipped_ldconf_dirs(&pkg);
         let pkgfile = syn_file(
             "/usr/lib64/eaglemode/lib/libemCore.so",
             "ELF 64-bit LSB shared object",
@@ -16054,7 +16070,69 @@ description = "explicit priority string bypasses the system crypto policy"
             "unrelated ldconf entry must stay quiet: {:?}",
             out.results()
         );
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_soname_snippet_selection_and_parsing() {
+        // Snippet selection matches the loader glob: a README, a
+        // non-.conf file, or a nested path under ld.so.conf.d is
+        // not a snippet, so an absolute line in one brings nothing
+        // into scope. A top-level .conf snippet parses lossily
+        // (non-UTF8 bytes do not drop the file), strips inline
+        // comments, and normalises doubled slashes and trailing
+        // slashes; the main /etc/ld.so.conf still counts.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mk = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name.replace('/', "_"));
+            std::fs::write(&path, bytes).unwrap();
+            let mut f = syn_file(name, "");
+            f.path = path.to_string_lossy().into_owned();
+            f
+        };
+        let count = |files: Vec<PkgFile>| {
+            let mut check = BinariesCheck::with_tool_dir(&config, None);
+            let pkg = synthetic_pkg("testpkg", "x86_64", files);
+            check.ldconf_dirs = shipped_ldconf_dirs(&pkg);
+            let pkgfile = syn_file("/usr/lib64/R/lib/libR.so", "ELF 64-bit LSB shared object");
+            let mut info = syn_info();
+            info.is_shlib = true;
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "no-soname").len()
+        };
+        assert_eq!(
+            count(vec![mk("/etc/ld.so.conf.d/README", b"/usr/lib64/R/lib\n")]),
+            0,
+            "README is not a snippet"
+        );
+        assert_eq!(
+            count(vec![mk(
+                "/etc/ld.so.conf.d/sub/x.conf",
+                b"/usr/lib64/R/lib\n"
+            )]),
+            0,
+            "nested path is not a snippet"
+        );
+        assert_eq!(
+            count(vec![mk("/etc/ld.so.conf.d/R.txt", b"/usr/lib64/R/lib\n")]),
+            0,
+            "non-.conf file is not a snippet"
+        );
+        assert_eq!(
+            count(vec![mk(
+                "/etc/ld.so.conf.d/R.conf",
+                b"\xff\xfe\n/usr/lib64//R/lib/ # R libraries\n"
+            )]),
+            1,
+            "lossy parse, comment strip and normalisation must fire"
+        );
+        assert_eq!(
+            count(vec![mk("/etc/ld.so.conf", b"/usr/lib64/R/lib\n")]),
+            1,
+            "main ld.so.conf still counts"
+        );
     }
 
     #[test]
