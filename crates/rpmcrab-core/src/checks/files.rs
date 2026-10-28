@@ -515,6 +515,12 @@ fn fsf_zip_in_window(buf: &[u8], left_edge: Option<u8>, right_edge: Option<u8>) 
     false
 }
 
+/// Minimum number of gzipped icons in scalable icon directories
+/// for a package's scalable payload to count as an icon theme
+/// rather than a set of individually placed icons
+/// (`FilesCheck::svgz_theme_credit`).
+const SVGZ_THEME_MIN_GZIPPED: usize = 100;
+
 static SCALABLE_ICON_REGEX: OnceLock<Regex> = OnceLock::new();
 fn scalable_icon_regex() -> &'static Regex {
     SCALABLE_ICON_REGEX.get_or_init(|| {
@@ -2257,6 +2263,10 @@ struct PkgState {
     is_kernel_package: bool,
     debuginfo_package: bool,
     debugsource_package: bool,
+    /// The package's scalable icon payload is a uniformly gzipped
+    /// icon theme (see `FilesCheck::svgz_theme_credit`);
+    /// `gzipped-svg-icon` stays silent for such a package.
+    svgz_theme: bool,
     perl_dep_error: bool,
     python_dep_error: bool,
     /// `no-dependency-on` candidates this package recorded (issue
@@ -2352,6 +2362,7 @@ impl Check for FilesCheck {
         st.is_kernel_package = is_match(&self.kernel_package_re, &pkg.name);
         st.debuginfo_package = is_match(&self.debuginfo_package_re, &pkg.name);
         st.debugsource_package = is_match(&self.debugsource_package_re, &pkg.name);
+        st.svgz_theme = self.svgz_theme_credit(pkg);
         st.postin = strip_quotes(
             &self.quotes_re,
             &crate::checks::shared::script_body_or_prog(
@@ -6665,7 +6676,7 @@ impl FilesCheck {
         self.check_normal_exec(pkg, fname, pkgfile, &mut fd, out);
         self.check_normal_non_conf_in_etc(pkg, fname, pkgfile, out);
         self.check_normal_python_noarch(pkg, fname, out);
-        self.check_normal_gzipped_svg(pkg, fname, out);
+        self.check_normal_gzipped_svg(pkg, fname, st, out);
         self.check_normal_pem(pkg, fname, out);
         self.check_normal_tcl(pkg, fname, out);
         self.check_normal_text(pkg, fname, pkgfile, &mut fd, out);
@@ -7445,7 +7456,33 @@ impl FilesCheck {
         }
     }
 
-    fn check_normal_gzipped_svg(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
+    /// Uniformly gzipped icon theme credit for `gzipped-svg-icon`:
+    /// a package whose own scalable icon payload ships at least
+    /// `SVGZ_THEME_MIN_GZIPPED` gzipped icons, with the gzipped
+    /// icons making up at least nine tenths of the payload's vector
+    /// files (`.svg` + `.svgz` regular files under scalable icon
+    /// directories), ships a theme in its native format rather than
+    /// a set of individually misplaced icons, so the per-icon
+    /// finding does not apply to it. Below theme scale, and for
+    /// large but mixed payloads, the finding fires per icon.
+    fn svgz_theme_credit(&self, pkg: &Pkg) -> bool {
+        let (mut svgz, mut svg) = (0usize, 0usize);
+        for f in &pkg.files {
+            if pkgfile::is_reg(f.mode) && is_match(&self.scalable_icon_re, &f.name) {
+                if f.name.ends_with(".svgz") {
+                    svgz += 1;
+                } else if f.name.ends_with(".svg") {
+                    svg += 1;
+                }
+            }
+        }
+        svgz >= SVGZ_THEME_MIN_GZIPPED && svgz >= 9 * svg
+    }
+
+    fn check_normal_gzipped_svg(&self, pkg: &Pkg, fname: &str, st: &PkgState, out: &mut Filter) {
+        if st.svgz_theme {
+            return;
+        }
         if fname.ends_with(".svgz")
             && !pkg.files.iter().any(|f| f.name == fname[..fname.len() - 1])
             && is_match(&self.scalable_icon_re, fname)
@@ -11940,6 +11977,119 @@ mod tests {
         assert!(!is_sysusers_snippet("/usr/lib/sysusers.d/foo.txt"));
         assert!(!is_sysusers_snippet("/usr/lib/tmpfiles.d/foo.conf"));
         assert!(!is_sysusers_snippet("/foo.conf"));
+    }
+
+    fn svgz_findings(pkg: &Pkg) -> Vec<String> {
+        run_check_binary(pkg)
+            .into_iter()
+            .filter(|(n, _)| n == "gzipped-svg-icon")
+            .map(|(_, line)| line)
+            .collect()
+    }
+
+    fn scalable_icon_files(svgz: usize, svg: usize) -> Vec<PkgFile> {
+        let mut files = Vec::new();
+        for i in 0..svgz {
+            files.push(mode_file(
+                &format!("/usr/share/icons/hicolor/scalable/apps/icon{i}.svgz"),
+                0o100644,
+            ));
+        }
+        for i in 0..svg {
+            files.push(mode_file(
+                &format!("/usr/share/icons/hicolor/scalable/apps/plain{i}.svg"),
+                0o100644,
+            ));
+        }
+        files
+    }
+
+    #[test]
+    fn gzipped_svg_icon_fires_for_a_single_app_icon() {
+        let (pkg, _dir) = pkg_with_files(scalable_icon_files(1, 0));
+        let hits = svgz_findings(&pkg);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            hits[0].contains("/usr/share/icons/hicolor/scalable/apps/icon0.svgz"),
+            "the finding names the icon: {}",
+            hits[0]
+        );
+    }
+
+    #[test]
+    fn gzipped_svg_icon_fires_per_untwinned_icon_in_a_mixed_package() {
+        let mut files = scalable_icon_files(1, 0);
+        files.push(mode_file(
+            "/usr/share/icons/hicolor/scalable/apps/pair.svgz",
+            0o100644,
+        ));
+        files.push(mode_file(
+            "/usr/share/icons/hicolor/scalable/apps/pair.svg",
+            0o100644,
+        ));
+        let (pkg, _dir) = pkg_with_files(files);
+        let hits = svgz_findings(&pkg);
+        assert_eq!(hits.len(), 1, "only the untwinned icon fires: {hits:?}");
+        assert!(hits[0].contains("icon0.svgz"), "{hits:?}");
+    }
+
+    #[test]
+    fn gzipped_svg_icon_silent_for_a_uniform_theme() {
+        // 120 gzipped against 6 plain: theme scale, 95% gzipped.
+        let (pkg, _dir) = pkg_with_files(scalable_icon_files(120, 6));
+        assert!(svgz_findings(&pkg).is_empty());
+    }
+
+    #[test]
+    fn gzipped_svg_icon_fires_below_theme_scale() {
+        // Uniform but small: 99 gzipped icons are individually
+        // placed icons, not a theme.
+        let (pkg, _dir) = pkg_with_files(scalable_icon_files(99, 0));
+        assert_eq!(svgz_findings(&pkg).len(), 99);
+    }
+
+    #[test]
+    fn gzipped_svg_icon_fires_for_a_large_mixed_payload() {
+        // Theme scale but only 89% gzipped: a mixed payload keeps
+        // firing per icon.
+        let (pkg, _dir) = pkg_with_files(scalable_icon_files(100, 12));
+        assert_eq!(svgz_findings(&pkg).len(), 100);
+    }
+
+    #[test]
+    fn gzipped_svg_icon_credits_at_the_share_boundary() {
+        // 100 gzipped against 11 plain is a 90.09% share: credited.
+        let (pkg, _dir) = pkg_with_files(scalable_icon_files(100, 11));
+        assert!(svgz_findings(&pkg).is_empty());
+    }
+
+    #[test]
+    fn gzipped_svg_icon_population_counts_regular_files_only() {
+        // Symlinked .svgz names neither fire nor count toward the
+        // theme population: 99 regular + 3 symlinks stays below
+        // theme scale and every regular icon fires.
+        let mut files = scalable_icon_files(99, 0);
+        for i in 0..3 {
+            files.push(mode_file(
+                &format!("/usr/share/icons/hicolor/scalable/apps/link{i}.svgz"),
+                0o120777,
+            ));
+        }
+        let (pkg, _dir) = pkg_with_files(files);
+        assert_eq!(svgz_findings(&pkg).len(), 99);
+    }
+
+    #[test]
+    fn gzipped_svg_icon_ignores_non_scalable_dirs() {
+        let mut files = Vec::new();
+        for i in 0..120 {
+            files.push(mode_file(
+                &format!("/usr/share/icons/hicolor/48x48/apps/icon{i}.svgz"),
+                0o100644,
+            ));
+        }
+        let (pkg, _dir) = pkg_with_files(files);
+        assert!(svgz_findings(&pkg).is_empty());
     }
 
     #[test]
