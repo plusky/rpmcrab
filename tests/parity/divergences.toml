@@ -2358,6 +2358,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "python-bytecode-without-source"
+kind = "behaviour"
+reason = "Fix-and-diverge: python-bytecode-without-source does not fire on a .pyc/.pyo file inside the library tree of an interpreter the package itself ships: for a regular executable file named python<major>.<minor> in a bin directory, the tree <prefix>/lib/python<major>.<minor>/ is that interpreter's own payload, and a self-contained bundle that ships its interpreter with a sourceless standard library (rpmlint-mini: /opt/testing/bin/python3.13 with its stdlib and rpmlint itself as legacy sourceless .pyc under /opt/testing/lib/python3.13/) is sourceless by design -- the bytecode is the shipped interpreter's live payload, not a module whose source the package failed to ship. The reference has no such credit and fires on every file of the bundle. The grammar fails closed: an unversioned or partially versioned interpreter name, a non-regular or non-executable entry, an interpreter outside a bin directory, and bytecode outside the tree earn no credit, and when the mapped source ships and resolves the magic and mtime checks keep their say. Census (Factory corpus, 51,589 RPMs): exactly 589 files carry the shape, all in rpmlint-mini, and those 589 are the removed set. Pinned by pyc_in_shipped_interpreter_tree_is_silent, pyc_tree_without_interpreter_still_fires, pyc_outside_shipped_interpreter_tree_still_fires, pyc_tree_with_non_executable_interpreter_still_fires, pyc_tree_with_unversioned_or_linked_interpreter_still_fires and pyc_in_tree_with_shipped_source_keeps_mtime_check in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
