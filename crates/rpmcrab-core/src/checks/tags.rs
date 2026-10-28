@@ -1835,11 +1835,13 @@ impl Check for TagsCheck {
     }
 
     /// The deferred `obsolete-not-provided` verdict: a candidate is
-    /// credited only when its build is complete in this run — the
-    /// run holds the build's source package — and a package of the
-    /// build provides the obsoleted name under its exact spelling.
-    /// Every other candidate fires, so partial and single-package
-    /// runs report exactly the per-package verdict.
+    /// credited only when its build is source-complete in this
+    /// run -- the run holds the build's source package, and source
+    /// presence is the whole gate: the build's full package closure
+    /// is not checked -- and a package of the build provides the
+    /// obsoleted name under its exact spelling. Every other
+    /// candidate fires, so source-absent (partial) and
+    /// single-package runs report exactly the per-package verdict.
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
         for cand in &self.obs_unkeyed {
             emit_obsolete_not_provided(out, cand);
@@ -3231,6 +3233,21 @@ mod tests {
             hits.len(),
             1,
             "case differs: not the solver's name: {results:?}"
+        );
+    }
+
+    #[test]
+    fn obsolete_separator_mismatch_sibling_does_not_credit() {
+        let config = test_config();
+        let (_t0, src) = build_src();
+        let (_t1, a) = build_pkg("pkg-a", &[], &["old-name"]);
+        let (_t2, provider) = build_pkg("pkg-rt", &["old_name"], &[]);
+        let results = run_check_multi(&config, &[src, a, provider]);
+        let hits = tag_hits(&results, "obsolete-not-provided");
+        assert_eq!(
+            hits.len(),
+            1,
+            "separator differs: not the solver's name: {results:?}"
         );
     }
 
