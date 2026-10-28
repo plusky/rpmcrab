@@ -330,7 +330,7 @@ mod tests {
             ),
             (
                 "CMakeConfigCheck.toml",
-                "4d99b66cbf814b204bf4938984d0742fc2fb5144b84f18dec6da32dcf4772043",
+                "b6ad5ab2c7064211d0709c43f0c2b0e8d485ce7522fe47ea44bf67e223092bb2",
             ),
             (
                 "CheckForXinetd.toml",

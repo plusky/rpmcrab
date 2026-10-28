@@ -1,11 +1,16 @@
 cmake-dangling-imported-location="""
 A CMake export file of this build imports a location that no package
-built from the same source ships, so find_package() fails for every
+built from the same source ships as a payload file (a %ghost entry
+ships no payload and does not satisfy the reference), so
+find_package() fails for every
 downstream consumer with "the imported target ... references the file
 ... but this file does not exist". The export was generated against a
 different install layout than the package ships: the library or
 executable was moved to another directory, or deleted, after the
-export file was generated. Install the file at the imported location
+export file was generated. A flavour build whose exports name the
+base build's libraries reads the same way to this check, and a
+single lint run cannot tell that case apart, which is why the
+finding is a warning. Install the file at the imported location
 (a compatibility symlink is enough), or regenerate or patch the
 export file so it names the location the build actually ships.
 
@@ -13,5 +18,8 @@ This check is run-scoped: it judges a build only when the lint run
 also contains the build's source package, as a lint run over a
 finished build does, and stays silent on partial or single-package
 input, where the imported files are expected to sit in packages
-that were not linted.
+that were not linted. Exports that no config file of their package
+reaches are not judged, and imported values that are not absolute
+or still carry a ${...} variable or $<...> generator expression
+are skipped as undecidable.
 """
