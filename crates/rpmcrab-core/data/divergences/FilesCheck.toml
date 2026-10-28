@@ -946,3 +946,24 @@ kind = "behaviour"
 reason = "New port-only Warning: a regular *.gz payload file (not .tar.gz) outside /usr/share/man and /usr/share/info whose gzip header MTIME is non-zero and later than SOURCE_DATE_EPOCH + 2 s; rpm clamps payload file mtimes to SOURCE_DATE_EPOCH but not timestamps stored inside files. The reference has no such check. SOURCE_DATE_EPOCH comes from BUILDTIME when BUILDHOST is reproducible, else the SOURCE_DATE_EPOCH environment variable; with neither known the check stays silent. Factory sweep of 51,589 RPMs: 717 findings in 3 packages (erlang 595, R-grDevices 106, erlang27 16) out of 470 packages shipping in-scope *.gz files."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1181"
+
+[[divergence]]
+case = "global"
+check = "wrong-file-end-of-line-encoding"
+kind = "behaviour"
+reason = "Fix-and-diverge: wrong-file-end-of-line-encoding fires only when the doc file's peek chunk shows CRLF line endings or CR-only line endings (carriage returns present, no line feed); a carriage return inside an otherwise LF-ended file is content, not an encoding. Five corpus files leave the finding set on this account (recorded test output carrying progress carriage returns, a data table, single stray carriage returns after dates in changelogs). Pinned by doc_eol_still_fires_for_wrong_encodings and doc_eol_silent_for_content_cr_and_crlf_native_formats in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "wrong-file-end-of-line-encoding"
+kind = "behaviour"
+reason = "Fix-and-diverge: wrong-file-end-of-line-encoding also stays quiet on doc files whose format makes CRLF the correct end-of-line encoding: .bat and .cmd (the cmd.exe interpreter expects CRLF), .ps1 (the PowerShell interpreter accepts CRLF), .ics and .eml (their formats delimit lines with CRLF). 48 corpus files leave the finding set on this account. Pinned by doc_eol_silent_for_content_cr_and_crlf_native_formats and doc_eol_still_fires_for_wrong_encodings in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "wrong-file-end-of-line-encoding"
+kind = "behaviour"
+reason = "Fix-and-diverge: wrong-file-end-of-line-encoding also stays quiet on a shipped .http file whose content opens with an HTTP status line: the file is an HTTP response message, whose format delimits its lines with CRLF; the name alone earns no credit. Seven corpus files (example error responses) leave the finding set on this account. Pinned by doc_eol_silent_for_content_cr_and_crlf_native_formats and doc_eol_still_fires_for_wrong_encodings in files.rs."
+since = "0.4.1"
