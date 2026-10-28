@@ -2063,6 +2063,7 @@ impl Check for SpecCheck {
         if !self.mini_mode {
             let parse_failure_reported = self.check_specfile_error(pkg, out);
             self.check_invalid_url(pkg, out, parse_failure_reported);
+            self.check_parse_time_cpu_count(pkg, out);
         }
     }
 
@@ -2249,6 +2250,116 @@ impl SpecCheck {
             if netloc.is_none() {
                 let tag = format!("{tag}:");
                 self.info(out, pkg, Level::Warning, "invalid-url", &[&tag, url]);
+            }
+        }
+    }
+
+    /// Check for job-count macros that expand to a literal CPU count
+    /// while the spec is parsed (`parse-time-cpu-count`).
+    ///
+    /// `%jobs`, `%_smp_build_ncpus` and `%_smp_build_nthreads` expand at
+    /// parse time, so the parsing machine's CPU count is stored in the
+    /// source rpm -- and, through the source digest every binary rpm
+    /// records, in the binaries. The run-time forms (`%{?_smp_mflags}`,
+    /// `%make_build`, `${RPM_BUILD_NCPUS}` in shell) only resolve when
+    /// the build script runs. To tell the two apart the spec is parsed
+    /// once more with the three macros defined to a sentinel value:
+    /// each line of the parsed spec text that contains the sentinel
+    /// stored a parse-time CPU count. Parsing (rather than scanning the
+    /// raw text) is what keeps dead `%if` branches, `%define` bodies,
+    /// escaped `%%jobs` and constant `%{?jobs:-n 4}` bodies silent.
+    fn check_parse_time_cpu_count(&self, pkg: &SpecPkg, out: &mut Filter) {
+        use librpm::build::SpecFlags;
+        // A sentinel already present in the raw spec would also match
+        // the literal text, not just macro expansions, so use the first
+        // candidate the raw spec does not contain.
+        let sentinel = [
+            "7919", "17919", "27919", "37919", "47919", "57919", "67919", "77919", "87919", "97919",
+        ]
+        .into_iter()
+        .find(|cand| !pkg.lines.iter().any(|line| line.contains(*cand)))
+        .unwrap_or("7919");
+        let spec_file = self.spec_file.as_deref().unwrap_or("");
+        let _ = pkg_init();
+        // The probe, the defines, the parse, the section read, the
+        // pops and the parsed spec's drop all touch process-global
+        // librpm state, so the macro lock is held for the whole
+        // sequence, exactly as in `check_invalid_url`. `parsed` is
+        // declared after the guard so it drops first.
+        let _macro_guard = crate::pkg::global_macro_lock();
+        let macros = librpm::macro_context::MacroContext::default();
+        let _ = macros.define(&format!("_sourcedir {}", self.spec_file_dir()), 0);
+        // Snapshot the effective state of the three judged macros.
+        // A parse pushes the spec's own defines of them into the
+        // global context, where they outlive the parse, and one of
+        // this check's pops could then remove the spec's entry
+        // instead of the sentinel, stranding the sentinel in the
+        // context. The state found here is restored before leaving,
+        // so the check leaves the context as it found it.
+        let expansion = |name: &str| macros.expand(&format!("%{{?{name}}}")).unwrap_or_default();
+        let before = [
+            ("jobs", expansion("jobs")),
+            ("_smp_build_ncpus", expansion("_smp_build_ncpus")),
+            ("_smp_build_nthreads", expansion("_smp_build_nthreads")),
+        ];
+        // A distribution macro file may already map `%jobs` to the
+        // run-time `${RPM_BUILD_NCPUS}`; a sentinel define would shadow
+        // that mapping and report the run-time form as a parse-time
+        // one. Probe the expansion before defining anything and leave
+        // `jobs` alone when it already expands to `${RPM_BUILD_NCPUS}`.
+        // A spec's own `%define jobs ...` needs no probe: defined at
+        // spec level, it overrides the sentinel (see below) by itself.
+        let jobs_is_run_time = before[0].1.trim() == "${RPM_BUILD_NCPUS}";
+        // Level -7 is RMIL_CMDLINE, the level `rpmspec --define`
+        // uses: above the macro files (-13), so the sentinel replaces
+        // the host's own job-count definitions, but below the spec's
+        // `%define` (-3) and `%global` (0), so a spec that defines
+        // these macros itself keeps its own expansion.
+        let _ = macros.define(&format!("_smp_build_ncpus {sentinel}"), -7);
+        let _ = macros.define(&format!("_smp_build_nthreads {sentinel}"), -7);
+        if !jobs_is_run_time {
+            let _ = macros.define(&format!("jobs {sentinel}"), -7);
+        }
+        let parsed =
+            librpm::build::Spec::parse(spec_file, SpecFlags::ANYARCH | SpecFlags::FORCE, None);
+        if !jobs_is_run_time {
+            let _ = macros.pop("jobs");
+        }
+        let _ = macros.pop("_smp_build_nthreads");
+        let _ = macros.pop("_smp_build_ncpus");
+        // Restore the snapshotted state of the judged macros: pop
+        // entries the sequence added (a spec define of one of them,
+        // or a sentinel the pops above did not reach) until the
+        // incoming expansion is effective again.
+        for (name, target) in &before {
+            for _ in 0..16 {
+                if expansion(name) == *target || !macros.is_defined(name) {
+                    break;
+                }
+                let _ = macros.pop(name);
+            }
+            if expansion(name) != *target && !target.is_empty() {
+                let _ = macros.define(&format!("{name} {target}"), -7);
+            }
+        }
+        let _ = macros.pop("_sourcedir");
+        let Some(parsed) = parsed else {
+            // A spec that does not parse is already reported through
+            // `specfile-error`; there is no parsed text to judge.
+            return;
+        };
+        let Some(text) = parsed.get_section(librpm::build::Section::NONE) else {
+            return;
+        };
+        for line in text.lines() {
+            if line.contains(sentinel) {
+                self.info(
+                    out,
+                    pkg,
+                    Level::Warning,
+                    "parse-time-cpu-count",
+                    &[line.trim()],
+                );
             }
         }
     }
@@ -6307,6 +6418,174 @@ exit 1"#,
             "fallback detail is the spec path: {}",
             errors[0]
         );
+    }
+
+    /// A minimal spec scaffold for the `parse-time-cpu-count` tests:
+    /// `pre` goes into the preamble (before `%description`), `build`
+    /// becomes the `%build` section body.
+    fn cpu_count_spec(pre: &str, build: &str) -> String {
+        let mut text = String::new();
+        text.push_str(pre);
+        text.push_str(
+            "Name:           wobble\n\
+             Version:        1.0\n\
+             Release:        1\n\
+             Summary:        Wobble\n\
+             License:        MIT\n\
+             \n\
+             %description\n\
+             Wobble.\n\
+             \n\
+             %build\n",
+        );
+        text.push_str(build);
+        text.push('\n');
+        text
+    }
+
+    fn cpu_count_lines(results: &[(String, String)]) -> Vec<String> {
+        lines_for(results, "parse-time-cpu-count")
+    }
+
+    #[test]
+    fn parse_time_cpu_count_firing_forms_and_spec_define_override() {
+        // The firing forms and the spec-define override are sequenced
+        // in one test on purpose: parsing a spec pushes its `%define`s
+        // into the process-global macro context, where they outlive
+        // the parse, so after the override spec has been parsed the
+        // context no longer shows the host's own `%jobs` state and no
+        // other test in the process could judge `%jobs` against it.
+        // The firing forms therefore run first; no other test judges
+        // `%jobs`.
+        for form in [
+            "echo %jobs",
+            "echo %{_smp_build_ncpus}",
+            "echo %{_smp_build_nthreads}",
+            "echo %{?jobs}",
+            "echo %{?jobs:-n %jobs}",
+        ] {
+            let results = run_with(&cpu_count_spec("", form), &Config::default());
+            let hits = cpu_count_lines(&results);
+            assert_eq!(hits.len(), 1, "form {form:?}: {hits:?}");
+            assert!(hits[0].contains("7919"), "form {form:?}: {}", hits[0]);
+        }
+
+        // A spec's own `%define jobs ${RPM_BUILD_NCPUS}` is the
+        // run-time mapping: defined at spec level it overrides the
+        // command-line-level sentinel, so even the conditional forms
+        // store the shell variable, not a number.
+        let build = "echo %jobs\necho %{?jobs:-n %jobs}";
+        let results = run_with(
+            &cpu_count_spec("%define jobs ${RPM_BUILD_NCPUS}\n", build),
+            &Config::default(),
+        );
+        assert!(cpu_count_lines(&results).is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn parse_time_cpu_count_dead_branch_stays_silent() {
+        // A `%jobs` use in the never-taken branch of an `%if` is not
+        // stored, and neither is one in a dead `%else` branch; the
+        // live branch of the second spec carries no macro at all.
+        let spec = cpu_count_spec("", "echo live\n%if 0\necho %{_smp_build_ncpus}\n%endif");
+        let results = run_with(&spec, &Config::default());
+        assert!(cpu_count_lines(&results).is_empty(), "{results:?}");
+        let build = "%if 1\necho live\n%else\necho %{jobs}\n%endif";
+        let results = run_with(&cpu_count_spec("", build), &Config::default());
+        assert!(cpu_count_lines(&results).is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn parse_time_cpu_count_escaped_and_run_time_forms_stay_silent() {
+        for form in [
+            // Escaped: stored literally, never expanded.
+            "echo %%jobs",
+            // A constant conditional body: the *value* of jobs is
+            // discarded, so nothing parse-time is stored.
+            "echo %{?jobs:-n 4}",
+            // The run-time forms the tag description recommends.
+            "echo %{?_smp_mflags}",
+            "make ${RPM_BUILD_NCPUS}",
+        ] {
+            let results = run_with(&cpu_count_spec("", form), &Config::default());
+            assert!(
+                cpu_count_lines(&results).is_empty(),
+                "form {form:?}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_time_cpu_count_comment_in_script_section_fires() {
+        // Comments inside script sections are stored (and expanded),
+        // so a job-count macro in one stores the number too.
+        let results = run_with(
+            &cpu_count_spec("", "# pin workers to %{_smp_build_ncpus}\necho ok"),
+            &Config::default(),
+        );
+        assert_eq!(cpu_count_lines(&results).len(), 1, "{results:?}");
+    }
+
+    #[test]
+    fn parse_time_cpu_count_literal_sentinel_in_spec_does_not_fire() {
+        // The sentinel is chosen outside the raw spec's own text: a
+        // literal 7919 is not a finding, and a real expansion in the
+        // same spec is reported under the bumped sentinel instead.
+        let literal_only = run_with(&cpu_count_spec("", "echo 7919"), &Config::default());
+        assert!(
+            cpu_count_lines(&literal_only).is_empty(),
+            "{literal_only:?}"
+        );
+        let mixed = run_with(
+            &cpu_count_spec("", "echo 7919\necho %{_smp_build_ncpus}"),
+            &Config::default(),
+        );
+        let hits = cpu_count_lines(&mixed);
+        assert_eq!(hits.len(), 1, "{mixed:?}");
+        assert!(hits[0].contains("17919"), "{}", hits[0]);
+    }
+
+    #[test]
+    fn parse_time_cpu_count_parallel_checks_match_serial() {
+        // The sentinel sequence (probe, defines, parse, pops) runs
+        // against the process-global macro context; concurrent checks
+        // must reproduce the serial result exactly -- a leaked define
+        // or pop would change the stored text a sibling worker's parse
+        // produces. The fixture uses the `%_smp_build_*` pair rather
+        // than `%jobs`: a spec-level `%define jobs` parsed anywhere in
+        // the process outlives its parse in the global context (see
+        // the firing-forms test), so `%jobs` outcomes depend on
+        // process history, not on this sequence's locking.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.spec");
+        std::fs::write(
+            &path,
+            cpu_count_spec("", "echo %{_smp_build_ncpus} %{_smp_build_nthreads}"),
+        )
+        .unwrap();
+        let config = Config::default();
+        let baseline = run_spec_at(&path, &config);
+        assert_eq!(cpu_count_lines(&baseline).len(), 1, "{baseline:?}");
+        let mismatches: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut bad = Vec::new();
+                        for round in 0..10 {
+                            if run_spec_at(&path, &config) != baseline {
+                                bad.push(format!("round {round} diverged"));
+                            }
+                        }
+                        bad
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        });
+        assert!(mismatches.is_empty(), "{mismatches:?}");
     }
 
     /// `check_invalid_url` defines `_sourcedir`, parses the spec and
