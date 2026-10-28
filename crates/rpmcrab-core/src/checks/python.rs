@@ -233,21 +233,20 @@ impl PythonCheck {
         is_metadata: bool,
         python_version: &str,
     ) -> Vec<Requirement> {
+        if is_metadata {
+            // The Requires-Dist fields of the header block, read
+            // through the shared header helper: field names match
+            // case-insensitively, the block ends at the first blank
+            // line, and folded continuation lines are not headers.
+            return Self::metadata_headers(content, "Requires-Dist")
+                .iter()
+                .map(|req| Self::split_marker(req))
+                .collect();
+        }
         let mut out = Vec::new();
         let mut section: Option<String> = None;
         for line in content.lines() {
             let line = line.trim();
-            if is_metadata {
-                if line.starts_with("Requires-Dist:") {
-                    let req = line
-                        .strip_prefix("Requires-Dist:")
-                        .unwrap_or(line)
-                        .trim()
-                        .to_string();
-                    out.push(Self::split_marker(&req));
-                }
-                continue;
-            }
             // requires.txt: sections like `[section]`, `[section:marker]`,
             // or `[:marker]`. The reference (`importlib.metadata`) synthesizes
             // `extra == "<section>"` markers for named sections.
@@ -319,21 +318,32 @@ impl PythonCheck {
         }
     }
 
-    /// One header field of a dist-info METADATA: header names are
-    /// matched case-insensitively, and the header block ends at
-    /// the first blank line - a `Name:` or `Version:` line in the
-    /// long-description body is not a header (#1177 item 8).
+    /// One header field of a dist-info METADATA: the first of
+    /// `metadata_headers`.
     fn metadata_header(content: &str, field: &str) -> Option<String> {
+        Self::metadata_headers(content, field).into_iter().next()
+    }
+
+    /// All values of one header field of a dist-info METADATA:
+    /// header names are matched case-insensitively, and the header
+    /// block ends at the first blank line - a `Name:` or `Version:`
+    /// line in the long-description body is not a header (#1177
+    /// item 8). Folded continuation lines (leading whitespace)
+    /// belong to the previous field and are never headers
+    /// themselves.
+    fn metadata_headers(content: &str, field: &str) -> Vec<String> {
         content
             .lines()
             .take_while(|l| !l.trim().is_empty())
-            .find_map(|l| {
+            .filter(|l| !l.starts_with([' ', '\t']))
+            .filter_map(|l| {
                 let (name, value) = l.split_once(':')?;
                 name.trim()
                     .eq_ignore_ascii_case(field)
                     .then(|| value.trim().to_string())
             })
             .filter(|v| !v.is_empty())
+            .collect()
     }
 
     /// Split a requirement head (`name[extras]specifier`) into the name,
@@ -719,9 +729,10 @@ impl PythonCheck {
     /// Whether an RPM require satisfies a Python requirement name.
     fn require_satisfied(req_names: &[String], req: &Requirement) -> bool {
         let mut names = Self::module_names(&req.name, &req.extras);
-        // pythonX-foo variants
+        // pythonX-foo variants, the dotted flavour spelling
+        // (`python3.13-foo`) included, as in `classify_atom`.
         for n in Self::module_names(&req.name, &req.extras) {
-            names.push(format!("python\\d*-{}", fancy_regex::escape(&n)));
+            names.push(format!("python\\d*(\\.\\d+)?-{}", fancy_regex::escape(&n)));
         }
         // python3.12dist(foo) variants
         for n in Self::module_names(&req.name, &req.extras) {
@@ -1408,48 +1419,66 @@ impl PythonCheck {
         // reference ignores them, so a package shipping the very dist
         // it declares a requirement on (python313-ua-parser on
         // `ua-parser-builtins`) warned on itself.
-        let own_provides = pkg
-            .provides
-            .iter()
-            .flat_map(|p| p.leaves())
-            .any(|leaf| {
-                Self::dist_provide_inner(&Self::leaf_capability(&leaf))
-                    .is_some_and(|inner| variants.iter().any(|v| v.eq_ignore_ascii_case(inner)))
-            });
+        let own_provides = pkg.provides.iter().flat_map(|p| p.leaves()).any(|leaf| {
+            Self::dist_provide_inner(&Self::leaf_capability(&leaf))
+                .is_some_and(|inner| variants.iter().any(|v| v.eq_ignore_ascii_case(inner)))
+        });
         if own_provides {
             return Satisfaction::Satisfied;
         }
         if !Self::require_satisfied(&pkg.req_names, req) {
             return Satisfaction::Missing;
         }
-        match Self::classify_matches(&pkg.req_names, &variants) {
+        match Self::classify_matches(pkg, &variants) {
             MatchClass::Full | MatchClass::Unknown => Satisfaction::Satisfied,
             MatchClass::BareOnly(bare) => Satisfaction::BareOnly(bare),
         }
     }
 
-    /// Classify how the require strings match a requirement's name
-    /// variants: any fully-shaped atom (the name itself, a
+    /// Classify how the package's requires match a requirement's
+    /// name variants, per `or` branch as the floor comparison
+    /// judges them: a branch whose matching leaves are all bare
+    /// `python-<name>` atoms is a bare branch, and one bare branch
+    /// makes the match bare-only however fully shaped a sibling
+    /// branch is (an alternative that resolves through the bare
+    /// name guarantees no flavour); a branch mixing bare and
+    /// fully-shaped matching leaves counts as fully shaped. With
+    /// no bare branch, any fully-shaped branch (the name itself, a
     /// `python<digits>-` flavour name, a `python3.Xdist()` spelling)
-    /// wins; otherwise the first bare `python-<name>` atom decides.
-    /// Shapes the atomiser cannot classify leave the match `Unknown`,
-    /// and the caller keeps the historical satisfied verdict — the
-    /// bare-only demotion must never invent a finding.
-    fn classify_matches(req_names: &[String], variants: &[String]) -> MatchClass {
+    /// makes the match full. Shapes no branch classifies leave the
+    /// match `Unknown`, and the caller keeps the historical
+    /// satisfied verdict — the bare-only demotion must never invent
+    /// a finding.
+    fn classify_matches(pkg: &Pkg, variants: &[String]) -> MatchClass {
         let mut bare: Option<String> = None;
-        for req_name in req_names {
-            for atom in Self::split_rich_atoms(req_name) {
-                match Self::classify_atom(&atom, variants) {
-                    Some(AtomMatch::Full) => return MatchClass::Full,
-                    Some(AtomMatch::Bare) if bare.is_none() => {
-                        bare = Some(req_name.clone());
+        let mut any_full = false;
+        for dep in pkg.requires.iter().chain(&pkg.prereq) {
+            for branch in Self::require_branches(dep) {
+                let mut branch_full = false;
+                let mut branch_bare = false;
+                for leaf in &branch {
+                    match Self::classify_atom(&Self::leaf_capability(leaf), variants) {
+                        Some(AtomMatch::Full) => branch_full = true,
+                        Some(AtomMatch::Bare) => branch_bare = true,
+                        None => {}
                     }
-                    _ => {}
+                }
+                if branch_bare && !branch_full {
+                    if bare.is_none() {
+                        bare = Some(dep.name.clone());
+                    }
+                } else if branch_full {
+                    any_full = true;
                 }
             }
         }
-        bare.map(MatchClass::BareOnly)
-            .unwrap_or(MatchClass::Unknown)
+        if let Some(bare) = bare {
+            return MatchClass::BareOnly(bare);
+        }
+        if any_full {
+            return MatchClass::Full;
+        }
+        MatchClass::Unknown
     }
 
     /// The atoms of a require string: a plain name yields itself; a
@@ -1566,7 +1595,9 @@ impl PythonCheck {
         if let Some(rest) = rest
             && let Some((digits, sub)) = rest.split_once('-')
         {
-            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+            if digits.bytes().any(|b| b.is_ascii_digit())
+                && digits.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            {
                 return in_variants(sub).then_some(AtomMatch::Full);
             }
             if digits.is_empty() {
@@ -1688,26 +1719,35 @@ impl PythonCheck {
 
     /// The floor comparison (#1024 §3.3): a kept requirement whose
     /// declared lower bound the matching RPM Requires do not carry.
-    /// Each `or` branch of a rich Require is judged on its own
-    /// leaves (#1177 item 9): a branch carrying a usable floor is
-    /// governed by that floor, so a floored branch never hides a
-    /// sibling branch's missing version, and an unversioned branch
-    /// fires `python-require-unversioned-despite-metadata-floor`
-    /// even when a sibling branch clears the floor; a branch whose
-    /// highest floor sits below the metadata's fires
-    /// `python-require-floor-below-metadata`. A requirement no RPM
-    /// Require names at all is `python-missing-require`'s finding,
-    /// not these ones', and a requirement met by the package's own
-    /// Provides has no RPM floor to compare.
+    /// The verdict is computed per require entry first (#1177
+    /// item 9): each `or` branch of a rich entry is judged on its
+    /// own leaves — a branch carrying a usable floor is governed by
+    /// that floor (a branch mixing floored and unversioned matching
+    /// leaves counts as floored), and an entry with an unversioned
+    /// branch is an unversioned entry even when a sibling branch
+    /// carries a floor, its own floors then not credited. Separate
+    /// entries are conjunctive, so the per-entry verdicts join:
+    /// the entries' floors join by maximum — a joined floor below
+    /// the metadata's fires `python-require-floor-below-metadata`,
+    /// a joined floor at or above it is quiet — and only when no
+    /// entry carries a floor does an unversioned entry fire
+    /// `python-require-unversioned-despite-metadata-floor`. A
+    /// requirement no RPM Require names at all is
+    /// `python-missing-require`'s finding, not these ones', and a
+    /// requirement met by the package's own Provides has no RPM
+    /// floor to compare.
     fn check_require_floor(pkg: &Pkg, out: &mut Filter, req: &Requirement) {
         let Some((floor, floor_text)) = Self::metadata_floor(req) else {
             return;
         };
         let variants = Self::module_names(&req.name, &req.extras);
         let mut any_match = false;
-        let mut any_unversioned_branch = false;
-        let mut highest_below: Option<(Pep440Version, String)> = None;
+        let mut any_unversioned_entry = false;
+        let mut joined_floor: Option<(Pep440Version, String)> = None;
         for dep in pkg.requires.iter().chain(&pkg.prereq) {
+            let mut entry_match = false;
+            let mut entry_unversioned = false;
+            let mut entry_floor: Option<(Pep440Version, String)> = None;
             for branch in Self::require_branches(dep) {
                 let mut branch_match = false;
                 let mut branch_unversioned = false;
@@ -1738,53 +1778,70 @@ impl PythonCheck {
                 if !branch_match {
                     continue;
                 }
-                any_match = true;
+                entry_match = true;
                 match branch_highest {
                     Some((h, h_text)) => {
-                        if pep440_cmp(&h, &floor) == std::cmp::Ordering::Less
-                            && highest_below.as_ref().is_none_or(|(b, _)| {
-                                pep440_cmp(&h, b) == std::cmp::Ordering::Greater
-                            })
+                        if entry_floor
+                            .as_ref()
+                            .is_none_or(|(b, _)| pep440_cmp(&h, b) == std::cmp::Ordering::Greater)
                         {
-                            highest_below = Some((h, h_text));
+                            entry_floor = Some((h, h_text));
                         }
                     }
-                    None if branch_unversioned => any_unversioned_branch = true,
+                    None if branch_unversioned => entry_unversioned = true,
                     None => {}
                 }
+            }
+            if !entry_match {
+                continue;
+            }
+            any_match = true;
+            if entry_unversioned {
+                any_unversioned_entry = true;
+            } else if let Some(f) = entry_floor
+                && joined_floor
+                    .as_ref()
+                    .is_none_or(|(b, _)| pep440_cmp(&f.0, b) == std::cmp::Ordering::Greater)
+            {
+                joined_floor = Some(f);
             }
         }
         if !any_match {
             return;
         }
-        if any_unversioned_branch {
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "python-require-unversioned-despite-metadata-floor",
-                &[
-                    &req.name,
-                    "metadata-floor",
-                    &floor_text,
-                    "rpm-floor",
-                    "unversioned",
-                ],
-            );
-        } else if let Some((_, h_text)) = highest_below {
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "python-require-floor-below-metadata",
-                &[
-                    &req.name,
-                    "metadata-floor",
-                    &floor_text,
-                    "rpm-floor",
-                    &h_text,
-                ],
-            );
+        match joined_floor {
+            Some((f, h_text)) if pep440_cmp(&f, &floor) == std::cmp::Ordering::Less => {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "python-require-floor-below-metadata",
+                    &[
+                        &req.name,
+                        "metadata-floor",
+                        &floor_text,
+                        "rpm-floor",
+                        &h_text,
+                    ],
+                );
+            }
+            Some(_) => {}
+            None if any_unversioned_entry => {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "python-require-unversioned-despite-metadata-floor",
+                    &[
+                        &req.name,
+                        "metadata-floor",
+                        &floor_text,
+                        "rpm-floor",
+                        "unversioned",
+                    ],
+                );
+            }
+            None => {}
         }
     }
 
@@ -3159,9 +3216,11 @@ mod tests {
     }
 
     #[test]
-    fn rich_dep_with_a_full_atom_is_not_bare_only() {
-        // #1024 §3.1: in a rich require, one fully-shaped atom is
-        // enough; the bare alternative does not demote the match.
+    fn rich_dep_bare_branch_demotes_despite_full_sibling() {
+        // Branches are judged independently, as in the floor
+        // comparison: the bare alternative resolves through the
+        // unflavoured name and guarantees no flavour, so the match
+        // is bare-only even beside a fully-shaped sibling branch.
         let reqs = PythonCheck::parse_requirements("securesystemslib\n", false, "3.13");
         let findings = findings_with_pkg(&reqs, |pkg| {
             pkg.req_names =
@@ -3172,7 +3231,10 @@ mod tests {
                 None,
             )];
         });
-        assert!(findings.is_empty(), "findings: {findings:?}");
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, _, line) = &findings[0];
+        assert_eq!(name, "python-unflavoured-require");
+        assert!(line.contains("python-securesystemslib"), "line: {line}");
     }
 
     #[test]
@@ -3278,11 +3340,11 @@ mod tests {
     }
 
     #[test]
-    fn floor_unversioned_plain_require_wins_over_below_floor_one() {
-        // #1177 item 9 combine rule: separate require entries are
-        // separate branches, so an unversioned entry fires the
-        // unversioned tag even beside a floored-but-low entry for
-        // the same requirement.
+    fn floor_unversioned_entry_joins_floored_entry_by_conjunction() {
+        // Separate require entries are conjunctive: the unversioned
+        // entry contributes no floor, but the joined floor is the
+        // floored entry's, so the below tag fires with it - the
+        // unversioned tag fires only when no entry carries a floor.
         let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
         let findings = findings_with_pkg(&reqs, |pkg| {
             pkg.req_names = vec![
@@ -3299,10 +3361,35 @@ mod tests {
             ];
         });
         assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, _, line) = &findings[0];
+        assert_eq!(name, "python-require-floor-below-metadata");
         assert_eq!(
-            findings[0].0,
-            "python-require-unversioned-despite-metadata-floor"
+            line,
+            "python-test.noarch: W: python-require-floor-below-metadata dulwich metadata-floor 0.22 rpm-floor 0.21"
         );
+    }
+
+    #[test]
+    fn floor_unversioned_entry_beside_clearing_entry_is_quiet() {
+        // The conjunction again: a sibling entry whose floor meets
+        // the metadata's satisfies the requirement, so the
+        // unversioned entry fires neither floor tag.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec![
+                "python3-dulwich".to_string(),
+                "python3.13dist(dulwich) >= 0.22".to_string(),
+            ];
+            pkg.requires = vec![
+                dep("python3-dulwich", 0, None),
+                dep(
+                    "python3.13dist(dulwich)",
+                    crate::pkg::dep::RPMSENSE_GREATER | crate::pkg::dep::RPMSENSE_EQUAL,
+                    Some("0.22"),
+                ),
+            ];
+        });
+        assert!(findings.is_empty(), "findings: {findings:?}");
     }
 
     #[test]
@@ -3490,6 +3577,21 @@ mod tests {
         ));
         assert!(PythonCheck::classify_atom("python3.x-dulwich", &variants).is_none());
         assert!(PythonCheck::classify_atom("python3.13-other", &variants).is_none());
+        // A flavour of only dots carries no digit and is no flavour.
+        assert!(PythonCheck::classify_atom("python.-dulwich", &variants).is_none());
+        assert!(PythonCheck::classify_atom("python..-dulwich", &variants).is_none());
+    }
+
+    #[test]
+    fn metadata_requires_dist_uses_the_header_block() {
+        // Requires-Dist extraction shares the header helper: the
+        // field name matches case-insensitively, a folded
+        // continuation line is not a header, and the block ends at
+        // the first blank line.
+        let content = "Metadata-Version: 2.1\nName: demo\nDescription: folded\n Requires-Dist: foldedfake\nrequires-dist: lowerreq\nRequires-Dist: realreq>=1.0\n\nRequires-Dist: bodyreq\n";
+        let reqs = PythonCheck::parse_requirements(content, true, "3.13");
+        let names: Vec<&str> = reqs.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["lowerreq", "realreq"]);
     }
 
     #[test]
@@ -3507,6 +3609,24 @@ mod tests {
         );
         let body_only = "Metadata-Version: 2.1\n\nName: bar\n";
         assert_eq!(PythonCheck::metadata_header(body_only, "Name"), None);
+    }
+
+    #[test]
+    fn dotted_flavour_require_satisfies_end_to_end() {
+        // The dotted flavour spelling classifies Full, and the
+        // satisfaction pattern accepts the same grammar, so a
+        // `python3.13-<name>` Require at the metadata floor leaves
+        // no missing, unflavoured or floor finding.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3.13-dulwich >= 0.22".to_string()];
+            pkg.requires = vec![dep(
+                "python3.13-dulwich",
+                crate::pkg::dep::RPMSENSE_GREATER | crate::pkg::dep::RPMSENSE_EQUAL,
+                Some("0.22"),
+            )];
+        });
+        assert!(findings.is_empty(), "findings: {findings:?}");
     }
 
     #[test]
@@ -3566,8 +3686,7 @@ mod tests {
         // which fires only when no usable floor exists, stays quiet
         // as well -- neither floor tag may fire on the caret shape.
         assert!(
-            !tags_of(&findings)
-                .contains(&"python-require-unversioned-despite-metadata-floor"),
+            !tags_of(&findings).contains(&"python-require-unversioned-despite-metadata-floor"),
             "findings: {findings:?}"
         );
     }
