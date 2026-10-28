@@ -1855,8 +1855,10 @@ fn parse_vendored_c_crates(raw: &str) -> Vec<VendoredCCrate> {
 /// graph is a few hundred KiB of JSON in practice, and the bound
 /// exists so a corrupt section cannot inflate without limit (the
 /// posture of the DWARF reader's bound in `erlang.rs`). A section
-/// that inflates past it fails to parse and stays silent, like a
-/// section of bad zlib.
+/// that inflates past it stays silent, like a section of bad zlib:
+/// the read is limit-plus-one and an over-bound result is detected
+/// explicitly, so a section is never parsed from a truncated
+/// prefix that happens to remain valid JSON.
 const MAX_DEP_V0_INFLATE: u64 = 16 * 1024 * 1024;
 
 /// Read one ELF's `.dep-v0` section: zlib-compressed JSON whose
@@ -1885,9 +1887,10 @@ fn detect_vendored_c_crates(elf: &goblin::elf::Elf, data: &[u8]) -> Vec<Vendored
     use std::io::Read;
     let mut json = Vec::new();
     if flate2::read::ZlibDecoder::new(raw)
-        .take(MAX_DEP_V0_INFLATE)
+        .take(MAX_DEP_V0_INFLATE + 1)
         .read_to_end(&mut json)
         .is_err()
+        || json.len() as u64 > MAX_DEP_V0_INFLATE
     {
         return Vec::new();
     }
@@ -21298,6 +21301,35 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(zstd.name, "zstd-sys");
         assert!(zstd.witness_present);
         assert_eq!(zstd.c_version.as_deref(), Some("1.5.7"));
+    }
+
+    #[test]
+    fn dep_v0_over_bound_section_stays_silent() {
+        // The inflated payload is a complete valid graph followed by
+        // padding past the cap: serde_json tolerates the trailing
+        // whitespace, so a read capped at the limit would parse the
+        // truncated prefix and report the crate. The limit-plus-one
+        // read detects the overflow and the section stays silent.
+        use std::io::Write;
+        let doc = serde_json::json!({
+            "format": 1,
+            "packages": [{"name": "zstd-sys", "version": "2.1.0+zstd.1.5.7", "source": "crates.io"}],
+        })
+        .to_string();
+        let mut inflated = doc.into_bytes();
+        inflated.resize(MAX_DEP_V0_INFLATE as usize + 1024 * 1024, b' ');
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&inflated).unwrap();
+        let dep = enc.finish().unwrap();
+        let info = parse_crafted_sections(
+            "depv0-over",
+            &[(".rodata", b"some other string\0"), (".dep-v0", &dep)],
+        );
+        assert!(
+            info.vendored_crates.is_empty(),
+            "{:?}",
+            info.vendored_crates
+        );
     }
 
     #[test]
