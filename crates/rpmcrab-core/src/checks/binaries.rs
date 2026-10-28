@@ -49,6 +49,28 @@ fn soname_tail(soname: &str) -> Option<&str> {
 /// of issue #1029 for files the shared-library file-name test
 /// misses). A library in a subdirectory of a lib dir (a plugin or
 /// compat tree such as `/usr/lib64/ncurses6nt/`) does not qualify.
+/// Directories a package adds to the dynamic linker's search path
+/// through its own /etc/ld.so.conf or /etc/ld.so.conf.d snippets.
+/// Only plain directory lines count; comments and `include` lines
+/// name no directory.
+fn shipped_ldconf_dirs(pkg: &Pkg) -> std::collections::HashSet<String> {
+    let mut dirs = std::collections::HashSet::new();
+    for f in &pkg.files {
+        if f.name != "/etc/ld.so.conf" && !f.name.starts_with("/etc/ld.so.conf.d/") {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&f.path) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('/') {
+                    dirs.insert(line.trim_end_matches('/').to_string());
+                }
+            }
+        }
+    }
+    dirs
+}
+
 fn in_lib_dir(path: &str) -> bool {
     let parent = path.rsplit_once('/').map_or("", |(p, _)| p);
     let dir = parent.rsplit_once('/').map_or(parent, |(_, last)| last);
@@ -6244,6 +6266,26 @@ impl BinariesCheck {
         self.check_soname_arms(pkg, pkgfile, soname, out);
     }
 
+    /// A SONAME has a consumer only where the dynamic linker searches:
+    /// the configured system library paths, plus a directory the
+    /// package itself adds to the search path with an ld.so.conf
+    /// snippet. A shared object anywhere else (a private module tree,
+    /// a plugin directory, an interpreter's library folder) is loaded
+    /// by path -- dlopen, an rpath, or a runtime's own module search --
+    /// and the recorded name the linker would use is the file name
+    /// either way, so a missing SONAME there is not a defect.
+    fn no_soname_in_linker_scope(&self, pkg: &Pkg, pkgfile: &PkgFile) -> bool {
+        let parent = pkgfile.name.rsplit_once('/').map_or("", |(p, _)| p);
+        if self
+            .system_lib_paths
+            .iter()
+            .any(|d| d.trim_end_matches('/') == parent)
+        {
+            return true;
+        }
+        shipped_ldconf_dirs(pkg).contains(parent)
+    }
+
     fn check_shared_library(
         &self,
         pkg: &Pkg,
@@ -6257,7 +6299,9 @@ impl BinariesCheck {
         }
         match &info.soname {
             None => {
-                add_info(out, Level::Warning, pkg, "no-soname", &[&pkgfile.name]);
+                if self.no_soname_in_linker_scope(pkg, pkgfile) {
+                    add_info(out, Level::Warning, pkg, "no-soname", &[&pkgfile.name]);
+                }
             }
             Some(soname) => {
                 if validso_regex().is_match(soname).unwrap_or(false)
@@ -15866,6 +15910,98 @@ description = "explicit priority string bypasses the system crypto policy"
             "non-library name must be quiet: {:?}",
             out.results()
         );
+    }
+
+    #[test]
+    fn no_soname_private_tree_quiet() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("eaglemode", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.is_shlib = true;
+        // A private module tree is not a linker search directory.
+        let pkgfile = syn_file(
+            "/usr/lib64/eaglemode/lib/libemCore.so",
+            "ELF 64-bit LSB shared object",
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "private-tree library must stay quiet: {:?}",
+            out.results()
+        );
+        // Same for a database server's private module directory.
+        let pkgfile = syn_file(
+            "/usr/lib/postgresql16/lib64/plpgsql.so",
+            "ELF 64-bit LSB shared object",
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "server module must stay quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn no_soname_ldconf_covered_dir_fires() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        // The package puts its private directory into the linker
+        // search path itself, so the missing SONAME is a defect again.
+        let dir =
+            std::env::temp_dir().join(format!("rpmcrab-nosoname-ldconf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("R.conf");
+        std::fs::write(&conf, "/usr/lib64/R/lib\n").unwrap();
+        let mut ldconf = syn_file("/etc/ld.so.conf.d/R.conf", "");
+        ldconf.path = conf.to_string_lossy().into_owned();
+        let pkg = synthetic_pkg("R-core-libs", "x86_64", vec![ldconf]);
+        let pkgfile = syn_file("/usr/lib64/R/lib/libR.so", "ELF 64-bit LSB shared object");
+        let mut info = syn_info();
+        info.is_shlib = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "no-soname");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_soname_unrelated_ldconf_dir_quiet() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        // An ld.so.conf snippet naming a DIFFERENT directory does not
+        // bring this file's directory into the search path.
+        let dir = std::env::temp_dir().join(format!(
+            "rpmcrab-nosoname-ldconf-other-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("other.conf");
+        std::fs::write(&conf, "# comment\n/usr/lib64/other/lib\n").unwrap();
+        let mut ldconf = syn_file("/etc/ld.so.conf.d/other.conf", "");
+        ldconf.path = conf.to_string_lossy().into_owned();
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![ldconf]);
+        let pkgfile = syn_file(
+            "/usr/lib64/eaglemode/lib/libemCore.so",
+            "ELF 64-bit LSB shared object",
+        );
+        let mut info = syn_info();
+        info.is_shlib = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_shared_library(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "unrelated ldconf entry must stay quiet: {:?}",
+            out.results()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -16,7 +16,9 @@ This package is marked as noarch but installs files into lib64.
 Not all architectures have this in path, so the package can't be noarch.
 """
 no-soname="""
-The library has no soname.
+The library has no soname. Only libraries in the dynamic linker's
+search directories are reported; shared objects in private
+directories are loaded by path.
 """
 no-ldconfig-symlink="""
 The package should not only include the shared library itself, but
