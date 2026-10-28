@@ -504,6 +504,12 @@ impl PythonCheck {
         {
             return holds;
         }
+        // implementation_name: pinned to `cpython`, the PEP 508 value of
+        // `sys.implementation.name` for the CPython interpreter the
+        // `platform_python_implementation` pin above already assumes.
+        if let Some(holds) = Self::string_marker_holds(atom, "implementation_name", "cpython") {
+            return holds;
+        }
         // The remaining `default_environment()` keys are not evaluated:
         // fail closed rather than guess.
         // The pinned keys stay in the fail-closed loop as a backstop:
@@ -533,8 +539,9 @@ impl PythonCheck {
     fn string_marker_holds(atom: &str, var: &str, pinned: &str) -> Option<bool> {
         // Per-`var` cached regexes: the pattern varies only with `var`,
         // which comes from a small fixed set of call sites.
-        static STRING_MARKER_RES: [(&str, OnceLock<Regex>); 6] = [
+        static STRING_MARKER_RES: [(&str, OnceLock<Regex>); 7] = [
             ("extra", OnceLock::new()),
+            ("implementation_name", OnceLock::new()),
             ("os_name", OnceLock::new()),
             ("platform_machine", OnceLock::new()),
             ("platform_python_implementation", OnceLock::new()),
@@ -545,8 +552,9 @@ impl PythonCheck {
         // `"literal" != var`. Only `==`/`!=` are symmetric; a reversed `in`
         // is left unmatched so the fail-closed backstop in
         // `marker_atom_holds` handles it.
-        static STRING_MARKER_REV_RES: [(&str, OnceLock<Regex>); 6] = [
+        static STRING_MARKER_REV_RES: [(&str, OnceLock<Regex>); 7] = [
             ("extra", OnceLock::new()),
+            ("implementation_name", OnceLock::new()),
             ("os_name", OnceLock::new()),
             ("platform_machine", OnceLock::new()),
             ("platform_python_implementation", OnceLock::new()),
@@ -1923,6 +1931,10 @@ impl PythonCheck {
     /// for (#481a): the declared names are unioned across all of the
     /// package's dist-infos (each evaluated with its own marker
     /// `python_version`), and each require is returned at most once.
+    /// Names are compared in PEP 503 canonical form, so a requirement
+    /// declared as `jaraco-classes` also accounts for an RPM require
+    /// on `python3-jaraco.classes` (the reference compares raw
+    /// `-`/`_` variants only and reports that pair).
     /// Extra markers are evaluated, not skipped: the reference runs the
     /// full PEP 508 environment over them.
     fn leftover_require_strings(
@@ -1946,7 +1958,7 @@ impl PythonCheck {
                 wanted.extend(Self::module_names(&req.name, &req.extras));
             }
         }
-        let wanted: Vec<String> = wanted.iter().map(|n| n.to_lowercase()).collect();
+        let wanted: Vec<String> = wanted.iter().map(|n| pep503(n)).collect();
         let mut out: Vec<String> = Vec::new();
         for req in req_names {
             let Some(module) = Self::leftover_dep_name(req) else {
@@ -1957,7 +1969,7 @@ impl PythonCheck {
             }
             let variants: Vec<String> = Self::module_names(&module, &[])
                 .iter()
-                .map(|n| n.to_lowercase())
+                .map(|n| pep503(n))
                 .collect();
             if !variants.iter().any(|v| wanted.contains(v)) && !out.contains(req) {
                 out.push(req.clone());
@@ -2392,6 +2404,74 @@ mod tests {
     }
 
     #[test]
+    fn leftover_pep503_canonical_names_match() {
+        // PEP 503 canonical form equates `-`, `_` and `.` in
+        // distribution names: metadata declaring `jaraco-classes`
+        // accounts for the RPM require `python3-jaraco.classes`
+        // (mistral-vibe), and the mirror image holds too. The
+        // reference compares raw `-`/`_` variants only and reports
+        // both pairs.
+        let reqs = PythonCheck::parse_requirements(
+            "Metadata-Version: 2.1\nRequires-Dist: jaraco-classes\n",
+            true,
+            "3.13",
+        );
+        let got = PythonCheck::leftover_require_strings(
+            &["python3-jaraco.classes".to_string()],
+            &[(&reqs, "3.13")],
+        );
+        assert!(got.is_empty(), "unexpected leftovers: {got:?}");
+
+        let reqs = PythonCheck::parse_requirements(
+            "Metadata-Version: 2.1\nRequires-Dist: jaraco.classes\n",
+            true,
+            "3.13",
+        );
+        let got = PythonCheck::leftover_require_strings(
+            &["python3-jaraco-classes".to_string()],
+            &[(&reqs, "3.13")],
+        );
+        assert!(got.is_empty(), "unexpected leftovers: {got:?}");
+
+        // Near miss: a different distribution under the same
+        // namespace prefix is not the declared one and still fires.
+        let got = PythonCheck::leftover_require_strings(
+            &["python3-jaraco-context".to_string()],
+            &[(&reqs, "3.13")],
+        );
+        assert_eq!(got, vec!["python3-jaraco-context".to_string()]);
+    }
+
+    #[test]
+    fn leftover_implementation_name_marker_is_wanted() {
+        // mistral-vibe declares `pycparser` under a marker that only
+        // excludes PyPy, aarch64 and non-Linux; with
+        // `implementation_name` pinned to the linter's CPython
+        // environment the marker holds, the requirement is wanted,
+        // and the RPM require is no leftover. The reference,
+        // evaluating the real environment, stays quiet here too.
+        let content = "Metadata-Version: 2.1\nRequires-Dist: pycparser==3.0; (implementation_name != 'PyPy' and platform_machine != 'aarch64') or (implementation_name != 'PyPy' and platform_python_implementation != 'PyPy') or (implementation_name != 'PyPy' and sys_platform != 'linux')\n";
+        let reqs = PythonCheck::parse_requirements(content, true, "3.13");
+        let got = PythonCheck::leftover_require_strings(
+            &["python3-pycparser".to_string()],
+            &[(&reqs, "3.13")],
+        );
+        assert!(got.is_empty(), "unexpected leftovers: {got:?}");
+
+        // Near miss: the same requirement gated on running under
+        // PyPy is not wanted in this environment, so the require
+        // stays a leftover.
+        let content =
+            "Metadata-Version: 2.1\nRequires-Dist: pycparser; implementation_name == \"pypy\"\n";
+        let reqs = PythonCheck::parse_requirements(content, true, "3.13");
+        let got = PythonCheck::leftover_require_strings(
+            &["python3-pycparser".to_string()],
+            &[(&reqs, "3.13")],
+        );
+        assert_eq!(got, vec!["python3-pycparser".to_string()]);
+    }
+
+    #[test]
     fn leftover_extra_markers_are_evaluated_not_skipped() {
         // Emission-path test through `check_requirements_findings`: the reference
         // evaluates `extra` markers in the leftover path with the full PEP 508
@@ -2614,6 +2694,40 @@ mod tests {
         ));
         assert!(PythonCheck::marker_atom_holds(
             "\"PyPy\" != platform_python_implementation",
+            "3.12"
+        ));
+    }
+
+    #[test]
+    fn marker_pinned_implementation_name() {
+        // PEP 508 `implementation_name` is `sys.implementation.name`;
+        // the linter's environment is CPython, whose value is
+        // `cpython` — the same assumption the
+        // `platform_python_implementation` pin makes. The reference
+        // evaluates the real environment. Each form gets its own
+        // assertion so no arm is dominated by another.
+        assert!(PythonCheck::marker_atom_holds(
+            "implementation_name == \"cpython\"",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "implementation_name != \"PyPy\"",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds(
+            "implementation_name == \"pypy\"",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "\"PyPy\" != implementation_name",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "implementation_name in \"cpython pypy\"",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds(
+            "implementation_name not in \"cpython pypy\"",
             "3.12"
         ));
     }
