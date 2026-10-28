@@ -147,7 +147,9 @@ file (%{load:...}) and the executing directives (%define, %global,
 %{undefine:...} and %{error:...} forms) — are performed by rpm while
 the specfile is parsed, even inside comments. Escape the macro with
 another leading % (%%) if the mention is only prose, or reword the
-comment so it does not name the macro.
+comment so it does not name the macro. The escape does not hold
+inside an %{expand:...} argument: the escaped %% run is re-expanded
+there and stays live, so reword the comment instead.
 """
 patch-fuzz-is-changed="""
 The internal patch fuzz value was changed, and could hide patch's issues, or
