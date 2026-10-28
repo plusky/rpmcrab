@@ -5148,29 +5148,41 @@ impl BinariesCheck {
                 );
             } else {
                 // The suggestion judges whether the distro's PIE flags
-                // reached the link, and four shapes of file carry no
-                // such signal. A binary whose ELF machine is not the
-                // package architecture's own is payload built by
+                // reached the link, and some shapes of file carry no
+                // such signal. The debuginfo shape is name-only -- the
+                // `.debug` suffix or a path under `/usr/lib/debug/` --
+                // so it is judged from the name whether or not an ELF
+                // analysis exists: such an image is never loaded by
+                // the dynamic linker, its link shape restates the
+                // shipped image's, and a firmware debug tree's images
+                // ship only as PE. The remaining shapes judge ELF
+                // content and apply only to a successful parse: a
+                // failed analysis carries the empty shape (EM_NONE
+                // machine, no stamp, no dynamic section), which would
+                // otherwise read as foreign and static and silence a
+                // file the check could not read -- the suggestion
+                // charges on an unreadable file, as it does without an
+                // analysis at all. A binary whose ELF machine is not
+                // the package architecture's own is payload built by
                 // another target's toolchain under that target's
                 // flags -- the host-machine test
                 // `check_binary_without_debuginfo` applies, an
-                // unmapped package arch charging as there. A GHC
-                // producer stamp in `.comment` marks Haskell output,
-                // whose code generator takes no distro `-fPIE`; the
-                // stamp is the signal the Haskell skip trusts for
-                // statically linked tools. A separate-debuginfo image
-                // -- the `.debug` name or a file under
-                // `/usr/lib/debug/` -- is never loaded by the dynamic
-                // linker: its link shape restates the shipped image's,
-                // and a firmware debug tree's images ship only as PE.
-                // A statically linked executable -- ET_EXEC with no
-                // dynamic section -- has no dynamic link for the flags
-                // to reach: the `-pie` half of the remedy does not
-                // typecheck for a `-static` link.
+                // unmapped package arch charging as there. Haskell
+                // output -- a GHC producer stamp in `.comment`, or a
+                // `libHS*` SONAME / DT_NEEDED for comment-stripped
+                // output -- comes from a code generator that takes no
+                // distro `-fPIE`. A statically linked executable --
+                // ET_EXEC with no dynamic section -- has no dynamic
+                // link for the flags to reach: the `-pie` half of the
+                // remedy does not typecheck for a `-static` link.
                 // A listed executable (the error above) is charged
-                // regardless, and without an ELF analysis the
-                // suggestion charges as before.
-                let quiet = info.is_some_and(|info| {
+                // regardless.
+                let debug_name =
+                    bin_name.ends_with(".debug") || bin_name.starts_with("/usr/lib/debug/");
+                let content_quiet = info.is_some_and(|info| {
+                    if info.failed.is_some() {
+                        return false;
+                    }
                     let host_machines = host_elf_machines(&pkg.arch);
                     let foreign_machine =
                         !host_machines.is_empty() && !host_machines.contains(&info.elf_machine);
@@ -5178,10 +5190,11 @@ impl BinariesCheck {
                         info.elf_type == goblin::elf::header::ET_EXEC && !info.has_dynamic;
                     foreign_machine
                         || info.ghc_comment
+                        || info.is_haskell_binary()
                         || info.is_debug
                         || static_exec
-                        || bin_name.starts_with("/usr/lib/debug/")
                 });
+                let quiet = debug_name || content_quiet;
                 if !quiet {
                     add_info(
                         out,
@@ -15079,7 +15092,7 @@ description = "explicit priority string bypasses the system crypto policy"
 
     #[test]
     fn pie_suggested_quiet_for_foreign_machine() {
-        use goblin::elf::header::{EM_PPC64, EM_X86_64};
+        use goblin::elf::header::{EM_386, EM_PPC64, EM_X86_64};
         let run = |arch: &str, info: Option<ReadelfInfo>| {
             let config = test_config();
             let check = BinariesCheck::with_tool_dir(&config, None);
@@ -15102,6 +15115,19 @@ description = "explicit priority string bypasses the system crypto policy"
         // A foreign machine is another toolchain's output: quiet.
         let mut info = syn_info();
         info.elf_machine = EM_PPC64;
+        let results = run("x86_64", Some(info));
+        assert!(
+            lines_for(&results, "position-independent-executable-suggested").is_empty(),
+            "{results:?}"
+        );
+
+        // A same-family machine is quiet too: this gate keeps the
+        // exact host-machine test even though the compile-time
+        // hardening findings charge the same-family shape under
+        // their ISA-family test. The two scopes are deliberate and
+        // pinned apart.
+        let mut info = syn_info();
+        info.elf_machine = EM_386;
         let results = run("x86_64", Some(info));
         assert!(
             lines_for(&results, "position-independent-executable-suggested").is_empty(),
@@ -15147,6 +15173,84 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn pie_suggested_quiet_for_haskell_needed() {
+        // The libHS arm: a dynamically linked Haskell executable
+        // whose .comment stamp was stripped is still GHC output --
+        // its DT_NEEDED names the Haskell runtime, the signal the
+        // sibling Haskell skips trust.
+        let run = |needed: Vec<String>, soname: Option<&str>| {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let mut info = syn_info();
+            info.needed = needed;
+            info.soname = soname.map(str::to_string);
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_non_pie(&pkg, "/usr/bin/probe", Some(&info), &mut out);
+            out.results().to_vec()
+        };
+        assert!(
+            lines_for(
+                &run(vec!["libHSrts-1.0.2.so".to_string()], None),
+                "position-independent-executable-suggested"
+            )
+            .is_empty()
+        );
+        assert!(
+            lines_for(
+                &run(vec![], Some("libHSbase-4.21.2.0.so")),
+                "position-independent-executable-suggested"
+            )
+            .is_empty()
+        );
+        // An ordinary C executable still gets the suggestion.
+        assert_eq!(
+            lines_for(
+                &run(vec!["libc.so.6".to_string()], None),
+                "position-independent-executable-suggested"
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn pie_suggested_charges_when_analysis_failed() {
+        // A failed parse leaves the empty shape behind (EM_NONE
+        // machine, no stamp, no dynamic section): none of the
+        // content gates may read it as foreign, Haskell or static.
+        // The suggestion charges, as it does with no analysis.
+        use goblin::elf::header::{EM_NONE, ET_EXEC};
+        let run = |mutate: &dyn Fn(&mut ReadelfInfo)| {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let mut info = syn_info();
+            info.failed = Some("synthetic parse failure".to_string());
+            mutate(&mut info);
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_non_pie(&pkg, "/usr/bin/probe", Some(&info), &mut out);
+            out.results().to_vec()
+        };
+        let charge = |results: Vec<(String, String)>| {
+            assert_eq!(
+                lines_for(&results, "position-independent-executable-suggested").len(),
+                1,
+                "{results:?}"
+            );
+        };
+        charge(run(&|info| info.elf_machine = EM_NONE));
+        charge(run(&|info| info.ghc_comment = true));
+        charge(run(&|info| {
+            info.elf_type = ET_EXEC;
+            info.has_dynamic = false;
+        }));
+        charge(run(&|info| {
+            info.needed = vec!["libHSrts-1.0.2.so".to_string()]
+        }));
+    }
+
+    #[test]
     fn pie_suggested_quiet_for_debug_image() {
         let run = |name: &str, is_debug: bool| {
             let config = test_config();
@@ -15183,6 +15287,19 @@ description = "explicit priority string bypasses the system crypto policy"
             )
             .is_empty()
         );
+        // The debuginfo test is name-only: it quiets with no ELF
+        // analysis at all, where the content gates cannot apply.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        for name in ["/usr/bin/probe.debug", "/usr/lib/debug/usr/bin/probe"] {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_non_pie(&pkg, name, None, &mut out);
+            assert!(
+                lines_for(out.results(), "position-independent-executable-suggested").is_empty(),
+                "{name} must be quiet without an analysis"
+            );
+        }
     }
 
     #[test]
