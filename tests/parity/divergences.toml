@@ -804,14 +804,14 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "BuildRootAndDateCheck"
 kind = "behaviour"
-reason = "today_string() derives the date from UTC, while the reference's time.strftime('%b %e %Y') is local time. On hosts east of UTC the two disagree for 22:00-24:00 UTC, which moves which files trigger file-contains-current-date and file-contains-date-and-time. E-level today, but a real byte-level difference. Fixing it needs a timezone database or libc localtime; the workspace forbids unsafe_code, so this stays ledgered."
-since = "0.1.0"
+reason = "today_string() derives the run day from UTC, while the reference's time.strftime('%b %e %Y') uses local time. Near midnight the two disagree on the civil date, which moves which files trigger file-contains-current-date and file-contains-date-and-time. The port takes UTC so the findings do not depend on the lint host's timezone."
+since = "0.4.1"
 
 [[divergence]]
 case = "global"
 check = "BuildRootAndDateCheck"
 kind = "behaviour"
-reason = "today_string() hardcodes English month abbreviations, while the reference inherits the ambient locale for %b (BuildRootAndDateCheck.__init__ is one of the few places the reference does not apply ENGLISH_ENVIRONMENT). On non-English locales the reference matches e.g. 'Okt' where the port matches 'Oct'."
+reason = "format_date() hardcodes English month abbreviations, while the reference inherits the ambient locale for %b (BuildRootAndDateCheck.__init__ is one of the few places the reference does not apply ENGLISH_ENVIRONMENT). On non-English locales the reference matches e.g. 'Okt' where the port matches 'Oct'."
 since = "0.1.0"
 
 [[divergence]]
@@ -823,26 +823,18 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
-check = "file-contains-date-and-time"
-kind = "severity"
-reason = "Deliberate severity recalibration (issue #759, decision D11 of #714): the port reports E where the reference reports W. An embedded build date stamps image content with the build moment and makes the image non-reproducible byte-for-byte, a significant defect on an image-based OS. Solidity was measured before the flip by build-time emulation over the Factory corpus (51,589 RPMs; every payload scanned for its own BUILDTIME date under the check's exact rule, the check itself matching the linter's run date): file-contains-date-and-time fires 443 times in 240 binary packages (208 srcpkgs). The matching rule is unchanged; only the level moves."
-since = "0.3.0"
-upstream = "https://github.com/plusky/rpmcrab/issues/759"
-
-[[divergence]]
-case = "global"
-check = "file-contains-current-date"
-kind = "severity"
-reason = "Deliberate severity recalibration (issue #759, decision D11 of #714): the port reports E where the reference reports W, on the file-contains-date-and-time reasoning. The build-time emulation over the Factory corpus (51,589 RPMs) fires it 135 times in 71 binary packages (59 srcpkgs); 25 hand-read firings across both date findings carried 23 genuine embedded build dates (ELF __DATE__/__TIME__ stamps, doxygen generation stamps, firmware build stamps, configure-stamped configuration). The 2 remaining firings of the 578 are upstream release-history files whose newest entry's date equals the build date on a release-day build (liberation-fonts ChangeLog, perl-Unicode-LineBreak Changes): the file genuinely contains the build date, the class is bounded and self-limiting, and the matching rule stays unchanged."
-since = "0.3.0"
-upstream = "https://github.com/plusky/rpmcrab/issues/759"
+check = "BuildRootAndDateCheck"
+kind = "detail"
+reason = "Staged `--explain` texts for `file-contains-current-date` and `file-contains-date-and-time` were garbled (`may cause the package to rebuild in excess`, `causes the package to rebuild when not needed`). Reworded to name the actual harm: the file content changes with the build date (and time), so rebuilding the same sources does not produce the same package (the date-only entry hedges this to `may not`, since a rebuild on the same date is unchanged). The texts now name the build's wall-clock date (and time) and give the fix as stamping from SOURCE_DATE_EPOCH instead of the current date or time; the date-and-time text no longer claims the file uses __DATE__ and __TIME__, which the check's read path never sees in an ELF."
+since = "0.4.1"
 
 [[divergence]]
 case = "global"
 check = "BuildRootAndDateCheck"
-kind = "detail"
-reason = "Staged `--explain` texts for `file-contains-current-date` and `file-contains-date-and-time` were garbled (`may cause the package to rebuild in excess`, `causes the package to rebuild when not needed`). Reworded to name the actual harm: the file content changes with the build date (and time), so rebuilding the same sources does not produce the same package (the date-only entry hedges this to `may not`, since a rebuild on the same date is unchanged)."
+kind = "behaviour"
+reason = "A stamp that is the package's own SOURCE_DATE_EPOCH is not reported; the reference has no such exemption. SDE is taken from BUILDTIME when BUILDHOST is reproducible, else from $SOURCE_DATE_EPOCH (shared sourcing: checks::shared::source_date_epoch). For file-contains-date-and-time, occurrences of SDE's exact stamp (its date in %b %e %Y shape, whitespace, its HH:MM:SS in UTC) are removed before the reference's rule judges the rest of the file. For file-contains-current-date the finding stays silent whenever SDE's UTC day is the run day, which also silences a wall-clock date-only stamp from a build that ran that day."
 since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1180"
 
 [[divergence]]
 case = "global"
