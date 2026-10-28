@@ -846,7 +846,7 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 case = "global"
 check = "BuildRootAndDateCheck"
 kind = "behaviour"
-reason = "today_string() derives the run day from UTC, while the reference's time.strftime('%b %e %Y') uses local time. Near midnight the two disagree on the civil date, which moves which files trigger file-contains-current-date and file-contains-date-and-time. The port takes UTC so the findings do not depend on the lint host's timezone."
+reason = "The run day derives from UTC (OffsetDateTime::now_utc(), rendered by format_date()), while the reference's time.strftime('%b %e %Y') uses local time. Near midnight the two disagree on the civil date, which moves which files trigger file-contains-current-date and file-contains-date-and-time. The port takes UTC so the findings do not depend on the lint host's timezone."
 since = "0.4.1"
 
 [[divergence]]

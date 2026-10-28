@@ -42,11 +42,11 @@ fn format_date(dt: time::OffsetDateTime) -> String {
 }
 
 /// The SDE stamp a file may legitimately carry: SDE's date in the
-/// reference's `%b %e %Y` shape, whitespace, then SDE's `HH:MM:SS` (UTC) —
+/// reference's `%b %e %Y` shape, horizontal whitespace, then SDE's `HH:MM:SS` (UTC) —
 /// the shape `date '+%b %e %Y %T'` and `__DATE__ " " __TIME__` produce.
 fn sde_stamp_regex(sde: time::OffsetDateTime) -> Regex {
     Regex::new(&format!(
-        r"{}\s+{:02}:{:02}:{:02}",
+        r"{}[ \t]+{:02}:{:02}:{:02}",
         fancy_regex::escape(&format_date(sde)),
         sde.hour(),
         sde.minute(),
@@ -61,9 +61,17 @@ fn sde_stamp_regex(sde: time::OffsetDateTime) -> Regex {
 fn without_matches(data: &str, re: &Regex) -> String {
     let mut out = String::with_capacity(data.len());
     let mut last = 0;
-    for m in re.find_iter(data).filter_map(|r| r.ok()) {
-        out.push_str(&data[last..m.start()]);
-        last = m.end();
+    for m in re.find_iter(data) {
+        match m {
+            Ok(m) => {
+                out.push_str(&data[last..m.start()]);
+                last = m.end();
+            }
+            // The shared matcher's discipline: an engine error is
+            // logged and the match treated as absent, never dropped
+            // silently.
+            Err(e) => log::debug!("regex engine error: {e}"),
+        }
     }
     out.push_str(&data[last..]);
     out
@@ -133,9 +141,12 @@ impl BuildRootAndDateCheck {
     /// by the caller: an emission seam so tests can pin both the run day
     /// (via `with_datetime`) and SDE without crafting a package header.
     fn check_files(&self, pkg: &Pkg, out: &mut Filter, sde: Option<time::OffsetDateTime>) {
-        // The exemption can only bite when a stamp carrying SDE's date
-        // can be the run-day match at all: SDE's UTC day is the run day.
-        let sde_stamp = sde.filter(|s| s.date() == self.today).map(sde_stamp_regex);
+        // The package's own SDE stamps come out whenever SDE is dated
+        // at all: the exact stamp is the package's own reproducible
+        // timestamp, whatever day it names. The run day bounds only
+        // the current-date silence below.
+        let sde_stamp = sde.map(sde_stamp_regex);
+        let sde_is_today = sde.is_some_and(|s| s.date() == self.today);
         for f in &pkg.files {
             let filename = &f.name;
             if filename.starts_with("/usr/lib/debug") || !is_reg(f.mode) {
@@ -166,7 +177,7 @@ impl BuildRootAndDateCheck {
                         "file-contains-date-and-time",
                         &[filename],
                     );
-                } else if sde_stamp.is_none() && is_match(&self.istoday, judged) {
+                } else if !sde_is_today && is_match(&self.istoday, judged) {
                     // `file-contains-current-date` stays silent on SDE's
                     // own day: a date-only stamp from a build that ran
                     // that day cannot be told apart from an SDE one
@@ -412,11 +423,12 @@ mod tests {
     /// Today's date plus a time triggers `file-contains-date-and-time` (W).
     #[test]
     fn today_with_time_is_flagged() {
-        let content = format!(
-            "built {} at 14:30:00",
-            format_date(OffsetDateTime::now_utc())
-        );
-        let results = findings_for_content("/usr/bin/with-time", &content);
+        // One clock read, pinned for both the content and the check:
+        // two reads could straddle midnight UTC and disagree on the
+        // run day.
+        let now = OffsetDateTime::now_utc();
+        let content = format!("built {} at 14:30:00", format_date(now));
+        let results = findings_pinned("/usr/bin/with-time", &content, now, None);
         assert_eq!(results.len(), 1, "unexpected: {results:?}");
         assert_eq!(results[0].0, "file-contains-date-and-time");
         assert!(results[0].1.contains(": W: "), "level: {}", results[0].1);
@@ -430,8 +442,9 @@ mod tests {
     /// Today's date without a time triggers `file-contains-current-date` (W).
     #[test]
     fn today_without_time_is_flagged() {
-        let content = format!("built {}", format_date(OffsetDateTime::now_utc()));
-        let results = findings_for_content("/usr/bin/with-date", &content);
+        let now = OffsetDateTime::now_utc();
+        let content = format!("built {}", format_date(now));
+        let results = findings_pinned("/usr/bin/with-date", &content, now, None);
         assert_eq!(results.len(), 1, "unexpected: {results:?}");
         assert_eq!(results[0].0, "file-contains-current-date");
         assert!(results[0].1.contains(": W: "), "level: {}", results[0].1);
@@ -540,6 +553,41 @@ mod tests {
         );
         assert_eq!(results.len(), 1, "unexpected: {results:?}");
         assert_eq!(results[0].0, "file-contains-date-and-time");
+    }
+
+    /// Near miss: the stamp's date and time are joined by horizontal
+    /// whitespace only. A stamp split across lines is not stripped,
+    /// so the unmodified rule fires on it.
+    #[test]
+    fn sde_stamp_split_across_lines_still_fires() {
+        let now = utc_dt(2026, Month::October, 28, 12, 0, 0);
+        let sde = utc_dt(2026, Month::October, 28, 9, 30, 0);
+        let results = findings_pinned(
+            "/usr/share/rbdate/split.txt",
+            "built Oct 28 2026\n09:30:00\n",
+            now,
+            Some(sde),
+        );
+        assert_eq!(results.len(), 1, "unexpected: {results:?}");
+        assert_eq!(results[0].0, "file-contains-date-and-time");
+    }
+
+    /// An old-day SDE's exact stamp is stripped too: in a file that
+    /// also carries a run-day date-only string, the stamp must not
+    /// contribute its time -- the finding is the current-date one,
+    /// not date-and-time.
+    #[test]
+    fn old_sde_stamp_does_not_contribute_its_time() {
+        let now = utc_dt(2026, Month::October, 28, 12, 0, 0);
+        let sde = utc_dt(2026, Month::October, 19, 9, 30, 0);
+        let results = findings_pinned(
+            "/usr/share/rbdate/oldstamp.txt",
+            "built Oct 19 2026 09:30:00, archived Oct 28 2026\n",
+            now,
+            Some(sde),
+        );
+        assert_eq!(results.len(), 1, "unexpected: {results:?}");
+        assert_eq!(results[0].0, "file-contains-current-date");
     }
 
     /// Near miss: the stamp's order is date-then-time. A reversed pair is
