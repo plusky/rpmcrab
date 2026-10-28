@@ -1,12 +1,14 @@
 file-contains-current-date="""
-Your file contains the current date. Its content therefore changes
-with the build date, so rebuilding the same sources may not
-produce the same package.
+Your file contains the build's wall-clock date. Its content
+therefore changes with the build date, so rebuilding the same
+sources may not produce the same package. Stamp it from
+SOURCE_DATE_EPOCH instead of the current date.
 """
 file-contains-date-and-time="""
-Your file uses __DATE__ and __TIME__, so its content changes with
-the build date and time, and rebuilding the same sources does not
-produce the same package.
+Your file contains the build's wall-clock date and time, so its
+content changes with the build moment, and rebuilding the same
+sources does not produce the same package. Stamp it from
+SOURCE_DATE_EPOCH instead of the current time.
 """
 file-contains-buildroot="""
 Your file contains traces of %{buildroot}."""

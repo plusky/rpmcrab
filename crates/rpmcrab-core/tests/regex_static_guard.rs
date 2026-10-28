@@ -116,8 +116,13 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     // Owned-Regex factory with a runtime-data pattern; called once in the
     // constructor, never on the per-file hot path.
     ("buildroot_and_date.rs", "fn buildroot_regex", "runtime"),
-    // Unit-test shape assertion for `today_string()`.
+    // Unit-test shape assertion for the run-day string.
     ("buildroot_and_date.rs", "^[A-Z][a-z]{2}", "test"),
+    // buildroot_and_date.rs (#1180): the SDE stamp pattern embeds the
+    // package's own SOURCE_DATE_EPOCH (runtime data), so it cannot be a
+    // static; compiled once per package in check_files, never per file.
+    ("buildroot_and_date.rs", "Regex::new(&format!", "runtime"),
+    ("buildroot_and_date.rs", "fn sde_stamp_regex", "runtime"),
 ];
 
 fn checks_dir() -> PathBuf {
