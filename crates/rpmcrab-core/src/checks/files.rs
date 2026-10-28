@@ -4926,7 +4926,7 @@ fn ldconfig_conf_dirs(pkg: &Pkg) -> std::collections::HashSet<String> {
 /// Record the directory entries of one ld.so.conf-format text in `dirs`:
 /// one directory per line; `#` comments and `include` directives name
 /// none, and relative entries can never name a library's parent.
-fn parse_ldso_conf(content: &str, dirs: &mut std::collections::HashSet<String>) {
+pub(crate) fn parse_ldso_conf(content: &str, dirs: &mut std::collections::HashSet<String>) {
     for line in content.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() || line.starts_with("include") || !line.starts_with('/') {
