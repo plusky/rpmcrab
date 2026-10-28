@@ -2195,6 +2195,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1033"
 
 [[divergence]]
 case = "global"
+check = "gzipped-svg-icon"
+kind = "behaviour"
+reason = "Fix-and-diverge: the reference fires on every .svgz in a scalable icon directory that lacks a same-path .svg twin. rpmcrab credits a package whose own scalable vector payload is a uniformly gzipped icon theme -- at least 100 gzipped icons in scalable directories, with gzipped icons making up at least nine tenths of the payload's .svg + .svgz regular files -- and emits no gzipped-svg-icon findings for it: a theme shipped uniformly in its native compressed format is a format choice, not a set of per-icon packaging errors. The two thresholds sit in an empty band of the Factory corpus: the largest non-theme scalable svgz population is 41 icons (kdesvn, share 1.0) and the one uniform theme, kf6-oxygen-icons-scalable, ships 5,248 gzipped of 5,348 vector files (share 0.98), so any scale floor between 42 and 5,248 has the same corpus effect. Measured over the Factory corpus: the tag drops from 5,378 findings in 64 packages to 180 in 63, and the removed 5,198 are exactly kf6-oxygen-icons-scalable's; every other package's findings are unchanged, including the one plain-text file shipped under a .svgz name (kalgebra), which keeps firing. Below theme scale, and for large but mixed payloads, the per-icon findings fire exactly as the reference's. Pinned by gzipped_svg_icon_fires_for_a_single_app_icon, gzipped_svg_icon_fires_per_untwinned_icon_in_a_mixed_package, gzipped_svg_icon_silent_for_a_uniform_theme, gzipped_svg_icon_fires_below_theme_scale, gzipped_svg_icon_fires_for_a_large_mixed_payload, gzipped_svg_icon_credits_at_the_share_boundary, gzipped_svg_icon_population_counts_regular_files_only and gzipped_svg_icon_ignores_non_scalable_dirs in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
