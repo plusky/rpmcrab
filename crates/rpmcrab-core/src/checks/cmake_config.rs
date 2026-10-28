@@ -177,19 +177,42 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 /// The patterns of every `file(GLOB ...)` / `file(GLOB_RECURSE ...)`
 /// statement in `text`: the quoted or bare arguments that carry a
 /// glob character or name a `.cmake` file (the result variable and
-/// the keyword arguments carry neither).
+/// the keyword arguments carry neither). CMake command names are
+/// case-insensitive and whitespace may precede the parenthesis, so
+/// the scan accepts `FILE (GLOB ...)` and its kin.
 fn glob_patterns(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(pos) = rest.find("file(GLOB") {
-        let stmt = &rest[pos..];
-        let Some(end) = stmt.find(')') else { break };
-        for tok in stmt[..end].split(|c: char| c.is_whitespace() || c == '"') {
-            if tok.contains('*') || tok.contains('?') || tok.ends_with(".cmake") {
-                out.push(tok.to_string());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // A `file` command at a word start: the preceding byte is not
+        // a name byte, the name matches case-insensitively, and only
+        // whitespace may stand between it and the parenthesis.
+        let word_start = i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+        if word_start && bytes.len() - i >= 4 && bytes[i..i + 4].eq_ignore_ascii_case(b"file") {
+            let mut j = i + 4;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'(' {
+                let mut k = j + 1;
+                while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                if bytes.len() - k >= 4 && bytes[k..k + 4].eq_ignore_ascii_case(b"glob") {
+                    let stmt = &text[i..];
+                    let Some(end) = stmt.find(')') else { break };
+                    for tok in stmt[..end].split(|c: char| c.is_whitespace() || c == '"') {
+                        if tok.contains('*') || tok.contains('?') || tok.ends_with(".cmake") {
+                            out.push(tok.to_string());
+                        }
+                    }
+                    i += end;
+                    continue;
+                }
             }
         }
-        rest = &stmt[end..];
+        i += 1;
     }
     out
 }
@@ -231,6 +254,26 @@ fn expand_glob_pattern(pattern: &str, from_dir: &str) -> String {
 /// the middle of the stem (`ZMusic${_comp}Targets.cmake`) names
 /// nothing, and neither does a variable standing for a whole name
 /// component (`${CMAKE_FIND_PACKAGE_NAME}-targets.cmake`).
+/// Whether `text` mentions `stem` as a name: an occurrence whose
+/// following character is not a name character, so a longer name
+/// that merely starts with the stem (`Foo` inside `FooBarTargets`)
+/// does not count as naming the file.
+fn stem_mention(text: &str, stem: &str) -> bool {
+    let mut from = 0;
+    while let Some(pos) = text[from..].find(stem) {
+        let end = from + pos + stem.len();
+        match text[end..].chars().next() {
+            None => return true,
+            Some(c) if !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '+') => {
+                return true;
+            }
+            _ => {}
+        }
+        from += pos + 1;
+    }
+    false
+}
+
 fn names_file(text: &str, from_path: &str, target_path: &str) -> bool {
     if text.contains(target_path) {
         return true;
@@ -239,7 +282,7 @@ fn names_file(text: &str, from_path: &str, target_path: &str) -> bool {
     let stem = basename(target_path)
         .strip_suffix(".cmake")
         .unwrap_or(basename(target_path));
-    if same_dir && !stem.is_empty() && text.contains(stem) {
+    if same_dir && !stem.is_empty() && stem_mention(text, stem) {
         return true;
     }
     for pattern in glob_patterns(text) {
@@ -294,6 +337,11 @@ fn imported_locations(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = text;
     while let Some(pos) = rest.find("IMPORTED_LOCATION") {
+        // The match must start the property name: a name byte
+        // directly before it makes it a different, longer property
+        // (`MY_IMPORTED_LOCATION` names no imported location).
+        let at_boundary = pos == 0
+            || !matches!(rest.as_bytes()[pos - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
         let after = &rest[pos + "IMPORTED_LOCATION".len()..];
         // An optional `_<CONFIG>` suffix of the property name.
         let after = match after.strip_prefix('_') {
@@ -305,7 +353,8 @@ fn imported_locations(text: &str) -> Vec<String> {
             }
             None => after,
         };
-        if let Some(quoted) = after.trim_start().strip_prefix('"')
+        if at_boundary
+            && let Some(quoted) = after.trim_start().strip_prefix('"')
             && let Some(end) = quoted.find('"')
         {
             out.push(quoted[..end].to_string());
@@ -315,8 +364,8 @@ fn imported_locations(text: &str) -> Vec<String> {
     out
 }
 
-/// The locations of export file `m` (its own and its
-/// `<stem>-*.cmake` satellites'), judged against the build's shipped
+/// The locations of export file `m` (its own and those of its
+/// `<stem>-*.cmake` satellites), judged against the build's shipped
 /// paths: `(counted, missing)`. A value counts once
 /// `${_IMPORT_PREFIX}` is substituted: a value still carrying a
 /// `${...}` variable or a `$<...>` generator expression, and a value
@@ -361,6 +410,12 @@ fn judged_locations(
 impl Check for CMakeConfigCheck {
     fn name(&self) -> &'static str {
         "CMakeConfigCheck"
+    }
+
+    /// This check never emits errors (its only finding is a
+    /// warning), so `--errors-only` skips it.
+    fn max_severity(&self) -> Level {
+        Level::Warning
     }
 
     fn reset(&mut self) {
@@ -849,6 +904,51 @@ mod tests {
             "leaked state: {:?}",
             out.results()
         );
+    }
+
+    #[test]
+    fn stem_mention_needs_a_trailing_delimiter() {
+        // The credited generated shape: a suffix variable appended
+        // to the full stem.
+        assert!(stem_mention(
+            "include(OpenCVModules${OpenCV_MODULES_SUFFIX}.cmake)",
+            "OpenCVModules"
+        ));
+        // The plain full name and a closing delimiter credit too.
+        assert!(stem_mention("include(FooTargets)", "FooTargets"));
+        assert!(stem_mention("\"FooTargets.cmake\"", "FooTargets"));
+        // A longer name that merely starts with the stem does not.
+        assert!(!stem_mention("include(FooBarTargets)", "Foo"));
+        assert!(!stem_mention("include(FooTargetsExtra)", "FooTargets"));
+        assert!(!stem_mention("include(FooTargets-Release)", "FooTargets"));
+    }
+
+    #[test]
+    fn glob_patterns_accept_case_and_whitespace_forms() {
+        for text in [
+            "file(GLOB CONF \"/x/*.cmake\")",
+            "FILE(GLOB CONF \"/x/*.cmake\")",
+            "file (GLOB CONF \"/x/*.cmake\")",
+            "File(Glob CONF \"/x/*.cmake\")",
+            "file(GLOB_RECURSE CONF \"/x/*.cmake\")",
+        ] {
+            assert_eq!(glob_patterns(text), vec!["/x/*.cmake"], "{text}");
+        }
+        // A longer identifier ending in `file` is not the command.
+        assert!(glob_patterns("myfile(GLOB CONF \"/x/*.cmake\")").is_empty());
+    }
+
+    #[test]
+    fn imported_locations_need_a_leading_boundary() {
+        let text = "set_target_properties(t PROPERTIES IMPORTED_LOCATION \"/a.so\")";
+        assert_eq!(imported_locations(text), vec!["/a.so"]);
+        // A longer property name containing the string is a
+        // different property and contributes no location.
+        let text = "set_property(TARGET t PROPERTY MY_IMPORTED_LOCATION \"/b.so\")";
+        assert!(imported_locations(text).is_empty());
+        // The config-suffixed form still counts.
+        let text = "set_target_properties(t PROPERTIES IMPORTED_LOCATION_RELEASE \"/c.so\")";
+        assert_eq!(imported_locations(text), vec!["/c.so"]);
     }
 
     #[test]

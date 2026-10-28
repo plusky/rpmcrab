@@ -200,13 +200,13 @@ fn every_constructible_check_is_listed_in_checks() {
     }
 }
 
-/// `--errors-only` (upstream rpmlint#134) drops exactly the six audited
+/// `--errors-only` (upstream rpmlint#134) drops exactly the seven audited
 /// warning-only checks. The per-check assertion lives in `check.rs`; this
 /// closes the multiplicity gap: no other registry check may report a
 /// sub-Error `max_severity`, or `--errors-only` would silently skip a check
 /// that was never audited as warning-only.
 #[test]
-fn exactly_six_warning_only_checks_in_registry() {
+fn exactly_seven_warning_only_checks_in_registry() {
     // Bundled defaults: some checks (e.g. AtomicUpdateCheck) require config
     // keys that `Config::default()` does not provide.
     let config = config::load_bundled();
@@ -221,6 +221,7 @@ fn exactly_six_warning_only_checks_in_registry() {
         below_error,
         vec![
             "BashismsCheck",
+            "CMakeConfigCheck",
             "ConfigFilesCheck",
             "FHSCheck",
             "SourceCheck",
