@@ -641,6 +641,16 @@ struct ReadelfInfo {
     /// mktemp call check reads it for archives, where the definition
     /// site is a separate member object and not a call site.
     undefined_function_refs: Vec<String>,
+    /// FUNC-type symbol names as `readelf -s` prints them: the bare
+    /// name plus the `.dynsym` version decoration (`name@VER` for a
+    /// needed or non-default version, `name@@VER` for the default
+    /// version; `.symtab` entries print undecorated). The
+    /// gethostbyname family pattern carries an `@GLIBC` arm that only
+    /// engages on the printed form, so that finder reads this set
+    /// instead of `functions`.
+    functions_printed: Vec<String>,
+    /// The undefined subset of `functions_printed`.
+    undefined_function_refs_printed: Vec<String>,
     is_shlib: bool,
     is_debug: bool,
     /// True when the binary was produced by the Rust toolchain.
@@ -752,6 +762,39 @@ const AR_MAGIC: &[u8; 8] = b"!<arch>\n";
 /// ELF identification magic: `0x7f` followed by `ELF`.
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 
+/// The version decoration `readelf -s` prints after a `.dynsym`
+/// symbol name: `@VER` for a needed version or a non-default
+/// definition, `@@VER` for the default version definition, and
+/// nothing when the symbol carries no version (`.gnu.version` index
+/// 0 or 1) or the version sections do not resolve the index.
+fn dynsym_version_decoration(
+    elf: &goblin::elf::Elf,
+    idx: usize,
+    defined: bool,
+    verdef_names: &HashMap<u16, &str>,
+    verneed_names: &HashMap<u16, &str>,
+) -> String {
+    let Some(versym) = elf.versym.as_ref().and_then(|s| s.get_at(idx)) else {
+        return String::new();
+    };
+    // VER_NDX_LOCAL (0) and VER_NDX_GLOBAL (1) print no decoration.
+    if versym.version() <= 1 {
+        return String::new();
+    }
+    if defined {
+        match verdef_names.get(&versym.version()) {
+            Some(name) if versym.is_hidden() => format!("@{name}"),
+            Some(name) => format!("@@{name}"),
+            None => String::new(),
+        }
+    } else {
+        match verneed_names.get(&versym.version()) {
+            Some(name) => format!("@{name}"),
+            None => String::new(),
+        }
+    }
+}
+
 impl ReadelfInfo {
     fn empty(name: &str) -> Self {
         ReadelfInfo {
@@ -760,6 +803,8 @@ impl ReadelfInfo {
             functions: Vec::new(),
             undefined_functions: Vec::new(),
             undefined_function_refs: Vec::new(),
+            functions_printed: Vec::new(),
+            undefined_function_refs_printed: Vec::new(),
             // The reference derives is_shlib and is_debug from the file name,
             // not the ELF content (readelfparser.py). A PIE executable or Go
             // binary is ET_DYN but is not a shared library for these checks.
@@ -982,6 +1027,29 @@ impl ReadelfInfo {
             self.program_headers.push(ElfProgramHeader { name, flags });
         }
 
+        // Version index -> name maps from `.gnu.version_d` and
+        // `.gnu.version_r`, for the printed symbol forms below.
+        let mut verdef_names: HashMap<u16, &str> = HashMap::new();
+        if let Some(section) = elf.verdef.as_ref() {
+            for def in section.iter() {
+                if let Some(aux) = def.iter().next() {
+                    if let Some(name) = elf.dynstrtab.get_at(aux.vda_name) {
+                        verdef_names.insert(def.vd_ndx, name);
+                    }
+                }
+            }
+        }
+        let mut verneed_names: HashMap<u16, &str> = HashMap::new();
+        if let Some(section) = elf.verneed.as_ref() {
+            for need in section.iter() {
+                for aux in need.iter() {
+                    if let Some(name) = elf.dynstrtab.get_at(aux.vna_name) {
+                        verneed_names.insert(aux.vna_other, name);
+                    }
+                }
+            }
+        }
+
         // Function symbols from both tables, mirroring the reference
         // `readelf -s` scan over `.dynsym` and `.symtab`.
         for sym in elf.syms.iter() {
@@ -989,8 +1057,13 @@ impl ReadelfInfo {
                 if let Some(name) = elf.strtab.get_at(sym.st_name) {
                     if !name.is_empty() {
                         self.functions.push(name.to_string());
+                        // The static table carries no version
+                        // decorations: the printed form is the bare
+                        // name.
+                        self.functions_printed.push(name.to_string());
                         if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize {
                             self.undefined_function_refs.push(name.to_string());
+                            self.undefined_function_refs_printed.push(name.to_string());
                         }
                     }
                 }
@@ -1003,20 +1076,38 @@ impl ReadelfInfo {
         // toolchains emit many of them as NOTYPE (`__cxa_finalize` is one),
         // and the loader-shim predicate over `undefined_functions` must see
         // the binary's full import set.
-        for sym in elf.dynsyms.iter() {
+        for (idx, sym) in elf.dynsyms.iter().enumerate() {
             let ty = sym.st_type();
             if ty != goblin::elf::sym::STT_FUNC && ty != goblin::elf::sym::STT_NOTYPE {
                 continue;
             }
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                 if !name.is_empty() {
-                    if ty == goblin::elf::sym::STT_FUNC {
+                    let printed = if ty == goblin::elf::sym::STT_FUNC {
+                        let defined =
+                            sym.st_shndx != goblin::elf::section_header::SHN_UNDEF as usize;
+                        Some(format!(
+                            "{name}{}",
+                            dynsym_version_decoration(
+                                elf,
+                                idx,
+                                defined,
+                                &verdef_names,
+                                &verneed_names
+                            )
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(printed) = &printed {
                         self.functions.push(name.to_string());
+                        self.functions_printed.push(printed.clone());
                     }
                     if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize {
                         self.undefined_functions.push(name.to_string());
-                        if ty == goblin::elf::sym::STT_FUNC {
+                        if let Some(printed) = printed {
                             self.undefined_function_refs.push(name.to_string());
+                            self.undefined_function_refs_printed.push(printed);
                         }
                     }
                 }
@@ -1166,6 +1257,22 @@ impl ReadelfInfo {
     /// site (the archive member implementing the function) stays silent.
     fn has_undefined_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
         self.undefined_function_refs
+            .iter()
+            .any(|s| regex.is_match(s).unwrap_or(false))
+    }
+
+    /// The printed-form view of `has_function_matching`: the pattern
+    /// runs over the symbol names as `readelf -s` prints them,
+    /// version decorations included -- the input the reference scans.
+    fn has_printed_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
+        self.functions_printed
+            .iter()
+            .any(|s| regex.is_match(s).unwrap_or(false))
+    }
+
+    /// The printed-form view of `has_undefined_function_matching`.
+    fn has_undefined_printed_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
+        self.undefined_function_refs_printed
             .iter()
             .any(|s| regex.is_match(s).unwrap_or(false))
     }
@@ -6375,7 +6482,15 @@ impl BinariesCheck {
         // to every object kind, so this finder does not import the
         // defined-match overreach the family tightening removes.
         let tmpnam = info.has_undefined_function_matching(&self.tmpnam_call_regex);
-        let gethostbyname = info.has_function_matching(&self.gethostbyname_call_regex);
+        // The family pattern runs over the printed symbol forms:
+        // its `@GLIBC` arm accepts a needed GLIBC version and
+        // rejects every other decoration, so a version-scripted
+        // namesake (an NSS module's `_nss_*_gethostbyname_r@@VER`
+        // export, an internal `sysdb_gethostbyname@VER` reference)
+        // is not the legacy call, while an unversioned wrapper
+        // reference (`net_gethostbyname`, `ares_gethostbyname`)
+        // still matches at the end of the name, as in the reference.
+        let gethostbyname = info.has_printed_function_matching(&self.gethostbyname_call_regex);
         // Legacy crypto primitives (#972 candidate 6): undefined
         // references to the low-level OpenSSL-style entry points.
         // The reference is the predicate -- the implementing
@@ -6463,7 +6578,7 @@ impl BinariesCheck {
             // call-to-mktemp uses (#852). The level rests on the
             // Factory corpus measurement recorded in the divergence
             // ledger (#967).
-            if info.has_undefined_function_matching(&self.gethostbyname_call_regex)
+            if info.has_undefined_printed_function_matching(&self.gethostbyname_call_regex)
                 && (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg))
             {
                 add_info(
@@ -8521,6 +8636,8 @@ mod tests {
                 functions: Vec::new(),
                 undefined_functions: Vec::new(),
                 undefined_function_refs: Vec::new(),
+                functions_printed: Vec::new(),
+                undefined_function_refs_printed: Vec::new(),
                 is_shlib: false,
                 is_debug: false,
                 is_rust: false,
@@ -11390,6 +11507,8 @@ description = "explicit priority string bypasses the system crypto policy"
                 functions: Vec::new(),
                 undefined_functions: Vec::new(),
                 undefined_function_refs: Vec::new(),
+                functions_printed: Vec::new(),
+                undefined_function_refs_printed: Vec::new(),
                 is_shlib: true,
                 is_debug: false,
                 soname: None,
@@ -11541,6 +11660,8 @@ description = "explicit priority string bypasses the system crypto policy"
             functions: Vec::new(),
             undefined_functions: Vec::new(),
             undefined_function_refs: Vec::new(),
+            functions_printed: Vec::new(),
+            undefined_function_refs_printed: Vec::new(),
             is_shlib: false,
             is_debug: false,
             soname: None,
@@ -19947,6 +20068,7 @@ description = "explicit priority string bypasses the system crypto policy"
         // gethostbyname -> Warning.
         let mut info = syn_info();
         info.functions = vec!["gethostbyname".to_string()];
+        info.functions_printed = info.functions.clone();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
         let results = out.results().to_vec();
@@ -20239,6 +20361,8 @@ description = "explicit priority string bypasses the system crypto policy"
             let mut info = syn_info();
             info.functions = functions.iter().map(|s| s.to_string()).collect();
             info.undefined_function_refs = info.functions.clone();
+            info.functions_printed = info.functions.clone();
+            info.undefined_function_refs_printed = info.undefined_function_refs.clone();
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_security_functions(pkg, pkgfile, &info, &mut out);
             let results = out.results().to_vec();
@@ -20254,6 +20378,7 @@ description = "explicit priority string bypasses the system crypto policy"
             let check = BinariesCheck::with_tool_dir(&config, None);
             let mut info = syn_info();
             info.functions = vec!["gethostbyname".to_string()];
+            info.functions_printed = info.functions.clone();
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_security_functions(pkg, pkgfile, &info, &mut out);
             let results = out.results().to_vec();
@@ -20365,7 +20490,124 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn gethostbyname_printed_forms() {
+        // The family pattern reads the printed symbol forms (name
+        // plus version decoration): the pattern's `@GLIBC` arm
+        // accepts a needed GLIBC version only, so decorated
+        // namesakes stay silent while unversioned and
+        // GLIBC-versioned references fire.
+        fn run(
+            pkg: &Pkg,
+            pkgfile: &PkgFile,
+            functions: &[&str],
+            undefined: &[&str],
+        ) -> Vec<String> {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let mut info = syn_info();
+            info.functions_printed = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs_printed =
+                undefined.iter().map(|s| s.to_string()).collect();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-gethostbyname")
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        let plain = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let bare_pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let svc_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/lib/systemd/system/foo.service",
+                "ASCII text",
+            )],
+        );
 
+        // A needed GLIBC version engages the `@GLIBC` arm: Warning
+        // bare, Error inside the daemon gate.
+        let lines = run(
+            &bare_pkg,
+            &plain,
+            &["gethostbyname@GLIBC_2.2.5"],
+            &["gethostbyname@GLIBC_2.2.5"],
+        );
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        let lines = run(
+            &svc_pkg,
+            &plain,
+            &["gethostbyname@GLIBC_2.2.5"],
+            &["gethostbyname@GLIBC_2.2.5"],
+        );
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // An unversioned wrapper reference ends the name: Warning.
+        let lines = run(
+            &bare_pkg,
+            &plain,
+            &["net_gethostbyname"],
+            &["net_gethostbyname"],
+        );
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // Near miss: a reference to a version-scripted namesake is
+        // not the legacy call -- silent even inside the gate.
+        let lines = run(
+            &svc_pkg,
+            &plain,
+            &["sysdb_gethostbyname@V_2.13.1"],
+            &["sysdb_gethostbyname@V_2.13.1"],
+        );
+        assert_eq!(lines.len(), 0, "no finding: {lines:?}");
+
+        // Near miss: the exact name under a non-GLIBC version is
+        // outside the pattern as well.
+        let lines = run(
+            &bare_pkg,
+            &plain,
+            &["gethostbyname@OTHER_1.0"],
+            &["gethostbyname@OTHER_1.0"],
+        );
+        assert_eq!(lines.len(), 0, "no finding: {lines:?}");
+
+        // Near misses: default-version definitions (`@@`) never
+        // match, exact or embedded.
+        let lines = run(&bare_pkg, &plain, &["gethostbyname@@GLIBC_2.2.5"], &[]);
+        assert_eq!(lines.len(), 0, "no finding: {lines:?}");
+        let lines = run(
+            &bare_pkg,
+            &plain,
+            &["_nss_mdns_gethostbyname_r@@NSSMDNS_0"],
+            &[],
+        );
+        assert_eq!(lines.len(), 0, "no finding: {lines:?}");
+
+        // An unversioned definition still fires at Warning: the
+        // definition-only population the gate leaves there.
+        let lines = run(&bare_pkg, &plain, &["gethostbyname"], &[]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // The gate reads the printed forms too: a definition plus a
+        // namesake reference inside the gate stays a Warning -- the
+        // namesake is not the call that promotes.
+        let lines = run(
+            &svc_pkg,
+            &plain,
+            &["gethostbyname"],
+            &["sysdb_gethostbyname@V_2.13.1"],
+        );
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+    }
+
+    #[test]
     fn unbounded_copy_findings() {
         // #972 candidate 4: an undefined reference to strcpy, strcat,
         // sprintf or vsprintf reports at Warning. The predicate is the
