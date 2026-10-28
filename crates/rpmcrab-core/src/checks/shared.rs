@@ -141,34 +141,109 @@ pub(crate) fn script_body_or_prog(pkg: &Pkg, tag: librpm::Tag, prog: librpm::Tag
     }
 }
 
-/// The package's SOURCE_DATE_EPOCH, when one is known. A package whose
-/// BUILDHOST is `reproducible` was built by the configuration that sets
+/// How a caller resolves the one corner where the two
+/// `SOURCE_DATE_EPOCH` consumers disagree: BUILDHOST is
+/// `reproducible` but the header carries no BUILDTIME.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReproducibleNoBuildtime {
+    /// No SDE is known. The environment value applies to every
+    /// package in a run, so it cannot stand in for the value this
+    /// package's own header would have carried.
+    Unknown,
+    /// The environment value is the SDE in effect.
+    UseEnvironment,
+}
+
+/// The package's SOURCE_DATE_EPOCH as epoch seconds, when one is
+/// known per package. A package whose BUILDHOST is `reproducible`
+/// was built by the configuration that sets
 /// `%use_source_date_epoch_as_buildtime`, so its BUILDTIME is the
-/// SOURCE_DATE_EPOCH. Otherwise the `SOURCE_DATE_EPOCH` environment
-/// variable, when set to an integer, is the only known value; with
-/// neither, there is nothing to compare embedded timestamps against.
-pub(crate) fn source_date_epoch(pkg: &Pkg) -> Option<i64> {
+/// SOURCE_DATE_EPOCH; a missing BUILDTIME there leaves no known
+/// value, because the `SOURCE_DATE_EPOCH` environment variable
+/// applies to every package in the run, not to this package.
+/// Otherwise the environment variable, when set to an integer, is
+/// the only known value; with neither, there is nothing to compare
+/// embedded timestamps against.
+pub(crate) fn source_date_epoch_seconds(pkg: &Pkg) -> Option<i64> {
     resolve_source_date_epoch(
         pkg.tag_str(librpm::Tag::BUILDHOST).as_deref(),
         pkg.tag_i64(librpm::Tag::BUILDTIME),
-        std::env::var("SOURCE_DATE_EPOCH").ok().as_deref(),
+        env_source_date_epoch(),
+        ReproducibleNoBuildtime::Unknown,
     )
 }
 
-/// The sourcing rule of [`source_date_epoch`], pure so tests can pin the
-/// whole matrix: a `reproducible` BUILDHOST names the BUILDTIME and
-/// nothing else (a missing BUILDTIME there leaves no known value, the
-/// environment is not consulted); any other BUILDHOST consults the
-/// environment value alone, and an unparsable one is no value.
+/// The package's `SOURCE_DATE_EPOCH`, when one is in effect.
+///
+/// Sourcing order (issue #1180): the package header wins. Under the
+/// Factory build configuration (`%use_source_date_epoch_as_buildtime Y`
+/// together with `%_buildhost reproducible`) BUILDTIME is the package's
+/// own SDE, and the header value is per-package where the environment
+/// variable applies to every package in a run. When the header route
+/// does not apply -- including a `reproducible` BUILDHOST with no
+/// BUILDTIME -- fall back to `$SOURCE_DATE_EPOCH` from the linter's
+/// environment. When neither is available there is no SDE in effect
+/// and callers keep their default behaviour.
+pub fn source_date_epoch(pkg: &Pkg) -> Option<time::OffsetDateTime> {
+    source_date_epoch_from_parts(
+        pkg.tag_str(librpm::Tag::BUILDHOST).as_deref(),
+        pkg.tag_i64(librpm::Tag::BUILDTIME),
+        env_source_date_epoch(),
+    )
+}
+
+/// The pure form of [`source_date_epoch`], so tests can pin the
+/// matrix without crafting a package header.
+fn source_date_epoch_from_parts(
+    buildhost: Option<&str>,
+    buildtime: Option<i64>,
+    env_sde: Option<i64>,
+) -> Option<time::OffsetDateTime> {
+    resolve_source_date_epoch(
+        buildhost,
+        buildtime,
+        env_sde,
+        ReproducibleNoBuildtime::UseEnvironment,
+    )
+    .and_then(|e| time::OffsetDateTime::from_unix_timestamp(e).ok())
+}
+
+/// The sourcing rule both SDE consumers share: BUILDTIME counts as
+/// the SDE only when BUILDHOST is exactly `reproducible`; in every
+/// other case the environment value (already parsed, `None` when
+/// unset or unparsable) rules. The `reproducible`-without-BUILDTIME
+/// corner is the caller's `missing` policy.
 fn resolve_source_date_epoch(
     buildhost: Option<&str>,
     buildtime: Option<i64>,
-    env: Option<&str>,
+    env_sde: Option<i64>,
+    missing: ReproducibleNoBuildtime,
 ) -> Option<i64> {
-    if buildhost == Some("reproducible") {
-        return buildtime;
+    match (buildhost, buildtime) {
+        (Some("reproducible"), Some(buildtime)) => Some(buildtime),
+        (Some("reproducible"), None) => match missing {
+            ReproducibleNoBuildtime::Unknown => None,
+            ReproducibleNoBuildtime::UseEnvironment => env_sde,
+        },
+        _ => env_sde,
     }
-    env.and_then(|v| v.parse::<i64>().ok())
+}
+
+/// `$SOURCE_DATE_EPOCH` from the environment, parsed once per
+/// process. A value that is not an integer epoch is ignored, as if
+/// unset.
+fn env_source_date_epoch() -> Option<i64> {
+    static ENV_SDE: OnceLock<Option<i64>> = OnceLock::new();
+    *ENV_SDE.get_or_init(|| {
+        parse_env_source_date_epoch(std::env::var("SOURCE_DATE_EPOCH").ok().as_deref())
+    })
+}
+
+/// The pure parse behind [`env_source_date_epoch`]: surrounding
+/// whitespace is ignored; anything that is not an integer epoch is
+/// no value.
+fn parse_env_source_date_epoch(raw: Option<&str>) -> Option<i64> {
+    raw.and_then(|v| v.trim().parse::<i64>().ok())
 }
 
 /// One scriptlet of a package: its `%`-label, its interpreter (the `-p`
@@ -299,50 +374,6 @@ pub fn is_64bit_arch(arch: &str) -> bool {
     )
 }
 
-/// The package's `SOURCE_DATE_EPOCH`, when one is in effect.
-///
-/// Sourcing order (issue #1180): the package header wins. Under the
-/// Factory build configuration (`%use_source_date_epoch_as_buildtime Y`
-/// together with `%_buildhost reproducible`) BUILDTIME is the package's
-/// own SDE, and the header value is per-package where the environment
-/// variable applies to every package in a run. When the header route
-/// does not apply, fall back to `$SOURCE_DATE_EPOCH` from the linter's
-/// environment. When neither is available there is no SDE in effect and
-/// callers keep their default behaviour.
-pub fn source_date_epoch(pkg: &Pkg) -> Option<time::OffsetDateTime> {
-    sde_from_parts(
-        pkg.tag_str(librpm::Tag::BUILDHOST).as_deref(),
-        pkg.tag_i64(librpm::Tag::BUILDTIME),
-        env_source_date_epoch(),
-    )
-}
-
-/// The pure sourcing rule behind [`source_date_epoch`]: BUILDTIME counts
-/// as SDE only when BUILDHOST is exactly `reproducible`; in every other
-/// case the environment value (already parsed, `None` when unset) rules.
-fn sde_from_parts(
-    buildhost: Option<&str>,
-    buildtime: Option<i64>,
-    env_sde: Option<i64>,
-) -> Option<time::OffsetDateTime> {
-    let epoch = match (buildhost, buildtime) {
-        (Some("reproducible"), Some(buildtime)) => Some(buildtime),
-        _ => env_sde,
-    };
-    epoch.and_then(|e| time::OffsetDateTime::from_unix_timestamp(e).ok())
-}
-
-/// `$SOURCE_DATE_EPOCH` from the environment, parsed once per process.
-/// A value that is not an integer epoch is ignored, as if unset.
-fn env_source_date_epoch() -> Option<i64> {
-    static ENV_SDE: OnceLock<Option<i64>> = OnceLock::new();
-    *ENV_SDE.get_or_init(|| {
-        std::env::var("SOURCE_DATE_EPOCH")
-            .ok()
-            .and_then(|v| v.trim().parse::<i64>().ok())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,11 +408,21 @@ mod tests {
         // The env value is deliberately different: under a reproducible
         // BUILDHOST the BUILDTIME is the SOURCE_DATE_EPOCH, full stop.
         assert_eq!(
-            resolve_source_date_epoch(Some("reproducible"), Some(111), Some("222")),
+            resolve_source_date_epoch(
+                Some("reproducible"),
+                Some(111),
+                Some(222),
+                ReproducibleNoBuildtime::Unknown
+            ),
             Some(111)
         );
         assert_eq!(
-            resolve_source_date_epoch(Some("reproducible"), Some(111), None),
+            resolve_source_date_epoch(
+                Some("reproducible"),
+                Some(111),
+                None,
+                ReproducibleNoBuildtime::Unknown
+            ),
             Some(111)
         );
     }
@@ -391,7 +432,12 @@ mod tests {
         // No fallback to the environment: the reproducible configuration
         // guarantees a BUILDTIME, so its absence leaves nothing known.
         assert_eq!(
-            resolve_source_date_epoch(Some("reproducible"), None, Some("222")),
+            resolve_source_date_epoch(
+                Some("reproducible"),
+                None,
+                Some(222),
+                ReproducibleNoBuildtime::Unknown
+            ),
             None
         );
     }
@@ -399,11 +445,16 @@ mod tests {
     #[test]
     fn source_date_epoch_other_buildhost_uses_environment() {
         assert_eq!(
-            resolve_source_date_epoch(Some("builder.example.com"), Some(111), Some("222")),
+            resolve_source_date_epoch(
+                Some("builder.example.com"),
+                Some(111),
+                Some(222),
+                ReproducibleNoBuildtime::Unknown
+            ),
             Some(222)
         );
         assert_eq!(
-            resolve_source_date_epoch(None, Some(111), Some("222")),
+            resolve_source_date_epoch(None, Some(111), Some(222), ReproducibleNoBuildtime::Unknown),
             Some(222)
         );
     }
@@ -411,21 +462,50 @@ mod tests {
     #[test]
     fn source_date_epoch_other_buildhost_without_environment_is_unknown() {
         assert_eq!(
-            resolve_source_date_epoch(Some("builder.example.com"), Some(111), None),
+            resolve_source_date_epoch(
+                Some("builder.example.com"),
+                Some(111),
+                None,
+                ReproducibleNoBuildtime::Unknown
+            ),
             None
         );
-        assert_eq!(resolve_source_date_epoch(None, None, None), None);
+        assert_eq!(
+            resolve_source_date_epoch(None, None, None, ReproducibleNoBuildtime::Unknown),
+            None
+        );
     }
 
     #[test]
     fn source_date_epoch_unparsable_environment_is_unknown() {
+        assert_eq!(parse_env_source_date_epoch(Some("abc")), None);
+        assert_eq!(parse_env_source_date_epoch(Some("")), None);
+        assert_eq!(parse_env_source_date_epoch(None), None);
+        assert_eq!(parse_env_source_date_epoch(Some("222")), Some(222));
+    }
+
+    #[test]
+    fn source_date_epoch_reproducible_without_buildtime_diverges_by_policy() {
+        // The same header state resolves differently per caller, by
+        // design: the per-package consumer treats the SDE as unknown,
+        // the run-environment consumer uses the environment value.
         assert_eq!(
-            resolve_source_date_epoch(Some("builder.example.com"), None, Some("abc")),
+            resolve_source_date_epoch(
+                Some("reproducible"),
+                None,
+                Some(222),
+                ReproducibleNoBuildtime::Unknown
+            ),
             None
         );
         assert_eq!(
-            resolve_source_date_epoch(Some("builder.example.com"), None, Some("")),
-            None
+            resolve_source_date_epoch(
+                Some("reproducible"),
+                None,
+                Some(222),
+                ReproducibleNoBuildtime::UseEnvironment
+            ),
+            Some(222)
         );
     }
 
@@ -580,21 +660,21 @@ mod tests {
 
 #[cfg(test)]
 mod sde_tests {
-    use super::sde_from_parts;
+    use super::source_date_epoch_from_parts;
 
     // 2026-10-28 09:30:00 UTC.
     const SDE: i64 = 1_793_179_800;
 
     #[test]
     fn reproducible_header_wins_over_env() {
-        let got = sde_from_parts(Some("reproducible"), Some(SDE), Some(1)).unwrap();
+        let got = source_date_epoch_from_parts(Some("reproducible"), Some(SDE), Some(1)).unwrap();
         assert_eq!(got.unix_timestamp(), SDE);
         assert_eq!((got.hour(), got.minute(), got.second()), (9, 30, 0));
     }
 
     #[test]
     fn reproducible_header_without_env() {
-        let got = sde_from_parts(Some("reproducible"), Some(SDE), None).unwrap();
+        let got = source_date_epoch_from_parts(Some("reproducible"), Some(SDE), None).unwrap();
         assert_eq!(got.unix_timestamp(), SDE);
     }
 
@@ -602,24 +682,25 @@ mod sde_tests {
     fn other_buildhost_falls_back_to_env() {
         // A BUILDTIME under any other BUILDHOST is a wall-clock build
         // time, not SDE: the environment value rules.
-        let got = sde_from_parts(Some("buildhost.example"), Some(SDE), Some(42)).unwrap();
+        let got =
+            source_date_epoch_from_parts(Some("buildhost.example"), Some(SDE), Some(42)).unwrap();
         assert_eq!(got.unix_timestamp(), 42);
     }
 
     #[test]
     fn reproducible_without_buildtime_falls_back_to_env() {
-        let got = sde_from_parts(Some("reproducible"), None, Some(42)).unwrap();
+        let got = source_date_epoch_from_parts(Some("reproducible"), None, Some(42)).unwrap();
         assert_eq!(got.unix_timestamp(), 42);
     }
 
     #[test]
     fn no_source_no_sde() {
-        assert!(sde_from_parts(Some("buildhost.example"), Some(SDE), None).is_none());
-        assert!(sde_from_parts(None, None, None).is_none());
+        assert!(source_date_epoch_from_parts(Some("buildhost.example"), Some(SDE), None).is_none());
+        assert!(source_date_epoch_from_parts(None, None, None).is_none());
     }
 
     #[test]
     fn out_of_range_epoch_is_no_sde() {
-        assert!(sde_from_parts(Some("reproducible"), Some(i64::MAX), None).is_none());
+        assert!(source_date_epoch_from_parts(Some("reproducible"), Some(i64::MAX), None).is_none());
     }
 }
