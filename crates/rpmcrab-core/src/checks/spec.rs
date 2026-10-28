@@ -1585,6 +1585,42 @@ struct BodyLine {
     text: String,
 }
 
+/// One enclosing `%if`-family directive in the raw-line walk.
+///
+/// `construct` identifies the directive instance within the spec (two
+/// lines inside the same `%if` block share it); `text` is the
+/// whitespace-normalised directive line, so two separate blocks
+/// written with the same condition (the `_multibuild` flavour idiom)
+/// also compare as the same condition. `segment` is 0 in the `%if`
+/// branch, increments per `%elif`, and is `u32::MAX` in the `%else`
+/// branch.
+#[derive(Clone, Debug)]
+struct CondFrame {
+    construct: u64,
+    text: String,
+    segment: u32,
+}
+
+/// Whether two conditional contexts can hold in the same build. The
+/// only provable exclusion is a level where both sides share a
+/// condition (the same directive instance, or the same condition
+/// text) but sit in different branches of it: branches of one
+/// condition are mutually exclusive. Any other shape -- different
+/// conditions, nesting, an unconditional side -- stays compatible,
+/// so the caller keeps judging.
+fn cond_contexts_compatible(a: &[CondFrame], b: &[CondFrame]) -> bool {
+    for (fa, fb) in a.iter().zip(b.iter()) {
+        if fa.construct == fb.construct || fa.text == fb.text {
+            if fa.segment != fb.segment {
+                return false;
+            }
+        } else {
+            return true;
+        }
+    }
+    true
+}
+
 pub struct SpecCheck {
     mini_mode: bool,
     macro_re: Regex,
@@ -1650,7 +1686,13 @@ pub struct SpecCheck {
     declarative: bool,
     current_section: String,
     current_package: Option<String>,
-    package_noarch: BTreeMap<Option<String>, bool>,
+    package_noarch: BTreeMap<Option<String>, Vec<Vec<CondFrame>>>,
+    /// Conditional context of the line being walked: one frame per
+    /// enclosing `%if`-family directive, outermost first. Maintained
+    /// by `checkline_cond_stack` ahead of the other per-line scans.
+    cond_stack: Vec<CondFrame>,
+    /// Id source for `CondFrame::construct`; reset per spec.
+    cond_next_construct: u64,
     spec_only: bool,
     license_sections: Vec<FilesSectionScan>,
     license_section: Option<FilesSectionScan>,
@@ -1789,6 +1831,8 @@ impl SpecCheck {
             current_section: "package".to_string(),
             current_package: None,
             package_noarch: BTreeMap::new(),
+            cond_stack: Vec::new(),
+            cond_next_construct: 0,
             spec_only: false,
             license_sections: Vec::new(),
             license_section: None,
@@ -2081,6 +2125,8 @@ impl Check for SpecCheck {
         self.current_section = "package".to_string();
         self.current_package = None;
         self.package_noarch.clear();
+        self.cond_stack.clear();
+        self.cond_next_construct = 0;
         self.spec_only = false;
         self.license_sections.clear();
         self.license_section = None;
@@ -2377,6 +2423,7 @@ impl SpecCheck {
     }
 
     fn check_line(&mut self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
+        self.checkline_cond_stack(line);
         self.checkline_silent_constructs(pkg, out, line);
         self.checkline_declarative(line);
         self.checkline_break_space(pkg, out, line);
@@ -2692,7 +2739,9 @@ impl SpecCheck {
                 );
             } else {
                 self.package_noarch
-                    .insert(self.current_package.clone(), true);
+                    .entry(self.current_package.clone())
+                    .or_default()
+                    .push(self.cond_stack.clone());
             }
         }
     }
@@ -2879,17 +2928,66 @@ impl SpecCheck {
         }
     }
 
+    /// Track the `%if`-family nesting of the raw-line walk: one
+    /// `CondFrame` per enclosing directive. A directive spelled in a
+    /// comment never reaches here as one (its first word starts with
+    /// `#`); a directive inside a macro body or a text section is
+    /// tracked like any other line, the same exposure the reference's
+    /// own line walk has.
+    fn checkline_cond_stack(&mut self, line: &str) {
+        let trimmed = line.trim();
+        let first_word = trimmed.split_whitespace().next().unwrap_or("");
+        match first_word {
+            "%if" | "%ifarch" | "%ifnarch" | "%ifos" | "%ifnos" | "%ifdef" | "%ifndef"
+            | "%ifexpr" => {
+                self.cond_next_construct += 1;
+                self.cond_stack.push(CondFrame {
+                    construct: self.cond_next_construct,
+                    text: trimmed.split_whitespace().collect::<Vec<_>>().join(" "),
+                    segment: 0,
+                });
+            }
+            "%elif" | "%elifarch" | "%elifnarch" | "%elifos" | "%elifnos" => {
+                if let Some(top) = self.cond_stack.last_mut() {
+                    top.segment = top.segment.saturating_add(1);
+                }
+            }
+            "%else" => {
+                if let Some(top) = self.cond_stack.last_mut() {
+                    top.segment = u32::MAX;
+                }
+            }
+            "%endif" => {
+                self.cond_stack.pop();
+            }
+            _ => {}
+        }
+    }
+
     fn checkline_files(&self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         if self.current_section != "files" {
             return;
         }
-        let noarch = self
-            .package_noarch
-            .get(&self.current_package)
-            .copied()
-            .unwrap_or(false)
-            || (!self.package_noarch.contains_key(&self.current_package)
-                && self.package_noarch.get(&None).copied().unwrap_or(false));
+        // A `BuildArch: noarch` counts only where it can hold in the
+        // same build as this line. The candidates are the package's
+        // own declarations plus the main package's (a subpackage
+        // inherits the main `BuildArch` unless its own declaration's
+        // branch is the taken one), each with the conditional context
+        // it was declared under. A declaration in the opposite branch
+        // of a shared condition (the `_multibuild` flavour shape)
+        // never applies to the line.
+        let mut decls: Vec<&Vec<CondFrame>> = Vec::new();
+        if let Some(own) = self.package_noarch.get(&self.current_package) {
+            decls.extend(own.iter());
+        }
+        if self.current_package.is_some()
+            && let Some(main) = self.package_noarch.get(&None)
+        {
+            decls.extend(main.iter());
+        }
+        let noarch = decls
+            .iter()
+            .any(|decl| cond_contexts_compatible(decl, &self.cond_stack));
         if noarch && self.libdir_re.is_match(line).unwrap_or(false) {
             let pkgname = self
                 .current_package
@@ -8119,6 +8217,95 @@ exit 1"#,
             "line: {}",
             lines[0]
         );
+    }
+
+    /// #1171: the `_multibuild` flavour shape -- `BuildArch: noarch`
+    /// sits in the `%else` branch of the flavour condition while the
+    /// `%files` lines sit in the `%if` branch, so no build puts
+    /// `%{_libdir}` into a noarch package.
+    #[test]
+    fn libdir_macro_silent_for_multibuild_opposite_branches_1171() {
+        let spec = "Name: foo\n%global flavor @BUILD_FLAVOR@%{nil}\n%if \"%{flavor}\" == \"firefox\"\n%else\nBuildArch: noarch\n%endif\n%if \"%{flavor}\" == \"firefox\"\n%files\n%dir %{_libdir}/firefox\n%files -n %{base_name}-firefox-defaults\n%{_libdir}/firefox/browser/defaults/preferences/foo.js\n%endif\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "libdir-macro-in-noarch-package");
+        assert_eq!(lines.len(), 0, "results: {results:?}");
+    }
+
+    /// #1171, the reported layout with the declaration under the
+    /// subpackage's own key: the `BuildArch` line sits textually in
+    /// the subpackage's region (after its `%package` header), in
+    /// the %else branch, while the subpackage's %files lines are
+    /// in the %if branch of the same condition.
+    #[test]
+    fn libdir_macro_silent_for_subpackage_own_key_opposite_branches_1171() {
+        let spec = "Name: foo\n%package -n foo-sub\nSummary: x\n%if \"%{flavor}\" == \"firefox\"\n%files -n foo-sub\n%{_libdir}/foo\n%else\nBuildArch: noarch\n%endif\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "libdir-macro-in-noarch-package");
+        assert_eq!(lines.len(), 0, "results: {results:?}");
+    }
+
+    /// #1171 near-miss: declaration and `%files` line in the SAME
+    /// branch of the condition -- the noarch build really carries
+    /// the libdir path.
+    #[test]
+    fn libdir_macro_fires_when_noarch_in_same_branch_1171() {
+        let spec = "Name: foo\n%if \"%{flavor}\" == \"firefox\"\nBuildArch: noarch\n%files\n%{_libdir}/foo\n%endif\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "libdir-macro-in-noarch-package");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+    }
+
+    /// #1171 near-miss: an unconditional `BuildArch: noarch` applies
+    /// to `%files` lines under any conditional.
+    #[test]
+    fn libdir_macro_fires_when_noarch_unconditional_1171() {
+        let spec = "Name: foo\nBuildArch: noarch\n%if \"%{flavor}\" == \"firefox\"\n%files\n%{_libdir}/foo\n%endif\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "libdir-macro-in-noarch-package");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+    }
+
+    /// #1171 near-miss: opposite branches of DIFFERENT conditions
+    /// can hold in the same build, so the finding stays.
+    #[test]
+    fn libdir_macro_fires_for_opposite_branches_of_other_condition_1171() {
+        let spec = "Name: foo\n%if \"%{flavor}\" == \"firefox\"\n%else\nBuildArch: noarch\n%endif\n%ifarch x86_64\n%files\n%{_libdir}/foo\n%endif\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "libdir-macro-in-noarch-package");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+    }
+
+    /// #1171: an `%elif` branch is exclusive with the `%if` branch of
+    /// the same construct, so a declaration there does not reach a
+    /// `%files` line in the `%if` branch.
+    #[test]
+    fn libdir_macro_silent_for_elif_branch_1171() {
+        let spec = "Name: foo\n%if \"%{flavor}\" == \"firefox\"\nBuildArch: noarch\n%elif \"%{flavor}\" == \"seamonkey\"\n%files\n%{_libdir}/foo\n%endif\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "libdir-macro-in-noarch-package");
+        assert_eq!(lines.len(), 0, "results: {results:?}");
+    }
+
+    /// #1171: `%ifarch` conditions compare the same way -- the
+    /// declaration in the `%else` branch does not reach the `%files`
+    /// line in the `%ifarch` branch.
+    #[test]
+    fn libdir_macro_silent_for_ifarch_opposite_branches_1171() {
+        let spec = "Name: foo\n%ifarch x86_64\n%else\nBuildArch: noarch\n%endif\n%ifarch x86_64\n%files\n%{_libdir}/foo\n%endif\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "libdir-macro-in-noarch-package");
+        assert_eq!(lines.len(), 0, "results: {results:?}");
+    }
+
+    /// #1171 near-miss: a subpackage whose own conditional
+    /// declaration cannot apply still inherits the main package's
+    /// unconditional `BuildArch: noarch`.
+    #[test]
+    fn libdir_macro_fires_for_subpackage_inheriting_main_noarch_1171() {
+        let spec = "Name: foo\nBuildArch: noarch\n%package sub\nSummary: sub\n%if \"%{flavor}\" == \"firefox\"\n%else\nBuildArch: noarch\n%endif\n%description sub\nsub.\n%if \"%{flavor}\" == \"firefox\"\n%files sub\n%{_libdir}/foo\n%endif\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "libdir-macro-in-noarch-package");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
     }
 
     /// Negative pin for the removed `mixed-use-of-spaces-and-tabs`

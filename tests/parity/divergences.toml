@@ -3572,6 +3572,14 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "libdir-macro-in-noarch-package"
+kind = "behaviour"
+reason = "Fixed behaviour: a BuildArch: noarch declaration is credited only when its conditional context can hold at the same time as the %files line's -- a declaration and a %files line in mutually exclusive branches of the same condition (same condition text, different branch: %if against %elif/%else) never combine, while unrelated conditionals never exclude. The reference records noarch from any BuildArch line regardless of conditionals and warns on every branch pairing. Measured over the Factory spec corpus (16,501 specs): the tag drops 34 -> 23 findings; the 11 removed findings (libdbus-c++, muparserx, openmpi4, openmpi5) are each a declaration and %files lines in opposite branches of one repeated flavour condition, hand-verified; nothing is added."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1171"
+
+[[divergence]]
+case = "global"
 check = "SysVInitOnSystemdCheck"
 kind = "behaviour"
 reason = "The reference accumulates basenames in sets (SysVInitOnSystemdCheck.py:11-13), so a basename reachable by two init scripts yields one finding; the port sorts and dedups explicitly, giving the same single finding in sorted order rather than set order."
