@@ -7530,7 +7530,11 @@ impl FilesCheck {
         if fname.starts_with("/usr/share/man/") || fname.starts_with("/usr/share/info/") {
             return false;
         }
-        if chunk.len() < 10 || chunk[0] != 0x1f || chunk[1] != 0x8b {
+        // The magic includes the method byte: only deflate (8) is a
+        // gzip stream whose header bytes 4..8 are an MTIME; a
+        // reserved method's header must not contribute its bytes as
+        // a timestamp.
+        if chunk.len() < 10 || chunk[0] != 0x1f || chunk[1] != 0x8b || chunk[2] != 8 {
             return false;
         }
         let mtime = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
@@ -15557,6 +15561,20 @@ mod tests {
         let chunk = gzip_header((GZIP_SDE + 86_400) as u32);
         assert!(FilesCheck::gzip_mtime_after_sde(
             "/usr/lib64/erlang/man/man1/erl.gz",
+            &chunk,
+            Some(GZIP_SDE)
+        ));
+    }
+
+    #[test]
+    fn gzip_reserved_method_byte_stays_silent() {
+        // A header with a reserved compression method (not deflate)
+        // is not a gzip stream: its bytes 4..8 are not an MTIME and
+        // must not fire however large they are.
+        let mut chunk = gzip_header(u32::MAX);
+        chunk[2] = 7;
+        assert!(!FilesCheck::gzip_mtime_after_sde(
+            "/usr/share/data/table.gz",
             &chunk,
             Some(GZIP_SDE)
         ));
