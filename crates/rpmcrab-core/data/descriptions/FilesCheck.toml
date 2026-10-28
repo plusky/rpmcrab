@@ -413,6 +413,17 @@ the package or remove the redirect.
 manpage-not-compressed="""
 This manual page is not compressed. Compress manual pages with gzip.
 """
+
+manpage-gzip-magic-mismatch="""
+This manual page carries a .gz suffix but its first two bytes are
+not the gzip magic, so the page is not actually gzip-compressed.
+Either compress the page with gzip or drop the suffix; man fails to
+display a page whose claimed compression does not match its content.
+"""
+manpage-empty-after-decompression="""
+This compressed manual page decompresses to empty: it ships no page
+content at all. Ship the real page content, or drop the page.
+"""
 mimeinfo-cache-packaged="""
 The mimeinfo cache must not be packaged; it is regenerated at install time.
 """
