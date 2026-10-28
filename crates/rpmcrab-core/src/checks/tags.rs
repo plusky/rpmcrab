@@ -8,16 +8,26 @@
 //! The i18n summary/description loops are fully implemented, including
 //! `spelling-error` via the `spellbook` crate (pure Rust, Hunspell-compatible).
 //! In mini-mode the spellchecker is disabled, matching the reference.
+//!
+//! One finding is run-scoped: `obsolete-not-provided` is judged in
+//! `after_checks`, because a name a package obsoletes may be provided
+//! by a sibling subpackage of the same build. The sibling credit
+//! applies only when the run holds the build's source package
+//! (header name-version-release plus `.src.rpm`/`.nosrc.rpm` equals
+//! the binaries' `SOURCERPM`) — the shape an OBS lint run over a
+//! finished build takes. On any partial or single-package input
+//! every candidate fires, exactly the per-package verdict.
 
 use fancy_regex::Regex;
 use librpm::Tag;
 
 use super::is_match;
 use super::shared::{
-    devel_infix_regex, devel_regex, devel_underscore_regex, explicit_lib_package_regex, macro_regex,
+    binary_source_key, devel_infix_regex, devel_regex, devel_underscore_regex,
+    explicit_lib_package_regex, macro_regex, source_package_keys,
 };
 use super::spdx::suggest_licenses;
-use crate::check::{Check, add_info};
+use crate::check::{Check, add_info, make_finding};
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
@@ -26,6 +36,7 @@ use crate::pkg::dep::{
     DepInfo, RPMSENSE_EQUAL, RPMSENSE_FIND_REQUIRES, RPMSENSE_GREATER, RPMSENSE_LESS,
     version_to_string,
 };
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 /// Words that may start a summary in lowercase (`CAPITALIZED_IGNORE_LIST`).
@@ -75,6 +86,42 @@ pub struct TagsCheck {
     pkg_config_re: Regex,
     tag_re: Regex,
     spellchecker: Option<crate::spellcheck::Spellchecker>,
+    /// `SOURCERPM` spellings of the source packages the run holds.
+    obs_sources: HashSet<String>,
+    /// Build keys in first-seen order, so the deferred
+    /// `obsolete-not-provided` findings follow package lint order.
+    obs_order: Vec<String>,
+    obs_builds: HashMap<String, ObsoleteBuild>,
+    /// Candidates of binary packages that carry no `SOURCERPM` key:
+    /// they belong to no build the run can judge and always fire.
+    obs_unkeyed: Vec<ObsoleteCandidate>,
+}
+
+/// One `obsolete-not-provided` candidate of a binary package: an
+/// Obsoletes name the package's own Provides do not carry.
+struct ObsoleteCandidate {
+    pkg_name: String,
+    arch: String,
+    name: String,
+}
+
+/// Everything one build contributes to the run-scoped
+/// `obsolete-not-provided` verdict.
+#[derive(Default)]
+struct ObsoleteBuild {
+    /// Provides names of every package of the build the run holds.
+    provides: HashSet<String>,
+    /// The build's candidates, in package lint order.
+    candidates: Vec<ObsoleteCandidate>,
+}
+
+/// Cross-package state, exported per package and merged before
+/// `after_checks` (`rpmlint#1595`).
+struct ObsoleteState {
+    sources: HashSet<String>,
+    order: Vec<String>,
+    builds: HashMap<String, ObsoleteBuild>,
+    unkeyed: Vec<ObsoleteCandidate>,
 }
 
 static URL_ESCAPE_RE: OnceLock<Regex> = OnceLock::new();
@@ -140,6 +187,10 @@ impl TagsCheck {
             } else {
                 crate::spellcheck::Spellchecker::new()
             },
+            obs_sources: HashSet::new(),
+            obs_order: Vec::new(),
+            obs_builds: HashMap::new(),
+            obs_unkeyed: Vec::new(),
         }
     }
 
@@ -231,8 +282,14 @@ impl TagsCheck {
         self.check_license(pkg, out, &rpm_license);
         self.check_url(pkg, out);
 
-        let prov_names: Vec<&str> = pkg.provides.iter().map(|d| d.name.as_str()).collect();
-        self.check_obsolete_not_provided(pkg, out, &prov_names);
+        // A source package's `obsolete-not-provided` verdict is its
+        // own header's and is emitted here, as the reference emits it;
+        // a binary package's verdict is deferred to `after_checks`,
+        // where the run-scoped sibling credit is judged.
+        if pkg.is_source {
+            let prov_names: Vec<&str> = pkg.provides.iter().map(|d| d.name.as_str()).collect();
+            self.check_obsolete_not_provided(pkg, out, &prov_names);
+        }
 
         for dep in &pkg.obsoletes {
             let value = format_require(dep);
@@ -1524,6 +1581,49 @@ impl TagsCheck {
         }
     }
 
+    fn obs_build_mut(&mut self, key: &str) -> &mut ObsoleteBuild {
+        if !self.obs_builds.contains_key(key) {
+            self.obs_order.push(key.to_string());
+            self.obs_builds
+                .insert(key.to_string(), ObsoleteBuild::default());
+        }
+        self.obs_builds.get_mut(key).expect("just inserted")
+    }
+
+    /// Record one package's contribution to the run-scoped
+    /// `obsolete-not-provided` verdict: a source package opens its
+    /// build's gate; a binary package contributes its Provides names
+    /// and the Obsoletes its own Provides do not carry as candidates.
+    fn accumulate_obsolete(&mut self, pkg: &Pkg) {
+        if pkg.is_source {
+            for key in source_package_keys(pkg) {
+                self.obs_sources.insert(key);
+            }
+            return;
+        }
+        let own: HashSet<&str> = pkg.provides.iter().map(|d| d.name.as_str()).collect();
+        let candidates: Vec<ObsoleteCandidate> = pkg
+            .obsoletes
+            .iter()
+            .filter(|obs| !own.contains(obs.name.as_str()))
+            .map(|obs| ObsoleteCandidate {
+                pkg_name: pkg.name.clone(),
+                arch: pkg.arch.clone(),
+                name: obs.name.clone(),
+            })
+            .collect();
+        match binary_source_key(pkg) {
+            Some(key) => {
+                let build = self.obs_build_mut(&key);
+                build
+                    .provides
+                    .extend(pkg.provides.iter().map(|d| d.name.clone()));
+                build.candidates.extend(candidates);
+            }
+            None => self.obs_unkeyed.extend(candidates),
+        }
+    }
+
     fn check_obsolete_not_provided(&self, pkg: &Pkg, out: &mut Filter, prov_names: &[&str]) {
         for obs in &pkg.obsoletes {
             // Plain names: rpm rejects rich dependencies in both Obsoletes
@@ -1731,7 +1831,81 @@ impl Check for TagsCheck {
         // `__init__` dict which installs them unconditionally.
         Self::register_error_details(config, out);
         self.run(pkg, out);
+        self.accumulate_obsolete(pkg);
     }
+
+    /// The deferred `obsolete-not-provided` verdict: a candidate is
+    /// credited only when its build is complete in this run — the
+    /// run holds the build's source package — and a package of the
+    /// build provides the obsoleted name under its exact spelling.
+    /// Every other candidate fires, so partial and single-package
+    /// runs report exactly the per-package verdict.
+    fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
+        for cand in &self.obs_unkeyed {
+            emit_obsolete_not_provided(out, cand);
+        }
+        for key in &self.obs_order {
+            let build = &self.obs_builds[key];
+            let complete = self.obs_sources.contains(key);
+            for cand in &build.candidates {
+                if complete && build.provides.contains(&cand.name) {
+                    continue;
+                }
+                emit_obsolete_not_provided(out, cand);
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.obs_sources.clear();
+        self.obs_order.clear();
+        self.obs_builds.clear();
+        self.obs_unkeyed.clear();
+    }
+
+    fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        Some(Box::new(ObsoleteState {
+            sources: std::mem::take(&mut self.obs_sources),
+            order: std::mem::take(&mut self.obs_order),
+            builds: std::mem::take(&mut self.obs_builds),
+            unkeyed: std::mem::take(&mut self.obs_unkeyed),
+        }))
+    }
+
+    fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
+        if let Ok(mut state) = state.downcast::<ObsoleteState>() {
+            self.obs_sources.extend(state.sources.drain());
+            self.obs_unkeyed.append(&mut state.unkeyed);
+            for key in std::mem::take(&mut state.order) {
+                let Some(data) = state.builds.remove(&key) else {
+                    continue;
+                };
+                match self.obs_builds.get_mut(&key) {
+                    Some(mine) => {
+                        mine.provides.extend(data.provides);
+                        mine.candidates.extend(data.candidates);
+                    }
+                    None => {
+                        self.obs_order.push(key.clone());
+                        self.obs_builds.insert(key, data);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Emit one deferred `obsolete-not-provided` finding, with the
+/// package context the per-package emission derives.
+fn emit_obsolete_not_provided(out: &mut Filter, cand: &ObsoleteCandidate) {
+    out.add_info(make_finding(
+        &cand.pkg_name,
+        &cand.arch,
+        Level::Warning,
+        "obsolete-not-provided",
+        vec![cand.name.clone()],
+        None,
+    ));
 }
 
 impl TagsCheck {
@@ -1835,6 +2009,19 @@ mod tests {
         let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
         let mut check = TagsCheck::new(config);
         check.check(pkg, config, &mut out);
+        check.after_checks(config, &mut out);
+        out.results().to_vec()
+    }
+
+    /// Run one check instance over several packages in order, then
+    /// the deferred verdicts (`after_checks`).
+    fn run_check_multi(config: &Config, pkgs: &[Pkg]) -> Vec<(String, String)> {
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(config);
+        for pkg in pkgs {
+            check.check(pkg, config, &mut out);
+        }
+        check.after_checks(config, &mut out);
         out.results().to_vec()
     }
 
@@ -2955,6 +3142,171 @@ mod tests {
         assert_eq!(
             hits[0].1,
             "tags-emission-pins-obsolete.noarch: W: obsolete-not-provided tags-old-pin"
+        );
+    }
+
+    /// An fcprobe-derived binary package of the `fcprobe-1-1` build
+    /// (the fixture header's `SOURCERPM`), renamed, with the given
+    /// Provides/Obsoletes name lists.
+    fn build_pkg(name: &str, provides: &[&str], obsoletes: &[&str]) -> (tempfile::TempDir, Pkg) {
+        let (tmp, mut pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.name = name.to_string();
+        pkg.arch = "x86_64".to_string();
+        pkg.provides = provides.iter().map(|n| make_dep(n, 0, None)).collect();
+        pkg.obsoletes = obsoletes.iter().map(|n| make_dep(n, 0, None)).collect();
+        (tmp, pkg)
+    }
+
+    /// The fcprobe fixture header as the build's source package: the
+    /// source identity derived from its name/version/release is
+    /// `fcprobe-1-1.src.rpm`, the `SOURCERPM` every `build_pkg`
+    /// binary carries. Its own Obsoletes are cleared so it
+    /// contributes no findings of its own.
+    fn build_src() -> (tempfile::TempDir, Pkg) {
+        let (tmp, mut pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.is_source = true;
+        pkg.obsoletes = Vec::new();
+        (tmp, pkg)
+    }
+
+    #[test]
+    fn obsolete_sibling_credit_on_complete_build() {
+        let config = test_config();
+        let (_t0, src) = build_src();
+        // The fan-out shape: several subpackages obsolete a name only
+        // one sibling provides.
+        let (_t1, a) = build_pkg("pkg-a", &[], &["oldname"]);
+        let (_t2, b) = build_pkg("pkg-b", &[], &["oldname"]);
+        let (_t3, provider) = build_pkg("pkg-rt", &["oldname"], &[]);
+        let results = run_check_multi(&config, &[src, a, b, provider]);
+        let hits = tag_hits(&results, "obsolete-not-provided");
+        assert!(hits.is_empty(), "complete build must credit: {results:?}");
+    }
+
+    #[test]
+    fn obsolete_sibling_name_bearer_credited_on_complete_build() {
+        let config = test_config();
+        let (_t0, src) = build_src();
+        let (_t1, a) = build_pkg("pkg-snmp", &[], &["pkg-base"]);
+        let (_t2, bearer) = build_pkg("pkg-base", &["pkg-base"], &[]);
+        let results = run_check_multi(&config, &[src, a, bearer]);
+        let hits = tag_hits(&results, "obsolete-not-provided");
+        assert!(
+            hits.is_empty(),
+            "sibling bearing the name must credit: {results:?}"
+        );
+    }
+
+    #[test]
+    fn obsolete_sibling_no_credit_on_partial_build() {
+        let config = test_config();
+        let (_t1, a) = build_pkg("pkg-a", &[], &["oldname"]);
+        let (_t2, provider) = build_pkg("pkg-rt", &["oldname"], &[]);
+        // No source package in the run: the build is not judged
+        // complete, so the candidate fires as the per-package verdict.
+        let results = run_check_multi(&config, &[a, provider]);
+        let hits = tag_hits(&results, "obsolete-not-provided");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(hits[0].1, "pkg-a.x86_64: W: obsolete-not-provided oldname");
+    }
+
+    #[test]
+    fn obsolete_single_package_still_fires() {
+        let (_t1, pkg) = build_pkg("pkg-a", &["selfname"], &["selfname", "oldname"]);
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "obsolete-not-provided");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(hits[0].1, "pkg-a.x86_64: W: obsolete-not-provided oldname");
+    }
+
+    #[test]
+    fn obsolete_case_mismatch_sibling_does_not_credit() {
+        let config = test_config();
+        let (_t0, src) = build_src();
+        let (_t1, a) = build_pkg("pkg-a", &[], &["oldname"]);
+        let (_t2, provider) = build_pkg("pkg-rt", &["OldName"], &[]);
+        let results = run_check_multi(&config, &[src, a, provider]);
+        let hits = tag_hits(&results, "obsolete-not-provided");
+        assert_eq!(
+            hits.len(),
+            1,
+            "case differs: not the solver's name: {results:?}"
+        );
+    }
+
+    #[test]
+    fn obsolete_unrelated_sibling_provide_does_not_credit() {
+        let config = test_config();
+        let (_t0, src) = build_src();
+        let (_t1, a) = build_pkg("pkg-a", &[], &["oldname"]);
+        let (_t2, provider) = build_pkg("pkg-rt", &["othername"], &[]);
+        let results = run_check_multi(&config, &[src, a, provider]);
+        let hits = tag_hits(&results, "obsolete-not-provided");
+        assert_eq!(
+            hits.len(),
+            1,
+            "a different name must not credit: {results:?}"
+        );
+    }
+
+    #[test]
+    fn obsolete_foreign_source_does_not_open_the_gate() {
+        let config = test_config();
+        let (_t0, mut src) = build_src();
+        // A source package of another build: its derived keys name
+        // that build, not this one.
+        src.name = "otherbuild".to_string();
+        let (_t1, a) = build_pkg("pkg-a", &[], &["oldname"]);
+        let (_t2, provider) = build_pkg("pkg-rt", &["oldname"], &[]);
+        let results = run_check_multi(&config, &[src, a, provider]);
+        let hits = tag_hits(&results, "obsolete-not-provided");
+        assert_eq!(
+            hits.len(),
+            1,
+            "foreign build's source must not credit: {results:?}"
+        );
+    }
+
+    #[test]
+    fn obsolete_credit_survives_state_export() {
+        let config = test_config();
+        let (_t0, src) = build_src();
+        let (_t1, a) = build_pkg("pkg-a", &[], &["oldname"]);
+        let (_t2, provider) = build_pkg("pkg-rt", &["oldname"], &[]);
+        // A worker sees the source package and the provider; the
+        // main instance sees the obsoleter and merges the worker's
+        // exported state before `after_checks` (rpmlint#1595).
+        let mut worker_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut worker = TagsCheck::new(&config);
+        worker.check(&src, &config, &mut worker_out);
+        worker.check(&provider, &config, &mut worker_out);
+        let state = worker.export_state().expect("run-scope state");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.import_state(state);
+        check.check(&a, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        let hits = tag_hits(&results, "obsolete-not-provided");
+        assert!(hits.is_empty(), "merged state must credit: {results:?}");
+    }
+
+    #[test]
+    fn obsolete_reset_drops_the_run() {
+        let config = test_config();
+        let (_t0, src) = build_src();
+        let (_t1, a) = build_pkg("pkg-a", &[], &["oldname"]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.check(&src, &config, &mut out);
+        check.check(&a, &config, &mut out);
+        check.reset();
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        let hits = tag_hits(&results, "obsolete-not-provided");
+        assert!(
+            hits.is_empty(),
+            "reset must drop the run's state: {results:?}"
         );
     }
 
