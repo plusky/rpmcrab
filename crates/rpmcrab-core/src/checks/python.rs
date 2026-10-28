@@ -1592,11 +1592,101 @@ impl PythonCheck {
         caps.get(2).map(|m| m.as_str())
     }
 
+    /// The alternative branches of one require entry (#1177
+    /// item 9): a plain entry is a single branch holding its
+    /// leaves; a rich entry splits at `or` - each alternative is
+    /// its own branch, with `and`/`with`/`without` groups combined
+    /// into every branch they join and `if`/`unless` contributing
+    /// their `then` side. Past the shared rich-depth budget of
+    /// branches the entry falls back to one pooled branch of all
+    /// its leaves.
+    fn require_branches(dep: &crate::pkg::dep::DepInfo) -> Vec<Vec<crate::pkg::dep::DepLeaf>> {
+        use crate::pkg::dep::{DepExpr, DepLeaf, MAX_RICH_DEP_DEPTH, parse_dep_expr};
+
+        fn walk(expr: &DepExpr, depth: usize) -> Option<Vec<Vec<DepLeaf>>> {
+            if depth > MAX_RICH_DEP_DEPTH {
+                return None;
+            }
+            match expr {
+                DepExpr::Simple {
+                    name,
+                    qualifier,
+                    flags,
+                    epoch,
+                    version,
+                    release,
+                } => Some(vec![vec![DepLeaf {
+                    name: name.clone(),
+                    qualifier: qualifier.clone(),
+                    flags: *flags,
+                    epoch: *epoch,
+                    version: version.clone(),
+                    release: release.clone(),
+                }]]),
+                DepExpr::Or(children) => {
+                    let mut out = Vec::new();
+                    for child in children {
+                        out.extend(walk(child, depth + 1)?);
+                        if out.len() > MAX_RICH_DEP_DEPTH {
+                            return None;
+                        }
+                    }
+                    Some(out)
+                }
+                DepExpr::And(children) => {
+                    let mut acc: Vec<Vec<DepLeaf>> = vec![Vec::new()];
+                    for child in children {
+                        let branches = walk(child, depth + 1)?;
+                        let mut next = Vec::new();
+                        for a in &acc {
+                            for b in &branches {
+                                let mut joined = a.clone();
+                                joined.extend(b.iter().cloned());
+                                next.push(joined);
+                                if next.len() > MAX_RICH_DEP_DEPTH {
+                                    return None;
+                                }
+                            }
+                        }
+                        acc = next;
+                    }
+                    Some(acc)
+                }
+                DepExpr::With { lhs, rhs } | DepExpr::Without { lhs, rhs } => {
+                    let lhs_branches = walk(lhs, depth + 1)?;
+                    let rhs_branches = walk(rhs, depth + 1)?;
+                    let mut out = Vec::new();
+                    for a in &lhs_branches {
+                        for b in &rhs_branches {
+                            let mut joined = a.clone();
+                            joined.extend(b.iter().cloned());
+                            out.push(joined);
+                            if out.len() > MAX_RICH_DEP_DEPTH {
+                                return None;
+                            }
+                        }
+                    }
+                    Some(out)
+                }
+                DepExpr::If { then, .. } | DepExpr::Unless { then, .. } => walk(then, depth + 1),
+            }
+        }
+
+        match parse_dep_expr(&dep.name) {
+            DepExpr::Simple { .. } => vec![dep.leaves()],
+            expr => walk(&expr, 0).unwrap_or_else(|| vec![dep.leaves()]),
+        }
+    }
+
     /// The floor comparison (#1024 §3.3): a kept requirement whose
     /// declared lower bound the matching RPM Requires do not carry.
-    /// Matching Requires carrying no version at all fire
-    /// `python-require-unversioned-despite-metadata-floor`; ones whose
-    /// highest floor sits below the metadata's fire
+    /// Each `or` branch of a rich Require is judged on its own
+    /// leaves (#1177 item 9): a branch carrying a usable floor is
+    /// governed by that floor, so a floored branch never hides a
+    /// sibling branch's missing version, and an unversioned branch
+    /// fires `python-require-unversioned-despite-metadata-floor`
+    /// even when a sibling branch clears the floor; a branch whose
+    /// highest floor sits below the metadata's fires
     /// `python-require-floor-below-metadata`. A requirement no RPM
     /// Require names at all is `python-missing-require`'s finding,
     /// not these ones', and a requirement met by the package's own
@@ -1607,38 +1697,60 @@ impl PythonCheck {
         };
         let variants = Self::module_names(&req.name, &req.extras);
         let mut any_match = false;
-        let mut any_unversioned = false;
-        let mut highest: Option<(Pep440Version, String)> = None;
+        let mut any_unversioned_branch = false;
+        let mut highest_below: Option<(Pep440Version, String)> = None;
         for dep in pkg.requires.iter().chain(&pkg.prereq) {
-            for leaf in dep.leaves() {
-                if Self::classify_atom(&Self::leaf_capability(&leaf), &variants).is_none() {
+            for branch in Self::require_branches(dep) {
+                let mut branch_match = false;
+                let mut branch_unversioned = false;
+                let mut branch_highest: Option<(Pep440Version, String)> = None;
+                for leaf in &branch {
+                    if Self::classify_atom(&Self::leaf_capability(leaf), &variants).is_none() {
+                        continue;
+                    }
+                    branch_match = true;
+                    match Self::leaf_floor(leaf) {
+                        LeafFloor::Unversioned => branch_unversioned = true,
+                        LeafFloor::Versioned => {}
+                        LeafFloor::Floor(leaf_floor) => {
+                            let floor_str = match leaf.epoch {
+                                Some(e) if e > 0 => {
+                                    format!("{e}:{}", leaf.version.as_deref().unwrap_or(""))
+                                }
+                                _ => leaf.version.clone().unwrap_or_default(),
+                            };
+                            if branch_highest.as_ref().is_none_or(|(h, _)| {
+                                pep440_cmp(&leaf_floor, h) == std::cmp::Ordering::Greater
+                            }) {
+                                branch_highest = Some((leaf_floor, floor_str));
+                            }
+                        }
+                    }
+                }
+                if !branch_match {
                     continue;
                 }
                 any_match = true;
-                match Self::leaf_floor(&leaf) {
-                    LeafFloor::Unversioned => any_unversioned = true,
-                    LeafFloor::Versioned => {}
-                    LeafFloor::Floor(leaf_floor) => {
-                        let floor_str = match leaf.epoch {
-                            Some(e) if e > 0 => {
-                                format!("{e}:{}", leaf.version.as_deref().unwrap_or(""))
-                            }
-                            _ => leaf.version.clone().unwrap_or_default(),
-                        };
-                        if highest.as_ref().is_none_or(|(h, _)| {
-                            pep440_cmp(&leaf_floor, h) == std::cmp::Ordering::Greater
-                        }) {
-                            highest = Some((leaf_floor, floor_str));
+                match branch_highest {
+                    Some((h, h_text)) => {
+                        if pep440_cmp(&h, &floor) == std::cmp::Ordering::Less
+                            && highest_below.as_ref().is_none_or(|(b, _)| {
+                                pep440_cmp(&h, b) == std::cmp::Ordering::Greater
+                            })
+                        {
+                            highest_below = Some((h, h_text));
                         }
                     }
+                    None if branch_unversioned => any_unversioned_branch = true,
+                    None => {}
                 }
             }
         }
         if !any_match {
             return;
         }
-        match highest {
-            None if any_unversioned => add_info(
+        if any_unversioned_branch {
+            add_info(
                 out,
                 Level::Warning,
                 pkg,
@@ -1650,23 +1762,21 @@ impl PythonCheck {
                     "rpm-floor",
                     "unversioned",
                 ],
-            ),
-            Some((h, h_text)) if pep440_cmp(&h, &floor) == std::cmp::Ordering::Less => {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "python-require-floor-below-metadata",
-                    &[
-                        &req.name,
-                        "metadata-floor",
-                        &floor_text,
-                        "rpm-floor",
-                        &h_text,
-                    ],
-                );
-            }
-            _ => {}
+            );
+        } else if let Some((_, h_text)) = highest_below {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "python-require-floor-below-metadata",
+                &[
+                    &req.name,
+                    "metadata-floor",
+                    &floor_text,
+                    "rpm-floor",
+                    &h_text,
+                ],
+            );
         }
     }
 
@@ -2979,6 +3089,85 @@ mod tests {
         assert_eq!(
             line,
             "python-test.noarch: W: python-require-floor-below-metadata dulwich metadata-floor 0.22 rpm-floor 0.21"
+        );
+    }
+
+    #[test]
+    fn floor_rich_unversioned_branch_fires_unversioned() {
+        // #1177 item 9: branches are judged separately - the
+        // floored branch clearing the metadata floor does not hide
+        // the unversioned alternative beside it.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names =
+                vec!["(python3.13dist(dulwich) >= 0.30 or python3-dulwich)".to_string()];
+            pkg.requires = vec![dep(
+                "(python3.13dist(dulwich) >= 0.30 or python3-dulwich)",
+                0,
+                None,
+            )];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-require-unversioned-despite-metadata-floor");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            "python-test.noarch: W: python-require-unversioned-despite-metadata-floor dulwich metadata-floor 0.22 rpm-floor unversioned"
+        );
+    }
+
+    #[test]
+    fn floor_rich_all_branches_above_floor_stays_quiet() {
+        // #1177 item 9: a rich require whose every branch carries a
+        // floor above the metadata floor is satisfied.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec![
+                "(python3.13dist(dulwich) >= 0.30 or python3.13dist(dulwich) >= 0.25)".to_string(),
+            ];
+            pkg.requires = vec![dep(
+                "(python3.13dist(dulwich) >= 0.30 or python3.13dist(dulwich) >= 0.25)",
+                0,
+                None,
+            )];
+        });
+        let tags = tags_of(&findings);
+        assert!(
+            !tags.contains(&"python-require-unversioned-despite-metadata-floor"),
+            "findings: {findings:?}"
+        );
+        assert!(
+            !tags.contains(&"python-require-floor-below-metadata"),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn floor_unversioned_plain_require_wins_over_below_floor_one() {
+        // #1177 item 9 combine rule: separate require entries are
+        // separate branches, so an unversioned entry fires the
+        // unversioned tag even beside a floored-but-low entry for
+        // the same requirement.
+        let reqs = PythonCheck::parse_requirements("dulwich>=0.22\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec![
+                "python3-dulwich".to_string(),
+                "python3.13dist(dulwich) >= 0.21".to_string(),
+            ];
+            pkg.requires = vec![
+                dep("python3-dulwich", 0, None),
+                dep(
+                    "python3.13dist(dulwich)",
+                    crate::pkg::dep::RPMSENSE_GREATER | crate::pkg::dep::RPMSENSE_EQUAL,
+                    Some("0.21"),
+                ),
+            ];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        assert_eq!(
+            findings[0].0,
+            "python-require-unversioned-despite-metadata-floor"
         );
     }
 
