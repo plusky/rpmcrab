@@ -20,15 +20,22 @@ An error occurred while reading or parsing the .pc file.
 """
 pkgconfig-dangling-library="""
 This pkg-config file's Libs: line names the package's own library
-with -l, but no package built from the same source ships that
-library as a .so, .a or .dll.a file, so a consumer linking with
-this .pc file fails. Ship the library in one of the build's
-packages, or drop the -l flag from the .pc file when the package
-deliberately provides no linkable library under that name.
+with -l, but no package built from the same source ships a file
+named lib<name>.so, lib<name>.a or lib<name>.dll.a (matching is
+by file name, in any directory, and a %ghost entry ships no
+payload and does not count), so a consumer linking with this
+.pc file fails. Ship the library in one of the build's packages,
+or drop the -l flag from the .pc file when the package
+deliberately provides no linkable library under that name. A
+library a -32bit or -64bit sibling build ships, or one another
+source's devel package provides, reads the same way to this
+check, and a single lint run cannot tell that case apart, which
+is why the finding is a warning.
 
 This check is run-scoped: it judges a build only when the lint run
-also contains the build's source package, as a lint run over a
-finished build does, and stays silent on partial or single-package
-input, where the library is expected to sit in a package that was
-not linted.
+also contains the build's source package (identified by header
+name-version-release plus .src.rpm/.nosrc.rpm, equal to the
+binaries' SOURCERPM), as a lint run over a finished build does,
+and stays silent on partial or single-package input, where the
+library is expected to sit in a package that was not linted.
 """
