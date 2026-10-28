@@ -2289,7 +2289,7 @@ struct PkgState {
     /// the only directories ldconfig scans.
     ldconfig_dirs: std::collections::HashSet<String>,
     /// The package's SOURCE_DATE_EPOCH when one is known (see
-    /// `crate::checks::shared::source_date_epoch`); without it the
+    /// `crate::checks::shared::source_date_epoch_seconds`); without it the
     /// gzip-header MTIME comparison has nothing to compare against.
     source_date_epoch: Option<i64>,
     bindir_exes: IndexMap<String, Vec<String>>,
@@ -2390,7 +2390,7 @@ impl Check for FilesCheck {
             librpm::Tag::PREUNPROG,
         );
         st.ldconfig_dirs = ldconfig_conf_dirs(pkg);
-        st.source_date_epoch = crate::checks::shared::source_date_epoch(pkg);
+        st.source_date_epoch = crate::checks::shared::source_date_epoch_seconds(pkg);
         st.license_tag_ids = pkg
             .tag_str(librpm::Tag::LICENSE)
             .map(|t| parse_license_tag(&t))
