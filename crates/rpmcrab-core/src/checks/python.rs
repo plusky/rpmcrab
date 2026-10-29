@@ -3609,7 +3609,7 @@ mod tests {
         let pkg = fixture_pkg_with_requires(req_names);
         let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
         let check = PythonCheck::new(config);
-        check.check_missing_requirements(&pkg, &mut out, reqs, "3.12");
+        check.check_missing_requirements(&pkg, &mut out, reqs, "3.12", &[], "");
         let levels = out.result_levels().to_vec();
         out.results()
             .iter()
@@ -3652,7 +3652,7 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let check = PythonCheck::new(&config);
         let reqs = PythonCheck::parse_requirements("pygobject\n", false, "3.12");
-        check.check_missing_requirements(&pkg, &mut out, &reqs, "3.12");
+        check.check_missing_requirements(&pkg, &mut out, &reqs, "3.12", &[], "");
         let levels = out.result_levels().to_vec();
         let names: Vec<String> = out
             .results()
