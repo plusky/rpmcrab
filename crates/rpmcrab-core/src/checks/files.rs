@@ -6280,6 +6280,83 @@ impl FilesCheck {
     }
 }
 
+/// One row of the Python bytecode magic table.
+struct PythonMagicVersion {
+    version: String,
+    magics: Vec<u32>,
+}
+
+/// The Python bytecode magic table, baked in like the Go toolchain
+/// floor so an installed binary needs no data dir next to it.
+const PYTHON_MAGIC_VALUES_TOML: &str = include_str!("../../data/python-magic-values.toml");
+
+/// The parsed magic table, parsed once (the `defect_pattern::registry`
+/// pattern).
+fn python_magic_table() -> &'static [PythonMagicVersion] {
+    static TABLE: OnceLock<Vec<PythonMagicVersion>> = OnceLock::new();
+    TABLE.get_or_init(|| parse_python_magic_values(PYTHON_MAGIC_VALUES_TOML))
+}
+
+/// Parse and validate the table. Validation takes the staged-data
+/// posture (the registry's): a malformed table panics at startup
+/// instead of silently disabling the finder.
+fn parse_python_magic_values(raw: &str) -> Vec<PythonMagicVersion> {
+    let table: toml::Table = raw.parse().expect("python magic values is valid TOML");
+    assert!(
+        table.get("as_of").and_then(toml::Value::as_str).is_some(),
+        "python magic values records an as_of date"
+    );
+    let records = table
+        .get("version")
+        .and_then(toml::Value::as_array)
+        .expect("python magic values has a [[version]] array");
+    let versions: Vec<PythonMagicVersion> = records
+        .iter()
+        .map(|record| {
+            let version = record
+                .get("version")
+                .and_then(toml::Value::as_str)
+                .expect("python magic version has a version string")
+                .to_string();
+            let magics = record
+                .get("magics")
+                .and_then(toml::Value::as_array)
+                .expect("python magic version has a magics array")
+                .iter()
+                .map(|v| {
+                    u32::try_from(v.as_integer().expect("python magic value is an integer"))
+                        .expect("python magic value fits u32")
+                })
+                .collect();
+            PythonMagicVersion { version, magics }
+        })
+        .collect();
+    // Ascending version order: the found-version lookup reports the
+    // first entry containing a magic.
+    let key = |v: &str| -> Vec<u64> {
+        v.split('.')
+            .map(|part| part.parse().expect("python magic version is numeric"))
+            .collect()
+    };
+    let mut prev: Option<Vec<u64>> = None;
+    for entry in &versions {
+        assert!(
+            !entry.version.is_empty(),
+            "python magic version is non-empty"
+        );
+        assert!(
+            !entry.magics.is_empty(),
+            "python magic version lists magics"
+        );
+        let k = key(&entry.version);
+        if let Some(p) = &prev {
+            assert!(k > *p, "python magic versions are in ascending order");
+        }
+        prev = Some(k);
+    }
+    versions
+}
+
 impl FilesCheck {
     /// Names from requires + recommends + suggests, mirroring the
     /// reference's deps list used by the missing-dependency-to-*
@@ -7281,25 +7358,16 @@ impl FilesCheck {
 
     /// The reference's `python_bytecode_to_script`.
     /// Python bytecode magic values, mirroring the reference's
-    /// `_python_magic_values` dict.
+    /// `_python_magic_values` dict. The table lives in
+    /// `data/python-magic-values.toml`, baked in like the Go
+    /// toolchain floor so an installed binary needs no data dir
+    /// next to it.
     fn python_magic_values(version: &str) -> &'static [u32] {
-        match version {
-            "2.2" => &[60717],
-            "2.3" => &[62011],
-            "2.4" => &[62061],
-            "2.5" => &[62131],
-            "2.6" => &[62161],
-            "2.7" => &[62211],
-            "3.0" => &[3130],
-            "3.1" => &[3150],
-            "3.2" => &[3180],
-            "3.3" => &[3230],
-            "3.4" => &[3310],
-            "3.5" => &[3350, 3351],
-            "3.6" => &[3379],
-            "3.7" => &[3390, 3391, 3392, 3393, 3394],
-            _ => &[],
-        }
+        python_magic_table()
+            .iter()
+            .find(|entry| entry.version == version)
+            .map(|entry| entry.magics.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Read a little-endian u32 from the first 4 bytes, like the
@@ -7369,14 +7437,13 @@ impl FilesCheck {
         if exp.contains(&found_magic) {
             return None;
         }
-        // Find the version name for the found magic value.
+        // Find the version name for the found magic value: the
+        // first table entry containing it, in ascending version
+        // order (the file's order is significant).
         let mut found_version = "unknown";
-        for v in [
-            "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "3.0", "3.1", "3.2", "3.3", "3.4", "3.5",
-            "3.6", "3.7",
-        ] {
-            if Self::python_magic_values(v).contains(&found_magic) {
-                found_version = v;
+        for entry in python_magic_table() {
+            if entry.magics.contains(&found_magic) {
+                found_version = entry.version.as_str();
                 break;
             }
         }
@@ -13795,6 +13862,32 @@ mod tests {
             &[3390, 3391, 3392, 3393, 3394][..]
         );
         assert!(FilesCheck::python_magic_values("9.9").is_empty());
+    }
+
+    #[test]
+    fn python_magic_table_matches_the_former_hardcoded_table() {
+        // The move from a hardcoded match to the data file must not
+        // change a single value: every former entry, checked through
+        // the real lookup path.
+        let expected: [(&str, &[u32]); 14] = [
+            ("2.2", &[60717]),
+            ("2.3", &[62011]),
+            ("2.4", &[62061]),
+            ("2.5", &[62131]),
+            ("2.6", &[62161]),
+            ("2.7", &[62211]),
+            ("3.0", &[3130]),
+            ("3.1", &[3150]),
+            ("3.2", &[3180]),
+            ("3.3", &[3230]),
+            ("3.4", &[3310]),
+            ("3.5", &[3350, 3351]),
+            ("3.6", &[3379]),
+            ("3.7", &[3390, 3391, 3392, 3393, 3394]),
+        ];
+        for (version, magics) in expected {
+            assert_eq!(FilesCheck::python_magic_values(version), magics);
+        }
     }
 
     #[test]

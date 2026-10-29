@@ -1,0 +1,89 @@
+# Python bytecode magic values, mirroring the reference's
+# `_python_magic_values` dict.
+#
+# A table value is the low 16 bits of the version's CPython
+# `MAGIC_NUMBER`: the .pyc header's first four bytes are that magic
+# as two little-endian bytes followed by `\r\n`, and the checker
+# masks the header word to 16 bits before comparing. Up to 3.13 the
+# upstream spelling is `MAGIC_NUMBER = (N).to_bytes(2, 'little') +
+# b'\r\n'`; from 3.14 it is the `PYC_MAGIC_NUMBER` define in
+# `Include/internal/pycore_magic_number.h`, which is the same
+# two-byte value.
+#
+# The table is cumulative: versions are added, never removed. A
+# version's list holds every magic its .pyc files may carry (3.7
+# shipped five across its development cycle); the checker treats a
+# .pyc as matching when its magic is anywhere in the list.
+#
+# Order is significant: entries are in ascending version order, and
+# the found-version lookup reports the FIRST entry containing a
+# magic, so keep the file sorted.
+#
+# The table holds BASE values. The checker adds one for exactly
+# versions 3.0 and 3.1 at check time (the reference's rule that
+# those two always use the value one higher); that adjustment is
+# not baked into the entries here.
+#
+# Maintenance: scripts/check-python-magic-table.py derives the
+# expected table from CPython upstream and fails on any released
+# 3.8+ version missing from this file; a monthly CI job runs it.
+# Table edits stay human-reviewed: the job never opens a PR and
+# never edits anything itself.
+
+as_of = "2026-10-29"
+
+[[version]]
+version = "2.2"
+magics = [60717]
+
+[[version]]
+version = "2.3"
+magics = [62011]
+
+[[version]]
+version = "2.4"
+magics = [62061]
+
+[[version]]
+version = "2.5"
+magics = [62131]
+
+[[version]]
+version = "2.6"
+magics = [62161]
+
+[[version]]
+version = "2.7"
+magics = [62211]
+
+[[version]]
+version = "3.0"
+magics = [3130]
+
+[[version]]
+version = "3.1"
+magics = [3150]
+
+[[version]]
+version = "3.2"
+magics = [3180]
+
+[[version]]
+version = "3.3"
+magics = [3230]
+
+[[version]]
+version = "3.4"
+magics = [3310]
+
+[[version]]
+version = "3.5"
+magics = [3350, 3351]
+
+[[version]]
+version = "3.6"
+magics = [3379]
+
+[[version]]
+version = "3.7"
+magics = [3390, 3391, 3392, 3393, 3394]
