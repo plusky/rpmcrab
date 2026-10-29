@@ -6677,16 +6677,33 @@ impl BinariesCheck {
         // itself. A tracing wrapper must not drop the caller's
         // groups, so there is no package-side fix and the finding
         // stays quiet. The credit is conservative: an object that
-        // both defines and calls (an undefined setuid/setgid
-        // reference exists) still fires, and a defined pair with
-        // no dlsym reference still fires. Archives are unchanged:
-        // they already charge references only. The undefined sets
-        // carry bare names, so the dlsym test is an exact match.
+        // both defines and calls still fires, whether the call is a
+        // FUNC reference or a NOTYPE import (the gets/shell disjunct
+        // shape), and a defined pair with no dlsym reference still
+        // fires. Archives are unchanged: they already charge
+        // references only. The dlsym test strips a `@VERSION` suffix
+        // before matching, like the loader-shim predicate, so a
+        // versioned dlsym reference credits the same way a bare one
+        // does.
         let interposer = !self.is_archive
-            && !info.has_undefined_function_matching(&self.setgid_call_regex)
-            && !info.has_undefined_function_matching(&self.setuid_call_regex)
-            && (info.undefined_function_refs.iter().any(|s| s == "dlsym")
-                || info.undefined_functions.iter().any(|s| s == "dlsym"));
+            && !(info.has_undefined_function_matching(&self.setgid_call_regex)
+                || info
+                    .undefined_functions
+                    .iter()
+                    .any(|s| self.setgid_call_regex.is_match(s).unwrap_or(false)))
+            && !(info.has_undefined_function_matching(&self.setuid_call_regex)
+                || info
+                    .undefined_functions
+                    .iter()
+                    .any(|s| self.setuid_call_regex.is_match(s).unwrap_or(false)))
+            && (info
+                .undefined_function_refs
+                .iter()
+                .any(|s| s.split('@').next().unwrap_or(s) == "dlsym")
+                || info
+                    .undefined_functions
+                    .iter()
+                    .any(|s| s.split('@').next().unwrap_or(s) == "dlsym"));
         // An archive charges only a reference: its members are separate
         // objects, so the member that defines mktemp (newlib's libc.a
         // carries the definition in libc_a-mktemp.o) makes no call and
@@ -21418,6 +21435,44 @@ description = "explicit priority string bypasses the system crypto policy"
             out.results().is_empty(),
             "defined-only archive member must stay quiet: {:?}",
             out.results()
+        );
+    }
+
+    #[test]
+    fn setgroups_interposer_credit_edges() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libtrace.so", "ELF 64-bit LSB shared object");
+
+        // A versioned dlsym reference credits like a bare one: the
+        // test strips the version suffix before matching.
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        info.undefined_function_refs = vec!["dlsym@GLIBC_2.34".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "versioned dlsym must credit: {:?}",
+            out.results()
+        );
+
+        // A define-plus-NOTYPE-call shape cannot take the credit: the
+        // setuid call lives only in the broad undefined set (NOTYPE),
+        // not in the FUNC-only refs list, yet it still defeats the
+        // absence half.
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        info.undefined_functions = vec!["setuid".to_string(), "dlsym".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
+        assert_eq!(
+            lines.len(),
+            1,
+            "define-plus-NOTYPE-call must still fire: {results:?}"
         );
     }
 
