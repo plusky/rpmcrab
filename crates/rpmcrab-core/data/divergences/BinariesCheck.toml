@@ -598,3 +598,10 @@ kind = "behaviour"
 reason = "Fix-and-diverge (issue #1225): new Error with no reference counterpart. The reference charges an executable stack and a missing PT_GNU_STACK but stays silent on other invalid flag sets; rpmcrab rejects every PT_GNU_STACK flag set other than RW and RWE on linked images. RW stays silent and RWE keeps its existing executable-stack verdict only: the new finding fires exactly on the flag sets the existing arms leave silent (no flags, read-only, write-only). Images built for a different instruction set than the package architecture are not charged, the same foreign-machine treatment the executable-stack arm applies. Pinned by the executable-stack gate tests in binaries.rs."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1225"
+
+[[divergence]]
+case = "global"
+check = "missing-call-to-setgroups-before-setuid"
+kind = "behaviour"
+reason = "The charged symbol must BE the libc call: the setuid/setgid/setgroups patterns are anchored at the start, so project wrappers whose names merely contain the call (lttng_ust_after_setuid) stay silent. In archives only undefined references charge, as for call-to-mktemp: an archive member that defines the calls (newlib libgloss stubs) is a provider, not a caller."
+since = "0.4.1"
