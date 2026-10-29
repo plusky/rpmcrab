@@ -2460,6 +2460,14 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "zero-perms-ghost"
+kind = "behaviour"
+reason = "Fix-and-diverge: a `%ghost` entry with mode 000 stays quiet when the package does not own the entry's permissions, because the entry tracks something another mechanism creates. Measured over the Factory corpus (738 findings, 583 credited, 155 remain): entries under `/etc/alternatives/`, where the alternatives tool owns every link; entries an install-time scriptlet creates as a symlink, via a literal `ln -s` or a `for`-loop-expanded `ln -s`; entries under the SELinux policy store `/etc/selinux/<policy>/active/`, rewritten by semodule; tool-generated cache files (icon-theme.cache under `/usr/share/icons/`, encodings.dir, fonts.scale and .fonts-config-timestamp under `/usr/share/fonts/`, and the install-info directory file); and the kernel boot symlinks `/boot/vmlinuz` and `/boot/initrd`. The remaining entries keep firing, including state and log files whose permissions the spec should declare. Separately, the fallback suggestion for a ghost directory is 0755, not 0644: a 0644 directory cannot be traversed, so suggesting it is unusable advice."
+since = "0.4.1"
+upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint/checks/FilesCheck.py"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
