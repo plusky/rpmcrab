@@ -2538,6 +2538,7 @@ def generate(ref_dir=None, pins=None):
                     raise FileNotFoundError(
                         f"hand-maintained {filename} missing from {DISTRO_DIR / flavor}"
                     )
+                text = stems_path.read_text(encoding="utf-8")
             elif ref_dir:
                 text = fetch_local(ref_dir, sha, filename)
             else:
