@@ -37,3 +37,10 @@ kind = "behaviour"
 reason = "A stamp that is the package's own SOURCE_DATE_EPOCH is not reported; the reference has no such exemption. SDE is taken from BUILDTIME when BUILDHOST is reproducible, else from $SOURCE_DATE_EPOCH (shared sourcing: checks::shared::source_date_epoch). For file-contains-date-and-time, occurrences of SDE's exact stamp (its date in %b %e %Y shape, whitespace, its HH:MM:SS in UTC) are removed before the reference's rule judges the rest of the file. For file-contains-current-date the finding stays silent whenever SDE's UTC day is the run day, which also silences a wall-clock date-only stamp from a build that ran that day."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1180"
+
+[[divergence]]
+case = "global"
+check = "BuildRootAndDateCheck"
+kind = "behaviour"
+reason = "The buildroot trace rule matches the host-independent `/BUILDROOT/` path segment, while the reference builds its pattern from the lint host's `%{?buildroot}` macro expansion (falling back to the `/%{NAME}-%{VERSION}-build/BUILDROOT/` template when the expansion is empty). The port's findings therefore do not depend on which machine built or linted the package: any path containing a slash-delimited BUILDROOT segment fires, and a name merely containing BUILDROOT without slash delimiters does not."
+since = "0.4.1"

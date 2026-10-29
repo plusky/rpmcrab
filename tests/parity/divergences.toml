@@ -961,6 +961,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1180"
 
 [[divergence]]
 case = "global"
+check = "BuildRootAndDateCheck"
+kind = "behaviour"
+reason = "The buildroot trace rule matches the host-independent `/BUILDROOT/` path segment, while the reference builds its pattern from the lint host's `%{?buildroot}` macro expansion (falling back to the `/%{NAME}-%{VERSION}-build/BUILDROOT/` template when the expansion is empty). The port's findings therefore do not depend on which machine built or linted the package: any path containing a slash-delimited BUILDROOT segment fires, and a name merely containing BUILDROOT without slash delimiters does not."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "CMakeConfigCheck"
 kind = "behaviour"
 reason = "Deliberate config divergence: rpmcrab enables CMakeConfigCheck in its bundled default config (crates/rpmcrab-core/data/configdefaults.toml) and in the vendored openSUSE flavour config (crates/rpmcrab-core/data/distro/opensuse/opensuse.toml, appended by EXTRA_CHECKS in scripts/generate-distro-configs.py). The reference has no CMakeConfigCheck at all -- no shipped config lists one and no reference check reads CMake payload files -- so nothing runs there. The check is run-scoped (see the cmake-dangling-imported-location entry), so enabling it by default is silent on partial and single-package inputs and has no reference behaviour to diverge from on complete ones."

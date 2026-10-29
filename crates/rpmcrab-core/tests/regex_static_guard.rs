@@ -106,17 +106,15 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("branding_policy.rs", "re_icon_theme", "ctor-once"),
     // Config-driven with format!.
     ("tags.rs", "invalid_url", "config"),
-    // buildroot_and_date.rs (landed on main after this branch): the buildroot
-    // pattern embeds the runtime `%{?buildroot}` macro value and `istoday`
-    // embeds today's date, so neither can be a static; both are compiled once
-    // in the constructor and stored in the struct. `looksliketime` is a
-    // constant struct-field pattern (ctor-once, matching the entries above).
-    ("buildroot_and_date.rs", "Regex::new(&pattern)", "runtime"),
+    // buildroot_and_date.rs: `istoday` embeds today's date, so it cannot be
+    // a static; it is compiled once in the constructor and stored in the
+    // struct. `looksliketime` and `lookslikebuildroot` are constant
+    // struct-field patterns (ctor-once, matching the entries above); the
+    // buildroot rule is the host-independent `/BUILDROOT/` segment, not a
+    // runtime macro value.
     ("buildroot_and_date.rs", "looksliketime", "ctor-once"),
     ("buildroot_and_date.rs", "istoday", "runtime"),
-    // Owned-Regex factory with a runtime-data pattern; called once in the
-    // constructor, never on the per-file hot path.
-    ("buildroot_and_date.rs", "fn buildroot_regex", "runtime"),
+    ("buildroot_and_date.rs", "lookslikebuildroot", "ctor-once"),
     // Unit-test shape assertion for the run-day string.
     ("buildroot_and_date.rs", "^[A-Z][a-z]{2}", "test"),
     // buildroot_and_date.rs (#1180): the SDE stamp pattern embeds the
