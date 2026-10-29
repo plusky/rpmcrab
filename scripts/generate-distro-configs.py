@@ -2222,6 +2222,80 @@ def prune_pie_paths(text, pruned_log):
     return "".join(out)
 
 
+# Distro python-module stem equivalences appended to the SUSE flavour's
+# opensuse.toml (see PYTHON_MODULE_STEMS below and
+# `PythonModuleStems` in the port's PythonCheck). Each pair is a
+# measured SUSE naming equivalence: a package declaring the module
+# that Requires the stem form satisfies the requirement. This is
+# distro naming policy, NOT core matching logic — the core check only
+# gains the generic "also try these config-supplied stems" hook, and
+# the table itself lives here, in flavour config, so it can be
+# reviewed, pruned and diverged per distro without a code release.
+# Seed: the 23 pairs measured in the 2026-10-28 python-missing-require
+# census (PR #1247 area report); zero new pairs since the 2026-10-15
+# design doc's seed table. Staleness: an entry whose module or stem
+# no longer appears in the distro is flagged by
+# scripts/check-python-module-stems.py (monthly, alongside the
+# distro-config-sync — it needs a corpus, so CI cannot run it).
+PYTHON_MODULE_STEMS = [
+    ("avocado-framework", ["avocado"]),
+    ("pycairo", ["cairo"]),
+    ("python-barbicanclient", ["barbicanclient"]),
+    ("python-bugzilla", ["bugzilla"]),
+    ("python-dateutil", ["dateutil"]),
+    ("python-digitalocean", ["digitalocean"]),
+    ("python-gnupg", ["gnupg"]),
+    ("python-keystoneclient", ["keystoneclient"]),
+    ("python-ldap", ["ldap"]),
+    ("python-linstor", ["linstor"]),
+    ("python-ly", ["ly"]),
+    ("python-magic", ["magic"]),
+    ("python-manilaclient", ["manilaclient"]),
+    ("python-openstackclient", ["openstackclient"]),
+    ("python-swiftclient", ["swiftclient"]),
+    ("pygobject", ["gobject"]),
+    ("pyhamcrest", ["hamcrest"]),
+    ("pyopengl", ["opengl"]),
+    ("pyqt5", ["qt5"]),
+    ("pyqt5-sip", ["qt5-sip"]),
+    ("pyqt6", ["qt6"]),
+    ("pyusb", ["usb"]),
+    ("pyxdg", ["xdg"]),
+]
+
+
+def append_python_module_stems(text, stems):
+    """Append the `PythonModuleStems` array-of-tables to a TOML document.
+
+    Used for the distro stem equivalences (see PYTHON_MODULE_STEMS):
+    appended at the end of the file so the monthly sync re-emits them
+    deterministically. Refuses to run twice over the same text — the
+    generator always starts from pristine upstream text.
+    """
+    assert "[[PythonModuleStems]]" not in text, (
+        "PythonModuleStems already present; generator must start from "
+        "pristine upstream text"
+    )
+    out = [text]
+    if not text.endswith("\n"):
+        out.append("\n")
+    out.append("\n")
+    out.append("# PythonModuleStems: distro python-module stem equivalences\n")
+    out.append("# appended by rpmcrab (not from upstream; see\n")
+    out.append("# PYTHON_MODULE_STEMS in scripts/generate-distro-configs.py).\n")
+    out.append("# A package declaring `module` that Requires the stem form\n")
+    out.append("# satisfies the requirement under the SUSE flavours only;\n")
+    out.append("# the core check reads this key generically and applies\n")
+    out.append("# nothing when it is absent. Staleness is flagged by\n")
+    out.append("# scripts/check-python-module-stems.py (monthly corpus run).\n")
+    for module, module_stems in stems:
+        quoted = ", ".join(f'"{s}"' for s in module_stems)
+        out.append("[[PythonModuleStems]]\n")
+        out.append(f'module = "{module}"\n')
+        out.append(f"stems = [{quoted}]\n")
+    return "".join(out)
+
+
 def append_extra_filters(text, filters):
     """Append regexes to the `Filters = [...]` list in a TOML document.
 
@@ -2565,6 +2639,7 @@ def generate(ref_dir=None, pins=None):
                 text = append_extra_atomic_allowed_dirs(
                     text, [d for d, _reason in EXTRA_ATOMIC_ALLOWED_DIRS]
                 )
+                text = append_python_module_stems(text, PYTHON_MODULE_STEMS)
             text, adj_log = apply_digest_adjudications(text, filename)
             adjudicated_log.extend(adj_log)
             data["files"][filename] = text
@@ -2603,6 +2678,13 @@ def generate(ref_dir=None, pins=None):
     )
     for dir_prefix, reason in EXTRA_ATOMIC_ALLOWED_DIRS:
         provenance.append(f"#   AtomicAllowedDirs: added {dir_prefix!r} ({reason})")
+    provenance.append("#")
+    provenance.append(
+        "# PythonModuleStems appended (not from upstream; see"
+        " PYTHON_MODULE_STEMS):"
+    )
+    for module, module_stems in PYTHON_MODULE_STEMS:
+        provenance.append(f"#   PythonModuleStems: {module!r} -> {module_stems!r}")
     provenance.append("#")
     provenance.append(
         "# SystemdPresetPackages appended (not from upstream; see SYSTEMD_PRESET_PACKAGES):"

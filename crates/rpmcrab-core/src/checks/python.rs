@@ -53,6 +53,12 @@ pub struct PythonCheck {
     pyc_version: Option<String>,
     checked_files: usize,
     default_python: String,
+    /// Distro stem equivalences from the `PythonModuleStems` config
+    /// table (canonical module name -> acceptable stems): SUSE naming
+    /// policy, applied as additional name variants when testing
+    /// declared requirements. Absent config means an empty map and
+    /// behaviour byte-identical to today.
+    module_stems: HashMap<String, Vec<String>>,
     /// Deferred `python-leftover-require` candidates, resolved in
     /// `after_checks` once every package in the run has contributed its
     /// provider metadata (#481).
@@ -169,9 +175,65 @@ impl PythonCheck {
             pyc_version: None,
             checked_files: 0,
             default_python,
+            module_stems: Self::parse_module_stems(config),
             leftover_packages: Vec::new(),
             provider_modules: Vec::new(),
         }
+    }
+
+    /// Canonical lookup key for a `PythonModuleStems` module name:
+    /// case-insensitive with `-`/`_` equated, matching the matcher's
+    /// own normalisation, so the `PyGObject`/`pygobject` spelling pair
+    /// needs a single table entry.
+    fn stem_key(name: &str) -> String {
+        name.to_lowercase().replace('_', "-")
+    }
+
+    /// Read the `PythonModuleStems` array-of-tables from the merged
+    /// configuration into canonical-key -> stems. Malformed entries
+    /// are skipped, never fatal: a bad table must not break the check.
+    fn parse_module_stems(config: &Config) -> HashMap<String, Vec<String>> {
+        let mut out = HashMap::new();
+        let Some(toml::Value::Array(entries)) = config.configuration.get("PythonModuleStems")
+        else {
+            return out;
+        };
+        for entry in entries {
+            let Some(table) = entry.as_table() else {
+                continue;
+            };
+            let Some(module) = table.get("module").and_then(toml::Value::as_str) else {
+                continue;
+            };
+            let Some(toml::Value::Array(stems)) = table.get("stems") else {
+                continue;
+            };
+            let stems: Vec<String> = stems
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_string)
+                .collect();
+            if stems.is_empty() {
+                continue;
+            }
+            out.insert(Self::stem_key(module), stems);
+        }
+        out
+    }
+
+    /// Additional name variants for a declared requirement from the
+    /// distro stem table: each stem goes through the same
+    /// `module_names` expansion (including extras) as the declared
+    /// name itself, so a stem satisfies through exactly the same
+    /// anchored forms.
+    fn stem_variants(&self, name: &str, extras: &[String]) -> Vec<String> {
+        let Some(stems) = self.module_stems.get(&Self::stem_key(name)) else {
+            return Vec::new();
+        };
+        stems
+            .iter()
+            .flat_map(|stem| Self::module_names(stem, extras))
+            .collect()
     }
 
     fn sitelib_pattern() -> &'static str {
@@ -728,18 +790,24 @@ impl PythonCheck {
     }
 
     /// Whether an RPM require satisfies a Python requirement name.
-    fn require_satisfied(req_names: &[String], req: &Requirement) -> bool {
+    fn require_satisfied(req_names: &[String], req: &Requirement, extra_names: &[String]) -> bool {
         let mut names = Self::module_names(&req.name, &req.extras);
+        names.extend(
+            extra_names
+                .iter()
+                .flat_map(|n| Self::module_names(n, &req.extras)),
+        );
+        let base = names.clone();
         // pythonX-foo variants, the dotted flavour spelling
         // (`python3.13-foo`) included, as in `classify_atom`.
-        for n in Self::module_names(&req.name, &req.extras) {
-            names.push(format!("python\\d*(\\.\\d+)?-{}", fancy_regex::escape(&n)));
+        for n in &base {
+            names.push(format!("python\\d*(\\.\\d+)?-{}", fancy_regex::escape(n)));
         }
         // python3.12dist(foo) variants
-        for n in Self::module_names(&req.name, &req.extras) {
+        for n in &base {
             names.push(format!(
                 r"python\d+(\.\d+)?dist\({}\)",
-                fancy_regex::escape(&n)
+                fancy_regex::escape(n)
             ));
         }
         let pattern = format!(
@@ -1444,7 +1512,7 @@ impl PythonCheck {
             {
                 continue;
             }
-            match Self::require_satisfaction(pkg, req, shipped, tree) {
+            match self.require_satisfaction(pkg, req, shipped, tree) {
                 Satisfaction::Satisfied => {}
                 Satisfaction::BareOnly(bare) => {
                     add_info(
@@ -1475,12 +1543,18 @@ impl PythonCheck {
     /// flavoured or dist-spelled RPM Require, only by a bare
     /// `python-<name>` Require, or not at all.
     fn require_satisfaction(
+        &self,
         pkg: &Pkg,
         req: &Requirement,
         shipped: &[(String, String)],
         tree: &str,
     ) -> Satisfaction {
-        let variants = Self::module_names(&req.name, &req.extras);
+        let mut variants = Self::module_names(&req.name, &req.extras);
+        // Distro stem equivalences (`PythonModuleStems`): each stem is
+        // an additional name variant, judged through the same anchored
+        // forms as the declared name itself.
+        let stems = self.stem_variants(&req.name, &req.extras);
+        variants.extend(stems.iter().cloned());
         // The package's own `python3.Xdist()` Provides satisfy: the
         // reference ignores them, so a package shipping the very dist
         // it declares a requirement on (python313-ua-parser on
@@ -1506,7 +1580,7 @@ impl PythonCheck {
             return Satisfaction::Satisfied;
         }
         let class = Self::classify_matches(pkg, &variants);
-        if !Self::require_satisfied(&pkg.req_names, req) && matches!(class, MatchClass::Unknown) {
+        if !Self::require_satisfied(&pkg.req_names, req, &stems) && matches!(class, MatchClass::Unknown) {
             return Satisfaction::Missing;
         }
         match class {
@@ -3292,11 +3366,13 @@ mod tests {
         let req_names = vec!["python3-requests".to_string()];
         assert!(PythonCheck::require_satisfied(
             &req_names,
-            &requirement("requests")
+            &requirement("requests"),
+            &[]
         ));
         assert!(!PythonCheck::require_satisfied(
             &req_names,
-            &requirement("urllib3")
+            &requirement("urllib3"),
+            &[]
         ));
     }
 
@@ -3305,7 +3381,8 @@ mod tests {
         let req_names = vec!["python312dist(requests)".to_string()];
         assert!(PythonCheck::require_satisfied(
             &req_names,
-            &requirement("requests")
+            &requirement("requests"),
+            &[]
         ));
     }
 
@@ -3493,6 +3570,198 @@ mod tests {
             .zip(levels)
             .map(|((name, line), level)| (name.clone(), level, line.clone()))
             .collect()
+    }
+
+    fn config_with_stems(pairs: &[(&str, &[&str])]) -> Config {
+        let mut config = Config::default();
+        let entries: Vec<toml::Value> = pairs
+            .iter()
+            .map(|(module, stems)| {
+                let mut table = toml::Table::new();
+                table.insert(
+                    "module".to_string(),
+                    toml::Value::String(module.to_string()),
+                );
+                table.insert(
+                    "stems".to_string(),
+                    toml::Value::Array(
+                        stems
+                            .iter()
+                            .map(|s| toml::Value::String(s.to_string()))
+                            .collect(),
+                    ),
+                );
+                toml::Value::Table(table)
+            })
+            .collect();
+        config
+            .configuration
+            .insert("PythonModuleStems".to_string(), toml::Value::Array(entries));
+        config
+    }
+
+    fn missing_require_findings_with_config(
+        reqs: &[Requirement],
+        req_names: &[&str],
+        config: &Config,
+    ) -> Vec<(String, Level, String)> {
+        use crate::color::Color;
+        let pkg = fixture_pkg_with_requires(req_names);
+        let mut out = Filter::new(config, Color::for_tty(false)).unwrap();
+        let check = PythonCheck::new(config);
+        check.check_missing_requirements(&pkg, &mut out, reqs, "3.12");
+        let levels = out.result_levels().to_vec();
+        out.results()
+            .iter()
+            .zip(levels)
+            .filter(|((name, _), _)| name == "python-missing-require")
+            .map(|((name, line), level)| (name.clone(), level, line.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn stem_table_satisfies_declared_requirement() {
+        // The shipped SUSE equivalence: a package declaring `pygobject`
+        // that Requires `python3-gobject` no longer warns.
+        let config = config_with_stems(&[("pygobject", &["gobject"])]);
+        let reqs = PythonCheck::parse_requirements("pygobject\n", false, "3.12");
+        for req_names in [
+            vec!["python3-gobject"],
+            vec!["python3.13dist(gobject)"],
+            // Bare `python-<stem>` behaves like bare `python-<name>`:
+            // unflavoured, not missing.
+            vec!["python-gobject"],
+        ] {
+            let findings = missing_require_findings_with_config(&reqs, &req_names, &config);
+            assert!(findings.is_empty(), "req_names {req_names:?}: {findings:?}");
+        }
+    }
+
+    #[test]
+    fn stem_bare_require_is_unflavoured_not_missing() {
+        // A bare `python-<stem>` Require behaves like bare
+        // `python-<name>`: the requirement is carried but unflavoured,
+        // so the finding is `python-unflavoured-require`, never silence
+        // and never `python-missing-require`. This pins the stem
+        // variants reaching `classify_matches`, not just the regex.
+        use crate::color::Color;
+        let config = config_with_stems(&[("pygobject", &["gobject"])]);
+        let mut pkg = fixture_pkg_with_requires(&["python-gobject"]);
+        // `classify_matches` reads the parsed requires, not `req_names`.
+        pkg.requires = vec![dep("python-gobject", 0, None)];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = PythonCheck::new(&config);
+        let reqs = PythonCheck::parse_requirements("pygobject\n", false, "3.12");
+        check.check_missing_requirements(&pkg, &mut out, &reqs, "3.12");
+        let levels = out.result_levels().to_vec();
+        let names: Vec<String> = out
+            .results()
+            .iter()
+            .zip(levels)
+            .map(|((name, _), _)| name.clone())
+            .collect();
+        assert_eq!(names, vec!["python-unflavoured-require".to_string()]);
+    }
+
+    #[test]
+    fn stem_table_key_is_case_and_separator_insensitive() {
+        let config = config_with_stems(&[("pygobject", &["gobject"]), ("pyqt5-sip", &["qt5-sip"])]);
+        // Capitalised declaration matches the lowercase table key.
+        let reqs = PythonCheck::parse_requirements("PyGObject\n", false, "3.12");
+        assert!(
+            missing_require_findings_with_config(&reqs, &["python3-gobject"], &config).is_empty()
+        );
+        // Underscore declaration matches the dashed table key.
+        let reqs = PythonCheck::parse_requirements("pyqt5_sip\n", false, "3.12");
+        assert!(
+            missing_require_findings_with_config(&reqs, &["python3-qt5-sip"], &config).is_empty()
+        );
+    }
+
+    #[test]
+    fn stem_table_does_not_generalise_to_unlisted_names() {
+        // No generic affix rule ships with the table: an unlisted
+        // `py`-prefixed name is NOT satisfied by its stripped form,
+        // and a different distribution sharing the stem prefix still
+        // fires. The table alone, with no matching Require, silences
+        // nothing.
+        let config = config_with_stems(&[("pygobject", &["gobject"])]);
+        for (declared, req_names) in [
+            ("pyfoo\n", vec!["python3-foo"]),
+            ("pygobject\n", vec!["python3-gobject2"]),
+            ("pygobject\n", vec![]),
+        ] {
+            let reqs = PythonCheck::parse_requirements(declared, false, "3.12");
+            let findings = missing_require_findings_with_config(&reqs, &req_names, &config);
+            assert_eq!(
+                findings.len(),
+                1,
+                "declared {declared:?} req_names {req_names:?}: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stem_table_parsing_skips_malformed_entries() {
+        let mut config = Config::default();
+        let mut good = toml::Table::new();
+        good.insert(
+            "module".to_string(),
+            toml::Value::String("pygobject".to_string()),
+        );
+        good.insert(
+            "stems".to_string(),
+            toml::Value::Array(vec![toml::Value::String("gobject".to_string())]),
+        );
+        let mut no_stems = toml::Table::new();
+        no_stems.insert(
+            "module".to_string(),
+            toml::Value::String("pyqt5".to_string()),
+        );
+        let mut no_module = toml::Table::new();
+        no_module.insert(
+            "stems".to_string(),
+            toml::Value::Array(vec![toml::Value::String("qt5".to_string())]),
+        );
+        let mut mixed = toml::Table::new();
+        mixed.insert(
+            "module".to_string(),
+            toml::Value::String("pyusb".to_string()),
+        );
+        mixed.insert(
+            "stems".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::String("usb".to_string()),
+                toml::Value::Integer(42),
+            ]),
+        );
+        config.configuration.insert(
+            "PythonModuleStems".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::Table(good),
+                toml::Value::Table(no_stems),
+                toml::Value::Table(no_module),
+                toml::Value::Table(mixed),
+                toml::Value::String("not-a-table".to_string()),
+            ]),
+        );
+        let check = PythonCheck::new(&config);
+        assert_eq!(check.module_stems.len(), 2);
+        assert_eq!(
+            check.module_stems.get("pygobject").map(Vec::as_slice),
+            Some(["gobject".to_string()].as_slice())
+        );
+        // Non-string stem elements are skipped, the valid one kept.
+        assert_eq!(
+            check.module_stems.get("pyusb").map(Vec::as_slice),
+            Some(["usb".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn stem_table_absent_is_empty() {
+        let check = PythonCheck::new(&Config::default());
+        assert!(check.module_stems.is_empty());
     }
 
     #[test]
@@ -4817,11 +5086,13 @@ mod tests {
         let req_names = vec!["(python3-other or python3-requests)".to_string()];
         assert!(PythonCheck::require_satisfied(
             &req_names,
-            &requirement("requests")
+            &requirement("requests"),
+            &[]
         ));
         assert!(!PythonCheck::require_satisfied(
             &req_names,
-            &requirement("urllib3")
+            &requirement("urllib3"),
+            &[]
         ));
     }
 
@@ -5594,11 +5865,11 @@ azure_mgmt_core-1.0.dist-info/RECORD,,
         // Issue #382: `Twisted[tls]` must match `python313-Twisted-tls`.
         let req = PythonCheck::split_marker("Twisted[tls]>=14.0");
         let req_names = vec!["python313-Twisted-tls >= 14.0.0".to_string()];
-        assert!(PythonCheck::require_satisfied(&req_names, &req));
+        assert!(PythonCheck::require_satisfied(&req_names, &req, &[]));
         // And `dask[array]` must match `python313-dask-array`.
         let req = PythonCheck::split_marker("dask[array]>=2022.2.0");
         let req_names = vec!["python313-dask-array >= 2022.2.0".to_string()];
-        assert!(PythonCheck::require_satisfied(&req_names, &req));
+        assert!(PythonCheck::require_satisfied(&req_names, &req, &[]));
     }
 
     #[test]
