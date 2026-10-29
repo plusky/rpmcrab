@@ -612,3 +612,10 @@ check = "missing-call-to-setgroups-before-setuid"
 kind = "behaviour"
 reason = "Fix-and-diverge: in a linked object, `missing-call-to-setgroups-before-setuid` stays quiet when the setuid/setgid match comes only from defined symbols (no undefined setuid/setgid reference exists) and the object references dlsym (undefined). Such an object provides its own setuid/setgid wrapper and forwards through dlsym -- an LD_PRELOAD-style interposer that makes no privilege decision itself -- and a tracing wrapper must not drop the caller's groups, so there is no package-side fix. The credit is conservative: an object that both defines and calls (an undefined setuid/setgid reference exists) still fires, a defined pair with no dlsym reference still fires, and archives are unchanged (they already charge references only). Pinned by setgroups_interposer_credit in binaries.rs."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "ldd-failed"
+kind = "missing"
+reason = "Removed: the port parses ELF with goblin in both ReadelfInfo and LddInfo, so every input that fails the ldd parse already fails the readelf parse and emits readelf-failed first; ldd-failed is unreachable. The reference runs the ldd tool, whose distinct failure modes the goblin port has no equivalent for. The emission, its description entry, and its pinning test are removed."
+since = "0.4.1"

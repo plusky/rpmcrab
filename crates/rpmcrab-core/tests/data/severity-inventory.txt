@@ -150,7 +150,6 @@ kmp-excessive-supplements = W
 kmp-missing-enhances = E
 kmp-missing-requires = E
 kmp-missing-supplements = E
-ldd-failed = E
 libalternatives-directory-not-exists = E
 libdir-macro-in-noarch-package = W
 library-without-ldconfig-postin = E
