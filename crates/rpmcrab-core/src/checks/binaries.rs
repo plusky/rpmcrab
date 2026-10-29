@@ -397,6 +397,18 @@ static SHELL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
 const GLIBC_EMPTY_ARCHIVES: &[&str] = &["libanl", "libdl", "libpthread", "librt", "libutil"];
+/// LTO marker symbol prefixes: GCC emits these names in slim-LTO
+/// objects, where the LTO evidence is in the symbol table rather
+/// than in `.gnu.lto_` sections.
+const LTO_MARKER_SYMBOL_PREFIXES: &[&str] = &["__gnu_lto_v1", "__gnu_lto_slim"];
+
+/// True when a symbol name carries an LTO marker prefix.
+fn is_lto_marker_symbol(name: &str) -> bool {
+    LTO_MARKER_SYMBOL_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
 const LTO_TEXT_LIKE_SECTIONS: &[&str] = &[
     ".preinit_array",
     ".init_array",
@@ -719,6 +731,12 @@ struct ReadelfInfo {
     /// table or debuglink states nothing about stripping. Computed
     /// during parse; see `comment_has_ghc_version`.
     ghc_comment: bool,
+    /// True when a static-table symbol name carries an LTO marker
+    /// prefix (`__gnu_lto_v1` / `__gnu_lto_slim`): a slim-LTO
+    /// object, whose LTO evidence is in the symbol table rather
+    /// than in `.gnu.lto_` sections. Computed during parse; see
+    /// `fill_from_elf`.
+    has_lto_symbol: bool,
     /// The vendored C libraries this file's `.dep-v0` records, one per
     /// `data/vendored-c-crates.toml` entry the crate graph names.
     /// `.dep-v0` lists every resolved crate, linked or not, so each
@@ -862,6 +880,7 @@ impl ReadelfInfo {
             go_toolchains: Vec::new(),
             go_buildinfo: false,
             ghc_comment: false,
+            has_lto_symbol: false,
             vendored_crates: Vec::new(),
             soname: None,
             needed: Vec::new(),
@@ -1095,6 +1114,21 @@ impl ReadelfInfo {
                     if let Some(name) = elf.dynstrtab.get_at(aux.vna_name) {
                         verneed_names.insert(aux.vna_other, name);
                     }
+                }
+            }
+        }
+
+        // LTO marker symbols: slim-LTO objects carry `__gnu_lto_v1` /
+        // `__gnu_lto_slim` in the static table as absolute markers,
+        // not functions, so the FUNC-only collection below never sees
+        // them; the LTO verdicts read this flag instead.
+        if !self.has_lto_symbol {
+            for sym in elf.syms.iter() {
+                if let Some(name) = elf.strtab.get_at(sym.st_name)
+                    && is_lto_marker_symbol(name)
+                {
+                    self.has_lto_symbol = true;
+                    break;
                 }
             }
         }
@@ -5540,18 +5574,20 @@ impl BinariesCheck {
         }
         // The finding charges an archive built with LTO but without
         // -ffat-lto-objects, so candidacy requires LTO content among
-        // the members: a `.gnu.lto_` section (GCC) or an `.llvmbc`
-        // embedded-bitcode section (LLVM) in an ELF member. An archive
+        // the members: a `.gnu.lto_` or `.gnu.debuglto_` section
+        // (GCC), an LTO marker symbol (`__gnu_lto_v1` /
+        // `__gnu_lto_slim`), or an `.llvmbc` embedded-bitcode
+        // section (LLVM) in an ELF member. An archive
         // whose ELF members carry no LTO content -- a plain library of
         // data-only objects, such as the GUID libraries wine ships for
         // its Unix side -- has no text to miss. Members in other object
         // formats neither confer nor block candidacy (see
         // `parse_archive`): the ELF members decide.
-        let has_lto_content = info
-            .sections
-            .iter()
-            .flatten()
-            .any(|s| s.name.contains(".gnu.lto_.") || s.name == ".llvmbc");
+        let has_lto_content = info.sections.iter().flatten().any(|s| {
+            s.name.contains(".gnu.lto_.")
+                || s.name.starts_with(".gnu.debuglto_")
+                || s.name == ".llvmbc"
+        }) || info.has_lto_symbol;
         if !has_lto_content {
             return;
         }
@@ -5696,11 +5732,18 @@ impl BinariesCheck {
     ) {
         for elf_file in &info.sections {
             for section in elf_file {
-                if section.name.contains(".gnu.lto_.") {
+                if section.name.contains(".gnu.lto_.") || section.name.starts_with(".gnu.debuglto_")
+                {
                     add_info(out, Level::Error, pkg, "lto-bytecode", &[&pkgfile.name]);
                     return;
                 }
             }
+        }
+        // Slim-LTO evidence lives in symbol names, not sections: an
+        // object carrying an LTO marker symbol is LTO bytecode even
+        // with no `.gnu.lto_` section.
+        if info.has_lto_symbol {
+            add_info(out, Level::Error, pkg, "lto-bytecode", &[&pkgfile.name]);
         }
     }
 
@@ -8855,6 +8898,7 @@ mod tests {
                 go_toolchains: Vec::new(),
                 go_buildinfo: false,
                 ghc_comment: false,
+                has_lto_symbol: false,
                 soname: None,
                 needed: Vec::new(),
                 runpaths,
@@ -11957,6 +12001,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 go_toolchains: Vec::new(),
                 go_buildinfo: false,
                 ghc_comment: false,
+                has_lto_symbol: false,
                 vendored_crates: Vec::new(),
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -12112,6 +12157,7 @@ description = "explicit priority string bypasses the system crypto policy"
             go_toolchains: Vec::new(),
             go_buildinfo: false,
             ghc_comment: false,
+            has_lto_symbol: false,
             vendored_crates: Vec::new(),
         }
     }
@@ -17183,6 +17229,235 @@ description = "explicit priority string bypasses the system crypto policy"
             lines_for(&results, "lto-no-text-in-archive").len(),
             1,
             "embedded bitcode member must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn lto_marker_symbol_prefixes() {
+        // Prefix semantics: the marker names match by prefix, so a
+        // longer name sharing the prefix still counts, while names
+        // that merely resemble the markers stay silent.
+        for name in ["__gnu_lto_v1", "__gnu_lto_slim", "__gnu_lto_v1.foo"] {
+            assert!(is_lto_marker_symbol(name), "{name} must match");
+        }
+        for name in [
+            "__gnu_lto_v2",
+            "__gnu_lto_sli",
+            "__gnu_lto",
+            "__gnu_lto_v",
+            "_gnu_lto_v1",
+            "x__gnu_lto_v1",
+            "",
+        ] {
+            assert!(!is_lto_marker_symbol(name), "{name} must not match");
+        }
+    }
+
+    #[test]
+    fn lto_bytecode_debuglto_and_marker_symbols() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+
+        // A `.gnu.debuglto_` section is LTO bytecode.
+        for section in [".gnu.debuglto_.debug_info", ".gnu.debuglto_"] {
+            let mut info = syn_info();
+            info.sections = vec![vec![sec(".text"), sec(section)]];
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_lto_section(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            assert_eq!(
+                lines_for(&results, "lto-bytecode").len(),
+                1,
+                "{section} must fire: {results:?}"
+            );
+        }
+
+        // Lookalike section names stay silent.
+        for section in [".gnu.debuglto", ".debuglto_.debug_info", ".gnu.lto"] {
+            let mut info = syn_info();
+            info.sections = vec![vec![sec(".text"), sec(section)]];
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_lto_section(&pkg, &pkgfile, &info, &mut out);
+            assert!(
+                out.results().is_empty(),
+                "{section} must be quiet: {:?}",
+                out.results()
+            );
+        }
+
+        // A marker symbol is LTO bytecode even with no LTO section.
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".text")]];
+        info.has_lto_symbol = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_lto_section(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            lines_for(&results, "lto-bytecode").len(),
+            1,
+            "marker symbol must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn lto_no_text_in_archive_lto_content_arms() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+
+        // A marker symbol confers candidacy: no text means the
+        // finding fires, exactly as for a `.gnu.lto_` section.
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".comment")]];
+        info.has_lto_symbol = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            lines_for(&results, "lto-no-text-in-archive").len(),
+            1,
+            "marker symbol without text must fire: {results:?}"
+        );
+
+        // Text present stays silent even with a marker symbol.
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".comment"), sec(".text")]];
+        info.has_lto_symbol = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "text present must be quiet: {:?}",
+            out.results()
+        );
+
+        // A `.gnu.debuglto_` section confers candidacy too.
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".gnu.debuglto_.debug_info"), sec(".comment")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            lines_for(&results, "lto-no-text-in-archive").len(),
+            1,
+            "debuglto section without text must fire: {results:?}"
+        );
+
+        // A lookalike section confers no candidacy.
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".gnu.debuglto"), sec(".comment")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "lookalike section must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    /// Minimal ET_REL object with a `.symtab` naming `symbols` (all
+    /// GLOBAL NOTYPE absolute markers, the slim-LTO shape), plus a
+    /// `.strtab` and `.shstrtab`, for parse-level LTO marker tests.
+    fn craft_elf_symtab(symbols: &[&str]) -> Vec<u8> {
+        let mut strtab = vec![0u8];
+        let mut sym_name_offs = Vec::new();
+        for name in symbols {
+            sym_name_offs.push(strtab.len() as u32);
+            strtab.extend_from_slice(name.as_bytes());
+            strtab.push(0);
+        }
+        let mut shstrtab = vec![0u8];
+        let mut sh_name_offs = Vec::new();
+        for name in [".symtab", ".strtab", ".shstrtab"] {
+            sh_name_offs.push(shstrtab.len() as u32);
+            shstrtab.extend_from_slice(name.as_bytes());
+            shstrtab.push(0);
+        }
+
+        // Symbol entries: null entry + one per symbol (24 bytes each).
+        let mut symtab = vec![0u8; 24];
+        for (i, _) in symbols.iter().enumerate() {
+            let mut e = vec![0u8; 24];
+            e[0..4].copy_from_slice(&sym_name_offs[i].to_le_bytes());
+            e[4] = 0x10; // STB_GLOBAL (1) << 4 | STT_NOTYPE (0)
+            e[6..8].copy_from_slice(&0xfff1u16.to_le_bytes()); // SHN_ABS
+            symtab.extend(e);
+        }
+
+        // Layout: ELF header, symtab, strtab, shstrtab, section headers.
+        let mut buf = vec![0u8; 64];
+        let symtab_off = buf.len() as u64;
+        buf.extend_from_slice(&symtab);
+        let strtab_off = buf.len() as u64;
+        buf.extend_from_slice(&strtab);
+        let shstrtab_off = buf.len() as u64;
+        buf.extend_from_slice(&shstrtab);
+        while !buf.len().is_multiple_of(8) {
+            buf.push(0);
+        }
+        let shoff = buf.len() as u64;
+
+        // Section headers: NULL, .symtab, .strtab, .shstrtab.
+        let mut shdrs = vec![0u8; 64];
+        let mut h = vec![0u8; 64];
+        h[0..4].copy_from_slice(&sh_name_offs[0].to_le_bytes());
+        h[4..8].copy_from_slice(&2u32.to_le_bytes()); // SHT_SYMTAB
+        h[24..32].copy_from_slice(&symtab_off.to_le_bytes());
+        h[32..40].copy_from_slice(&(symtab.len() as u64).to_le_bytes());
+        h[40..44].copy_from_slice(&2u32.to_le_bytes()); // sh_link: .strtab
+        h[44..48].copy_from_slice(&1u32.to_le_bytes()); // sh_info: first non-local
+        h[56..64].copy_from_slice(&24u64.to_le_bytes()); // sh_entsize
+        shdrs.extend(h);
+        let mut h = vec![0u8; 64];
+        h[0..4].copy_from_slice(&sh_name_offs[1].to_le_bytes());
+        h[4..8].copy_from_slice(&3u32.to_le_bytes()); // SHT_STRTAB
+        h[24..32].copy_from_slice(&strtab_off.to_le_bytes());
+        h[32..40].copy_from_slice(&(strtab.len() as u64).to_le_bytes());
+        h[48..56].copy_from_slice(&1u64.to_le_bytes());
+        shdrs.extend(h);
+        let mut h = vec![0u8; 64];
+        h[0..4].copy_from_slice(&sh_name_offs[2].to_le_bytes());
+        h[4..8].copy_from_slice(&3u32.to_le_bytes()); // SHT_STRTAB
+        h[24..32].copy_from_slice(&shstrtab_off.to_le_bytes());
+        h[32..40].copy_from_slice(&(shstrtab.len() as u64).to_le_bytes());
+        h[48..56].copy_from_slice(&1u64.to_le_bytes());
+        shdrs.extend(h);
+        buf.extend(shdrs);
+
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2; // ELFCLASS64
+        ehdr[5] = 1; // ELFDATA2LSB
+        ehdr[6] = 1; // EV_CURRENT
+        ehdr[16..18].copy_from_slice(&1u16.to_le_bytes()); // ET_REL
+        ehdr[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[58..60].copy_from_slice(&64u16.to_le_bytes());
+        ehdr[60..62].copy_from_slice(&4u16.to_le_bytes()); // shnum
+        ehdr[62..64].copy_from_slice(&3u16.to_le_bytes()); // shstrndx
+        buf[0..64].copy_from_slice(&ehdr);
+        buf
+    }
+
+    #[test]
+    fn lto_marker_symbol_detected_in_parse() {
+        let info = parse_elf_bytes("lto-marker", &craft_elf_symtab(&["__gnu_lto_v1"]));
+        assert!(info.has_lto_symbol, "marker symbol must set the flag");
+        let info = parse_elf_bytes("lto-marker-slim", &craft_elf_symtab(&["__gnu_lto_slim"]));
+        assert!(info.has_lto_symbol, "slim marker must set the flag");
+        let info = parse_elf_bytes(
+            "lto-marker-near-miss",
+            &craft_elf_symtab(&["__gnu_lto_v2", "foo"]),
+        );
+        assert!(
+            !info.has_lto_symbol,
+            "near-miss symbols must not set the flag"
         );
     }
 
