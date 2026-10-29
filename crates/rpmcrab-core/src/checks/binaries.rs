@@ -6645,9 +6645,7 @@ impl BinariesCheck {
         // rsh-family remote-execution entry points
         // (rcmd/rexec/rresvport). The reference is the predicate
         // -- the implementing libraries define these symbols and
-        // stay silent. Warning only, provisional: the
-        // full-corpus measurement that would support a stronger
-        // level is not part of this change. The second disjunct
+        // stay silent. Warning only. The second disjunct
         // covers dynsym imports typed STT_NOTYPE: fill_from_elf
         // files those only under `undefined_functions`, never
         // under the FUNC-only `undefined_function_refs`.

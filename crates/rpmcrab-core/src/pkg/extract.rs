@@ -2172,7 +2172,7 @@ mod tests {
 
     /// Regression for the rocksndiamonds-data hang: `record` used to scan
     /// all previously recorded fixups per entry, O(n^2) path comparisons
-    /// (108k files took 277s to extract on the Mac, and timed out the
+    /// (108k files took 277s to extract, and timed out the
     /// 1800s container scan). Long shared prefixes, like the real
     /// /usr/share/rocksndiamonds/levels/... paths, make each failed
     /// comparison walk many components before differing.
