@@ -37,6 +37,17 @@ const STANDARD_BIN_DIRS: [&str; 4] = ["/bin", "/sbin", "/usr/bin", "/usr/sbin"];
 /// freedesktop theme lookup (and rpminspect's fallback set).
 const ICON_EXTENSIONS: [&str; 4] = ["png", "svg", "svgz", "xpm"];
 
+/// Bare Exec tokens accepted as base-system binaries: they are
+/// guaranteed by the base system even when no package in the run
+/// ships them, so they never fire. Deliberate fixed list, scoped
+/// to this check (see the ledger entry).
+const SYSTEM_BINARIES_BARE: [&str; 5] = ["env", "sh", "bash", "python", "false"];
+
+/// Absolute Exec paths accepted as base-system binaries, same
+/// reasoning as `SYSTEM_BINARIES_BARE`.
+const SYSTEM_BINARIES_ABS: [&str; 4] =
+    ["/bin/sh", "/bin/true", "/usr/bin/false", "/usr/bin/python3"];
+
 /// Parsed desktop file: section -> (key -> value).
 type DesktopSections = HashMap<String, HashMap<String, String>>;
 /// Parse error: (level, finding, details).
@@ -317,6 +328,16 @@ impl MenuXDGCheck {
                 .join(binary)
                 .exists()
         })
+    }
+
+    /// Whether the Exec token names a base-system binary, accepted
+    /// without any package shipping it.
+    fn is_system_binary(binary: &str) -> bool {
+        if binary.starts_with('/') {
+            SYSTEM_BINARIES_ABS.contains(&binary)
+        } else {
+            SYSTEM_BINARIES_BARE.contains(&binary)
+        }
     }
 
     /// The merged-/usr counterpart of a legacy-directory absolute
@@ -746,12 +767,16 @@ impl Check for MenuXDGCheck {
                         // on the first ASCII space only.
                         let binary = exec.split(' ').next().unwrap_or("");
                         let binary = Self::unquote_exec_token(binary);
-                        // Anything the package itself does not resolve
+                        // Base-system binaries never fire. Anything
+                        // else the package itself does not resolve
                         // is held for `after_checks`, where the
                         // run-scoped sibling credit is judged:
                         // emitting here would fire before the
                         // sibling's inventory is known.
-                        if !binary.is_empty() && !Self::binary_exists(pkg, binary) {
+                        if !binary.is_empty()
+                            && !Self::binary_exists(pkg, binary)
+                            && !Self::is_system_binary(binary)
+                        {
                             let candidate = DesktopBinaryCandidate {
                                 pkg_name: pkg.name.clone(),
                                 arch: pkg.arch.clone(),
@@ -1988,5 +2013,37 @@ mod tests {
         let src = menu_src_pkg(&d2);
         let results = run_menu_multi(&[src, desktop, foreign]);
         assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+    #[test]
+    fn system_binaries_silent() {
+        // Every allowlisted spelling stays silent on its own,
+        // with no sibling or source package in the run.
+        for token in [
+            "env",
+            "sh",
+            "bash",
+            "python",
+            "false",
+            "/bin/sh",
+            "/bin/true",
+            "/usr/bin/false",
+            "/usr/bin/python3",
+        ] {
+            let d0 = tempfile::tempdir().unwrap();
+            let desktop = menu_pkg(
+                &d0,
+                "sysbin",
+                vec![desktop_entry(
+                    d0.path(),
+                    "/usr/share/applications/sysbin.desktop",
+                    token,
+                )],
+            );
+            let results = run_menu_multi(&[desktop]);
+            assert!(
+                without_binary(&results).is_empty(),
+                "{token} should stay silent: {results:?}"
+            );
+        }
     }
 }
