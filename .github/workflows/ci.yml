@@ -436,6 +436,7 @@ jobs:
       - run: python3 scripts/test_parity_runner.py
       - run: python3 scripts/test_check_ledger_since.py
       - run: python3 scripts/test_check_python_magic_table.py
+      - run: python3 scripts/test_check_python_module_stems.py
       # A new ledger entry must name the next release, not one that has
       # already shipped. HEAD^1 is the exact main the PR merge commit was
       # built on, so a main that moved on since cannot misalign the diff.
