@@ -182,11 +182,11 @@ impl PythonCheck {
     }
 
     /// Canonical lookup key for a `PythonModuleStems` module name:
-    /// case-insensitive with `-`/`_` equated, matching the matcher's
-    /// own normalisation, so the `PyGObject`/`pygobject` spelling pair
-    /// needs a single table entry.
+    /// PEP 503 form, matching the matcher's own normalisation, so the
+    /// `PyGObject`/`pygobject` spelling pair -- and dotted or
+    /// multi-separator rows -- need a single table entry.
     fn stem_key(name: &str) -> String {
-        name.to_lowercase().replace('_', "-")
+        pep503(name)
     }
 
     /// Read the `PythonModuleStems` array-of-tables from the merged
@@ -211,14 +211,33 @@ impl PythonCheck {
             let stems: Vec<String> = stems
                 .iter()
                 .filter_map(toml::Value::as_str)
+                .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect();
             if stems.is_empty() {
                 continue;
             }
-            out.insert(Self::stem_key(module), stems);
+            // Duplicate keys merge: a later row extends the earlier
+            // list instead of silently dropping it.
+            out.entry(Self::stem_key(module)).or_default().extend(stems);
         }
         out
+    }
+
+    /// Additional name variants for a declared requirement from a
+    /// stem table, without a check instance (for the leftover
+    /// matcher, which is a free function).
+    fn stem_variants_for(
+        stems: &HashMap<String, Vec<String>>,
+        name: &str,
+        extras: &[String],
+    ) -> Vec<String> {
+        let Some(list) = stems.get(&Self::stem_key(name)) else {
+            return Vec::new();
+        };
+        list.iter()
+            .flat_map(|stem| Self::module_names(stem, extras))
+            .collect()
     }
 
     /// Additional name variants for a declared requirement from the
@@ -227,13 +246,7 @@ impl PythonCheck {
     /// name itself, so a stem satisfies through exactly the same
     /// anchored forms.
     fn stem_variants(&self, name: &str, extras: &[String]) -> Vec<String> {
-        let Some(stems) = self.module_stems.get(&Self::stem_key(name)) else {
-            return Vec::new();
-        };
-        stems
-            .iter()
-            .flat_map(|stem| Self::module_names(stem, extras))
-            .collect()
+        Self::stem_variants_for(&self.module_stems, name, extras)
     }
 
     fn sitelib_pattern() -> &'static str {
@@ -792,11 +805,11 @@ impl PythonCheck {
     /// Whether an RPM require satisfies a Python requirement name.
     fn require_satisfied(req_names: &[String], req: &Requirement, extra_names: &[String]) -> bool {
         let mut names = Self::module_names(&req.name, &req.extras);
-        names.extend(
-            extra_names
-                .iter()
-                .flat_map(|n| Self::module_names(n, &req.extras)),
-        );
+        // extra_names arrive pre-expanded: stem variants already carry
+        // the requirement's extras, so re-expanding extras over them
+        // would fabricate double-extra names (`gobject-x-x`) that
+        // satisfy nonsense RPM requires.
+        names.extend(extra_names.iter().cloned());
         let base = names.clone();
         // pythonX-foo variants, the dotted flavour spelling
         // (`python3.13-foo`) included, as in `classify_atom`.
@@ -1345,7 +1358,7 @@ impl Check for PythonCheck {
             .iter()
             .map(|d| (d.reqs.as_slice(), d.python_version.as_str()))
             .collect();
-        let candidates = Self::leftover_require_strings(&pkg.req_names, &refs);
+        let candidates = Self::leftover_require_strings(&pkg.req_names, &refs, &self.module_stems);
         if !candidates.is_empty() && Self::package_has_code(pkg) {
             self.leftover_packages.push(LeftoverPackage {
                 name: pkg.name.clone(),
@@ -1533,8 +1546,8 @@ impl PythonCheck {
                     );
                 }
             }
-            Self::check_require_floor(pkg, out, req);
-            Self::check_require_ceiling(pkg, out, req);
+            self.check_require_floor(pkg, out, req);
+            self.check_require_ceiling(pkg, out, req);
         }
     }
 
@@ -1920,11 +1933,12 @@ impl PythonCheck {
     /// `python-missing-require`'s finding, not these ones', and a
     /// requirement met by the package's own Provides has no RPM
     /// floor to compare.
-    fn check_require_floor(pkg: &Pkg, out: &mut Filter, req: &Requirement) {
+    fn check_require_floor(&self, pkg: &Pkg, out: &mut Filter, req: &Requirement) {
         let Some((floor, floor_text)) = Self::metadata_floor(req) else {
             return;
         };
-        let variants = Self::module_names(&req.name, &req.extras);
+        let mut variants = Self::module_names(&req.name, &req.extras);
+        variants.extend(self.stem_variants(&req.name, &req.extras));
         let mut any_match = false;
         let mut any_unversioned_entry = false;
         let mut joined_floor: Option<(Pep440Version, String)> = None;
@@ -2110,7 +2124,7 @@ impl PythonCheck {
     /// names at all is `python-missing-require`'s finding, not
     /// this one's, and a requirement met by the package's own
     /// Provides has no RPM ceiling to compare.
-    fn check_require_ceiling(pkg: &Pkg, out: &mut Filter, req: &Requirement) {
+    fn check_require_ceiling(&self, pkg: &Pkg, out: &mut Filter, req: &Requirement) {
         let meta = Self::metadata_ceiling(req);
         // A declared-but-garbled upper end is not an unbounded range:
         // when the specifier carries an upper clause but none of them
@@ -2121,7 +2135,8 @@ impl PythonCheck {
         if meta.is_none() && Self::metadata_ceiling_has_unparsable(req) {
             return;
         }
-        let variants = Self::module_names(&req.name, &req.extras);
+        let mut variants = Self::module_names(&req.name, &req.extras);
+        variants.extend(self.stem_variants(&req.name, &req.extras));
         let mut any_match = false;
         let mut joined_ceiling: Option<CeilingBound> = None;
         for dep in pkg.requires.iter().chain(&pkg.prereq) {
@@ -2510,6 +2525,7 @@ impl PythonCheck {
     fn leftover_require_strings(
         req_names: &[String],
         dist_infos: &[(&[Requirement], &str)],
+        stems: &HashMap<String, Vec<String>>,
     ) -> Vec<String> {
         // The reference returns early when a distribution declares no
         // requirements; the union keeps that guard: with nothing
@@ -2526,6 +2542,7 @@ impl PythonCheck {
                     continue;
                 }
                 wanted.extend(Self::module_names(&req.name, &req.extras));
+                wanted.extend(Self::stem_variants_for(stems, &req.name, &req.extras));
             }
         }
         let wanted: Vec<String> = wanted.iter().map(|n| pep503(n)).collect();
@@ -2989,6 +3006,7 @@ mod tests {
         let got = PythonCheck::leftover_require_strings(
             &["python3-jaraco.classes".to_string()],
             &[(&reqs, "3.13")],
+            &HashMap::new(),
         );
         assert!(got.is_empty(), "unexpected leftovers: {got:?}");
 
@@ -3000,6 +3018,7 @@ mod tests {
         let got = PythonCheck::leftover_require_strings(
             &["python3-jaraco-classes".to_string()],
             &[(&reqs, "3.13")],
+            &HashMap::new(),
         );
         assert!(got.is_empty(), "unexpected leftovers: {got:?}");
 
@@ -3008,8 +3027,36 @@ mod tests {
         let got = PythonCheck::leftover_require_strings(
             &["python3-jaraco-context".to_string()],
             &[(&reqs, "3.13")],
+            &HashMap::new(),
         );
         assert_eq!(got, vec!["python3-jaraco-context".to_string()]);
+    }
+
+    #[test]
+    fn leftover_sees_stem_variants() {
+        // A stem-satisfied require is wanted: the declared
+        // `pygobject` requirement's stem `gobject` matches the RPM
+        // require, so it is no leftover.
+        let reqs = PythonCheck::parse_requirements(
+            "Metadata-Version: 2.1\nRequires-Dist: pygobject\n",
+            true,
+            "3.13",
+        );
+        let mut stems = HashMap::new();
+        stems.insert("pygobject".to_string(), vec!["gobject".to_string()]);
+        let got = PythonCheck::leftover_require_strings(
+            &["python3-gobject".to_string()],
+            &[(&reqs, "3.13")],
+            &stems,
+        );
+        assert!(got.is_empty(), "unexpected leftovers: {got:?}");
+        // Without stems the same require is a leftover.
+        let got = PythonCheck::leftover_require_strings(
+            &["python3-gobject".to_string()],
+            &[(&reqs, "3.13")],
+            &HashMap::new(),
+        );
+        assert_eq!(got, vec!["python3-gobject".to_string()]);
     }
 
     #[test]
@@ -3025,6 +3072,7 @@ mod tests {
         let got = PythonCheck::leftover_require_strings(
             &["python3-pycparser".to_string()],
             &[(&reqs, "3.13")],
+            &HashMap::new(),
         );
         assert!(got.is_empty(), "unexpected leftovers: {got:?}");
 
@@ -3037,6 +3085,7 @@ mod tests {
         let got = PythonCheck::leftover_require_strings(
             &["python3-pycparser".to_string()],
             &[(&reqs, "3.13")],
+            &HashMap::new(),
         );
         assert_eq!(got, vec!["python3-pycparser".to_string()]);
     }
@@ -3389,6 +3438,29 @@ mod tests {
     }
 
     #[test]
+    fn require_satisfied_does_not_reexpand_extras_over_stem_variants() {
+        // Stem variants arrive pre-expanded with extras; re-expanding
+        // extras over them fabricates double-extra names that satisfy
+        // nonsense RPM requires.
+        let req = Requirement {
+            name: "gobject".to_string(),
+            marker: None,
+            extras: vec!["x".to_string()],
+            specifier: String::new(),
+        };
+        assert!(!PythonCheck::require_satisfied(
+            &["python3-gobject-x-x".to_string()],
+            &req,
+            &["gobject-x".to_string()],
+        ));
+        assert!(PythonCheck::require_satisfied(
+            &["python3-gobject-x".to_string()],
+            &req,
+            &["gobject-x".to_string()],
+        ));
+    }
+
+    #[test]
     fn marker_python_version_prefers_dist_info_path() {
         use crate::pkg::dep::DepInfo;
         let abi = DepInfo {
@@ -3557,7 +3629,11 @@ mod tests {
         // The single-dist-info flow of `check_binary`: missing inline,
         // leftover over this dist-info alone, emitted unsuppressed.
         check.check_missing_requirements(&pkg, &mut out, reqs, "3.12", &[], "");
-        for req in PythonCheck::leftover_require_strings(&pkg.req_names, &[(reqs, "3.12")]) {
+        for req in PythonCheck::leftover_require_strings(
+            &pkg.req_names,
+            &[(reqs, "3.12")],
+            &HashMap::new(),
+        ) {
             add_info(
                 &mut out,
                 Level::Warning,
@@ -3758,6 +3834,93 @@ mod tests {
             check.module_stems.get("pyusb").map(Vec::as_slice),
             Some(["usb".to_string()].as_slice())
         );
+    }
+
+    #[test]
+    fn stem_key_delegates_to_pep503() {
+        // Dotted and multi-separator module rows must resolve under
+        // the same canonical key the declared-name comparison uses,
+        // or the row misses the lookup while the declared name matches.
+        let mut config = Config::default();
+        let mut dotted = toml::Table::new();
+        dotted.insert(
+            "module".to_string(),
+            toml::Value::String("PyQt5.Sip".to_string()),
+        );
+        dotted.insert(
+            "stems".to_string(),
+            toml::Value::Array(vec![toml::Value::String("sip".to_string())]),
+        );
+        let mut multi = toml::Table::new();
+        multi.insert(
+            "module".to_string(),
+            toml::Value::String("foo__bar".to_string()),
+        );
+        multi.insert(
+            "stems".to_string(),
+            toml::Value::Array(vec![toml::Value::String("foobar".to_string())]),
+        );
+        config.configuration.insert(
+            "PythonModuleStems".to_string(),
+            toml::Value::Array(vec![toml::Value::Table(dotted), toml::Value::Table(multi)]),
+        );
+        let check = PythonCheck::new(&config);
+        assert_eq!(
+            check.module_stems.get("pyqt5-sip").map(Vec::as_slice),
+            Some(["sip".to_string()].as_slice())
+        );
+        assert_eq!(
+            check.module_stems.get("foo-bar").map(Vec::as_slice),
+            Some(["foobar".to_string()].as_slice())
+        );
+        assert!(
+            check
+                .stem_variants("pyqt5-sip", &[])
+                .contains(&"sip".to_string())
+        );
+    }
+
+    #[test]
+    fn stem_table_duplicate_keys_merge_and_empty_stems_drop() {
+        // A later row under the same module key extends the earlier
+        // list instead of silently dropping it, and empty-string
+        // stems are dropped (a row of only empty stems is skipped).
+        let mut config = Config::default();
+        let mut first = toml::Table::new();
+        first.insert("module".to_string(), toml::Value::String("foo".to_string()));
+        first.insert(
+            "stems".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::String("a".to_string()),
+                toml::Value::String("".to_string()),
+            ]),
+        );
+        let mut second = toml::Table::new();
+        second.insert("module".to_string(), toml::Value::String("foo".to_string()));
+        second.insert(
+            "stems".to_string(),
+            toml::Value::Array(vec![toml::Value::String("b".to_string())]),
+        );
+        let mut empty_only = toml::Table::new();
+        empty_only.insert("module".to_string(), toml::Value::String("bar".to_string()));
+        empty_only.insert(
+            "stems".to_string(),
+            toml::Value::Array(vec![toml::Value::String("".to_string())]),
+        );
+        config.configuration.insert(
+            "PythonModuleStems".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::Table(first),
+                toml::Value::Table(second),
+                toml::Value::Table(empty_only),
+            ]),
+        );
+        let check = PythonCheck::new(&config);
+        assert_eq!(
+            check.module_stems.get("foo").map(Vec::as_slice),
+            Some(["a".to_string(), "b".to_string()].as_slice())
+        );
+        assert!(!check.module_stems.contains_key("bar"));
     }
 
     #[test]
@@ -4299,6 +4462,100 @@ mod tests {
         let (name, _, line) = &findings[0];
         assert_eq!(name, "python-unflavoured-require");
         assert!(line.contains("python-securesystemslib"), "line: {line}");
+    }
+
+    #[test]
+    fn floor_sees_stem_variants() {
+        use crate::color::Color;
+
+        // A stem-satisfied requirement no longer silences the floor
+        // matcher: the stem variant matches the RPM require, so the
+        // unversioned RPM floor fires against the metadata floor.
+        let mut config = Config::default();
+        let mut row = toml::Table::new();
+        row.insert(
+            "module".to_string(),
+            toml::Value::String("pygobject".to_string()),
+        );
+        row.insert(
+            "stems".to_string(),
+            toml::Value::Array(vec![toml::Value::String("gobject".to_string())]),
+        );
+        config.configuration.insert(
+            "PythonModuleStems".to_string(),
+            toml::Value::Array(vec![toml::Value::Table(row)]),
+        );
+        let reqs = PythonCheck::parse_requirements("pygobject>=2.0\n", false, "3.13");
+        let mut pkg = fixture_pkg_with_requires(&[]);
+        pkg.requires = vec![dep("python3-gobject", 0, None)];
+        let check = PythonCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_require_floor(&pkg, &mut out, &reqs[0]);
+        assert_eq!(out.results().len(), 1, "results: {:?}", out.results());
+        assert_eq!(
+            out.results()[0].0,
+            "python-require-unversioned-despite-metadata-floor"
+        );
+        assert_eq!(out.result_levels()[0], Level::Warning);
+        assert_eq!(
+            out.results()[0].1,
+            "python-test.noarch: W: python-require-unversioned-despite-metadata-floor pygobject metadata-floor 2.0 rpm-floor unversioned"
+        );
+        // Without stems the same shape stays silent: no variant matches.
+        let plain_config = Config::default();
+        let plain = PythonCheck::new(&plain_config);
+        let mut out = Filter::new(&plain_config, Color::for_tty(false)).unwrap();
+        plain.check_require_floor(&pkg, &mut out, &reqs[0]);
+        assert!(out.results().is_empty(), "results: {:?}", out.results());
+    }
+
+    #[test]
+    fn ceiling_sees_stem_variants() {
+        use crate::color::Color;
+
+        // Same shape as the floor case on the ceiling side: the stem
+        // variant matches the RPM require, so a ceiling below the
+        // metadata ceiling fires instead of staying silent.
+        let mut config = Config::default();
+        let mut row = toml::Table::new();
+        row.insert(
+            "module".to_string(),
+            toml::Value::String("pygobject".to_string()),
+        );
+        row.insert(
+            "stems".to_string(),
+            toml::Value::Array(vec![toml::Value::String("gobject".to_string())]),
+        );
+        config.configuration.insert(
+            "PythonModuleStems".to_string(),
+            toml::Value::Array(vec![toml::Value::Table(row)]),
+        );
+        let reqs = PythonCheck::parse_requirements("pygobject>=2.0,<3.0\n", false, "3.13");
+        let mut pkg = fixture_pkg_with_requires(&[]);
+        pkg.requires = vec![dep(
+            "python3-gobject",
+            crate::pkg::dep::RPMSENSE_LESS,
+            Some("2.5"),
+        )];
+        let check = PythonCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_require_ceiling(&pkg, &mut out, &reqs[0]);
+        assert_eq!(out.results().len(), 1, "results: {:?}", out.results());
+        assert_eq!(
+            out.results()[0].0,
+            "python-require-upper-bound-contradicts-metadata"
+        );
+        assert_eq!(out.result_levels()[0], Level::Info);
+        assert_eq!(
+            out.results()[0].1,
+            "python-test.noarch: I: python-require-upper-bound-contradicts-metadata pygobject metadata-ceiling < 3.0 rpm-upper-bound < 2.5"
+        );
+        // Without stems the same shape stays silent: no variant matches.
+        let plain_config = Config::default();
+        let plain = PythonCheck::new(&plain_config);
+        let mut out = Filter::new(&plain_config, Color::for_tty(false)).unwrap();
+        plain.check_require_ceiling(&pkg, &mut out, &reqs[0]);
+        assert!(out.results().is_empty(), "results: {:?}", out.results());
     }
 
     #[test]
@@ -5468,6 +5725,7 @@ mod tests {
         let got = PythonCheck::leftover_require_strings(
             &req_names,
             &[(&reqs_a, "3.12"), (&reqs_b, "3.12")],
+            &HashMap::new(),
         );
         assert_eq!(got, vec!["python3-delta".to_string()]);
     }
@@ -5486,7 +5744,8 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let got = PythonCheck::leftover_require_strings(&req_names, &[(&reqs, "3.13")]);
+        let got =
+            PythonCheck::leftover_require_strings(&req_names, &[(&reqs, "3.13")], &HashMap::new());
         assert_eq!(got, vec!["python3-old".to_string()]);
     }
 
@@ -5496,8 +5755,11 @@ mod tests {
         // anywhere means no leftover evaluation at all.
         let req_names: Vec<String> = vec!["python3-anything".to_string()];
         let empty: Vec<Requirement> = Vec::new();
-        assert!(PythonCheck::leftover_require_strings(&req_names, &[(&empty, "3.12")]).is_empty());
-        assert!(PythonCheck::leftover_require_strings(&req_names, &[]).is_empty());
+        assert!(
+            PythonCheck::leftover_require_strings(&req_names, &[(&empty, "3.12")], &HashMap::new())
+                .is_empty()
+        );
+        assert!(PythonCheck::leftover_require_strings(&req_names, &[], &HashMap::new()).is_empty());
     }
 
     #[test]
