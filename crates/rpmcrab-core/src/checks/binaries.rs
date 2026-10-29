@@ -746,6 +746,11 @@ struct ReadelfInfo {
     /// DF_BIND_NOW (DT_FLAGS) or DF_1_NOW (DT_FLAGS_1). Together with a
     /// GNU_RELRO segment this is the full-versus-partial RELRO distinction.
     bind_now: bool,
+    /// DT_JMPREL is present: the object carries a PLT relocation table,
+    /// so lazy bindings exist for BIND_NOW to govern. Without it, the
+    /// remaining dynamic relocations resolve at load time and BIND_NOW
+    /// changes nothing.
+    has_plt_relocs: bool,
     /// The ELF has a dynamic section (PT_DYNAMIC). Static binaries do not;
     /// RELRO/BIND_NOW are dynamic-linker features meaningless without one.
     has_dynamic: bool,
@@ -859,6 +864,7 @@ impl ReadelfInfo {
             elf_type: goblin::elf::header::ET_NONE,
             elf_machine: goblin::elf::header::EM_NONE,
             bind_now: false,
+            has_plt_relocs: false,
             has_dynamic: false,
             x86_feature_1_and: X86Feature1And::Absent,
             has_endbr64: false,
@@ -1200,6 +1206,11 @@ impl ReadelfInfo {
                 || dynamic.info.flags_1 & goblin::elf::dynamic::DF_1_NOW != 0
             {
                 self.bind_now = true;
+            }
+            // DT_JMPREL is the PLT relocation table. OR-merged like
+            // bind_now: any archive member with one marks the whole file.
+            if dynamic.info.jmprel != 0 {
+                self.has_plt_relocs = true;
             }
             let dynstrtab = &elf.dynstrtab;
             for d in &dynamic.dyns {
@@ -5897,12 +5908,17 @@ impl BinariesCheck {
         // meaningful without a dynamic section. AMDGPU code objects are
         // gated out on the same basis: the GPU runtime loads them, the
         // dynamic linker never does, and the amdgcn link emits no FLAGS
-        // for BIND_NOW to attach to (rpmcrab#509).
+        // for BIND_NOW to attach to (rpmcrab#509). An object with no PLT
+        // relocation table (no DT_JMPREL) likewise has no lazy binding:
+        // its remaining dynamic relocations resolve at load time, so
+        // BIND_NOW changes nothing and partial-relro stays quiet, while
+        // missing-relro still fires (the segment absence is a gap of its
+        // own).
         if info.has_dynamic && info.elf_machine != goblin::elf::header::EM_AMDGPU {
             let has_relro = info.program_headers.iter().any(|h| h.name == "GNU_RELRO");
             if !has_relro {
                 add_info(out, Level::Warning, pkg, "missing-relro", &[&pkgfile.name]);
-            } else if !info.bind_now {
+            } else if !info.bind_now && info.has_plt_relocs {
                 add_info(out, Level::Warning, pkg, "partial-relro", &[&pkgfile.name]);
             }
         }
@@ -8785,6 +8801,7 @@ mod tests {
                 elf_type: goblin::elf::header::ET_EXEC,
                 elf_machine: goblin::elf::header::EM_X86_64,
                 bind_now: false,
+                has_plt_relocs: false,
                 has_dynamic: false,
                 code_machines: Vec::new(),
                 failed: None,
@@ -10102,6 +10119,56 @@ mod tests {
                 "{finding} must not fire for AMDGPU code objects: {results:?}"
             );
         }
+    }
+
+    #[test]
+    fn hardening_partial_relro_quiet_without_plt_relocs() {
+        // BIND_NOW governs lazy PLT binding only: an object with GNU_RELRO
+        // but no PLT relocation table (no DT_JMPREL) has no lazy binding,
+        // so partial-relro would be unactionable noise. Its remaining
+        // dynamic relocations resolve at load time.
+        let run = |has_plt_relocs: bool, bind_now: bool| {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let pkgfile = syn_file("/usr/lib64/libprobe.so.1", "ELF 64-bit LSB shared object");
+            let mut info = syn_info();
+            info.elf_type = goblin::elf::header::ET_DYN;
+            info.has_plt_relocs = has_plt_relocs;
+            info.bind_now = bind_now;
+            info.program_headers = vec![ElfProgramHeader {
+                name: "GNU_RELRO".to_string(),
+                flags: "R".to_string(),
+            }];
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+            out.results().to_vec()
+        };
+
+        // No PLT relocations, no BIND_NOW: quiet on both RELRO findings.
+        let results = run(false, false);
+        for finding in ["missing-relro", "partial-relro"] {
+            assert!(
+                lines_for(&results, finding).is_empty(),
+                "{finding} must not fire without PLT relocations: {results:?}"
+            );
+        }
+
+        // Near miss: PLT relocations present, no BIND_NOW: fires exactly once.
+        let results = run(true, false);
+        assert_eq!(
+            lines_for(&results, "partial-relro").len(),
+            1,
+            "partial-relro must fire with PLT relocations and no BIND_NOW: {results:?}"
+        );
+
+        // Near miss: no PLT relocations but BIND_NOW present: quiet
+        // (full RELRO already).
+        let results = run(false, true);
+        assert!(
+            lines_for(&results, "partial-relro").is_empty(),
+            "partial-relro must not fire with BIND_NOW: {results:?}"
+        );
     }
 
     #[test]
@@ -11672,6 +11739,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 elf_type: goblin::elf::header::ET_DYN,
                 elf_machine: goblin::elf::header::EM_X86_64,
                 bind_now: false,
+                has_plt_relocs: false,
                 has_dynamic: false,
                 code_machines: Vec::new(),
                 failed: None,
@@ -11825,6 +11893,7 @@ description = "explicit priority string bypasses the system crypto policy"
             elf_type: goblin::elf::header::ET_EXEC,
             elf_machine: goblin::elf::header::EM_X86_64,
             bind_now: false,
+            has_plt_relocs: false,
             has_dynamic: true,
             code_machines: Vec::new(),
             failed: None,
