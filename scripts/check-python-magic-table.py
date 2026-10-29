@@ -34,9 +34,17 @@ into the table and is not applied here.
 
 Exit status is 0 when every probed version is covered, 1 when any
 version is MISSING or STALE-VALUE, 2 when the check could not be
-completed (network failure, or an upstream layout the script does
-not recognise). Table edits stay human-reviewed: this script never
-edits the table itself.
+completed (network failure, an unreadable or invalid table, or an
+upstream layout the script does not recognise). Table edits stay
+human-reviewed: this script never edits the table itself.
+
+Only a bootstrap 404 stops the sweep: a missing header for an
+existing branch is an unrecognised layout, not a missing branch,
+so it fails the check instead of silently ending the probe run.
+
+Table rows are validated strictly at load: each entry needs a
+major.minor version string and a non-empty list of integer magics
+in the low-16-bit range, and versions must not repeat.
 """
 
 import argparse
@@ -49,7 +57,7 @@ import urllib.request
 BASE_URL = "https://raw.githubusercontent.com/python/cpython"
 
 TO_BYTES_RE = re.compile(
-    r"MAGIC_NUMBER\s*=\s*\((\d+)\)\.to_bytes\(2,\s*'little'\)"
+    r"MAGIC_NUMBER\s*=\s*\((\d+)\)\.to_bytes\(2,\s*['\"]little['\"]\)"
 )
 PYC_DEFINE_RE = re.compile(r"#define\s+PYC_MAGIC_NUMBER\s+(\d+)")
 
@@ -92,19 +100,25 @@ def derive_magic(version, fetch, base_url=BASE_URL):
     bootstrap_url = (
         f"{base_url}/{branch}/Lib/importlib/_bootstrap_external.py"
     )
-    try:
-        bootstrap = fetch(bootstrap_url)
-    except BranchMissing:
-        raise
-    except FetchError:
-        raise
+    # A bootstrap 404 propagates: the branch does not exist, and the
+    # sweep stops. Any other fetch failure propagates as FetchError.
+    bootstrap = fetch(bootstrap_url)
     match = TO_BYTES_RE.search(bootstrap)
     if match:
         return int(match.group(1))
     header_url = (
         f"{base_url}/{branch}/Include/internal/pycore_magic_number.h"
     )
-    header = fetch(header_url)
+    try:
+        header = fetch(header_url)
+    except BranchMissing as exc:
+        # The branch exists (its bootstrap fetched); a missing header
+        # is an unrecognised layout, not a missing branch. Converting
+        # it keeps a later version from reporting falsely clean when
+        # the sweep would otherwise stop here.
+        raise FetchError(
+            f"header missing for existing branch CPython {version}"
+        ) from exc
     match = PYC_DEFINE_RE.search(header)
     if match:
         return int(match.group(1))
@@ -113,18 +127,46 @@ def derive_magic(version, fetch, base_url=BASE_URL):
     )
 
 
+_VERSION_RE = re.compile(r"^\d+\.\d+$")
+
+
 def load_table(path):
-    """Table file path -> {version string: [magic, ...]}."""
+    """Table file path -> {version string: [magic, ...]}.
+
+    Rows are validated strictly: each entry needs a major.minor
+    version string and a non-empty list of integer magics in the
+    low-16-bit range, and versions must not repeat (like the Rust
+    table loader). Raises ValueError on any violation, OSError or
+    TOMLDecodeError on unreadable input.
+    """
     with open(path, "rb") as fh:
         parsed = tomllib.load(fh)
     table = {}
     for entry in parsed.get("version", []):
+        if not isinstance(entry, dict):
+            raise ValueError(f"table entry is not a table: {entry!r}")
         version = entry.get("version")
         magics = entry.get("magics")
-        if isinstance(version, str) and isinstance(magics, list):
-            table[version] = [
-                magic for magic in magics if isinstance(magic, int)
-            ]
+        if not isinstance(version, str) or not _VERSION_RE.match(version):
+            raise ValueError(
+                f"table entry has no major.minor version: {entry!r}"
+            )
+        if version in table:
+            raise ValueError(f"duplicate table entry for version {version}")
+        if not isinstance(magics, list) or not magics:
+            raise ValueError(f"table entry for {version} has no magics list")
+        for magic in magics:
+            if not isinstance(magic, int) or isinstance(magic, bool):
+                raise ValueError(
+                    f"table entry for {version} has non-integer magic: {magic!r}"
+                )
+            if not 0 <= magic <= 0xFFFF:
+                raise ValueError(
+                    f"table entry for {version} has out-of-range magic: {magic}"
+                )
+        table[version] = list(magics)
+    if not table:
+        raise ValueError("table carries no version entries")
     return table
 
 
@@ -189,7 +231,11 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    table = load_table(args.table)
+    try:
+        table = load_table(args.table)
+    except (OSError, tomllib.TOMLDecodeError, ValueError) as exc:
+        print(f"INDETERMINATE: {exc}", file=sys.stderr)
+        return 2
     try:
         probed = probe_versions(
             fetch_text, from_minor=args.from_minor, base_url=args.base_url

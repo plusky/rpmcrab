@@ -64,6 +64,29 @@ class DeriveMagicTest(unittest.TestCase):
         with self.assertRaises(_mod.BranchMissing):
             _mod.derive_magic("3.99", fake_fetch({}))
 
+    def test_double_quote_spelling(self):
+        fetch = fake_fetch(
+            {
+                bootstrap_url("3.12"): (
+                    "MAGIC_NUMBER = (3531).to_bytes(2, \"little\") + b'\\r\\n'\n"
+                )
+            }
+        )
+        self.assertEqual(_mod.derive_magic("3.12", fetch), 3531)
+
+    def test_header_404_is_fetch_error_not_branch_missing(self):
+        # The branch exists (its bootstrap fetched); a missing header
+        # is an unrecognised layout, not a missing branch.
+        fetch = fake_fetch(
+            {
+                bootstrap_url("3.14"): (
+                    "MAGIC_NUMBER = _imp.pyc_magic_number_token.to_bytes(4, 'little')\n"
+                ),
+            }
+        )
+        with self.assertRaises(_mod.FetchError):
+            _mod.derive_magic("3.14", fetch)
+
     def test_unrecognised_layout_is_fetch_error(self):
         fetch = fake_fetch(
             {
@@ -85,6 +108,22 @@ class ProbeVersionsTest(unittest.TestCase):
         )
         probed = _mod.probe_versions(fetch, from_minor=8)
         self.assertEqual(probed, [("3.8", 3413), ("3.9", 3425)])
+
+    def test_header_404_does_not_stop_sweep(self):
+        # A header 404 mid-sweep must fail the check, not end the
+        # probe run with later versions falsely clean.
+        fetch = fake_fetch(
+            {
+                bootstrap_url("3.8"): (
+                    "MAGIC_NUMBER = (3413).to_bytes(2, 'little') + b'\\r\\n'\n"
+                ),
+                bootstrap_url("3.9"): (
+                    "MAGIC_NUMBER = _imp.pyc_magic_number_token.to_bytes(4, 'little')\n"
+                ),
+            }
+        )
+        with self.assertRaises(_mod.FetchError):
+            _mod.probe_versions(fetch, from_minor=8)
 
     def test_cap_bounds_the_sweep(self):
         fetch = fake_fetch(
@@ -135,6 +174,12 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(findings, [])
 
 
+def write_table(text):
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+        fh.write(text)
+        return fh.name
+
+
 class LoadTableTest(unittest.TestCase):
     def test_loads_version_arrays(self):
         text = (
@@ -155,6 +200,55 @@ class LoadTableTest(unittest.TestCase):
             path = fh.name
         table = _mod.load_table(path)
         self.assertEqual(table, {"3.6": [3379], "3.7": [3390, 3394]})
+
+    def test_out_of_range_magic_rejected(self):
+        path = write_table(
+            '[[version]]\nversion = "3.8"\nmagics = [70000]\n'
+        )
+        with self.assertRaises(ValueError):
+            _mod.load_table(path)
+
+    def test_duplicate_version_rejected(self):
+        path = write_table(
+            '[[version]]\nversion = "3.8"\nmagics = [3413]\n'
+            '[[version]]\nversion = "3.8"\nmagics = [3414]\n'
+        )
+        with self.assertRaises(ValueError):
+            _mod.load_table(path)
+
+    def test_non_integer_magic_rejected(self):
+        path = write_table(
+            '[[version]]\nversion = "3.8"\nmagics = ["3413"]\n'
+        )
+        with self.assertRaises(ValueError):
+            _mod.load_table(path)
+
+    def test_empty_magics_rejected(self):
+        path = write_table('[[version]]\nversion = "3.8"\nmagics = []\n')
+        with self.assertRaises(ValueError):
+            _mod.load_table(path)
+
+    def test_missing_version_rejected(self):
+        path = write_table('[[version]]\nmagics = [3413]\n')
+        with self.assertRaises(ValueError):
+            _mod.load_table(path)
+
+    def test_bad_version_format_rejected(self):
+        path = write_table('[[version]]\nversion = "3"\nmagics = [3413]\n')
+        with self.assertRaises(ValueError):
+            _mod.load_table(path)
+
+    def test_empty_table_rejected(self):
+        path = write_table('as_of = "2026-10-29"\n')
+        with self.assertRaises(ValueError):
+            _mod.load_table(path)
+
+    def test_load_failure_exits_indeterminate(self):
+        self.assertEqual(_mod.main(["--table", "/nonexistent/table.toml"]), 2)
+        path = write_table(
+            '[[version]]\nversion = "3.8"\nmagics = [70000]\n'
+        )
+        self.assertEqual(_mod.main(["--table", path]), 2)
 
 
 if __name__ == "__main__":
