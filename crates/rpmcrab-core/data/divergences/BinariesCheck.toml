@@ -127,6 +127,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/17"
 case = "global"
 check = "BinariesCheck"
 kind = "behaviour"
+reason = "Fix-and-diverge: `partial-relro` fires only when the object carries a PLT relocation table (DT_JMPREL). BIND_NOW governs lazy PLT binding only: an object with GNU_RELRO but no PLT relocation table has no lazy binding -- its remaining dynamic relocations resolve at load time -- so the finding is unactionable noise. `missing-relro` is unaffected: the segment absence is a gap of its own. Factory corpus (51,589 RPMs): 602 firings in 143 packages before, 596 after; the 6 removed are two polymake libraries, one slurm plugin, two valgrind preload objects, and one s390 firmware image, each verified to carry no DT_JMPREL entry."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
 reason = "rpmcrab#447 narrows the rpmcrab#17 hardening rule: `missing-fortify` and `missing-stack-protector` apply only when the binary has \"something to protect\". `missing-fortify` fires only when the binary imports at least three distinct fortifiable libc functions (the glibc _FORTIFY_SOURCE set) without any `__*_chk` symbol (rpmcrab#529: below three distinct imports, zero `__*_chk` cannot distinguish a build without _FORTIFY_SOURCE from a fortified build whose fortifiable calls all have runtime-sized destinations, which glibc never redirects to `__*_chk`; measured on the 2026-10-14 Factory sweep, 11,117 of 18,071 hits sit in the 1-2 import buckets, 85-88% of them memory-family only, including the proven-fortified liblzfse.so); `missing-stack-protector` fires only when the binary is not a pure dynamic-loader shim (undefined imports limited to dlopen/dlsym/dlclose/dlerror/dladdr plus CRT boilerplate). Before this change rpmcrab fired both findings on any binary lacking the respective symbols, including shims and wrappers with no protectable code, where the findings are unactionable noise. Intentional post-0.2.0 strictening."
 since = "0.3.0"
 
