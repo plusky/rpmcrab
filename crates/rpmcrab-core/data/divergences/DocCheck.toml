@@ -31,3 +31,24 @@ check = "install-file-in-docs"
 kind = "behaviour"
 reason = "An INSTALL file inside an embedded example/demo/sample tree (a component named example/examples/demo/demos/sample/samples that is not the file's immediate parent directory, e.g. examples/hello-c/INSTALL) is not charged: the file belongs to a self-contained tree the package itself ships below that component, and its instructions describe building or installing that tree (the gettext hello-* examples carry their own autogen.sh/configure.ac alongside), not the already-installed package. The reference charges every %doc INSTALL. Measured on the public Tumbleweed snapshot (repomd 1792894150): 70 of the 109 raw findings are this class (gettext examples 68, gmp demo 1, mgetty sample 1); the remaining 39 keep firing."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "DocCheck"
+kind = "behaviour"
+reason = "package-with-huge-docs does not count man pages (/usr/share/man/) or info pages (/usr/share/info/) toward the documentation share. Man and info pages ship with the binaries they document and are never split into a -doc subpackage, so counting them produces findings whose stated remedy does not apply. Measured on the Factory corpus: excluding man/info pages removes 97 of the 554 package-with-huge-docs findings."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "DocCheck"
+kind = "behaviour"
+reason = "package-with-huge-docs does not count help trees (GNOME help under /usr/share/help/, KDE help under /usr/share/doc/HTML/) toward the documentation share. Help books are read by the help viewer from the main package; moving them into an optional -doc subpackage would remove in-app help. Measured on the Factory corpus: excluding help trees removes 15 findings from the set remaining after the man/info exclusion and the translations exemption."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "DocCheck"
+kind = "behaviour"
+reason = "package-with-huge-docs is skipped for translations packages: packages whose every non-doc regular file is a locale file under /usr/share/locale/. Translated help, man pages and manuals belong in the language split, not in a -doc subpackage. A package with no non-doc regular files is not a translations package. Measured on the Factory corpus: 113 findings sit in translations packages."
+since = "0.4.1"
