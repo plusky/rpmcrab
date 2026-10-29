@@ -4181,6 +4181,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "spelling-error"
+kind = "behaviour"
+reason = "The bundled supplementary vocabulary gains four stems for eBPF and ELF prose: uprobe/S for the kernel uprobes facility, with the plural attested so the stem carries the plural flag; symtab and dynsym for the ELF section names; and ringbuf for the BPF ring buffer map type. All four are absent from the pinned en_US dictionary, so the reference flags them and the port stays silent. A single project's name is not added: the wordlist excludes package-specific names, so funkoverage keeps firing. Verified against the pinned en_US dictionary and pinned by unit tests over the wordlist path, including the uprobes plural and the dotted .symtab/.dynsym forms."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "invalid-license"
 kind = "severity"
 reason = "Emission level (issues #594, #699): the port emits invalid-license at E (tags.rs), while the reference emits W (TagsCheck.py:629) and its shipped base scoring does not promote it. #594 first carried the promotion in the vendored scoring.toml of both flavours (invalid-license = 100000, SCORING_ADDITIONS in the generator); #699 removed the vendored scoring tables and made E the emission level instead, because a license string that fails SPDX validation is a legal metadata defect in itself -- the always-implies-damage judgement #594 recorded. Near-miss spellings are covered by the separate I-level invalid-license-spellcheck suggestion, not by softening this one."
