@@ -569,7 +569,7 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
-check = "BinariesCheck"
+check = "binary-or-shlib-calls-legacy-network"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #1217): a new `binary-or-shlib-calls-legacy-network` warning fires on an undefined reference to the 14 legacy network entry points (inet_addr, inet_aton, inet_ntoa, inet_nsap_addr, inet_nsap_ntoa, inet_makeaddr, inet_netof, inet_network, inet_neta, inet_net_ntop, inet_net_pton, rcmd, rexec, rresvport), FUNC or NOTYPE alike. A definition alone never fires: the implementing library is the provider, not a caller. The frozen 2.10.0 reference has no such check; the names come from rpminspect's badfuncs list, reimplemented from documented behaviour, not ported."
 since = "0.4.1"
