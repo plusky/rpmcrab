@@ -59,3 +59,10 @@ check = "DocCheck"
 kind = "behaviour"
 reason = "package-with-huge-docs is skipped for pure-documentation name families: packages whose name contains -manual, -examples, -demo, -testresults, -html or -apidoc. The -doc remedy is circular for these packages: they are the documentation carrier by construction (manuals, example collections, demos, test-result logs, HTML documentation sets, API documentation). Measured on the Factory corpus: extending the ignore_pkg family quiets 60 of the 331 remaining findings, 0 added; 53 of the 67 pure-documentation packages go quiet and 14 remain (names without a family marker)."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "DocCheck"
+kind = "behaviour"
+reason = "package-with-huge-docs is skipped for fourteen individual pure-documentation packages: books, c-intro-and-ref-pdf, docbook-tdg, fhs, grub2, gtk2-engines, myspell-de, myspell-en, openmpi4-testsuite, php8-test, release-notes-openSUSE, tuxpaint-stamps, xemacs-info, xemacs-packages-info. Each package's RPM header shows zero non-doc regular files: books carries twelve %doc PDFs; c-intro-and-ref-pdf a single PDF; docbook-tdg the guide HTML tree and PDFs; fhs the specification document; grub2 and gtk2-engines only changelog and readme docs with their functional payload in subpackages; myspell-de and myspell-en only licence and readme docs with dictionaries in per-locale subpackages; openmpi4-testsuite and php8-test only test logs; release-notes-openSUSE the release-notes tree; tuxpaint-stamps only changelog and licence docs with stamps in per-category subpackages; xemacs-info and xemacs-packages-info only GNU info files. A -doc split would move the package's entire payload, so the remedy does not apply. Measured on the Factory corpus: exempting the fourteen removes 14 of the 271 remaining findings, 0 added."
+since = "0.4.1"
