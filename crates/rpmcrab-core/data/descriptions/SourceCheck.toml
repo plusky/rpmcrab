@@ -40,5 +40,5 @@ make source code render differently from how it executes
 intentional (e.g. a test demonstrating the attack). The finding names
 the first control in the member and its line and column; one finding
 per member. Plain payload files, including the spec, are covered by
-the bidi-control-character scan instead. Archive nesting is capped at 5 levels; a compressed single file is scanned as itself.
+the bidi-control-character scan instead. Archive nesting is capped at 5 levels; a compressed single file is scanned as itself when decompression yields text, while a decompressed payload that itself forms an archive is walked as archive members; compression suffixes are stripped case-insensitively.
 """
