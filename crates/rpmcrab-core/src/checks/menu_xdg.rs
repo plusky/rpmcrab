@@ -16,13 +16,14 @@
 //! always does the native parse: missing header, duplicate sections/options,
 //! non-UTF-8, and the Exec binary check.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use fancy_regex::Regex;
 
-use crate::check::{Check, add_info};
+use crate::check::{Check, add_info, make_finding};
 use crate::checks::is_match;
+use crate::checks::shared::{binary_source_key, is_ghost_file, source_package_keys};
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
@@ -41,10 +42,44 @@ type DesktopSections = HashMap<String, HashMap<String, String>>;
 /// Parse error: (level, finding, details).
 type ParseError = (Level, &'static str, Vec<String>);
 
+/// One `desktopfile-without-binary` candidate, held until
+/// `after_checks` knows the run's build inventories and which
+/// builds are source-complete.
+struct DesktopBinaryCandidate {
+    pkg_name: String,
+    arch: String,
+    filename: String,
+    binary: String,
+}
+
+/// Everything one build contributes to the run-scoped
+/// `desktopfile-without-binary` verdict: the regular files and
+/// symlink targets its packages ship, plus the candidates its
+/// packages raised.
+#[derive(Default)]
+struct DesktopBuild {
+    regular: HashSet<String>,
+    symlinks: HashMap<String, String>,
+    candidates: Vec<DesktopBinaryCandidate>,
+}
+
+/// Cross-package state, exported per package and merged before
+/// `after_checks`.
+struct DesktopBuildState {
+    sources: HashSet<String>,
+    order: Vec<String>,
+    builds: HashMap<String, DesktopBuild>,
+    unkeyed: Vec<DesktopBinaryCandidate>,
+}
+
 pub struct MenuXDGCheck {
     file_regex: Regex,
     checked_files: usize,
     validator: Tool,
+    sources: HashSet<String>,
+    order: Vec<String>,
+    builds: HashMap<String, DesktopBuild>,
+    unkeyed: Vec<DesktopBinaryCandidate>,
 }
 
 impl MenuXDGCheck {
@@ -61,6 +96,10 @@ impl MenuXDGCheck {
             file_regex: Regex::new(r"^/usr/share/applications/.*\.desktop$").expect("static regex"),
             checked_files: 0,
             validator,
+            sources: HashSet::new(),
+            order: Vec::new(),
+            builds: HashMap::new(),
+            unkeyed: Vec::new(),
         }
     }
 
@@ -278,6 +317,91 @@ impl MenuXDGCheck {
                 .join(binary)
                 .exists()
         })
+    }
+
+    /// The merged-/usr counterpart of a legacy-directory absolute
+    /// path, mirroring `binary_exists`: `/sbin/x` to `/usr/sbin/x`
+    /// and `/bin/x` to `/usr/bin/x`. `None` for any other path.
+    fn usrmerge_counterpart(path: &str) -> Option<String> {
+        if let Some(rest) = path.strip_prefix("/sbin/") {
+            return Some(format!("/usr/sbin/{rest}"));
+        }
+        if let Some(rest) = path.strip_prefix("/bin/") {
+            return Some(format!("/usr/bin/{rest}"));
+        }
+        None
+    }
+
+    /// Paths an Exec token can resolve through: the token itself
+    /// (plus its merged-/usr counterpart for absolute paths) for
+    /// absolute tokens, every standard bin dir for bare tokens.
+    /// A bare token never resolves outside the bin dirs: a plugin
+    /// or directory named like the token is not on PATH.
+    fn candidate_paths(binary: &str) -> Vec<String> {
+        if binary.starts_with('/') {
+            let mut paths = vec![binary.to_string()];
+            if let Some(counterpart) = Self::usrmerge_counterpart(binary) {
+                paths.push(counterpart);
+            }
+            paths
+        } else {
+            STANDARD_BIN_DIRS
+                .iter()
+                .map(|d| format!("{d}/{binary}"))
+                .collect()
+        }
+    }
+
+    /// Whether the Exec token resolves through a sibling's
+    /// shipped regular files: any candidate path present in
+    /// the build's inventory.
+    fn resolves_via_build(build: &DesktopBuild, binary: &str) -> bool {
+        Self::candidate_paths(binary)
+            .iter()
+            .any(|path| build.regular.contains(path))
+    }
+
+    fn build_mut(&mut self, key: &str) -> &mut DesktopBuild {
+        if !self.builds.contains_key(key) {
+            self.order.push(key.to_string());
+            self.builds.insert(key.to_string(), DesktopBuild::default());
+        }
+        self.builds.get_mut(key).expect("just inserted")
+    }
+
+    /// Record one binary package's contribution to the run-scoped
+    /// verdict: its shipped regular files and symlink targets,
+    /// keyed by its build. Ghost entries are not shipped content
+    /// and never resolve a token. Packages without a build key
+    /// contribute nothing: no build the run can judge owns them.
+    fn accumulate_inventory(&mut self, pkg: &Pkg) {
+        let Some(key) = binary_source_key(pkg) else {
+            return;
+        };
+        let build = self.build_mut(&key);
+        for file in &pkg.files {
+            if is_ghost_file(pkg, file) {
+                continue;
+            }
+            if is_reg(file.mode) {
+                build.regular.insert(file.name.clone());
+            } else if is_symlink(file.mode) {
+                build
+                    .symlinks
+                    .insert(file.name.clone(), file.linkto.clone());
+            }
+        }
+    }
+
+    fn emit_without_binary(out: &mut Filter, cand: &DesktopBinaryCandidate) {
+        out.add_info(make_finding(
+            &cand.pkg_name,
+            &cand.arch,
+            Level::Warning,
+            "desktopfile-without-binary",
+            vec![cand.filename.clone(), cand.binary.clone()],
+            None,
+        ));
     }
 
     /// Normalise an absolute path, resolving `.` and `..` segments, so a
@@ -501,7 +625,20 @@ impl Check for MenuXDGCheck {
         "MenuXDGCheck"
     }
 
+    fn check_source(&mut self, pkg: &Pkg, _config: &Config, _out: &mut Filter) {
+        // A source package opens its build's gate: the run holds
+        // the build only when a source package's spelling equals
+        // the build's key. Source presence is the whole gate.
+        for key in source_package_keys(pkg) {
+            self.sources.insert(key);
+        }
+    }
+
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
+        // Every binary package contributes its shipped files to
+        // its build's inventory, whether or not it carries a
+        // desktop file: it may be the sibling that resolves one.
+        self.accumulate_inventory(pkg);
         for pkgfile in &pkg.files {
             let filename = pkgfile.name.as_str();
             if !is_match(&self.file_regex, filename) {
@@ -578,14 +715,25 @@ impl Check for MenuXDGCheck {
                         // on the first ASCII space only.
                         let binary = exec.split(' ').next().unwrap_or("");
                         let binary = Self::unquote_exec_token(binary);
+                        // Anything the package itself does not resolve
+                        // is held for `after_checks`, where the
+                        // run-scoped sibling credit is judged:
+                        // emitting here would fire before the
+                        // sibling's inventory is known.
                         if !binary.is_empty() && !Self::binary_exists(pkg, binary) {
-                            add_info(
-                                out,
-                                Level::Warning,
-                                pkg,
-                                "desktopfile-without-binary",
-                                &[filename, binary],
-                            );
+                            let candidate = DesktopBinaryCandidate {
+                                pkg_name: pkg.name.clone(),
+                                arch: pkg.arch.clone(),
+                                filename: filename.to_string(),
+                                binary: binary.to_string(),
+                            };
+                            match binary_source_key(pkg) {
+                                Some(key) => {
+                                    let build = self.build_mut(&key);
+                                    build.candidates.push(candidate);
+                                }
+                                None => self.unkeyed.push(candidate),
+                            }
                         }
                     }
                     if let Some(entry) = sections.get("Desktop Entry") {
@@ -596,8 +744,67 @@ impl Check for MenuXDGCheck {
         }
     }
 
+    /// The deferred `desktopfile-without-binary` verdict: a
+    /// candidate is credited only when its build is
+    /// source-complete in this run -- the run holds the build's
+    /// source package -- and its token resolves through a
+    /// sibling's shipped files. Every other candidate fires, so
+    /// source-absent (partial) and single-package runs report
+    /// exactly the per-package verdict.
+    fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
+        for cand in &self.unkeyed {
+            Self::emit_without_binary(out, cand);
+        }
+        for key in &self.order {
+            let build = &self.builds[key];
+            let complete = self.sources.contains(key);
+            for cand in &build.candidates {
+                if complete && Self::resolves_via_build(build, &cand.binary) {
+                    continue;
+                }
+                Self::emit_without_binary(out, cand);
+            }
+        }
+    }
+
     fn reset(&mut self) {
         self.checked_files = 0;
+        self.sources.clear();
+        self.order.clear();
+        self.builds.clear();
+        self.unkeyed.clear();
+    }
+
+    fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        Some(Box::new(DesktopBuildState {
+            sources: std::mem::take(&mut self.sources),
+            order: std::mem::take(&mut self.order),
+            builds: std::mem::take(&mut self.builds),
+            unkeyed: std::mem::take(&mut self.unkeyed),
+        }))
+    }
+
+    fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
+        if let Ok(mut state) = state.downcast::<DesktopBuildState>() {
+            self.sources.extend(state.sources.drain());
+            self.unkeyed.append(&mut state.unkeyed);
+            for key in std::mem::take(&mut state.order) {
+                let Some(data) = state.builds.remove(&key) else {
+                    continue;
+                };
+                match self.builds.get_mut(&key) {
+                    Some(mine) => {
+                        mine.regular.extend(data.regular);
+                        mine.symlinks.extend(data.symlinks);
+                        mine.candidates.extend(data.candidates);
+                    }
+                    None => {
+                        self.order.push(key.clone());
+                        self.builds.insert(key, data);
+                    }
+                }
+            }
+        }
     }
 
     fn checked_files(&self) -> Option<usize> {
@@ -1301,6 +1508,7 @@ mod tests {
         let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
         let mut check = MenuXDGCheck::new(&config);
         check.check_binary(&pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
         let results = out.results().to_vec();
         drop(dir);
         drop(extract_root);
@@ -1427,5 +1635,241 @@ mod tests {
         // even though the merged directory itself exists.
         assert!(!MenuXDGCheck::binary_exists(&pkg, "/sbin/"));
         assert!(!MenuXDGCheck::binary_exists(&pkg, "/bin/"));
+    }
+
+    /// Drive one check instance over several packages in order,
+    /// then the deferred verdicts (`after_checks`).
+    fn run_menu_multi(pkgs: &[Pkg]) -> Vec<(String, String)> {
+        let config = Config::default();
+        let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
+        let mut check = MenuXDGCheck::new(&config);
+        for pkg in pkgs {
+            check.check(pkg, &config, &mut out);
+        }
+        check.after_checks(&config, &mut out);
+        out.results().to_vec()
+    }
+
+    /// A fixture package with the given name and file list,
+    /// opened from the fcprobe RPM so every fixture shares its
+    /// build key (`fcprobe-1-1.src.rpm`).
+    fn menu_pkg(dir: &tempfile::TempDir, name: &str, files: Vec<PkgFile>) -> Pkg {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, dir.path(), true).expect("open fixture pkg");
+        pkg.name = name.to_string();
+        pkg.files = files;
+        pkg
+    }
+
+    /// The run's source package for the fcprobe build: the header
+    /// identity it derives (`fcprobe-1-1.src.rpm`) is the `SOURCERPM`
+    /// every fixture member carries, so its presence makes the
+    /// build complete.
+    fn menu_src_pkg(dir: &tempfile::TempDir) -> Pkg {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, dir.path(), true).expect("open fixture pkg");
+        pkg.is_source = true;
+        pkg.files = Vec::new();
+        pkg
+    }
+
+    /// A fixture package of another build (fsf-address-fixture
+    /// key), for foreign-source and cross-build tests.
+    fn menu_foreign_pkg(dir: &tempfile::TempDir, name: &str, files: Vec<PkgFile>) -> Pkg {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, dir.path(), true).expect("open fixture pkg");
+        pkg.name = name.to_string();
+        pkg.files = files;
+        pkg
+    }
+
+    /// A desktop file entry whose content lives in `dir`: the
+    /// check reads the entry through its on-disk path.
+    fn desktop_entry(dir: &std::path::Path, filename: &str, exec: &str) -> PkgFile {
+        let path = dir.join("test.desktop");
+        std::fs::write(
+            &path,
+            format!("[Desktop Entry]\nType=Application\nName=Test\nExec={exec}\n"),
+        )
+        .unwrap();
+        PkgFile {
+            name: filename.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }
+    }
+
+    fn reg_entry(name: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }
+    }
+
+    fn link_entry(name: &str, linkto: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            mode: 0o120777,
+            linkto: linkto.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sibling_bare_token_credited_on_complete_build() {
+        // git-gui shape: the frontend's desktop file calls `git`
+        // with params; the sibling ships /usr/bin/git.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "git-gui",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/git-gui.desktop",
+                "git gui",
+            )],
+        );
+        let sibling = menu_pkg(&d1, "git-core", vec![reg_entry("/usr/bin/git")]);
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn sibling_bare_token_fires_on_partial_build() {
+        // The sibling ships the token, but the run holds no
+        // source package: the build is not judged complete and
+        // the candidate fires as the per-package verdict.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "git-gui",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/git-gui.desktop",
+                "git gui",
+            )],
+        );
+        let sibling = menu_pkg(&d1, "git-core", vec![reg_entry("/usr/bin/git")]);
+        let results = run_menu_multi(&[desktop, sibling]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn sibling_bare_token_fires_for_foreign_source() {
+        // A source package of another build does not open the
+        // gate.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "git-gui",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/git-gui.desktop",
+                "git gui",
+            )],
+        );
+        let sibling = menu_pkg(&d1, "git-core", vec![reg_entry("/usr/bin/git")]);
+        let foreign = menu_src_pkg_foreign(&d2);
+        let results = run_menu_multi(&[foreign, desktop, sibling]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    /// The fsf-address-fixture source package, whose key matches
+    /// no fcprobe fixture: a foreign source for the gate.
+    fn menu_src_pkg_foreign(dir: &tempfile::TempDir) -> Pkg {
+        let mut pkg = menu_foreign_pkg(dir, "fsf-address-fixture", Vec::new());
+        pkg.is_source = true;
+        pkg
+    }
+
+    #[test]
+    fn sibling_bare_token_single_package_fires_with_detail() {
+        // A single-package run reports exactly the per-package
+        // verdict, in the per-package rendering.
+        let d0 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "git-gui",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/git-gui.desktop",
+                "git gui",
+            )],
+        );
+        let results = run_menu_multi(&[desktop]);
+        let lines = without_binary(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("/usr/share/applications/git-gui.desktop"),
+            "detail carries the desktop file: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("git"),
+            "detail carries the token: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn sibling_absolute_usrmerge_counterpart_credited() {
+        // Absolute token through /sbin resolves through the
+        // sibling's merged-/usr counterpart, mirroring
+        // `binary_exists`.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "tool-frontend",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/tool.desktop",
+                "/sbin/tool",
+            )],
+        );
+        let sibling = menu_pkg(&d1, "tool", vec![reg_entry("/usr/sbin/tool")]);
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn bare_token_in_non_bin_dir_still_fires() {
+        // A bare token never resolves outside the standard bin
+        // dirs: a same-named file under libexec is not on PATH.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "foo-frontend",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/foo.desktop",
+                "foo",
+            )],
+        );
+        let sibling = menu_pkg(&d1, "foo", vec![reg_entry("/usr/libexec/foo")]);
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
     }
 }

@@ -34,8 +34,9 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Run one check's `check_binary` over the fixture and return the
-/// `(check_name, rendered_line)` pairs in emission order.
+/// Run one check's `check_binary` over the fixture, then its
+/// `after_checks` (as a production run does once per run), and return
+/// the `(check_name, rendered_line)` pairs in emission order.
 fn run_check(check: &mut impl Check, rpm: &str) -> Vec<(String, String)> {
     run_check_with(check, rpm, &Config::default())
 }
@@ -62,6 +63,7 @@ fn run_check_with_ghost_no_payload(
     let config = Config::default();
     let mut filter = Filter::new(&config, Color::for_tty(false)).unwrap();
     check.check_binary(&pkg, &config, &mut filter);
+    check.after_checks(&config, &mut filter);
     filter.results().to_vec()
 }
 
@@ -87,6 +89,7 @@ fn run_check_with_ghost(check: &mut impl Check, rpm: &str, ghost: &str) -> Vec<(
     let config = Config::default();
     let mut filter = Filter::new(&config, Color::for_tty(false)).unwrap();
     check.check_binary(&pkg, &config, &mut filter);
+    check.after_checks(&config, &mut filter);
     filter.results().to_vec()
 }
 
@@ -103,6 +106,7 @@ fn run_check_with(check: &mut impl Check, rpm: &str, config: &Config) -> Vec<(St
     let pkg = Pkg::open(&rpm_path, scratch.path(), true).unwrap();
     let mut filter = Filter::new(config, Color::for_tty(false)).unwrap();
     check.check_binary(&pkg, config, &mut filter);
+    check.after_checks(config, &mut filter);
     filter.results().to_vec()
 }
 
@@ -390,6 +394,7 @@ fn run_appdata_with_content(content: &str) -> Vec<(String, String)> {
     let mut filter = Filter::new(&config, Color::for_tty(false)).unwrap();
     let mut check = AppDataCheck::with_tool_dir(Some(empty.path()));
     check.check_binary(&pkg, &config, &mut filter);
+    check.after_checks(&config, &mut filter);
     filter.results().to_vec()
 }
 
