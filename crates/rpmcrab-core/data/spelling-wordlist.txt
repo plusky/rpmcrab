@@ -22,7 +22,8 @@
 # packaging domain, or ecosystem vocabulary that package prose uses
 # as common nouns. Genuine misspellings are never listed, however
 # many packages repeat them; package-specific names and library
-# identifiers are not listed either.
+# identifiers are not listed either, except where a filed issue
+# rules one in (recorded in the divergences ledger).
 #
 # Curated from the flagged-word histogram of the 2026-10-24 Factory
 # corpus sweep (34,596 findings at main 38459d25): an entry had to be
@@ -142,6 +143,7 @@ framebuffer/S
 frontend/MS
 fullscreen
 functors
+funkoverage
 fuzzer/S
 gameplay
 geocoding

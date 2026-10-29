@@ -1088,11 +1088,12 @@ SFX N 0 en [^ey]\n";
                 .check("hello .symtab/.dynsym world", "testpkg", &[])
                 .is_empty()
         );
-        // A single project's name is not supplementary vocabulary:
-        // the wordlist excludes package-specific names, so it fires.
-        let result = checker.check("hello funkoverage world", "testpkg", &[]);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, "funkoverage");
+        // The issue's project name is now accepted as a literal stem.
+        assert!(
+            checker
+                .check("hello funkoverage world", "testpkg", &[])
+                .is_empty()
+        );
     }
 
     #[test]
