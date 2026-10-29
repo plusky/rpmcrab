@@ -7432,6 +7432,12 @@ impl FilesCheck {
         st: &mut PkgState,
         out: &mut Filter,
     ) {
+        // A %ghost entry is bookkeeping, not payload: the package
+        // installs no file, and the header mode placeholder (regular
+        // file type with permission bits 0) is not a permission.
+        if pkgfile.is_ghost() {
+            return;
+        }
         if let Ok(Some(caps)) = self.bin_re.captures(fname) {
             if pkgfile.mode & 0o111 == 0 {
                 add_info(
@@ -9814,6 +9820,29 @@ mod tests {
         assert_lacks(&names, "non-standard-executable-perm");
         assert_lacks(&names, "perl-temp-file");
         assert_lacks(&names, "dir-or-file-in-opt");
+    }
+
+    #[test]
+    fn non_executable_in_bin_ghost_is_silent() {
+        // A %ghost entry is bookkeeping, not payload: the package
+        // installs no file, so there is no installed file to judge,
+        // and the header mode placeholder (regular file type with
+        // permission bits 0) is not a permission.
+        use crate::pkg::pkgfile::RPMFILE_GHOST;
+
+        let mut ghost = mode_file("/usr/bin/java", 0o100000);
+        ghost.flags = RPMFILE_GHOST;
+        let names = named_pkg_findings("java-11-openjdk-headless", vec![ghost]);
+        assert_lacks(&names, "non-executable-in-bin");
+        // The same header shape without the ghost flag still fires.
+        let names = named_pkg_findings(
+            "java-11-openjdk-headless",
+            vec![mode_file("/usr/bin/java", 0o100000)],
+        );
+        assert_has(&names, "non-executable-in-bin");
+        // A real non-executable regular file still fires.
+        let names = named_pkg_findings("foo", vec![mode_file("/usr/bin/foo-data", 0o100644)]);
+        assert_has(&names, "non-executable-in-bin");
     }
 
     /// A synthetic package carrying a single standard-dir entry,
