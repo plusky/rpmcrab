@@ -7504,9 +7504,9 @@ impl FilesCheck {
                 continue;
             };
             // /usr/local is user territory: no distro package ships
-            // an interpreter there, and a user-installed interpreter
-            // is not this package's payload.
-            if prefix == "/usr/local" {
+            // an interpreter anywhere under it, and a user-installed
+            // interpreter is not this package's payload.
+            if prefix == "/usr/local" || prefix.starts_with("/usr/local/") {
                 continue;
             }
             trees.push(format!("{prefix}/lib/{base}/"));
@@ -14277,6 +14277,26 @@ mod tests {
             ],
         );
         mark_exec(&mut pkg, "/usr/local/bin/python3.13");
+        assert_eq!(without_source_lines(&pkg).len(), 1);
+    }
+
+    #[test]
+    fn pyc_tree_under_nested_usr_local_still_fires() {
+        // Near miss: the exclusion covers the whole /usr/local
+        // subtree, so a nested interpreter earns no tree either.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = pybc_pkg(
+            &dir,
+            &[
+                ("/usr/local/myapp/bin/python3.13", b"elf", None),
+                (
+                    "/usr/local/myapp/lib/python3.13/encodings/aliases.pyc",
+                    &pyc_header(3571, 0, 1000),
+                    None,
+                ),
+            ],
+        );
+        mark_exec(&mut pkg, "/usr/local/myapp/bin/python3.13");
         assert_eq!(without_source_lines(&pkg).len(), 1);
     }
 
