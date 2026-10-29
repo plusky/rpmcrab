@@ -5230,6 +5230,8 @@ impl BinariesCheck {
         // under /home or /tmp).
         if la_file_regex().is_match(fname).unwrap_or(false) {
             // Find the matching line number via grep on the extracted file.
+            // Non-UTF8 .la files are skipped: read_to_string rejects
+            // invalid UTF-8, while the reference reads raw bytes.
             if let Ok(content) = std::fs::read_to_string(&pkgfile.path) {
                 for (idx, line) in content.lines().enumerate() {
                     if invalid_dir_ref_regex().is_match(line).unwrap_or(false) {

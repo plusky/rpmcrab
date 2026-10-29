@@ -14463,9 +14463,30 @@ print("hi")
     #[test]
     fn pyc_magic_check_modern_versions_from_path() {
         // Magic numbers verified against installed interpreters (3.12.16,
-        // 3.13.18, 3.15.2). A matching magic stays silent; a foreign magic
+        // 3.13.18, 3.15.2) and CPython release-branch heads (3.8, 3.9,
+        // 3.10, 3.11, 3.14). A matching magic stays silent; a foreign magic
         // fires an Error from the path version.
         let check = FilesCheck::new(&test_config());
+        assert!(
+            check
+                .pyc_magic_check("/usr/lib/python3.8/foo.pyc", 3413)
+                .is_none()
+        );
+        assert!(
+            check
+                .pyc_magic_check("/usr/lib/python3.9/foo.pyc", 3425)
+                .is_none()
+        );
+        assert!(
+            check
+                .pyc_magic_check("/usr/lib/python3.10/foo.pyc", 3439)
+                .is_none()
+        );
+        assert!(
+            check
+                .pyc_magic_check("/usr/lib/python3.11/foo.pyc", 3495)
+                .is_none()
+        );
         assert!(
             check
                 .pyc_magic_check("/usr/lib/python3.12/foo.pyc", 3531)
@@ -14474,6 +14495,11 @@ print("hi")
         assert!(
             check
                 .pyc_magic_check("/usr/lib/python3.13/foo.pyc", 3571)
+                .is_none()
+        );
+        assert!(
+            check
+                .pyc_magic_check("/usr/lib/python3.14/foo.pyc", 3627)
                 .is_none()
         );
         assert!(
