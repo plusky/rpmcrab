@@ -2561,6 +2561,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "pem-private-key"
+kind = "behaviour"
+reason = "pem-private-key: the reference pattern spells the private-key header with four leading dashes, so it cannot match a well-formed PEM header; the port uses five dashes and fires on genuine shipped private keys."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
