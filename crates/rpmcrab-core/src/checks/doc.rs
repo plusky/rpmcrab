@@ -80,6 +80,10 @@ impl DocCheck {
     /// manuals, example collections, demos, test-result logs, HTML
     /// documentation sets and API documentation. The -doc remedy is
     /// circular for these: the package is the documentation carrier.
+    /// Individual pure-documentation packages are listed by exact name
+    /// below: each carries only %doc files, so a -doc split would move
+    /// the package's entire payload (or split a test log) rather than
+    /// separate documentation from a functional payload.
     fn ignore_pkg(name: &str) -> bool {
         name.starts_with("bundle-")
             || name.contains("-devel")
@@ -90,6 +94,23 @@ impl DocCheck {
             || name.contains("-testresults")
             || name.contains("-html")
             || name.contains("-apidoc")
+            || matches!(
+                name,
+                "books"
+                    | "c-intro-and-ref-pdf"
+                    | "docbook-tdg"
+                    | "fhs"
+                    | "grub2"
+                    | "gtk2-engines"
+                    | "myspell-de"
+                    | "myspell-en"
+                    | "openmpi4-testsuite"
+                    | "php8-test"
+                    | "release-notes-openSUSE"
+                    | "tuxpaint-stamps"
+                    | "xemacs-info"
+                    | "xemacs-packages-info"
+            )
     }
 
     /// Man and info pages ship with the binaries they document; they
@@ -435,6 +456,31 @@ mod tests {
         assert!(!DocCheck::ignore_pkg("manual-foo"));
         assert!(!DocCheck::ignore_pkg("fooexamples"));
         assert!(!DocCheck::ignore_pkg("apidoc-foo"));
+    }
+
+    #[test]
+    fn ignore_pkg_pure_doc_packages() {
+        // Every individually exempted pure-documentation package.
+        assert!(DocCheck::ignore_pkg("books"));
+        assert!(DocCheck::ignore_pkg("c-intro-and-ref-pdf"));
+        assert!(DocCheck::ignore_pkg("docbook-tdg"));
+        assert!(DocCheck::ignore_pkg("fhs"));
+        assert!(DocCheck::ignore_pkg("grub2"));
+        assert!(DocCheck::ignore_pkg("gtk2-engines"));
+        assert!(DocCheck::ignore_pkg("myspell-de"));
+        assert!(DocCheck::ignore_pkg("myspell-en"));
+        assert!(DocCheck::ignore_pkg("openmpi4-testsuite"));
+        assert!(DocCheck::ignore_pkg("php8-test"));
+        assert!(DocCheck::ignore_pkg("release-notes-openSUSE"));
+        assert!(DocCheck::ignore_pkg("tuxpaint-stamps"));
+        assert!(DocCheck::ignore_pkg("xemacs-info"));
+        assert!(DocCheck::ignore_pkg("xemacs-packages-info"));
+        // Near misses: exact names only - siblings and lookalikes stay loud.
+        assert!(!DocCheck::ignore_pkg("bookshelf"));
+        assert!(!DocCheck::ignore_pkg("grub2-theme"));
+        assert!(!DocCheck::ignore_pkg("myspell-de_DE"));
+        assert!(!DocCheck::ignore_pkg("tuxpaint-stamps-animals"));
+        assert!(!DocCheck::ignore_pkg("xemacs-info-foo"));
     }
 
     /// `Pkg` is header-backed with no test constructor, so open a tiny fixture
