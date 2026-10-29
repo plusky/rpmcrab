@@ -95,8 +95,11 @@ impl SystemdInstallCheck {
         // this unit performs the same operation (enable is stronger
         // than preset). Other verbs, other units, and %posttrans earn
         // no credit: only the %post scriptlet is examined here.
-        let manual_re = Regex::new(&format!(r"systemctl.*\b(enable|preset)\b.*{}", escaped))
-            .expect("manual systemctl pattern");
+        let manual_re = Regex::new(&format!(
+            r"\bsystemctl\b.*\b(enable|preset)\b.*(?<![\w:.@-]){}(?![\w:.@-])",
+            escaped
+        ))
+        .expect("manual systemctl pattern");
         let patterns = [
             (
                 format!(
@@ -146,7 +149,10 @@ impl SystemdInstallCheck {
                 if statically_enabled {
                     continue;
                 }
-                if script.lines().any(|line| is_match(&manual_re, line)) {
+                if script
+                    .lines()
+                    .any(|line| Self::manual_line_credits(line, &manual_re))
+                {
                     continue;
                 }
             }
@@ -164,6 +170,23 @@ impl SystemdInstallCheck {
             missing.push(*finding);
         }
         missing
+    }
+
+    /// Whether one %post line manually enables or presets a unit in
+    /// system scope: full-line comments never credit, and a
+    /// scope-changing flag (`--user`, `--global`) moves the operation
+    /// to the user manager, so it never credits the system unit.
+    fn manual_line_credits(line: &str, manual_re: &Regex) -> bool {
+        if line.trim_start().starts_with('#') {
+            return false;
+        }
+        if line
+            .split_whitespace()
+            .any(|token| token == "--user" || token == "--global")
+        {
+            return false;
+        }
+        is_match(manual_re, line)
     }
 
     /// Unit-type suffixes systemd recognises (systemd.unit(5)). A name
@@ -389,29 +412,37 @@ impl Check for SystemdInstallCheck {
         }
 
         // Basenames of units statically enabled by a shipped wants
-        // symlink: a symlink under `<unitdir>/*.wants/` whose target
-        // resolves within the package to a unit file. A regular file
-        // in a wants directory, a wants link outside the unit
-        // directory, and a link resolving to no shipped file earn no
-        // credit. Only the resolved target's basename is credited, so
-        // a wants link for another unit never credits this one.
+        // symlink: a symlink directly under `<unitdir>/*.wants/` whose
+        // target resolves within the package. A regular file in a wants
+        // directory, a wants link outside the unit directory, a link
+        // nested below a wants directory, and a link resolving to no
+        // shipped file earn no credit. The credit is keyed by the link's
+        // basename: systemd enables the name the link carries, so a
+        // wants link for another unit never credits this one. With no
+        // units found, there is nothing to credit.
         let wants_prefix = format!("{}/", self.unit_dir);
         let mut statically_enabled: std::collections::HashSet<&str> =
             std::collections::HashSet::new();
-        for file in &pkg.files {
-            if !is_symlink(file.mode) {
-                continue;
-            }
-            if !file.name.starts_with(&wants_prefix) {
-                continue;
-            }
-            if !file.name.split('/').any(|seg| seg.ends_with(".wants")) {
-                continue;
-            }
-            if let Some(target) = pkg.readlink(file)
-                && let Some(basename) = target.name.rsplit('/').next()
-            {
-                statically_enabled.insert(basename);
+        if !units.is_empty() {
+            for file in &pkg.files {
+                if !is_symlink(file.mode) {
+                    continue;
+                }
+                // Parent-directory scope: the link must sit directly in
+                // a `.wants` directory directly under the unit directory;
+                // a `.wants` segment deeper in the path earns nothing.
+                let Some((parent, link_basename)) = file.name.rsplit_once('/') else {
+                    continue;
+                };
+                let Some(wants_dir) = parent.strip_prefix(&wants_prefix) else {
+                    continue;
+                };
+                if wants_dir.contains('/') || !wants_dir.ends_with(".wants") {
+                    continue;
+                }
+                if pkg.readlink(file).is_some() {
+                    statically_enabled.insert(link_basename);
+                }
             }
         }
 
@@ -824,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn wants_link_duplicate_suppresses_add_pre_only() {
+    fn wants_link_duplicate_suppresses_add_pre_and_add_post() {
         // The dracut shape: a direct unit-dir link to a shipped non-unit
         // file, plus the same unit name as a `.wants` enablement link.
         // The direct candidate still fires `add_pre`; the `.wants`
@@ -1044,15 +1075,20 @@ mod tests {
 
     #[test]
     fn wants_symlink_for_other_unit_does_not_credit() {
+        // The other unit's target is shipped: the wants credit lands on
+        // the other basename, so want720 still fires add_post. Without
+        // the shipped target the link would dangle and the credit logic
+        // would never run.
         let pkg = alias_pkg(Some(vec![
             reg(&format!("{UNIT}/want720.service")),
+            reg(&format!("{UNIT}/other720.service")),
             link(
                 &format!("{UNIT}/multi-user.target.wants/other720.service"),
                 "../other720.service",
             ),
         ]));
         let results = run(&pkg);
-        assert_eq!(results.len(), 4, "{results:?}");
+        assert_eq!(results.len(), 7, "{results:?}");
         assert_eq!(
             on_tag(
                 &results,
@@ -1060,6 +1096,14 @@ mod tests {
                 "want720.service"
             ),
             1
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "other720.service"
+            ),
+            0
         );
     }
 
@@ -1093,8 +1137,13 @@ mod tests {
 
     #[test]
     fn wants_symlink_outside_unit_dir_does_not_credit() {
+        // The outside link's target is shipped: the readlink succeeds,
+        // so only the outside-unit-dir guard blocks the credit. Without
+        // the shipped target the link would dangle and the guard would
+        // never run.
         let pkg = alias_pkg(Some(vec![
             reg(&format!("{UNIT}/want720.service")),
+            reg("/usr/lib/systemd/user/want720.service"),
             link(
                 "/usr/lib/systemd/user/sockets.target.wants/want720.service",
                 "../want720.service",
@@ -1110,6 +1159,106 @@ mod tests {
             ),
             1
         );
+    }
+
+    #[test]
+    fn wants_link_credits_link_name_not_target_name() {
+        // A wants link named differently from its target credits the
+        // link's name: systemd enables the name the link carries. The
+        // target unit itself still fires add_post, while the
+        // link-named unit is credited.
+        let pkg = alias_pkg(Some(vec![
+            reg(&format!("{UNIT}/want720.service")),
+            reg(&format!("{UNIT}/renamed720.service")),
+            link(
+                &format!("{UNIT}/multi-user.target.wants/renamed720.service"),
+                "../want720.service",
+            ),
+        ]));
+        let results = run(&pkg);
+        assert_eq!(results.len(), 7, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "want720.service"
+            ),
+            1
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "renamed720.service"
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn wants_link_nested_below_wants_dir_does_not_credit() {
+        // A link below a nested wants directory is not directly in a
+        // wants directory under the unit dir, so it earns no credit
+        // even though its target is shipped.
+        let pkg = alias_pkg(Some(vec![
+            reg(&format!("{UNIT}/want720.service")),
+            link(
+                &format!("{UNIT}/multi-user.target.wants/sub/want720.service"),
+                "../../want720.service",
+            ),
+        ]));
+        let results = run(&pkg);
+        assert_eq!(results.len(), 4, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "want720.service"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn manual_comment_line_does_not_credit() {
+        let post = "# systemctl enable foo.service";
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert!(missing.contains(&"systemd-service-without-service_add_post"));
+    }
+
+    #[test]
+    fn manual_user_scope_does_not_credit() {
+        for post in [
+            "systemctl --user enable foo.service",
+            "systemctl --global enable foo.service",
+        ] {
+            let missing =
+                SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+            assert!(
+                missing.contains(&"systemd-service-without-service_add_post"),
+                "{post}: {missing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn manual_unit_name_boundaries() {
+        // A longer name sharing the stem, a suffixed name, a
+        // hyphen-joined name, and a foreign command name are all
+        // different units and earn no credit.
+        for post in [
+            "systemctl enable myfoo.service",
+            "systemctl enable foo.service.bak",
+            "systemctl enable prefix-foo.service",
+            "foosystemctl enable foo.service",
+        ] {
+            let missing =
+                SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+            assert!(
+                missing.contains(&"systemd-service-without-service_add_post"),
+                "{post}: {missing:?}"
+            );
+        }
     }
 
     /// `del_preun` credits live only on that arm: the other three arms
