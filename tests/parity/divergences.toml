@@ -2747,14 +2747,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1223"
 case = "global"
 check = "MenuXDGCheck"
 kind = "behaviour"
-reason = "Fix-and-diverge: an Exec first token wrapped in one layer of double quotes is unquoted before the existence check. The Desktop Entry specification permits double-quoted arguments, and the quoted spelling names the same binary: a desktop file with Exec=\"/usr/bin/foo\" whose package ships /usr/bin/foo no longer fires. An unbalanced or lone quote is left alone."
+reason = "Fix-and-diverge: an Exec first token wrapped in one layer of double quotes is unquoted before the existence check. The Desktop Entry specification permits double-quoted arguments, and the quoted spelling names the same binary: a desktop file with Exec=\"/usr/bin/foo\" whose package ships /usr/bin/foo no longer fires. An unbalanced or lone quote is left alone. Only the first token is unquoted, split on the first ASCII space, so a quoted token is unquoted only when it contains no ASCII space; single-quoted tokens are never unquoted, and an empty token never fires. When a quoted entry still fires, the `desktopfile-without-binary` detail carries the unquoted binary."
 since = "0.4.1"
 
 [[divergence]]
 case = "global"
 check = "MenuXDGCheck"
 kind = "behaviour"
-reason = "Fix-and-diverge: an absolute Exec path through /sbin or /bin also resolves through its merged-/usr counterpart (/usr/sbin, /usr/bin). On merged-/usr systems /bin and /sbin are symlinks to those directories, so a package shipping the target under the merged path satisfies the entry. Only the legacy-to-merged direction is credited: the merged form is the canonical location."
+reason = "Fix-and-diverge: an absolute Exec path through /sbin or /bin also resolves through its merged-/usr counterpart (/usr/sbin, /usr/bin). On merged-/usr systems /bin and /sbin are symlinks to those directories, so a package shipping the target under the merged path satisfies the entry. Only the legacy-to-merged direction is credited: the merged form is the canonical location. The fallback remainder is sanitized: leading slashes are trimmed so the lookup stays inside the package root, and an empty remainder never satisfies (a bare /sbin/ or /bin/ does not resolve through the merged directory itself). Only paths strictly under /sbin/ or /bin/ take the fallback; bare /sbin or /bin do not. The mapping is one-way only: a merged-path entry never resolves through a legacy-path file, while a directly shipped literal path always counts. Tag: `desktopfile-without-binary`."
 since = "0.4.1"
 
 [[divergence]]

@@ -247,12 +247,24 @@ impl MenuXDGCheck {
             // /usr/sbin, so an absolute path through the legacy directory
             // resolves when the package ships the merged counterpart.
             if let Some(rest) = binary.strip_prefix("/sbin/") {
+                // Sanitize the remainder: a leading slash would make
+                // join() replace the package root with a host-absolute
+                // path, and an empty remainder would let the merged
+                // directory itself satisfy the lookup.
+                let rest = rest.trim_start_matches('/');
+                if rest.is_empty() {
+                    return false;
+                }
                 return Path::new(pkg.dir_name())
                     .join("usr/sbin")
                     .join(rest)
                     .exists();
             }
             if let Some(rest) = binary.strip_prefix("/bin/") {
+                let rest = rest.trim_start_matches('/');
+                if rest.is_empty() {
+                    return false;
+                }
                 return Path::new(pkg.dir_name())
                     .join("usr/bin")
                     .join(rest)
@@ -1406,5 +1418,14 @@ mod tests {
         assert!(!MenuXDGCheck::binary_exists(&pkg, "/bin"));
         // A name merely starting with the legacy prefix is not one.
         assert!(!MenuXDGCheck::binary_exists(&pkg, "/sbinfoo/tool"));
+        // Doubled slashes: the remainder is sanitized, so the lookup
+        // stays inside the package root and never probes the host.
+        assert!(MenuXDGCheck::binary_exists(&pkg, "/sbin//yast2"));
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/sbin//etc/passwd"));
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/bin//etc/passwd"));
+        // Bare legacy directory: an empty remainder never satisfies,
+        // even though the merged directory itself exists.
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/sbin/"));
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/bin/"));
     }
 }
