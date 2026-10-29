@@ -237,6 +237,16 @@ The finding is an error when the calling file is setuid/setgid or carries
 file capabilities, or when its package ships systemd service or socket
 units.
 """
+binary-or-shlib-calls-legacy-network="""
+The binary calls a legacy network API: one of the BSD inet_*
+address-conversion functions (inet_addr, inet_aton, inet_ntoa,
+inet_nsap_addr, inet_nsap_ntoa, inet_makeaddr, inet_netof,
+inet_network, inet_neta, inet_net_ntop, inet_net_pton) or the
+rsh-family remote-execution entry points (rcmd, rexec, rresvport).
+The inet_* family predates getaddrinfo and getnameinfo, and the
+r-commands authenticate by trusted-host lists; replace them in the
+upstream source.
+"""
 binary-or-shlib-calls-md5="""
 The binary calls the low-level MD5 functions (MD5, MD5_Init,
 MD5_Update, MD5_Final, MD5_Transform). MD5 is broken as a cryptographic hash --

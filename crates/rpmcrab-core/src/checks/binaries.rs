@@ -391,6 +391,7 @@ static DES_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static RC4_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static WEAK_PRNG_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static UNBOUNDED_COPY_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static LEGACY_NETWORK_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 static SHELL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
@@ -3758,6 +3759,7 @@ pub struct BinariesCheck {
     rc4_call_regex: Regex,
     weak_prng_call_regex: Regex,
     unbounded_copy_call_regex: Regex,
+    legacy_network_call_regex: Regex,
 
     shell_call_regex: Regex,
 
@@ -5080,6 +5082,13 @@ impl BinariesCheck {
             rc4_call_regex: RC4_CALL_REGEX
                 .get_or_init(|| {
                     Regex::new(r"^((RC4|RC4_set_key|RC4_options)(?:@\S+)?)(?:\s|$)")
+                        .expect("static regex")
+                })
+                .clone(),
+
+            legacy_network_call_regex: LEGACY_NETWORK_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(r"^((inet_addr|inet_aton|inet_ntoa|inet_nsap_addr|inet_nsap_ntoa|inet_makeaddr|inet_netof|inet_network|inet_neta|inet_net_ntop|inet_net_pton|rcmd|rexec|rresvport)(?:@\S+)?)(?:\s|$)")
                         .expect("static regex")
                 })
                 .clone(),
@@ -6631,6 +6640,22 @@ impl BinariesCheck {
                 .undefined_functions
                 .iter()
                 .any(|s| self.unbounded_copy_call_regex.is_match(s).unwrap_or(false));
+        // Legacy network APIs (#1217): undefined references to
+        // the BSD inet_* address-conversion family and the
+        // rsh-family remote-execution entry points
+        // (rcmd/rexec/rresvport). The reference is the predicate
+        // -- the implementing libraries define these symbols and
+        // stay silent. Warning only, provisional: the
+        // full-corpus measurement that would support a stronger
+        // level is not part of this change. The second disjunct
+        // covers dynsym imports typed STT_NOTYPE: fill_from_elf
+        // files those only under `undefined_functions`, never
+        // under the FUNC-only `undefined_function_refs`.
+        let legacy_network = info.has_undefined_function_matching(&self.legacy_network_call_regex)
+            || info
+                .undefined_functions
+                .iter()
+                .any(|s| self.legacy_network_call_regex.is_match(s).unwrap_or(false));
 
         if setgid && setuid && !setgroups {
             // Warning unconditionally (fix-and-diverge, #743). The
@@ -6721,6 +6746,15 @@ impl BinariesCheck {
                 Level::Warning,
                 pkg,
                 "binary-or-shlib-calls-rc4",
+                &[&pkgfile.name],
+            );
+        }
+        if legacy_network {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "binary-or-shlib-calls-legacy-network",
                 &[&pkgfile.name],
             );
         }
@@ -20614,6 +20648,61 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(count(&bare_pkg, &suid, &["arc4random"], &["arc4random"]), 0);
         assert_eq!(count(&bare_pkg, &suid, &["getrandom"], &["getrandom"]), 0);
         assert_eq!(count(&bare_pkg, &suid, &["getentropy"], &["getentropy"]), 0);
+    }
+
+    #[test]
+    fn legacy_network_call_findings() {
+        // The #1217 family fires on an undefined reference only:
+        // a definition alone, or a namesake embedding the name,
+        // stays silent.
+        fn run(undefined_refs: &[&str], undefined_all: &[&str], defined: &[&str]) -> Vec<String> {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+            let mut info = syn_info();
+            info.functions = defined.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = undefined_refs.iter().map(|s| s.to_string()).collect();
+            info.undefined_functions = undefined_all.iter().map(|s| s.to_string()).collect();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-legacy-network")
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+
+        // An undefined FUNC reference to an inet name fires, Warning.
+        let lines = run(&["inet_ntoa"], &[], &[]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(lines[0].contains("/usr/bin/foo"), "detail: {}", lines[0]);
+
+        // The r-command half fires the same tag.
+        let lines = run(&["rcmd"], &[], &[]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // A NOTYPE-only undefined import fires through the second disjunct.
+        let lines = run(&[], &["rexec"], &[]);
+        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+
+        // A definition alone stays silent: the implementing
+        // library is the provider, not a caller.
+        let lines = run(&[], &[], &["inet_ntoa"]);
+        assert!(lines.is_empty(), "definition-only silent: {lines:?}");
+
+        // Defined-but-not-undefined stays silent.
+        let lines = run(&[], &[], &["inet_addr"]);
+        assert!(lines.is_empty(), "defined-only silent: {lines:?}");
+
+        // A namesake embedding the name stays silent: the
+        // pattern is anchored, not a substring search.
+        let lines = run(&["foo_inet_ntoa"], &[], &[]);
+        assert!(lines.is_empty(), "namesake silent: {lines:?}");
+        let lines = run(&[], &["my_rcmd"], &[]);
+        assert!(lines.is_empty(), "namesake silent: {lines:?}");
     }
 
     #[test]

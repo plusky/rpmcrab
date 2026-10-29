@@ -33,6 +33,7 @@ binary-entry-value-not-found = W
 binary-in-etc = E
 binary-or-shlib-calls-des = W
 binary-or-shlib-calls-gethostbyname = E,W
+binary-or-shlib-calls-legacy-network = W
 binary-or-shlib-calls-md5 = W
 binary-or-shlib-calls-rc4 = W
 binary-or-shlib-calls-shell = W
