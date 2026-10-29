@@ -2703,6 +2703,20 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1223"
 
 [[divergence]]
 case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: an Exec first token wrapped in one layer of double quotes is unquoted before the existence check. The Desktop Entry specification permits double-quoted arguments, and the quoted spelling names the same binary: a desktop file with Exec=\"/usr/bin/foo\" whose package ships /usr/bin/foo no longer fires. An unbalanced or lone quote is left alone."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: an absolute Exec path through /sbin or /bin also resolves through its merged-/usr counterpart (/usr/sbin, /usr/bin). On merged-/usr systems /bin and /sbin are symlinks to those directories, so a package shipping the target under the merged path satisfies the entry. Only the legacy-to-merged direction is credited: the merged form is the canonical location."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "file-parent-ownership-mismatch"
 kind = "severity"
 reason = "Deliberate severity recalibration: the port reports W where the reference reports E when the mismatched file is owned by root (or uid 0). Measured over the Factory corpus, 198 of the 199 findings are root-owned files in service-user directories: 183 are deliberate layouts -- web-app writable directories, daemon state/config/certificate directories, spool and tftpboot trees -- and 15 are hylafax+ scripts in the uucp-owned /var/spool/hylafax/bin that the root-running faxq daemon executes, the privilege-escalation shape this check exists to catch; the demotion keeps them visible without failing builds over the deliberate mass. Which uid executes a file is runtime wiring, not decidable from the package, so no exemption separates the classes. The one both-unprivileged finding -- munin-node, a nobody-owned plugin-state directory inside the munin-owned /var/lib/munin -- stays an error. Corpus effect: 199 E become 198 W and 1 E; no finding is dropped."
