@@ -19,6 +19,31 @@
 # Extra AtomicAllowedDirs entries appended (not from upstream; see EXTRA_ATOMIC_ALLOWED_DIRS):
 #   AtomicAllowedDirs: added '/srv/' (whitelist with a known regression: the distro places service payload under /srv (apache_serverroot mandates /srv/www as the web root) while the atomic packaging guideline forbids applications outside the root subvolume, and no packaged application complies -- genuine violations under /srv go unflagged while this stands; tightened when openSUSE settles application packaging under the atomic rules; ledgered in tests/parity/divergences.toml)
 #
+# PythonModuleStems appended (not from upstream; see PYTHON_MODULE_STEMS):
+#   PythonModuleStems: 'avocado-framework' -> ['avocado']
+#   PythonModuleStems: 'pycairo' -> ['cairo']
+#   PythonModuleStems: 'python-barbicanclient' -> ['barbicanclient']
+#   PythonModuleStems: 'python-bugzilla' -> ['bugzilla']
+#   PythonModuleStems: 'python-dateutil' -> ['dateutil']
+#   PythonModuleStems: 'python-digitalocean' -> ['digitalocean']
+#   PythonModuleStems: 'python-gnupg' -> ['gnupg']
+#   PythonModuleStems: 'python-keystoneclient' -> ['keystoneclient']
+#   PythonModuleStems: 'python-ldap' -> ['ldap']
+#   PythonModuleStems: 'python-linstor' -> ['linstor']
+#   PythonModuleStems: 'python-ly' -> ['ly']
+#   PythonModuleStems: 'python-magic' -> ['magic']
+#   PythonModuleStems: 'python-manilaclient' -> ['manilaclient']
+#   PythonModuleStems: 'python-openstackclient' -> ['openstackclient']
+#   PythonModuleStems: 'python-swiftclient' -> ['swiftclient']
+#   PythonModuleStems: 'pygobject' -> ['gobject']
+#   PythonModuleStems: 'pyhamcrest' -> ['hamcrest']
+#   PythonModuleStems: 'pyopengl' -> ['opengl']
+#   PythonModuleStems: 'pyqt5' -> ['qt5']
+#   PythonModuleStems: 'pyqt5-sip' -> ['qt5-sip']
+#   PythonModuleStems: 'pyqt6' -> ['qt6']
+#   PythonModuleStems: 'pyusb' -> ['usb']
+#   PythonModuleStems: 'pyxdg' -> ['xdg']
+#
 # SystemdPresetPackages appended (not from upstream; see SYSTEMD_PRESET_PACKAGES):
 #   SystemdPresetPackages: added 'systemd'
 #   SystemdPresetPackages: added 'systemd-mini'
