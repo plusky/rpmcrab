@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn postun_bare_service_stem_is_accepted() {
         let postun = "systemd-update-helper mark-restart-system-units pmcd pmlogger || :";
-        let missing = SystemdInstallCheck::check_unit("pmcd.service", "", "", "", postun);
+        let missing = SystemdInstallCheck::check_unit("pmcd.service", true, "", "", "", postun);
         assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
         assert_eq!(missing.len(), 3);
     }
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn postun_bare_instantiated_template_stem_is_accepted() {
         let postun = "systemd-update-helper mark-restart-system-units foo@bar";
-        let missing = SystemdInstallCheck::check_unit("foo@bar.service", "", "", "", postun);
+        let missing = SystemdInstallCheck::check_unit("foo@bar.service", true, "", "", "", postun);
         assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
     }
 
@@ -272,6 +272,7 @@ mod tests {
         // Longer name sharing the stem.
         let missing = SystemdInstallCheck::check_unit(
             "foo.service",
+            true,
             "",
             "",
             "",
@@ -281,6 +282,7 @@ mod tests {
         // Different suffix: marking the timer does not mark the service.
         let missing = SystemdInstallCheck::check_unit(
             "foo.service",
+            true,
             "",
             "",
             "",
@@ -290,6 +292,7 @@ mod tests {
         // Bare names never resolve to non-service types.
         let missing = SystemdInstallCheck::check_unit(
             "foo.socket",
+            true,
             "",
             "",
             "",
@@ -299,6 +302,7 @@ mod tests {
         // Template stem names the template, not the instance.
         let missing = SystemdInstallCheck::check_unit(
             "foo@bar.service",
+            true,
             "",
             "",
             "",
@@ -314,7 +318,7 @@ mod tests {
                       systemd-update-helper remove-system-units foo\n\
                       systemd-update-helper mark-restart-system-units foo";
         let missing =
-            SystemdInstallCheck::check_unit("foo.service", script, script, script, script);
+            SystemdInstallCheck::check_unit("foo.service", true, script, script, script, script);
         assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
         assert!(missing.contains(&"systemd-service-without-service_add_pre"));
         assert!(missing.contains(&"systemd-service-without-service_add_post"));
