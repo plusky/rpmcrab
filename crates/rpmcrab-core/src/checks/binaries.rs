@@ -5065,21 +5065,25 @@ impl BinariesCheck {
             system_lib_paths: get_strings("SystemLibPaths"),
             system_libraries: SystemLibraries::system(),
             pie_exec_regexes,
+            // Anchored at the start, like mktemp below: the charged
+            // symbol must BE the libc call, not merely contain it --
+            // project wrappers such as lttng_ust_after_setuid are
+            // their own functions, not calls to libc setuid.
             setgid_call_regex: SETGID_CALL_REGEX
                 .get_or_init(|| {
-                    Regex::new(r"(set(?:res|e)?gid(?:@GLIBC\S+)?)(?:\s|$)")
+                    Regex::new(r"^(set(?:res|e)?gid(?:@GLIBC\S+)?)(?:\s|$)")
                         .expect("static regex")
                 })
                 .clone(),
             setuid_call_regex: SETUID_CALL_REGEX
                 .get_or_init(|| {
-                    Regex::new(r"(set(?:res|e)?uid(?:@GLIBC\S+)?)(?:\s|$)")
+                    Regex::new(r"^(set(?:res|e)?uid(?:@GLIBC\S+)?)(?:\s|$)")
                         .expect("static regex")
                 })
                 .clone(),
             setgroups_call_regex: SETGROUPS_CALL_REGEX
                 .get_or_init(|| {
-                    Regex::new(r"((?:ini|se)tgroups(?:@GLIBC\S+)?)(?:\s|$)")
+                    Regex::new(r"^((?:ini|se)tgroups(?:@GLIBC\S+)?)(?:\s|$)")
                         .expect("static regex")
                 })
                 .clone(),
@@ -6648,9 +6652,24 @@ impl BinariesCheck {
         info: &ReadelfInfo,
         out: &mut Filter,
     ) {
-        let setgid = info.has_function_matching(&self.setgid_call_regex);
-        let setuid = info.has_function_matching(&self.setuid_call_regex);
-        let setgroups = info.has_function_matching(&self.setgroups_call_regex);
+        // An archive charges only a reference, like mktemp below:
+        // its members are separate objects, so the member that
+        // defines setuid/setgid (newlib's libgloss stubs) makes no
+        // call and stays silent, while a member that references
+        // them still fires. A linked object charges any match.
+        let (setgid, setuid, setgroups) = if self.is_archive {
+            (
+                info.has_undefined_function_matching(&self.setgid_call_regex),
+                info.has_undefined_function_matching(&self.setuid_call_regex),
+                info.has_undefined_function_matching(&self.setgroups_call_regex),
+            )
+        } else {
+            (
+                info.has_function_matching(&self.setgid_call_regex),
+                info.has_function_matching(&self.setuid_call_regex),
+                info.has_function_matching(&self.setgroups_call_regex),
+            )
+        };
         // An archive charges only a reference: its members are separate
         // objects, so the member that defines mktemp (newlib's libc.a
         // carries the definition in libc_a-mktemp.o) makes no call and
@@ -21226,6 +21245,75 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             out.results().is_empty(),
             "initgroups present must be quiet: {:?}",
+            out.results()
+        );
+
+        // Anchored patterns: a name that merely contains the call
+        // is its own function, not a call to libc.
+        let mut info = syn_info();
+        info.functions = vec![
+            "lttng_ust_after_setuid".to_string(),
+            "lttng_ust_after_setgid".to_string(),
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "affixed names must be quiet: {:?}",
+            out.results()
+        );
+
+        // Versioned bare calls still fire.
+        let mut info = syn_info();
+        info.functions = vec![
+            "setuid@GLIBC_2.2.5".to_string(),
+            "setgid@GLIBC_2.2.5".to_string(),
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+
+        // Archives charge only references: a member that defines
+        // the calls stays silent, a member that references them fires.
+        let mut archive_check = BinariesCheck::with_tool_dir(&config, None);
+        archive_check.is_archive = true;
+        let archive_file = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        archive_check.check_security_functions(&pkg, &archive_file, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "defined-only archive must be quiet: {:?}",
+            out.results()
+        );
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        info.undefined_function_refs = vec!["setuid".to_string(), "setgid".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        archive_check.check_security_functions(&pkg, &archive_file, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        // A referenced setgroups silences the archive case too.
+        let mut info = syn_info();
+        info.functions = vec![
+            "setuid".to_string(),
+            "setgid".to_string(),
+            "setgroups".to_string(),
+        ];
+        info.undefined_function_refs = vec![
+            "setuid".to_string(),
+            "setgid".to_string(),
+            "setgroups".to_string(),
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        archive_check.check_security_functions(&pkg, &archive_file, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "referenced setgroups must be quiet: {:?}",
             out.results()
         );
     }
