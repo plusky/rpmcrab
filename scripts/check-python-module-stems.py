@@ -118,7 +118,8 @@ def main():
         print(f"no RPMs found under {args.corpus}")
         return 2
 
-    # Module side: canonical dist() provide names present in the corpus.
+    # Module side: canonical dist() names referenced in the corpus
+    # (a provide, or a require naming the distribution).
     provided = set()
     # Stem side: normalised capability strings present in the corpus.
     # One merged pool serves both: the dist() matcher picks provides
@@ -155,9 +156,9 @@ def main():
             stale += 1
             missing = []
             if not module_live:
-                missing.append("module (no dist() provide in corpus)")
+                missing.append("module (no dist() reference in corpus)")
             if dead_stems:
-                missing.append(f"stem(s) {dead_stems} (no Require in corpus)")
+                missing.append(f"stem(s) {dead_stems} (no provide/Require in corpus)")
             print(f"STALE  {module} -> {stems}: {'; '.join(missing)}")
 
     print(f"{len(entries) - stale}/{len(entries)} entries live "
