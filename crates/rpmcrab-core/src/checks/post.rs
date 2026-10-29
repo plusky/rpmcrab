@@ -72,6 +72,91 @@ impl PostCheck {
         static PERCENT_REGEX: OnceLock<Regex> = OnceLock::new();
         PERCENT_REGEX.get_or_init(|| Regex::new(r"(?m)^[^#]*%+\{?\w{3,}").expect("static regex"))
     }
+
+    /// Scriptlet text with rpm `--qf` / `--queryformat` arguments blanked,
+    /// for the `percent-in` match only: a `--qf` argument IS a queryformat
+    /// string, so `%{TAG}` inside it is format syntax, never macro fallout
+    /// (the openblas-common-devel %pre case: `rpm -q --qf '%{NAME}'`).
+    /// Blanking replaces argument bytes with spaces, preserving newlines
+    /// (line anchors) and `#` (comment masking); an unterminated quote or
+    /// a missing argument leaves the text untouched, so the check fails
+    /// closed. Every other check still sees the original scriptlet.
+    fn scrub_queryformat_args(script: &str) -> String {
+        let bytes = script.as_bytes();
+        let mut out = bytes.to_vec();
+        let mut i = 0;
+        while i < bytes.len() {
+            let opt_len = if bytes[i..].starts_with(b"--queryformat") {
+                13
+            } else if bytes[i..].starts_with(b"--qf") {
+                4
+            } else {
+                i += 1;
+                continue;
+            };
+            // Option token boundaries: preceded by start, whitespace or a
+            // shell separator; followed by whitespace, `=` or end of text.
+            let prev_ok = i == 0
+                || matches!(
+                    bytes[i - 1],
+                    b' ' | b'\t' | b'\n' | b';' | b'|' | b'&' | b'('
+                );
+            let next_ok = match bytes.get(i + opt_len) {
+                None => true,
+                Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'=') => true,
+                Some(_) => false,
+            };
+            if !prev_ok || !next_ok {
+                i += 1;
+                continue;
+            }
+            // Skip separators: whitespace, `=`, and backslash-newline
+            // continuations.
+            let mut j = i + opt_len;
+            loop {
+                match bytes.get(j) {
+                    Some(b' ') | Some(b'\t') | Some(b'=') => j += 1,
+                    Some(b'\\') if bytes.get(j + 1) == Some(&b'\n') => j += 2,
+                    _ => break,
+                }
+            }
+            if j >= bytes.len() {
+                break;
+            }
+            let arg_start = j;
+            let arg_end = match bytes[j] {
+                b'\'' | b'"' => {
+                    let quote = bytes[j];
+                    let mut k = j + 1;
+                    while k < bytes.len() && bytes[k] != quote {
+                        k += 1;
+                    }
+                    if k >= bytes.len() {
+                        // Unterminated quote: fail closed, scrub nothing.
+                        i = j + 1;
+                        continue;
+                    }
+                    k + 1
+                }
+                _ => {
+                    let mut k = j;
+                    while k < bytes.len()
+                        && !matches!(bytes[k], b' ' | b'\t' | b'\n' | b';' | b'|' | b'&' | b')')
+                    {
+                        k += 1;
+                    }
+                    k
+                }
+            };
+            for byte in out.iter_mut().take(arg_end).skip(arg_start) {
+                if *byte != b'\n' && *byte != b'#' {
+                    *byte = b' ';
+                }
+            }
+            i = arg_end;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
     fn home_regex() -> &'static Regex {
         static HOME_REGEX: OnceLock<Regex> = OnceLock::new();
         HOME_REGEX
@@ -1258,7 +1343,7 @@ impl PostCheck {
         }
 
         if prog == "/bin/sh" || prog == "/bin/bash" || prog == "/usr/bin/perl" {
-            if is_match(Self::percent_regex(), script) {
+            if is_match(Self::percent_regex(), &Self::scrub_queryformat_args(script)) {
                 out.push((Level::Warning, finding("percent-in"), vec![]));
             }
             if let Some(m) = Self::dangerous_regex()
@@ -2246,6 +2331,62 @@ mod tests {
         // `\\w{3,}` must not become `\\w{2,}`: `%ab` is not a macro.
         let found = check().check_scriptlet("/bin/sh", "echo %ab", "%post", &[], &[]);
         assert!(!found.iter().any(|(_, f, _)| f == "percent-in-%post"));
+    }
+
+    #[test]
+    fn percent_queryformat_arg_is_silent() {
+        // The openblas-common-devel %pre case: `%{NAME}` is the argument
+        // to `rpm -q --qf`, a queryformat string, not macro fallout.
+        let script = "d=/usr/lib64/cmake/openblas\n[ -d $d -a ! -L $d -a \"$(rpm -q --qf '%{NAME}' -f $d 2>/dev/null)\" = \"openblas-devel\" ] \\\n    && { n=$(mktemp -d $(dirname $d)/tmpd-XXXXX); mv $d $n; rm -rf $n; } || true";
+        let found = check().check_scriptlet("/bin/sh", script, "%pre", &[], &[]);
+        assert!(!found.iter().any(|(_, f, _)| f == "percent-in-%pre"));
+        // The scrub applies to the percent check only: the `rm -rf` in
+        // the same scriptlet still fires its own finding.
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%pre")
+        );
+    }
+
+    #[test]
+    fn percent_queryformat_forms_are_silent() {
+        for script in [
+            "rpm -q --qf '%{NAME}' -f /x",
+            "rpm -q --qf \"%{NAME}\" -f /x",
+            "rpm -q --qf=%{NAME} -f /x",
+            "rpm -q --qf='%{NAME}' -f /x",
+            "rpm -q --queryformat '%{NAME} %{VERSION}' -f /x",
+            "rpm -q --qf \\\n'%{NAME}' -f /x",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%pre", &[], &[]);
+            assert!(
+                !found.iter().any(|(_, f, _)| f == "percent-in-%pre"),
+                "queryformat form fired: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn percent_outside_queryformat_still_fires() {
+        let script = "rpm -q --qf '%{NAME}' -f /x\necho %foo";
+        let found = check().check_scriptlet("/bin/sh", script, "%pre", &[], &[]);
+        assert!(found.iter().any(|(_, f, _)| f == "percent-in-%pre"));
+    }
+
+    #[test]
+    fn percent_queryformat_lookalike_option_still_fires() {
+        // `--qformat` is not `--qf`: the option boundary matters.
+        let found =
+            check().check_scriptlet("/bin/sh", "echo --qformat '%{NAME}'", "%pre", &[], &[]);
+        assert!(found.iter().any(|(_, f, _)| f == "percent-in-%pre"));
+    }
+
+    #[test]
+    fn percent_queryformat_unterminated_quote_still_fires() {
+        // Fail closed: an unterminated quote scrubs nothing.
+        let found = check().check_scriptlet("/bin/sh", "rpm -q --qf '%{NAME}", "%pre", &[], &[]);
+        assert!(found.iter().any(|(_, f, _)| f == "percent-in-%pre"));
     }
 
     #[test]
