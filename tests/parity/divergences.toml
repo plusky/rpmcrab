@@ -2498,6 +2498,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "non-executable-in-bin"
+kind = "behaviour"
+reason = "Fix-and-diverge: non-executable files in bin dirs with a data extension do not fire unless they carry a shebang. The evidenced extensions are fpc compiler data (tdf, rsj, pt, ans), ooRexx class libraries (cls, dtd, xsd, xsl), FIPS sidecars (hmac), configs (conf, defs), PowerShell scripts (ps1) and host-loaded interpreter sources (lua, tcl). A shebang script in a bin dir is an entry point whatever its suffix, so shebang-carrying files still fire. Corpus instances: 45 rows (fpc 19, ooRexx 17, hmac 4, paraview.conf, spack.ps1, trigger-rally.config.defs, brltty-prologue.lua/.tcl). The reference fires on the shape. Pinned by non_executable_in_bin_data_files_are_silent in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
