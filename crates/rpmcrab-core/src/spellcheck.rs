@@ -1048,6 +1048,54 @@ SFX N 0 en [^ey]\n";
     }
 
     #[test]
+    fn ebpf_elf_terms_are_accepted() {
+        // eBPF/ELF vocabulary the system dictionary lacks: the uprobes
+        // facility, the .symtab/.dynsym section names, the BPF ring
+        // buffer map type. uprobe carries the plural flag, so uprobes
+        // is covered by the same entry; the affix rules here are the
+        // pinned en_US ones, so derivations resolve as in production.
+        let checker = Spellchecker::from_strings(TEST_AFF_WITH_AFFIXES, TEST_DIC)
+            .expect("test dictionary")
+            .with_supplementary_words();
+        assert!(
+            checker
+                .check("hello uprobe world", "testpkg", &[])
+                .is_empty()
+        );
+        assert!(
+            checker
+                .check("hello uprobes world", "testpkg", &[])
+                .is_empty()
+        );
+        assert!(
+            checker
+                .check("hello symtab world", "testpkg", &[])
+                .is_empty()
+        );
+        assert!(
+            checker
+                .check("hello dynsym world", "testpkg", &[])
+                .is_empty()
+        );
+        assert!(
+            checker
+                .check("hello ringbuf world", "testpkg", &[])
+                .is_empty()
+        );
+        // The dotted section names tokenise to the same stems.
+        assert!(
+            checker
+                .check("hello .symtab/.dynsym world", "testpkg", &[])
+                .is_empty()
+        );
+        // A single project's name is not supplementary vocabulary:
+        // the wordlist excludes package-specific names, so it fires.
+        let result = checker.check("hello funkoverage world", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "funkoverage");
+    }
+
+    #[test]
     fn every_supplementary_word_parses_and_is_accepted() {
         // Pins the bundled file: every entry must parse as a dictionary
         // line and its stem must be accepted once added (a typo'd entry

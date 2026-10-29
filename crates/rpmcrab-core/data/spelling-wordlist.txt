@@ -28,6 +28,7 @@
 # corpus sweep (34,596 findings at main 38459d25): an entry had to be
 # flagged in at least five source packages' prose, or complete a
 # family begun by such an entry.
+# Later additions from filed issues are recorded in the divergences ledger.
 
 
 # Ordinary English words missing from the pinned dictionary.
@@ -120,6 +121,7 @@ docstring/MS
 doctest/MS
 dotfile/MS
 downloader
+dynsym
 ebook/MS
 embeddable
 enablement
@@ -259,6 +261,7 @@ replayer/S
 repo/MS
 resolvers
 responder
+ringbuf
 ruleset/MS
 runnable
 runtime/S
@@ -301,6 +304,7 @@ superclass/S
 superset/S
 svn
 symlink/MS
+symtab
 synsets
 syscall/S
 sysconfig
@@ -328,6 +332,7 @@ univariate
 unmaintained
 untrusted
 unversioned
+uprobe/S
 uptime
 url/MS
 urlencoded
