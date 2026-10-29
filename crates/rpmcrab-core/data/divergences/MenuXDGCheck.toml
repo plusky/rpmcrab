@@ -59,3 +59,10 @@ check = "MenuXDGCheck"
 kind = "behaviour"
 reason = "Fix-and-diverge: a desktop file's Exec token that resolves to a binary shipped by a sibling subpackage of the same source build no longer fires, but only when the run holds the build's source package: the token is credited against the sibling's shipped files (bare tokens through the standard bin dirs, absolute tokens by exact path or merged-/usr counterpart). Partial runs, single-package runs, and runs without the build's source package still fire exactly the per-package verdict, and a token resolving only through another build's packages still fires."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: an Exec path shipped by the desktop package as a symlink no longer fires when the symlink chain resolves, inside the same source build, to a regular file shipped by a sibling subpackage, under the same source-complete run gate as the sibling token credit. A chain leaving the build, looping, or resolving only through another build's packages still fires."
+since = "0.4.1"

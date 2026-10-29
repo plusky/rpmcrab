@@ -2808,6 +2808,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: an Exec path shipped by the desktop package as a symlink no longer fires when the symlink chain resolves, inside the same source build, to a regular file shipped by a sibling subpackage, under the same source-complete run gate as the sibling token credit. A chain leaving the build, looping, or resolving only through another build's packages still fires."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "file-parent-ownership-mismatch"
 kind = "severity"
 reason = "Deliberate severity recalibration: the port reports W where the reference reports E when the mismatched file is owned by root (or uid 0). Measured over the Factory corpus, 198 of the 199 findings are root-owned files in service-user directories: 183 are deliberate layouts -- web-app writable directories, daemon state/config/certificate directories, spool and tftpboot trees -- and 15 are hylafax+ scripts in the uucp-owned /var/spool/hylafax/bin that the root-running faxq daemon executes, the privilege-escalation shape this check exists to catch; the demotion keeps them visible without failing builds over the deliberate mass. Which uid executes a file is runtime wiring, not decidable from the package, so no exemption separates the classes. The one both-unprivileged finding -- munin-node, a nobody-owned plugin-state directory inside the munin-owned /var/lib/munin -- stays an error. Corpus effect: 199 E become 198 W and 1 E; no finding is dropped."
