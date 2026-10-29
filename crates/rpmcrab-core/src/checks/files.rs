@@ -3143,6 +3143,43 @@ fn compiled_cache_of_shipped_source(pkg: &Pkg, pkgfile: &PkgFile) -> bool {
         .any(|f| f.name == stem && !f.is_ghost() && is_reg(f.mode))
 }
 
+/// Whether a non-executable file in a bin dir is dot-sourced by another
+/// payload file in the same package: a helper library the package own
+/// entry points source at runtime, not an entry point itself. The
+/// sourcing line must start (after whitespace) with a dot or source
+/// followed by whitespace, and the sourced path must be exactly the
+/// candidate basename or end with /<basename>, so comments, strings
+/// and execute forms (./name) do not credit.
+fn sourced_by_sibling_script(pkg: &Pkg, fname: &str) -> bool {
+    let Some(basename) = fname.rsplit("/").next() else {
+        return false;
+    };
+    if basename.is_empty() {
+        return false;
+    }
+    let suffix = format!("/{basename}");
+    pkg.files.iter().any(|f| {
+        if f.name == fname || f.is_ghost() || !is_reg(f.mode) {
+            return false;
+        }
+        pkg.read_file(&f.name).lines().any(|line| {
+            let trimmed = line.trim_start();
+            let rest = if trimmed.starts_with("source")
+                && trimmed[6..].starts_with(char::is_whitespace)
+            {
+                &trimmed[6..]
+            } else if trimmed.starts_with(".") && trimmed[1..].starts_with(char::is_whitespace) {
+                &trimmed[1..]
+            } else {
+                return false;
+            };
+            let rest = rest.trim();
+            let rest = rest.trim_end_matches(|c: char| c as u32 == 34 || c as u32 == 39);
+            rest == basename || rest.ends_with(&suffix)
+        })
+    })
+}
+
 /// Whether the package belongs to the sysconfig/fillup mechanism itself:
 /// a binary named `sysconfig` or `fillup`, or one built from that source
 /// package (the shape of `sysconfig-netconfig`, whose source package is
@@ -7440,6 +7477,11 @@ impl FilesCheck {
         }
         if let Ok(Some(caps)) = self.bin_re.captures(fname) {
             if pkgfile.mode & 0o111 == 0 {
+                // A helper library dot-sourced by the package own
+                // entry points is not an entry point itself.
+                if sourced_by_sibling_script(pkg, fname) {
+                    return;
+                }
                 add_info(
                     out,
                     Level::Warning,
@@ -9843,6 +9885,133 @@ mod tests {
         // A real non-executable regular file still fires.
         let names = named_pkg_findings("foo", vec![mode_file("/usr/bin/foo-data", 0o100644)]);
         assert_has(&names, "non-executable-in-bin");
+    }
+
+    fn nonexec_details(pkg: &Pkg) -> Vec<String> {
+        run_check_binary(pkg)
+            .into_iter()
+            .filter(|(n, _)| n == "non-executable-in-bin")
+            .map(|(_, d)| d)
+            .collect()
+    }
+
+    #[test]
+    fn non_executable_in_bin_sourced_by_sibling_is_silent() {
+        // Bare dot-source form (clevis shape) silences the candidate.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/bin/clevis-luks-common-functions",
+                    r#"# common functions
+"#,
+                ),
+                (
+                    "/usr/bin/clevis-luks-bind",
+                    r#"#!/bin/sh
+. clevis-luks-common-functions
+"#,
+                ),
+            ],
+        );
+        let details = nonexec_details(&pkg);
+        assert!(
+            !details
+                .iter()
+                .any(|d| d.contains("clevis-luks-common-functions")),
+            "sourced helper must stay silent: {details:?}"
+        );
+        // Dirname form (brltty shape) silences too.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/bin/brltty-prologue.sh",
+                    r#"# prologue
+"#,
+                ),
+                (
+                    "/usr/bin/brltty-term",
+                    r#"#!/bin/sh
+. "$(dirname "${0}")/brltty-prologue.sh"
+"#,
+                ),
+            ],
+        );
+        let details = nonexec_details(&pkg);
+        assert!(
+            !details.iter().any(|d| d.contains("brltty-prologue.sh")),
+            "dirname-sourced helper must stay silent: {details:?}"
+        );
+        // A comment mention does not credit.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/bin/clevis-luks-common-functions",
+                    r#"# common functions
+"#,
+                ),
+                (
+                    "/usr/bin/clevis-luks-bind",
+                    r#"#!/bin/sh
+# see clevis-luks-common-functions for helpers
+"#,
+                ),
+            ],
+        );
+        let details = nonexec_details(&pkg);
+        assert!(
+            details
+                .iter()
+                .any(|d| d.contains("clevis-luks-common-functions")),
+            "comment mention must still fire: {details:?}"
+        );
+        // An execute form does not credit.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[
+                (
+                    "/usr/bin/clevis-luks-common-functions",
+                    r#"# common functions
+"#,
+                ),
+                (
+                    "/usr/bin/clevis-luks-bind",
+                    r#"#!/bin/sh
+./clevis-luks-common-functions
+"#,
+                ),
+            ],
+        );
+        let details = nonexec_details(&pkg);
+        assert!(
+            details
+                .iter()
+                .any(|d| d.contains("clevis-luks-common-functions")),
+            "execute form must still fire: {details:?}"
+        );
+        // A self-reference does not credit.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[(
+                "/usr/bin/clevis-luks-common-functions",
+                r#". clevis-luks-common-functions
+"#,
+            )],
+        );
+        let details = nonexec_details(&pkg);
+        assert!(
+            details
+                .iter()
+                .any(|d| d.contains("clevis-luks-common-functions")),
+            "self-reference must still fire: {details:?}"
+        );
     }
 
     /// A synthetic package carrying a single standard-dir entry,
