@@ -46,6 +46,11 @@ binary-or-shlib-defines-rpath="""
 The binary or shared library defines `RPATH' (or `RUNPATH') that points
 to a non-system library path.
 """
+binary-or-shlib-defines-rpath-and-runpath="""
+The binary or shared library carries both `DT_RPATH' and
+`DT_RUNPATH'. The two tags have different search semantics, so
+carrying both is a defect.
+"""
 statically-linked-binary="""
 The package installs a statically linked binary or object file.
 
