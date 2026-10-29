@@ -5,6 +5,12 @@
 //! `desktopfile-duplicate-section`, `desktopfile-duplicate-option`,
 //! `non-utf8-desktopfile`, `desktopfile-without-binary`.
 //!
+//! Plus two findings the reference has no counterpart for, from the
+//! rpminspect desktop inspection (issue #1223): the Icon a desktop
+//! file names must resolve in this package when it is an absolute
+//! path (`desktopfile-icon-not-found`), and a resolved icon file
+//! must be world-readable (`desktopfile-icon-not-readable`).
+//!
 //! The reference runs `desktop-file-validate` and then parses the file with
 //! `configparser`. This port runs `desktop-file-validate` when available and
 //! always does the native parse: missing header, duplicate sections/options,
@@ -21,9 +27,14 @@ use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::pkgfile::{PkgFile, is_dir, is_reg, is_symlink};
 use crate::tools::{Tool, ToolSource, test_source};
 
 const STANDARD_BIN_DIRS: [&str; 4] = ["/bin", "/sbin", "/usr/bin", "/usr/sbin"];
+
+/// Icon theme file extensions tried for a bare Icon name, mirroring the
+/// freedesktop theme lookup (and rpminspect's fallback set).
+const ICON_EXTENSIONS: [&str; 4] = ["png", "svg", "svgz", "xpm"];
 
 /// Parsed desktop file: section -> (key -> value).
 type DesktopSections = HashMap<String, HashMap<String, String>>;
@@ -225,6 +236,179 @@ impl MenuXDGCheck {
                 .exists()
         })
     }
+
+    /// Normalise an absolute path, resolving `.` and `..` segments, so a
+    /// symlink chain step matches the package file list exactly.
+    fn normalize_icon_path(path: &str) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                _ => parts.push(part),
+            }
+        }
+        format!("/{}", parts.join("/"))
+    }
+
+    /// Follow a package file through its symlink chain, staying inside
+    /// this package. Returns the final entry, or `None` when the chain
+    /// leaves the package or loops: both stay silent, since the icon
+    /// may resolve through a sibling or system package.
+    fn resolve_icon_file<'a>(pkg: &'a Pkg, start: &str) -> Option<&'a PkgFile> {
+        let mut current = start.to_string();
+        for _ in 0..10 {
+            let entry = pkg.files.iter().find(|f| f.name == current)?;
+            if !is_symlink(entry.mode) {
+                return Some(entry);
+            }
+            let linkto = entry.linkto.as_str();
+            if linkto.is_empty() {
+                return None;
+            }
+            current = if linkto.starts_with('/') {
+                linkto.to_string()
+            } else {
+                let dir = current.rfind('/').map_or("", |i| &current[..i]);
+                if dir.is_empty() {
+                    linkto.to_string()
+                } else {
+                    Self::normalize_icon_path(&format!("{dir}/{linkto}"))
+                }
+            };
+        }
+        None
+    }
+
+    /// Files under the icon theme dirs (or pixmaps) that could provide
+    /// a bare or suffixed Icon name. Directory entries never count: a
+    /// directory named like the icon is not an icon file.
+    fn theme_icon_candidates<'a>(pkg: &'a Pkg, icon: &str, suffixed: bool) -> Vec<&'a PkgFile> {
+        pkg.files
+            .iter()
+            .filter(|f| {
+                if is_dir(f.mode) {
+                    return false;
+                }
+                let name = f.name.as_str();
+                if !(name.starts_with("/usr/share/icons/")
+                    || name.starts_with("/usr/share/pixmaps/"))
+                {
+                    return false;
+                }
+                let base = name.rsplit('/').next().unwrap_or(name);
+                if suffixed {
+                    base == icon
+                } else {
+                    base == icon
+                        || match base.rsplit_once('.') {
+                            Some((stem, ext)) => stem == icon && ICON_EXTENSIONS.contains(&ext),
+                            None => false,
+                        }
+                }
+            })
+            .collect()
+    }
+
+    /// Icon existence for one desktop entry (issue #1223). Fire only
+    /// where absence is decidable from this package alone: an absolute
+    /// Icon path must resolve to a regular file in this package, and a
+    /// resolved icon file must be world-readable. A bare or suffixed
+    /// name never fires on absence (a system icon theme may provide
+    /// it). Ghost entries, symlink chains leaving the package, and
+    /// loops all stay silent. Only the `[Desktop Entry]` Icon is read;
+    /// action icons are out of scope.
+    fn check_icon(pkg: &Pkg, out: &mut Filter, filename: &str, entry: &HashMap<String, String>) {
+        let Some(icon) = entry.get("icon") else {
+            return;
+        };
+        if icon.is_empty() || icon.contains("%{") {
+            return;
+        }
+        if icon.starts_with('/') {
+            let Some(start) = pkg.files.iter().find(|f| f.name == *icon) else {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "desktopfile-icon-not-found",
+                    &[filename, icon],
+                );
+                return;
+            };
+            if start.is_ghost() {
+                return;
+            }
+            match Self::resolve_icon_file(pkg, icon) {
+                None => {}
+                Some(target) => {
+                    if target.is_ghost() {
+                        return;
+                    }
+                    if !is_reg(target.mode) {
+                        add_info(
+                            out,
+                            Level::Warning,
+                            pkg,
+                            "desktopfile-icon-not-found",
+                            &[filename, icon],
+                        );
+                    } else if target.mode & 0o004 == 0 {
+                        add_info(
+                            out,
+                            Level::Warning,
+                            pkg,
+                            "desktopfile-icon-not-readable",
+                            &[filename, icon],
+                        );
+                    }
+                }
+            }
+            return;
+        }
+        if icon.contains('/') {
+            // A relative path is malformed; the validator's domain.
+            return;
+        }
+        let suffixed = icon
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ICON_EXTENSIONS.contains(&ext));
+        let mut readable = false;
+        let mut unreadable = false;
+        for candidate in Self::theme_icon_candidates(pkg, icon, suffixed) {
+            if candidate.is_ghost() {
+                // A managed icon file counts as present.
+                return;
+            }
+            match Self::resolve_icon_file(pkg, &candidate.name) {
+                None => {}
+                Some(target) => {
+                    if target.is_ghost() {
+                        return;
+                    }
+                    if !is_reg(target.mode) {
+                        continue;
+                    }
+                    if target.mode & 0o004 == 0 {
+                        unreadable = true;
+                    } else {
+                        readable = true;
+                    }
+                }
+            }
+        }
+        if unreadable && !readable {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "desktopfile-icon-not-readable",
+                &[filename, icon],
+            );
+        }
+    }
 }
 
 impl MenuXDGCheck {
@@ -359,6 +543,9 @@ impl Check for MenuXDGCheck {
                                 &[filename, binary],
                             );
                         }
+                    }
+                    if let Some(entry) = sections.get("Desktop Entry") {
+                        Self::check_icon(pkg, out, filename, entry);
                     }
                 }
             }
@@ -692,5 +879,349 @@ mod tests {
         check.checked_files = 4;
         check.reset();
         assert_eq!(check.checked_files(), Some(0));
+    }
+
+    /// Drive check_binary over a desktop file plus icon files, with the
+    /// validator pointed at an empty dir so it never runs. Returns only
+    /// the icon findings, each with its level.
+    fn run_icon_desktop(
+        content: &str,
+        icon_files: Vec<crate::pkg::pkgfile::PkgFile>,
+    ) -> Vec<(String, String, Level)> {
+        let dir = tempfile::tempdir().unwrap();
+        let app_dir = dir.path().join("usr/share/applications");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let path = app_dir.join("app.desktop");
+        std::fs::write(&path, content).unwrap();
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
+        let name = "/usr/share/applications/app.desktop";
+        pkg.files = vec![crate::pkg::pkgfile::PkgFile {
+            name: name.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }];
+        pkg.files.extend(icon_files);
+        pkg.ghost_files.clear();
+        let config = Config::default();
+        let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
+        let mut check = MenuXDGCheck::with_tool_dir(Some(&bin_dir));
+        check.check_binary(&pkg, &config, &mut out);
+        let levels = out.result_levels().to_vec();
+        let results: Vec<(String, String, Level)> = out
+            .results()
+            .iter()
+            .zip(levels.iter())
+            .filter(|((n, _), _)| n.starts_with("desktopfile-icon"))
+            .map(|((n, d), l)| (n.clone(), d.clone(), *l))
+            .collect();
+        drop(dir);
+        results
+    }
+
+    fn icon_desktop(icon: &str) -> String {
+        format!("[Desktop Entry]\nType=Application\nName=App\nExec=/usr/bin/app\nIcon={icon}\n")
+    }
+
+    fn icon_file(name: &str, mode: u32) -> crate::pkg::pkgfile::PkgFile {
+        crate::pkg::pkgfile::PkgFile {
+            name: name.to_string(),
+            mode,
+            ..Default::default()
+        }
+    }
+
+    fn icon_symlink(name: &str, linkto: &str) -> crate::pkg::pkgfile::PkgFile {
+        crate::pkg::pkgfile::PkgFile {
+            name: name.to_string(),
+            mode: 0o120777,
+            linkto: linkto.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn icon_ghost(name: &str) -> crate::pkg::pkgfile::PkgFile {
+        crate::pkg::pkgfile::PkgFile {
+            name: name.to_string(),
+            mode: 0o100644,
+            flags: crate::pkg::pkgfile::RPMFILE_GHOST,
+            ..Default::default()
+        }
+    }
+
+    fn assert_icon_finding(results: &[(String, String, Level)], tag: &str, icon: &str) {
+        assert_eq!(results.len(), 1, "expected one icon finding: {results:?}");
+        assert_eq!(results[0].0, tag, "tag: {results:?}");
+        assert_eq!(results[0].2, Level::Warning, "level: {results:?}");
+        assert!(
+            results[0].1.contains(icon),
+            "detail names the icon: {:?}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn icon_absolute_missing_fires() {
+        let results = run_icon_desktop(&icon_desktop("/usr/share/doc/foo/icons/Foo.png"), vec![]);
+        assert_icon_finding(&results, "desktopfile-icon-not-found", "Foo.png");
+    }
+
+    #[test]
+    fn icon_absolute_present_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("/usr/share/icons/hicolor/48x48/apps/app.png"),
+            vec![icon_file(
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+                0o100644,
+            )],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_absolute_unreadable_fires() {
+        let results = run_icon_desktop(
+            &icon_desktop("/usr/share/icons/hicolor/48x48/apps/app.png"),
+            vec![icon_file(
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+                0o100600,
+            )],
+        );
+        assert_icon_finding(&results, "desktopfile-icon-not-readable", "app.png");
+    }
+
+    #[test]
+    fn icon_absolute_symlink_to_file_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("/usr/share/icons/hicolor/48x48/apps/app.png"),
+            vec![
+                icon_symlink(
+                    "/usr/share/icons/hicolor/48x48/apps/app.png",
+                    "/usr/share/app/icon.png",
+                ),
+                icon_file("/usr/share/app/icon.png", 0o100644),
+            ],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_absolute_symlink_to_unreadable_fires() {
+        let results = run_icon_desktop(
+            &icon_desktop("/usr/share/icons/hicolor/48x48/apps/app.png"),
+            vec![
+                icon_symlink(
+                    "/usr/share/icons/hicolor/48x48/apps/app.png",
+                    "/usr/share/app/icon.png",
+                ),
+                icon_file("/usr/share/app/icon.png", 0o100600),
+            ],
+        );
+        assert_icon_finding(&results, "desktopfile-icon-not-readable", "app.png");
+    }
+
+    #[test]
+    fn icon_absolute_symlink_external_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("/usr/share/icons/hicolor/48x48/apps/app.png"),
+            vec![icon_symlink(
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+                "/usr/share/other/icon.png",
+            )],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_absolute_symlink_loop_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("/usr/share/icons/hicolor/48x48/apps/app.png"),
+            vec![
+                icon_symlink(
+                    "/usr/share/icons/hicolor/48x48/apps/app.png",
+                    "/usr/share/app/other.png",
+                ),
+                icon_symlink(
+                    "/usr/share/app/other.png",
+                    "/usr/share/icons/hicolor/48x48/apps/app.png",
+                ),
+            ],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_absolute_ghost_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("/usr/share/icons/hicolor/48x48/apps/app.png"),
+            vec![icon_ghost("/usr/share/icons/hicolor/48x48/apps/app.png")],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_absolute_dir_fires() {
+        let results = run_icon_desktop(
+            &icon_desktop("/usr/share/icons/hicolor/48x48/apps/app.png"),
+            vec![icon_file(
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+                0o40755,
+            )],
+        );
+        assert_icon_finding(&results, "desktopfile-icon-not-found", "app.png");
+    }
+
+    #[test]
+    fn icon_absolute_local_path_fires() {
+        let results = run_icon_desktop(&icon_desktop("/usr/local/share/foo/icons/foo.png"), vec![]);
+        assert_icon_finding(&results, "desktopfile-icon-not-found", "foo.png");
+    }
+
+    #[test]
+    fn icon_bare_resolved_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("app"),
+            vec![icon_file(
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+                0o100644,
+            )],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_bare_unresolved_silent() {
+        let results = run_icon_desktop(&icon_desktop("app"), vec![]);
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_bare_unreadable_fires() {
+        let results = run_icon_desktop(
+            &icon_desktop("app"),
+            vec![icon_file(
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+                0o100600,
+            )],
+        );
+        assert_icon_finding(&results, "desktopfile-icon-not-readable", "app");
+    }
+
+    #[test]
+    fn icon_bare_dir_match_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("app"),
+            vec![icon_file("/usr/share/pixmaps/app", 0o40755)],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_bare_wrong_extension_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("app"),
+            vec![icon_file(
+                "/usr/share/icons/hicolor/48x48/apps/app.jpg",
+                0o100644,
+            )],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_bare_prefix_no_match_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("app"),
+            vec![icon_file(
+                "/usr/share/icons/hicolor/48x48/apps/app2.png",
+                0o100644,
+            )],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_suffixed_resolved_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("app.png"),
+            vec![icon_file(
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+                0o100644,
+            )],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_suffixed_wrong_extension_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("app.png"),
+            vec![icon_file(
+                "/usr/share/icons/hicolor/48x48/apps/app.svg",
+                0o100644,
+            )],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_suffixed_unreadable_fires() {
+        let results = run_icon_desktop(
+            &icon_desktop("app.png"),
+            vec![icon_file(
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+                0o100600,
+            )],
+        );
+        assert_icon_finding(&results, "desktopfile-icon-not-readable", "app.png");
+    }
+
+    #[test]
+    fn icon_missing_silent() {
+        let results = run_icon_desktop(
+            "[Desktop Entry]\nType=Application\nName=App\nExec=/usr/bin/app\n",
+            vec![],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_empty_silent() {
+        let results = run_icon_desktop(&icon_desktop(""), vec![]);
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_macro_silent() {
+        let results = run_icon_desktop(&icon_desktop("%{foo}"), vec![]);
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_relative_slash_silent() {
+        let results = run_icon_desktop(&icon_desktop("icons/app.png"), vec![]);
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    #[test]
+    fn icon_theme_symlinks_external_silent() {
+        let results = run_icon_desktop(
+            &icon_desktop("veusz"),
+            vec![
+                icon_symlink(
+                    "/usr/share/icons/hicolor/48x48/apps/veusz.png",
+                    "/usr/share/veusz/icons/veusz_48.png",
+                ),
+                icon_symlink(
+                    "/usr/share/icons/hicolor/scalable/apps/veusz.svg",
+                    "/usr/share/veusz/icons/veusz.svg",
+                ),
+            ],
+        );
+        assert!(results.is_empty(), "unexpected findings: {results:?}");
     }
 }

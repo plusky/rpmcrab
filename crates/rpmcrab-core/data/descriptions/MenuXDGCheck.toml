@@ -8,6 +8,15 @@ desktopfile-without-binary="""
 The .desktop file refers to a binary that is not present in the package.
 You should check the Requires or see if this is not an error.
 """
+desktopfile-icon-not-found="""
+The .desktop file refers to an icon by absolute path that is not
+present in the package. Ship the icon file, or refer to it by theme
+name instead.
+"""
+desktopfile-icon-not-readable="""
+The .desktop file refers to an icon file that is not world-readable,
+so the desktop cannot display it. Make the icon file world-readable.
+"""
 desktopfile-duplicate-section="""
 The .desktop file contains the mentioned section name twice, which
 can trigger parsing ambiguities. Remove the duplicate.
