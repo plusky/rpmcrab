@@ -17,6 +17,7 @@ each exercising a particular check behavior.
 | `filescheck-devel-1.0-1.noarch.rpm` | devel package file placement |
 | `filescheck-deps-ok-1.0-1.noarch.rpm` | Dependency checks |
 | `filescheck-scripts-1.0-1.noarch.rpm` | Scriptlet content checks |
+| `pem-private-key-fixture-1.0-1.noarch.rpm` | pem-private-key whole-content scan: genuine five-dash header fires, certificate/malformed/text stay silent |
 | `w6-sourced-script-1.0-1.noarch.rpm` | sourced-script-with-shebang: profile.d scripts with/without shebang, executable variant, .pm control |
 | `postcheck-pretrans-lua-1.0-1.noarch.rpm` | `%pretrans -p <lua>` stays silent (pretrans-not-lua, #140) |
 | `ldconfig-test-1.0-1.noarch.rpm` | ldconfig scriptlet handling (#1602) |

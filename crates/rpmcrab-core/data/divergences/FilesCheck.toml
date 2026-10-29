@@ -1074,3 +1074,10 @@ check = "symlink-should-be-absolute"
 kind = "missing"
 reason = "Intentional: the check is dead by design under the shipped config — UseRelativeSymlinks is true in the builtin defaults and inherited unchanged by every flavour, so the config gate on this finding can never open. Its predicate is empty over Factory even when ungated (0 firings over 136,060 ../-leading relative links). The reference still emits it when the config is flipped; the port does not ship the check."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "pem-private-key"
+kind = "behaviour"
+reason = "pem-private-key: the reference pattern spells the private-key header with four leading dashes, so it cannot match a well-formed PEM header; the port uses five dashes and fires on genuine shipped private keys."
+since = "0.4.1"

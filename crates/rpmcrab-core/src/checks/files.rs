@@ -1829,11 +1829,13 @@ fn start_certificate_regex() -> &'static Regex {
 static START_PRIVATE_KEY_REGEX: OnceLock<Regex> = OnceLock::new();
 fn start_private_key_regex() -> &'static Regex {
     START_PRIVATE_KEY_REGEX.get_or_init(
-        || // NB: the reference spells this with four leading dashes, so it cannot
-    // match a well-formed PEM header; replicated exactly.
+        || // NB: the reference spells this with four leading dashes, so it
+    // cannot match a well-formed PEM header; this pattern uses five,
+    // so genuine shipped private keys fire. Diverges from the
+    // reference (see the divergences ledger).
     // Python's `$` matches before a trailing newline, Rust's does not;
     // the explicit newline keeps the reference behavior.
-    Regex::new(r"^----BEGIN PRIVATE KEY-----\n?$").expect("static regex"),
+    Regex::new(r"^-----BEGIN PRIVATE KEY-----\n?$").expect("static regex"),
     )
 }
 
@@ -10209,6 +10211,46 @@ mod tests {
     }
 
     #[test]
+    fn files_check_pem_private_key() {
+        // The reference pattern spells the private-key header with four
+        // leading dashes, so it cannot match a well-formed PEM header;
+        // the port uses five and fires on genuine shipped private keys
+        // (see the divergences ledger). The fixture carries one file
+        // per shape: a genuine five-dash header fires, a certificate
+        // header fires only the certificate tag, a malformed four-dash
+        // header stays silent, and non-PEM text stays silent. The match
+        // is whole-content (anchored, no multiline), so each fixture
+        // file holds exactly its header line.
+        let config = test_config();
+        let (results, _dirs) = run_files_check_session(
+            &[&fixture_path("pem-private-key-fixture-1.0-1.noarch.rpm")],
+            &config,
+        );
+        let key_lines: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "pem-private-key")
+            .map(|(_, l)| l.as_str())
+            .collect();
+        assert_eq!(key_lines.len(), 1, "pem-private-key lines: {key_lines:?}");
+        assert!(
+            key_lines[0].contains("genuine.pem"),
+            "pem-private-key line: {:?}",
+            key_lines[0]
+        );
+        let cert_lines: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "pem-certificate")
+            .map(|(_, l)| l.as_str())
+            .collect();
+        assert_eq!(cert_lines.len(), 1, "pem-certificate lines: {cert_lines:?}");
+        assert!(
+            cert_lines[0].contains("cert.pem"),
+            "pem-certificate line: {:?}",
+            cert_lines[0]
+        );
+    }
+
+    #[test]
     fn files_check_scripts_kitchen_sink() {
         let config = test_config();
         let (names, _dir) = run_files_check(
@@ -10238,9 +10280,11 @@ mod tests {
         assert_has(&names, "non-root-user-log-file");
         assert_has(&names, "non-root-group-log-file");
         assert_has(&names, "non-ghost-file");
-        // pem
+        // pem (the sink's only private-key file carries a malformed
+        // four-dash header, which the fixed pattern no longer matches;
+        // genuine-key coverage lives in files_check_pem_private_key)
         assert_has(&names, "pem-certificate");
-        assert_has(&names, "pem-private-key");
+        assert_lacks(&names, "pem-private-key");
         // misc
         assert_has(&names, "tcl-extension-file");
         assert_has(&names, "python-bytecode-without-source");
