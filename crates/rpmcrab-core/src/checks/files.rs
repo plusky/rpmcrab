@@ -3146,10 +3146,12 @@ fn compiled_cache_of_shipped_source(pkg: &Pkg, pkgfile: &PkgFile) -> bool {
 /// Whether a non-executable file in a bin dir is dot-sourced by another
 /// payload file in the same package: a helper library the package own
 /// entry points source at runtime, not an entry point itself. The
-/// sourcing line must start (after whitespace) with a dot or source
-/// followed by whitespace, and the sourced path must be exactly the
+/// sourcing line must start (after ASCII whitespace) with a dot or source
+/// followed by ASCII whitespace, and the sourced path must be exactly the
 /// candidate basename or end with /<basename>, so comments, strings
-/// and execute forms (./name) do not credit.
+/// and execute forms (./name) do not credit. Quotes around the sourced
+/// path are trimmed from both ends. Each sibling is read only up to the
+/// fragment-proof limit: a sourcing line past it is not proven.
 fn sourced_by_sibling_script(pkg: &Pkg, fname: &str) -> bool {
     let Some(basename) = fname.rsplit("/").next() else {
         return false;
@@ -3162,19 +3164,30 @@ fn sourced_by_sibling_script(pkg: &Pkg, fname: &str) -> bool {
         if f.name == fname || f.is_ghost() || !is_reg(f.mode) {
             return false;
         }
-        pkg.read_file(&f.name).lines().any(|line| {
-            let trimmed = line.trim_start();
+        let Ok(file) = std::fs::File::open(&f.path) else {
+            return false;
+        };
+        let Ok(bytes) = read_prefix(file, FRAGMENT_PROOF_SCAN_LIMIT) else {
+            return false;
+        };
+        let Ok(content) = String::from_utf8(bytes) else {
+            return false;
+        };
+        content.lines().any(|line| {
+            let trimmed = line.trim_ascii_start();
             let rest = if trimmed.starts_with("source")
-                && trimmed[6..].starts_with(char::is_whitespace)
+                && trimmed[6..].starts_with(|c: char| c.is_ascii_whitespace())
             {
                 &trimmed[6..]
-            } else if trimmed.starts_with(".") && trimmed[1..].starts_with(char::is_whitespace) {
+            } else if trimmed.starts_with(".")
+                && trimmed[1..].starts_with(|c: char| c.is_ascii_whitespace())
+            {
                 &trimmed[1..]
             } else {
                 return false;
             };
-            let rest = rest.trim();
-            let rest = rest.trim_end_matches(|c: char| c as u32 == 34 || c as u32 == 39);
+            let rest = rest.trim_ascii();
+            let rest = rest.trim_matches(|c: char| c as u32 == 34 || c as u32 == 39);
             rest == basename || rest.ends_with(&suffix)
         })
     })
@@ -3189,6 +3202,11 @@ fn is_bin_data_file(fname: &str) -> bool {
     let Some(basename) = fname.rsplit("/").next() else {
         return false;
     };
+    // A leading dot is not an extension separator: a dotfile has no
+    // extension, so `.conf` is not a conf data file.
+    if basename.starts_with('.') {
+        return false;
+    }
     let Some(ext) = basename.rsplit(".").next() else {
         return false;
     };
@@ -3214,13 +3232,20 @@ fn is_bin_data_file(fname: &str) -> bool {
     )
 }
 
-/// Whether the first line of a payload file is a shebang. An unreadable
-/// file has no first line, so it counts as shebang-free.
+/// Whether the first bytes of a payload file are a shebang. A file
+/// that cannot be opened is not proven shebang-free, so it counts as
+/// having one: the data credit is withheld (fail closed).
 fn file_has_shebang(pkg: &Pkg, fname: &str) -> bool {
-    pkg.read_file(fname)
-        .lines()
-        .next()
-        .is_some_and(|l| l.starts_with("#!"))
+    let Some(pkgfile) = pkg.files.iter().find(|f| f.name == fname) else {
+        return true;
+    };
+    let Ok(file) = std::fs::File::open(&pkgfile.path) else {
+        return true;
+    };
+    let Ok(bytes) = read_prefix(file, 2) else {
+        return true;
+    };
+    bytes.starts_with(b"#!")
 }
 
 /// Whether the package belongs to the sysconfig/fillup mechanism itself:
@@ -7512,22 +7537,25 @@ impl FilesCheck {
         st: &mut PkgState,
         out: &mut Filter,
     ) {
-        // A %ghost entry is bookkeeping, not payload: the package
-        // installs no file, and the header mode placeholder (regular
-        // file type with permission bits 0) is not a permission.
-        if pkgfile.is_ghost() {
-            return;
-        }
         if let Ok(Some(caps)) = self.bin_re.captures(fname) {
             if pkgfile.mode & 0o111 == 0 {
-                // A helper library dot-sourced by the package own
-                // entry points is not an entry point itself.
-                if sourced_by_sibling_script(pkg, fname) {
+                // A %ghost entry is bookkeeping, not payload: the package
+                // installs no file, and the header mode placeholder
+                // (regular file type with permission bits 0) is not a
+                // permission. The guard covers only this arm: a ghost
+                // entry carrying executable bits still registers in
+                // the duplicate-executable bookkeeping below.
+                if pkgfile.is_ghost() {
                     return;
                 }
                 // Data files shipped in a bin dir by convention are not
                 // entry points either, unless they carry a shebang.
                 if is_bin_data_file(fname) && !file_has_shebang(pkg, fname) {
+                    return;
+                }
+                // A helper library dot-sourced by the package own
+                // entry points is not an entry point itself.
+                if sourced_by_sibling_script(pkg, fname) {
                     return;
                 }
                 add_info(
@@ -10120,6 +10148,79 @@ print("hi")
         assert!(
             details.iter().any(|d| d.contains("helper.sh")),
             "unsourced .sh file must still fire: {details:?}"
+        );
+    }
+
+    #[test]
+    fn non_executable_in_bin_sourced_quoted_is_silent() {
+        // Quotes around the sourced path are trimmed from both ends,
+        // for both the source and the dot form.
+        for line in [
+            ". \"clevis-luks-common-functions\"",
+            "source 'clevis-luks-common-functions'",
+        ] {
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let pkg = content_pkg(
+                &dir,
+                &[
+                    (
+                        "/usr/bin/clevis-luks-common-functions",
+                        "# common functions\n",
+                    ),
+                    ("/usr/bin/clevis-luks-bind", &format!("#!/bin/sh\n{line}\n")),
+                ],
+            );
+            let details = nonexec_details(&pkg);
+            assert!(
+                !details
+                    .iter()
+                    .any(|d| d.contains("clevis-luks-common-functions")),
+                "quoted sourcing {line} must stay silent: {details:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_executable_in_bin_leading_dot_is_not_data() {
+        // A dotfile has no extension: `.conf` is not a conf data file,
+        // so it fires like any other non-executable file in a bin dir.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(&dir, &[("/usr/bin/.conf", "# conf data\n")]);
+        let details = nonexec_details(&pkg);
+        assert!(
+            details.iter().any(|d| d.contains("/usr/bin/.conf")),
+            "dotfile must still fire: {details:?}"
+        );
+    }
+
+    #[test]
+    fn non_executable_in_bin_unreadable_data_file_fires() {
+        // Fail closed: a data file whose payload cannot be opened is
+        // not proven shebang-free, so the data credit is withheld.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(&dir, &[("/usr/bin/ssh.hmac", "0123  ssh\n")]);
+        let path = pkg.files[0].path.clone();
+        std::fs::remove_file(&path).expect("remove payload");
+        let details = nonexec_details(&pkg);
+        assert!(
+            details.iter().any(|d| d.contains("ssh.hmac")),
+            "unreadable data file must still fire: {details:?}"
+        );
+    }
+
+    #[test]
+    fn non_executable_in_bin_ghost_executable_registers_for_duplicates() {
+        // The ghost guard covers only the non-executable arm: a ghost
+        // entry carrying executable bits still registers in the
+        // duplicate-executable bookkeeping.
+        use crate::pkg::pkgfile::RPMFILE_GHOST;
+
+        let mut ghost = mode_file("/usr/bin/mytool", 0o100755);
+        ghost.flags = RPMFILE_GHOST;
+        let names = named_pkg_findings("foo", vec![ghost, mode_file("/bin/mytool", 0o100755)]);
+        assert!(
+            names.iter().any(|n| n == "duplicate-executable"),
+            "ghost executable must register for duplicates: {names:?}"
         );
     }
 
