@@ -352,13 +352,44 @@ impl MenuXDGCheck {
         }
     }
 
-    /// Whether the Exec token resolves through a sibling's
-    /// shipped regular files: any candidate path present in
-    /// the build's inventory.
+    /// Whether one path resolves to a regular file through the
+    /// build's shipped entries, following symlink chains inside
+    /// the build. A chain leaving the build or looping stays
+    /// unresolved: the target is not a file this build ships.
+    fn resolve_in_build(build: &DesktopBuild, start: &str) -> bool {
+        let mut current = start.to_string();
+        for _ in 0..10 {
+            if build.regular.contains(&current) {
+                return true;
+            }
+            let Some(linkto) = build.symlinks.get(&current) else {
+                return false;
+            };
+            if linkto.is_empty() {
+                return false;
+            }
+            current = if linkto.starts_with('/') {
+                linkto.clone()
+            } else {
+                let dir = current.rfind('/').map_or("", |i| &current[..i]);
+                if dir.is_empty() {
+                    linkto.clone()
+                } else {
+                    Self::normalize_icon_path(&format!("{dir}/{linkto}"))
+                }
+            };
+        }
+        false
+    }
+
+    /// Whether the Exec token resolves through a sibling's files:
+    /// any candidate path resolving to a regular file in the
+    /// build's inventory, directly or through a symlink chain
+    /// inside the build.
     fn resolves_via_build(build: &DesktopBuild, binary: &str) -> bool {
         Self::candidate_paths(binary)
             .iter()
-            .any(|path| build.regular.contains(path))
+            .any(|path| Self::resolve_in_build(build, path))
     }
 
     fn build_mut(&mut self, key: &str) -> &mut DesktopBuild {
@@ -1870,6 +1901,92 @@ mod tests {
         let sibling = menu_pkg(&d1, "foo", vec![reg_entry("/usr/libexec/foo")]);
         let src = menu_src_pkg(&d2);
         let results = run_menu_multi(&[src, desktop, sibling]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+    #[test]
+    fn symlink_to_sibling_credited_on_complete_build() {
+        // cosmic-applet shape: the desktop package ships the
+        // Exec path as a relative symlink; the sibling ships
+        // the target.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "cosmic-applet-audio",
+            vec![
+                desktop_entry(
+                    d0.path(),
+                    "/usr/share/applications/cosmic-applet-audio.desktop",
+                    "/usr/bin/cosmic-applet-audio",
+                ),
+                link_entry("/usr/bin/cosmic-applet-audio", "cosmic-applets"),
+            ],
+        );
+        let sibling = menu_pkg(
+            &d1,
+            "cosmic-applets",
+            vec![reg_entry("/usr/bin/cosmic-applets")],
+        );
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn symlink_to_nowhere_fires_on_complete_build() {
+        // Complete build, but the symlink chain leaves the build.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "cosmic-applet-audio",
+            vec![
+                desktop_entry(
+                    d0.path(),
+                    "/usr/share/applications/cosmic-applet-audio.desktop",
+                    "/usr/bin/cosmic-applet-audio",
+                ),
+                link_entry("/usr/bin/cosmic-applet-audio", "missing-target"),
+            ],
+        );
+        let sibling = menu_pkg(&d1, "cosmic-applets", vec![reg_entry("/usr/bin/unrelated")]);
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn symlink_target_in_foreign_build_fires() {
+        // The target ships in the run, but in a package of
+        // another build: the chain leaves this build and the
+        // candidate fires.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "cosmic-applet-audio",
+            vec![
+                desktop_entry(
+                    d0.path(),
+                    "/usr/share/applications/cosmic-applet-audio.desktop",
+                    "/usr/bin/cosmic-applet-audio",
+                ),
+                link_entry("/usr/bin/cosmic-applet-audio", "cosmic-applets"),
+            ],
+        );
+        let foreign = menu_foreign_pkg(
+            &d1,
+            "cosmic-applets",
+            vec![reg_entry("/usr/bin/cosmic-applets")],
+        );
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, foreign]);
         assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
     }
 }
