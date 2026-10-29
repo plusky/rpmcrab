@@ -1,11 +1,10 @@
 # PythonModuleStems: distro python-module stem equivalences
-# appended by rpmcrab (not from upstream; see
-# PYTHON_MODULE_STEMS in scripts/generate-distro-configs.py).
+# maintained in this file (not from upstream).
 # A package declaring `module` that Requires the stem form
 # satisfies the requirement under the SUSE flavours only;
 # the core check reads this key generically and applies
 # nothing when it is absent. Staleness is flagged by
-# scripts/check-python-module-stems.py (monthly corpus run).
+# scripts/check-python-module-stems.py.
 [[PythonModuleStems]]
 module = "avocado-framework"
 stems = ["avocado"]
