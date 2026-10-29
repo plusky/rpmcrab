@@ -424,6 +424,9 @@ struct ElfSection {
     /// The section header type (`SHT_SYMTAB`, `SHT_PROGBITS`, ...):
     /// the symbol-table test reads the type, not the name.
     sh_type: u32,
+    /// Raw section-header flags (`sh_flags`): the ET_REL
+    /// `.note.GNU-stack` validity arm reads them, not the name.
+    sh_flags: u64,
 }
 
 struct ElfProgramHeader {
@@ -1028,6 +1031,7 @@ impl ReadelfInfo {
                 name: name.clone(),
                 size: sh.sh_size,
                 sh_type: sh.sh_type,
+                sh_flags: sh.sh_flags,
             }]);
         }
 
@@ -5754,7 +5758,7 @@ impl BinariesCheck {
         info: &ReadelfInfo,
         out: &mut Filter,
     ) {
-        use goblin::elf::header::{ET_DYN, ET_EXEC};
+        use goblin::elf::header::{ET_DYN, ET_EXEC, ET_REL};
         if pkg.arch.is_empty()
             || !default_executable_stack_archs()
                 .is_match(&pkg.arch)
@@ -5776,6 +5780,31 @@ impl BinariesCheck {
                 .any(|p| pkgfile.name.starts_with(p))
         {
             return;
+        }
+        if info.elf_type == ET_REL && !foreign_elf_machine(info.elf_machine, &pkg.arch) {
+            // A relocatable object carries no programme headers, so the
+            // linked-image arms below cannot judge it; its stack
+            // marking lives in the `.note.GNU-stack` section instead,
+            // which may carry no flag besides SHF_EXECINSTR: any other
+            // flag states a stack property the link step must not
+            // inherit from this object.
+            for elf_file in &info.sections {
+                for section in elf_file {
+                    if section.name == ".note.GNU-stack"
+                        && section.sh_flags & !u64::from(goblin::elf::section_header::SHF_EXECINSTR)
+                            != 0
+                    {
+                        add_info(
+                            out,
+                            Level::Error,
+                            pkg,
+                            "invalid-note-GNU-stack-flags",
+                            &[&pkgfile.name],
+                        );
+                        return;
+                    }
+                }
+            }
         }
         let stack_headers: Vec<&ElfProgramHeader> = info
             .program_headers
@@ -5826,6 +5855,20 @@ impl BinariesCheck {
             // flags state the target ABI's conventions, not this
             // package's hardening.
             add_info(out, Level::Error, pkg, "executable-stack", &[&pkgfile.name]);
+        } else if !foreign_elf_machine(info.elf_machine, &pkg.arch)
+            && !(stack_headers[0].flags.contains('R') && stack_headers[0].flags.contains('W'))
+        {
+            // The executable-flag population is charged by the arm
+            // above, so what reaches here carries no E: only RW
+            // remains valid, and a flag set that is neither RW nor
+            // executable states no usable stack policy.
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "invalid-PT_GNU_STACK-flags",
+                &[&pkgfile.name],
+            );
         }
     }
 
@@ -12016,6 +12059,7 @@ description = "explicit priority string bypasses the system crypto policy"
             } else {
                 0
             },
+            sh_flags: 0,
         };
 
         let results = run(vec![
@@ -12171,6 +12215,7 @@ description = "explicit priority string bypasses the system crypto policy"
             } else {
                 0
             },
+            sh_flags: 0,
         }
     }
 
@@ -12324,6 +12369,210 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_executable_stack(&pkg, &pkgfile, &info, &mut out);
         out.results().to_vec()
+    }
+
+    /// A minimal ELF64 linked image with one PT_LOAD and one
+    /// PT_GNU_STACK carrying the given p_flags, parseable by goblin:
+    /// the byte-level counterpart of the synthetic `ReadelfInfo`
+    /// shapes for the GNU_STACK flag-set predicate.
+    fn elf_with_gnu_stack_flags(e_type: u16, machine: u16, gnu_stack_flags: u32) -> Vec<u8> {
+        let mut elf: Vec<u8> = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        elf.extend_from_slice(&e_type.to_le_bytes());
+        elf.extend_from_slice(&machine.to_le_bytes());
+        elf.extend_from_slice(&1u32.to_le_bytes()); // version
+        elf.extend_from_slice(&0u64.to_le_bytes()); // entry
+        elf.extend_from_slice(&64u64.to_le_bytes()); // phoff
+        elf.extend_from_slice(&0u64.to_le_bytes()); // shoff
+        elf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        elf.extend_from_slice(&64u16.to_le_bytes()); // ehsize
+        elf.extend_from_slice(&56u16.to_le_bytes()); // phentsize
+        elf.extend_from_slice(&2u16.to_le_bytes()); // phnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shentsize
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shstrndx
+        for (p_type, p_flags) in [
+            (goblin::elf::program_header::PT_LOAD, 5u32),
+            (goblin::elf::program_header::PT_GNU_STACK, gnu_stack_flags),
+        ] {
+            elf.extend_from_slice(&p_type.to_le_bytes());
+            elf.extend_from_slice(&p_flags.to_le_bytes());
+            elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset
+            elf.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
+            elf.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+            elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz
+            elf.extend_from_slice(&0u64.to_le_bytes()); // p_memsz
+            elf.extend_from_slice(&0x1000u64.to_le_bytes()); // p_align
+        }
+        elf
+    }
+
+    /// A minimal ELF64 relocatable object with a `.note.GNU-stack`
+    /// section carrying the given sh_flags, parseable by goblin: the
+    /// byte-level counterpart of the synthetic `ReadelfInfo` shapes
+    /// for the ET_REL note-stack predicate.
+    fn elf_rel_with_note_stack(sh_flags: u64) -> Vec<u8> {
+        use goblin::elf::header::{EM_X86_64, ET_REL};
+        use goblin::elf::section_header::{SHT_NOTE, SHT_STRTAB};
+        let mut elf: Vec<u8> = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        elf.extend_from_slice(&ET_REL.to_le_bytes());
+        elf.extend_from_slice(&EM_X86_64.to_le_bytes());
+        elf.extend_from_slice(&1u32.to_le_bytes()); // version
+        elf.extend_from_slice(&0u64.to_le_bytes()); // entry
+        elf.extend_from_slice(&0u64.to_le_bytes()); // phoff
+        elf.extend_from_slice(&64u64.to_le_bytes()); // shoff
+        elf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        elf.extend_from_slice(&64u16.to_le_bytes()); // ehsize
+        elf.extend_from_slice(&56u16.to_le_bytes()); // phentsize
+        elf.extend_from_slice(&0u16.to_le_bytes()); // phnum
+        elf.extend_from_slice(&64u16.to_le_bytes()); // shentsize
+        elf.extend_from_slice(&3u16.to_le_bytes()); // shnum
+        elf.extend_from_slice(&2u16.to_le_bytes()); // shstrndx
+        // Null section.
+        elf.extend_from_slice(&[0u8; 64]);
+        // `.note.GNU-stack`: name offset 1 in the string table below.
+        elf.extend_from_slice(&1u32.to_le_bytes()); // sh_name
+        elf.extend_from_slice(&SHT_NOTE.to_le_bytes()); // sh_type
+        elf.extend_from_slice(&sh_flags.to_le_bytes()); // sh_flags
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_addr
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_offset
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_size
+        elf.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+        elf.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_addralign
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_entsize
+        // `.shstrtab`: name offset 17, data after the headers.
+        elf.extend_from_slice(&17u32.to_le_bytes()); // sh_name
+        elf.extend_from_slice(&SHT_STRTAB.to_le_bytes()); // sh_type
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_flags
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_addr
+        elf.extend_from_slice(&256u64.to_le_bytes()); // sh_offset
+        elf.extend_from_slice(&27u64.to_le_bytes()); // sh_size
+        elf.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+        elf.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+        elf.extend_from_slice(&1u64.to_le_bytes()); // sh_addralign
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_entsize
+        // String table: 64 (header) + 192 (3 headers) = 256.
+        elf.extend_from_slice(b"\0.note.GNU-stack\0.shstrtab\0");
+        elf
+    }
+
+    #[test]
+    fn note_gnu_stack_silent_without_flags_or_exec_only() {
+        use goblin::elf::section_header::SHF_EXECINSTR;
+        // The valid shapes: no flag, or only the executable flag.
+        for flags in [0u64, u64::from(SHF_EXECINSTR)] {
+            let results =
+                executable_stack_results("/usr/lib/foo.o", &elf_rel_with_note_stack(flags));
+            assert_lacks(&results, "invalid-note-GNU-stack-flags");
+            assert_lacks(&results, "missing-PT_GNU_STACK-section");
+            assert_lacks(&results, "executable-stack");
+        }
+    }
+
+    #[test]
+    fn note_gnu_stack_fires_on_flags_besides_exec() {
+        use goblin::elf::section_header::{SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE};
+        // Every flag besides SHF_EXECINSTR fires, alone or combined
+        // with it: the predicate is "no flag besides X", not "has X".
+        for flags in [
+            u64::from(SHF_WRITE),
+            u64::from(SHF_ALLOC),
+            u64::from(SHF_WRITE | SHF_EXECINSTR),
+            u64::from(SHF_ALLOC | SHF_EXECINSTR),
+            u64::from(SHF_WRITE | SHF_ALLOC),
+        ] {
+            let results =
+                executable_stack_results("/usr/lib/foo.o", &elf_rel_with_note_stack(flags));
+            let lines = lines_for(&results, "invalid-note-GNU-stack-flags");
+            assert_eq!(
+                lines.len(),
+                1,
+                "exactly one finding for flags {flags}: {results:?}"
+            );
+            assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+            assert!(
+                lines[0].contains("/usr/lib/foo.o"),
+                "detail names the file: {}",
+                lines[0]
+            );
+        }
+    }
+
+    #[test]
+    fn gnu_stack_flags_rw_silent_rwe_keeps_executable_stack() {
+        use goblin::elf::header::{EM_X86_64, ET_DYN};
+        // PF_R = 4, PF_W = 2, PF_X = 1. RW stays silent; RWE keeps
+        // its existing executable-stack verdict and nothing else.
+        let results = executable_stack_results(
+            "/usr/bin/tool",
+            &elf_with_gnu_stack_flags(ET_DYN, EM_X86_64, 6),
+        );
+        assert_lacks(&results, "invalid-PT_GNU_STACK-flags");
+        assert_lacks(&results, "executable-stack");
+        let results = executable_stack_results(
+            "/usr/bin/tool",
+            &elf_with_gnu_stack_flags(ET_DYN, EM_X86_64, 7),
+        );
+        assert_eq!(
+            lines_for(&results, "executable-stack").len(),
+            1,
+            "RWE keeps firing executable-stack: {results:?}"
+        );
+        assert_lacks(&results, "invalid-PT_GNU_STACK-flags");
+    }
+
+    #[test]
+    fn gnu_stack_flags_invalid_sets_fire() {
+        use goblin::elf::header::{EM_X86_64, ET_DYN};
+        // The flag sets the existing arms leave silent -- none,
+        // read-only, write-only -- fire the new finding; X-bearing
+        // sets keep executable-stack and nothing else.
+        for flags in [0u32, 4, 2] {
+            let results = executable_stack_results(
+                "/usr/bin/tool",
+                &elf_with_gnu_stack_flags(ET_DYN, EM_X86_64, flags),
+            );
+            let lines = lines_for(&results, "invalid-PT_GNU_STACK-flags");
+            assert_eq!(
+                lines.len(),
+                1,
+                "exactly one finding for flags {flags}: {results:?}"
+            );
+            assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+            assert_lacks(&results, "executable-stack");
+        }
+        for flags in [1u32, 5, 3] {
+            let results = executable_stack_results(
+                "/usr/bin/tool",
+                &elf_with_gnu_stack_flags(ET_DYN, EM_X86_64, flags),
+            );
+            assert_eq!(
+                lines_for(&results, "executable-stack").len(),
+                1,
+                "X-bearing flags {flags} keep firing executable-stack: {results:?}"
+            );
+            assert_lacks(&results, "invalid-PT_GNU_STACK-flags");
+        }
+    }
+
+    #[test]
+    fn gnu_stack_flags_silent_for_foreign_machine() {
+        use goblin::elf::header::{EM_PARISC, EM_X86_64, ET_EXEC};
+        // Byte-level counterpart of the foreign silence: the same
+        // R-only fixture fires on the host machine and stays silent
+        // with the machine patched to a foreign ISA.
+        let bytes = elf_with_gnu_stack_flags(ET_EXEC, EM_X86_64, 4);
+        let results = executable_stack_results("/usr/share/qemu/blob", &bytes);
+        assert_eq!(
+            lines_for(&results, "invalid-PT_GNU_STACK-flags").len(),
+            1,
+            "same-family byte fixture fires: {results:?}"
+        );
+        let mut bytes = bytes;
+        bytes[18..20].copy_from_slice(&EM_PARISC.to_le_bytes());
+        let results = executable_stack_results("/usr/share/qemu/blob", &bytes);
+        assert_lacks(&results, "invalid-PT_GNU_STACK-flags");
+        assert_lacks(&results, "executable-stack");
     }
 
     #[test]
@@ -15792,6 +16041,7 @@ description = "explicit priority string bypasses the system crypto policy"
             name: ".symtab".to_string(),
             size: 100,
             sh_type: goblin::elf::section_header::SHT_PROGBITS,
+            sh_flags: 0,
         });
         let results = run("x86_64", "/usr/bin/foo", 0o100755, &info);
         let lines = lines_for(&results, "binary-or-shlib-without-debuginfo");
@@ -17180,6 +17430,7 @@ description = "explicit priority string bypasses the system crypto policy"
             } else {
                 0
             },
+            sh_flags: 0,
         };
 
         let mut info = syn_info();
