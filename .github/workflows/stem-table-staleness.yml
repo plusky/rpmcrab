@@ -34,6 +34,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The runner image is not relied on for zstd: install it the same
       # way distro-config-sync installs its generator dependencies.
       # The cache key folds the runner OS release into `version` so a
@@ -56,28 +58,57 @@ jobs:
       - name: Fetch Tumbleweed primary metadata
         run: |
           python3 - <<'EOF'
+          import shutil
+          import time
+          import urllib.error
           import urllib.request
           import xml.etree.ElementTree as ET
 
           NS = "http://linux.duke.edu/metadata/repo"
+          # Mirror the generator's primary fetch shape: a stale mirror
+          # serves repomd.xml fine while the primary archive it
+          # references 404s (not synced yet), so each cycle re-fetches
+          # repomd for a fresh MirrorBrain redirect that may land on a
+          # synced mirror. Backoff sleeps only between cycles.
+          CYCLES = 3
+          BACKOFF = [30, 60]
           for repo in ("oss", "non-oss"):
-              repomd = ET.fromstring(
-                  urllib.request.urlopen(
-                      f"https://download.opensuse.org/tumbleweed/repo/{repo}/repodata/repomd.xml",
-                      timeout=120,
-                  ).read()
-              )
-              href = next(
-                  data.find(f"{{{NS}}}location").get("href")
-                  for data in repomd.findall(f"{{{NS}}}data")
-                  if data.get("type") == "primary"
-              )
-              url = f"https://download.opensuse.org/tumbleweed/repo/{repo}/{href}"
-              with urllib.request.urlopen(url, timeout=300) as r, open(
-                  f"primary-{repo}.xml.zst", "wb"
-              ) as fh:
-                  fh.write(r.read())
-              print(f"fetched primary-{repo}.xml.zst from {href}")
+              last_err = None
+              for cycle in range(CYCLES):
+                  try:
+                      with urllib.request.urlopen(
+                          f"https://download.opensuse.org/tumbleweed/repo/{repo}/repodata/repomd.xml",
+                          timeout=120,
+                      ) as r:
+                          repomd = ET.fromstring(r.read())
+                      href = next(
+                          (
+                              data.find(f"{{{NS}}}location").get("href")
+                              for data in repomd.findall(f"{{{NS}}}data")
+                              if data.get("type") == "primary"
+                          ),
+                          None,
+                      )
+                      if href is None:
+                          raise RuntimeError(
+                              f"primary location not found in {repo} repomd.xml"
+                          )
+                      url = f"https://download.opensuse.org/tumbleweed/repo/{repo}/{href}"
+                      with urllib.request.urlopen(url, timeout=300) as r, open(
+                          f"primary-{repo}.xml.zst", "wb"
+                      ) as fh:
+                          shutil.copyfileobj(r, fh)
+                      print(f"fetched primary-{repo}.xml.zst from {href}")
+                      last_err = None
+                      break
+                  except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+                      last_err = e
+                      if cycle + 1 < CYCLES:
+                          time.sleep(BACKOFF[cycle])
+              if last_err is not None:
+                  raise SystemExit(
+                      f"failed to fetch {repo} primary.xml after {CYCLES} cycles: {last_err}"
+                  )
           EOF
       - name: Check stem table staleness
         run: |
