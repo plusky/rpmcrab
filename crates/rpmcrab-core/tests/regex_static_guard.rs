@@ -53,6 +53,10 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("spec.rs", "^%{n}(?:\\s|$)", "package"),
     ("suid_permissions.rs", "Regex::new(&pattern)", "package"),
     ("systemd_install.rs", "Regex::new(pattern)", "package"),
+    // The manual systemctl credit pattern embeds the unit basename
+    // (package data), so it cannot be a static; it is compiled once
+    // per unit, like the per-unit patterns above.
+    ("systemd_install.rs", "manual_re", "package"),
     ("tags.rs", "Regex::new(&re_str)", "package"),
     ("tags.rs", "(?i){pat}", "package"),
     ("tmpfiles.rs", "Regex::new(&pattern)", "package"),
