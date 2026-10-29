@@ -3180,6 +3180,49 @@ fn sourced_by_sibling_script(pkg: &Pkg, fname: &str) -> bool {
     })
 }
 
+/// Extensions of data files shipped in bin dirs by convention, each
+/// grounded in corpus evidence: fpc compiler data (tdf, rsj, pt, ans),
+/// ooRexx class libraries (cls, dtd, xsd, xsl), FIPS sidecars (hmac),
+/// configs (conf, defs), a PowerShell script (ps1), and host-loaded
+/// interpreter sources (lua, tcl).
+fn is_bin_data_file(fname: &str) -> bool {
+    let Some(basename) = fname.rsplit("/").next() else {
+        return false;
+    };
+    let Some(ext) = basename.rsplit(".").next() else {
+        return false;
+    };
+    if ext == basename {
+        return false;
+    }
+    matches!(
+        ext,
+        "ans"
+            | "cls"
+            | "conf"
+            | "defs"
+            | "dtd"
+            | "hmac"
+            | "lua"
+            | "ps1"
+            | "pt"
+            | "rsj"
+            | "tcl"
+            | "tdf"
+            | "xsd"
+            | "xsl"
+    )
+}
+
+/// Whether the first line of a payload file is a shebang. An unreadable
+/// file has no first line, so it counts as shebang-free.
+fn file_has_shebang(pkg: &Pkg, fname: &str) -> bool {
+    pkg.read_file(fname)
+        .lines()
+        .next()
+        .is_some_and(|l| l.starts_with("#!"))
+}
+
 /// Whether the package belongs to the sysconfig/fillup mechanism itself:
 /// a binary named `sysconfig` or `fillup`, or one built from that source
 /// package (the shape of `sysconfig-netconfig`, whose source package is
@@ -7482,6 +7525,11 @@ impl FilesCheck {
                 if sourced_by_sibling_script(pkg, fname) {
                     return;
                 }
+                // Data files shipped in a bin dir by convention are not
+                // entry points either, unless they carry a shebang.
+                if is_bin_data_file(fname) && !file_has_shebang(pkg, fname) {
+                    return;
+                }
                 add_info(
                     out,
                     Level::Warning,
@@ -10011,6 +10059,67 @@ mod tests {
                 .iter()
                 .any(|d| d.contains("clevis-luks-common-functions")),
             "self-reference must still fire: {details:?}"
+        );
+    }
+
+    #[test]
+    fn non_executable_in_bin_data_files_are_silent() {
+        // Compiler data, FIPS sidecar and host-loaded source are silent.
+        for (path, content) in [
+            (
+                "/usr/bin/cvsdiff.tdf",
+                r#"# tdf data
+"#,
+            ),
+            (
+                "/usr/bin/ssh.hmac",
+                r#"0123456789abcdef0123456789abcdef01234567  ssh
+"#,
+            ),
+            (
+                "/usr/bin/brltty-prologue.lua",
+                r#"-- loaded by the brltty binary
+"#,
+            ),
+        ] {
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let pkg = content_pkg(&dir, &[(path, content)]);
+            let details = nonexec_details(&pkg);
+            assert!(
+                details.is_empty(),
+                "data file {path} must stay silent: {details:?}"
+            );
+        }
+        // A shebang script still fires whatever its suffix.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[(
+                "/usr/bin/brltty-prologue.lua",
+                r#"#!/usr/bin/lua
+print("hi")
+"#,
+            )],
+        );
+        let details = nonexec_details(&pkg);
+        assert!(
+            details.iter().any(|d| d.contains("brltty-prologue.lua")),
+            "shebang lua script must still fire: {details:?}"
+        );
+        // A non-data suffix still fires.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[(
+                "/usr/bin/helper.sh",
+                r#"# helper, sourced by nothing
+"#,
+            )],
+        );
+        let details = nonexec_details(&pkg);
+        assert!(
+            details.iter().any(|d| d.contains("helper.sh")),
+            "unsourced .sh file must still fire: {details:?}"
         );
     }
 
