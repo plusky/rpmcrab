@@ -258,10 +258,10 @@ impl Check for SystemdInstallCheck {
             if !file.name.split('/').any(|seg| seg.ends_with(".wants")) {
                 continue;
             }
-            if let Some(target) = pkg.readlink(file) {
-                if let Some(basename) = target.name.rsplit('/').next() {
-                    statically_enabled.insert(basename);
-                }
+            if let Some(target) = pkg.readlink(file)
+                && let Some(basename) = target.name.rsplit('/').next()
+            {
+                statically_enabled.insert(basename);
             }
         }
 
@@ -291,8 +291,15 @@ mod tests {
                       systemd-update-helper install-system-units foo.service\n\
                       systemd-update-helper remove-system-units foo.service\n\
                       systemd-update-helper mark-restart-system-units foo.service";
-        let missing =
-            SystemdInstallCheck::check_unit("foo.service", true, script, script, script, script, false);
+        let missing = SystemdInstallCheck::check_unit(
+            "foo.service",
+            true,
+            script,
+            script,
+            script,
+            script,
+            false,
+        );
         assert!(missing.is_empty(), "{missing:?}");
     }
 
@@ -305,7 +312,8 @@ mod tests {
 
     #[test]
     fn postun_without_restart_is_accepted() {
-        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", ":\n", false);
+        let missing =
+            SystemdInstallCheck::check_unit("foo.service", true, "", "", "", ":\n", false);
         assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
         assert_eq!(missing.len(), 3);
     }
@@ -720,8 +728,7 @@ mod tests {
     #[test]
     fn manual_preset_credits_add_post_only() {
         let post = "/usr/bin/systemctl --no-reload preset foo.service || :";
-        let missing =
-            SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
         assert_eq!(missing.len(), 3, "{missing:?}");
         assert!(!missing.contains(&"systemd-service-without-service_add_post"));
         assert!(missing.contains(&"systemd-service-without-service_add_pre"));
@@ -732,8 +739,7 @@ mod tests {
     #[test]
     fn manual_enable_with_flags_credits_add_post_only() {
         let post = "/usr/bin/systemctl --force enable foo.service || :";
-        let missing =
-            SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
         assert_eq!(missing.len(), 3, "{missing:?}");
         assert!(!missing.contains(&"systemd-service-without-service_add_post"));
     }
@@ -741,27 +747,23 @@ mod tests {
     #[test]
     fn manual_handling_of_other_unit_does_not_credit() {
         let post = "systemctl enable bar.service";
-        let missing =
-            SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
         assert!(missing.contains(&"systemd-service-without-service_add_post"));
     }
 
     #[test]
     fn manual_is_enabled_does_not_credit() {
         let post = "systemctl --quiet is-enabled foo.service";
-        let missing =
-            SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
         assert!(missing.contains(&"systemd-service-without-service_add_post"));
     }
 
     #[test]
     fn static_enable_credits_add_post_only() {
-        let missing =
-            SystemdInstallCheck::check_unit("foo.service", true, "", "", "", "", true);
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", "", true);
         assert_eq!(missing.len(), 3, "{missing:?}");
         assert!(!missing.contains(&"systemd-service-without-service_add_post"));
-        let missing =
-            SystemdInstallCheck::check_unit("foo.service", true, "", "", "", "", false);
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", "", "", "", false);
         assert_eq!(missing.len(), 4, "{missing:?}");
     }
 
