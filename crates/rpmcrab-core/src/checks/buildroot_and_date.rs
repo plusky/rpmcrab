@@ -77,48 +77,27 @@ fn without_matches(data: &str, re: &Regex) -> String {
     out
 }
 
-/// The reference's `prepare_regex`: `%{name}`/`%{version}`/`%{release}`
-/// (either case) stand for a 1-20 character name/version/release token.
-fn buildroot_regex(buildroot: &str) -> Regex {
-    let mut pattern = buildroot.to_string();
-    for m in ["name", "version", "release", "NAME", "VERSION", "RELEASE"] {
-        pattern = pattern.replace(&format!("%{{{m}}}"), r"[\w\!-\.]{1,20}");
-    }
-    Regex::new(&pattern).expect("buildroot pattern")
-}
-
 impl BuildRootAndDateCheck {
     pub fn new(_config: &Config) -> Self {
-        // `rpm.expandMacro('%{?buildroot}')`, empty on rpm >= 4.20 — then the
-        // reference falls back to the literal macro-laden path template.
-        let _ = crate::pkg::init();
-        let _macro_guard = crate::pkg::global_macro_lock();
-        let macros = librpm::macro_context::MacroContext::default();
-        let buildroot = macros.expand("%{?buildroot}").unwrap_or_default();
-        let buildroot = if buildroot.is_empty() {
-            "/%{NAME}-%{VERSION}-build/BUILDROOT/".to_string()
-        } else {
-            buildroot
-        };
-        Self::with_buildroot(&buildroot)
+        Self::with_datetime(time::OffsetDateTime::now_utc())
     }
 
-    /// The macro expansion is platform-dependent (empty on rpm >= 4.20,
-    /// the ambient buildroot otherwise), so tests pin it via this seam.
-    fn with_buildroot(buildroot: &str) -> Self {
-        Self::with_datetime(buildroot, time::OffsetDateTime::now_utc())
-    }
-
-    /// The run instant is a test seam alongside `with_buildroot`: the
-    /// SOURCE_DATE_EPOCH reproducer tests pin the run day instead of
-    /// depending on the machine clock.
-    fn with_datetime(buildroot: &str, now: time::OffsetDateTime) -> Self {
+    /// The run instant is a test seam: the SOURCE_DATE_EPOCH reproducer
+    /// tests pin the run day instead of depending on the machine clock.
+    fn with_datetime(now: time::OffsetDateTime) -> Self {
         Self {
             looksliketime: Regex::new(r"(2[0-3]|[01]?[0-9]):([0-5]?[0-9]):([0-5]?[0-9])")
                 .expect("static"),
             istoday: Regex::new(&format_date(now)).expect("static"),
             today: now.date(),
-            lookslikebuildroot: buildroot_regex(buildroot),
+            // Host-independent buildroot trace: a file's content fires
+            // `file-contains-buildroot` when it contains `/BUILDROOT/` as a
+            // slash-delimited path segment, whatever buildroot prefix
+            // surrounds it. The rule reads no host macro value, so the same
+            // package fires identically whichever machine built or linted it;
+            // a name merely containing BUILDROOT without slash delimiters
+            // does not fire.
+            lookslikebuildroot: Regex::new("/BUILDROOT/").expect("static"),
         }
     }
 }
@@ -213,7 +192,7 @@ mod tests {
     #[test]
     fn run_day_shape() {
         // `%b %e %Y`: month abbrev, space-padded day, year.
-        let check = BuildRootAndDateCheck::with_buildroot("/%{NAME}-%{VERSION}-build/BUILDROOT/");
+        let check = BuildRootAndDateCheck::with_datetime(time::OffsetDateTime::now_utc());
         let today = format_date(check.today.with_time(time::Time::MIDNIGHT).assume_utc());
         let re = Regex::new(r"^[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{4}$").unwrap();
         assert!(is_match(&re, &today), "{today}");
@@ -301,8 +280,7 @@ mod tests {
                 "TZ={:?} did not resolve to the requested offset",
                 std::env::var("TZ").unwrap_or_default()
             );
-            let check =
-                BuildRootAndDateCheck::with_buildroot("/%{NAME}-%{VERSION}-build/BUILDROOT/");
+            let check = BuildRootAndDateCheck::with_datetime(time::OffsetDateTime::now_utc());
             println!(
                 "RPMCRAB-TODAY: {}",
                 format_date(check.today.with_time(time::Time::MIDNIGHT).assume_utc())
@@ -369,10 +347,30 @@ mod tests {
     }
 
     #[test]
-    fn buildroot_regex_expands_placeholders() {
-        let re = buildroot_regex("/%{NAME}-%{VERSION}-build/BUILDROOT/");
-        assert!(is_match(&re, "/foo-1.2-build/BUILDROOT/"));
-        assert!(!is_match(&re, "/usr/lib/foo"));
+    fn buildroot_segment_fires_on_any_buildroot_prefix() {
+        // Host-independent segment match: any /BUILDROOT/ path segment
+        // fires, whatever buildroot prefix surrounds it — including a
+        // host-style prefix the old host-derived template never matched.
+        let results = findings_for_content(
+            "/usr/bin/with-buildroot",
+            "prefix=/home/abuild/rpmbuild/BUILDROOT/pkg-1.0/usr",
+        );
+        assert_eq!(results.len(), 1, "unexpected: {results:?}");
+        assert_eq!(results[0].0, "file-contains-buildroot");
+    }
+
+    #[test]
+    fn buildroot_segment_requires_slash_delimiters() {
+        // BUILDROOT without slash delimiters on both sides stays silent.
+        for content in [
+            "prefix=BUILDROOT-something",
+            "prefix=myBUILDROOT/dir",
+            "prefix=/usr/lib/foo",
+            "prefix=/x/BUILDROOT",
+        ] {
+            let results = findings_for_content("/usr/bin/no-buildroot", content);
+            assert!(results.is_empty(), "content: {content}: {results:?}");
+        }
     }
     use crate::color::Color;
     use crate::pkg::pkgfile::PkgFile;
@@ -414,8 +412,7 @@ mod tests {
         }];
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check =
-            BuildRootAndDateCheck::with_datetime("/%{NAME}-%{VERSION}-build/BUILDROOT/", now);
+        let check = BuildRootAndDateCheck::with_datetime(now);
         check.check_files(&pkg, &mut out, sde);
         out.results().to_vec()
     }
