@@ -52,3 +52,10 @@ check = "DocCheck"
 kind = "behaviour"
 reason = "package-with-huge-docs is skipped for translations packages: packages whose every non-doc regular file is a locale file under /usr/share/locale/. Translated help, man pages and manuals belong in the language split, not in a -doc subpackage. A package with no non-doc regular files is not a translations package. Measured on the Factory corpus: 113 findings sit in translations packages."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "DocCheck"
+kind = "behaviour"
+reason = "package-with-huge-docs is skipped for pure-documentation name families: packages whose name contains -manual, -examples, -demo, -testresults, -html or -apidoc. The -doc remedy is circular for these packages: they are the documentation carrier by construction (manuals, example collections, demos, test-result logs, HTML documentation sets, API documentation). Measured on the Factory corpus: extending the ignore_pkg family quiets 60 of the 331 remaining findings, 0 added; 53 of the 67 pure-documentation packages go quiet and 14 remain (names without a family marker)."
+since = "0.4.1"
