@@ -2484,6 +2484,13 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 
 [[divergence]]
 case = "global"
+check = "non-executable-in-bin"
+kind = "behaviour"
+reason = "Fix-and-diverge: %ghost entries do not fire. A %ghost entry is bookkeeping, not payload: the package installs no file, and the header mode is a placeholder (regular-file type with permission bits 0), not a permission. The corpus instances are update-alternatives placeholders (java-*-devel/headless /usr/bin/java, javac and siblings; cpio-mt /usr/bin/mt): update-alternatives creates the real symlink at install time. The reference fires on the shape (FilesCheck.py _check_file_normal_file_bin has no ghost guard), while its own non-readable check skips ghosts with the same rationale (Do not check permissions for ghosts files, rpmlint#1287). Measured on the Factory corpus (51,589 RPMs): the exemption removes exactly 310 of the 363 findings for this tag, all of them %ghost entries with header mode 0100000, and no other finding changes. Pinned by non_executable_in_bin_ghost_is_silent in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
