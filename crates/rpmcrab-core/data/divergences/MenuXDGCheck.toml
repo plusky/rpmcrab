@@ -66,3 +66,10 @@ check = "MenuXDGCheck"
 kind = "behaviour"
 reason = "Fix-and-diverge: an Exec path shipped by the desktop package as a symlink no longer fires when the symlink chain resolves, inside the same source build, to a regular file shipped by a sibling subpackage, under the same source-complete run gate as the sibling token credit. A chain leaving the build, looping, or resolving only through another build's packages still fires."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: Exec tokens naming base-system binaries no longer fire: bare env, sh, bash, python, false and absolute /bin/sh, /bin/true, /usr/bin/false, /usr/bin/python3. These binaries are guaranteed by the base system even when no package in the run ships them. The acceptance is a deliberate fixed list scoped to this check and this list."
+since = "0.4.1"
