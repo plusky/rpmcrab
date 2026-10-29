@@ -974,6 +974,7 @@ def test_stale_check_catches_name_keyed_entry():
         "invalid-soname",
         "invalid-version",
         "jar-not-indexed",
+        "ldd-failed",
         "lengthy-symlink",
         "lib-package-without-%mklibname",
         "log-files-without-logrotate",
