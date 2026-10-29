@@ -397,16 +397,36 @@ static SHELL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
 const GLIBC_EMPTY_ARCHIVES: &[&str] = &["libanl", "libdl", "libpthread", "librt", "libutil"];
-/// LTO marker symbol prefixes: GCC emits these names in slim-LTO
+/// LTO marker symbol names: GCC emits these names in slim-LTO
 /// objects, where the LTO evidence is in the symbol table rather
 /// than in `.gnu.lto_` sections.
 const LTO_MARKER_SYMBOL_PREFIXES: &[&str] = &["__gnu_lto_v1", "__gnu_lto_slim"];
 
-/// True when a symbol name carries an LTO marker prefix.
+/// True when a symbol name carries an LTO marker: exactly a marker
+/// name, or a marker name with a dot suffix. A longer name sharing
+/// the marker as a bare prefix (a version-like `__gnu_lto_v12`) is
+/// not a marker.
 fn is_lto_marker_symbol(name: &str) -> bool {
-    LTO_MARKER_SYMBOL_PREFIXES
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
+    LTO_MARKER_SYMBOL_PREFIXES.iter().any(|prefix| {
+        name.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    })
+}
+
+/// True when a section name carries GCC LTO content: a `.gnu.lto_.`
+/// name or a dotted `.gnu.debuglto_.` name. Both the archive-text
+/// candidacy and the `lto-bytecode` verdict read this one predicate.
+fn is_lto_section(name: &str) -> bool {
+    name.contains(".gnu.lto_.") || name.starts_with(".gnu.debuglto_.")
+}
+
+/// True when this symbol entry can carry LTO marker evidence: a
+/// defined, non-local entry. Undefined entries are imports and local
+/// entries are object-private; neither is a marker a slim-LTO object
+/// defines.
+fn is_lto_marker_candidate(sym: &goblin::elf::Sym) -> bool {
+    sym.st_shndx != goblin::elf::section_header::SHN_UNDEF as usize
+        && sym.st_bind() != goblin::elf::sym::STB_LOCAL
 }
 
 const LTO_TEXT_LIKE_SECTIONS: &[&str] = &[
@@ -1125,9 +1145,13 @@ impl ReadelfInfo {
         // LTO marker symbols: slim-LTO objects carry `__gnu_lto_v1` /
         // `__gnu_lto_slim` in the static table as absolute markers,
         // not functions, so the FUNC-only collection below never sees
-        // them; the LTO verdicts read this flag instead.
+        // them; the LTO verdicts read this flag instead. Undefined
+        // and local entries never count as markers.
         if !self.has_lto_symbol {
             for sym in elf.syms.iter() {
+                if !is_lto_marker_candidate(&sym) {
+                    continue;
+                }
                 if let Some(name) = elf.strtab.get_at(sym.st_name)
                     && is_lto_marker_symbol(name)
                 {
@@ -5582,20 +5606,21 @@ impl BinariesCheck {
         }
         // The finding charges an archive built with LTO but without
         // -ffat-lto-objects, so candidacy requires LTO content among
-        // the members: a `.gnu.lto_` or `.gnu.debuglto_` section
+        // the members: a `.gnu.lto_.` or `.gnu.debuglto_.` section
         // (GCC), an LTO marker symbol (`__gnu_lto_v1` /
-        // `__gnu_lto_slim`), or an `.llvmbc` embedded-bitcode
+        // `__gnu_lto_slim`, exact or dot-suffixed), or an `.llvmbc` embedded-bitcode
         // section (LLVM) in an ELF member. An archive
         // whose ELF members carry no LTO content -- a plain library of
         // data-only objects, such as the GUID libraries wine ships for
         // its Unix side -- has no text to miss. Members in other object
         // formats neither confer nor block candidacy (see
         // `parse_archive`): the ELF members decide.
-        let has_lto_content = info.sections.iter().flatten().any(|s| {
-            s.name.contains(".gnu.lto_.")
-                || s.name.starts_with(".gnu.debuglto_")
-                || s.name == ".llvmbc"
-        }) || info.has_lto_symbol;
+        let has_lto_content = info
+            .sections
+            .iter()
+            .flatten()
+            .any(|s| is_lto_section(&s.name) || s.name == ".llvmbc")
+            || info.has_lto_symbol;
         if !has_lto_content {
             return;
         }
@@ -5740,16 +5765,16 @@ impl BinariesCheck {
     ) {
         for elf_file in &info.sections {
             for section in elf_file {
-                if section.name.contains(".gnu.lto_.") || section.name.starts_with(".gnu.debuglto_")
-                {
+                if is_lto_section(&section.name) {
                     add_info(out, Level::Error, pkg, "lto-bytecode", &[&pkgfile.name]);
                     return;
                 }
             }
         }
         // Slim-LTO evidence lives in symbol names, not sections: an
-        // object carrying an LTO marker symbol is LTO bytecode even
-        // with no `.gnu.lto_` section.
+        // object carrying an LTO marker symbol (exact or dot-suffixed
+        // marker name; undefined and local entries do not count) is
+        // LTO bytecode even with no `.gnu.lto_` section.
         if info.has_lto_symbol {
             add_info(out, Level::Error, pkg, "lto-bytecode", &[&pkgfile.name]);
         }
@@ -17521,9 +17546,9 @@ description = "explicit priority string bypasses the system crypto policy"
 
     #[test]
     fn lto_marker_symbol_prefixes() {
-        // Prefix semantics: the marker names match by prefix, so a
-        // longer name sharing the prefix still counts, while names
-        // that merely resemble the markers stay silent.
+        // Exact-or-dot-suffix semantics: a marker name matches bare
+        // or with a dot suffix, while a longer name sharing the
+        // marker as a bare prefix (a version-like name) does not.
         for name in ["__gnu_lto_v1", "__gnu_lto_slim", "__gnu_lto_v1.foo"] {
             assert!(is_lto_marker_symbol(name), "{name} must match");
         }
@@ -17532,12 +17557,40 @@ description = "explicit priority string bypasses the system crypto policy"
             "__gnu_lto_sli",
             "__gnu_lto",
             "__gnu_lto_v",
+            "__gnu_lto_v1foo",
+            "__gnu_lto_v12",
+            "__gnu_lto_slimx",
             "_gnu_lto_v1",
             "x__gnu_lto_v1",
             "",
         ] {
             assert!(!is_lto_marker_symbol(name), "{name} must not match");
         }
+    }
+
+    #[test]
+    fn lto_marker_scan_skips_undefined_and_local() {
+        use goblin::elf::section_header::{SHN_ABS, SHN_UNDEF};
+        use goblin::elf::sym::{STB_GLOBAL, STB_LOCAL};
+        fn sym(bind: u8, shndx: usize) -> goblin::elf::Sym {
+            goblin::elf::Sym {
+                st_name: 0,
+                st_info: bind << 4,
+                st_other: 0,
+                st_shndx: shndx,
+                st_value: 0,
+                st_size: 0,
+            }
+        }
+        // A defined global entry counts.
+        assert!(is_lto_marker_candidate(&sym(STB_GLOBAL, SHN_ABS as usize)));
+        // An undefined entry is an import, not a marker.
+        assert!(!is_lto_marker_candidate(&sym(
+            STB_GLOBAL,
+            SHN_UNDEF as usize
+        )));
+        // A local entry is object-private, not a marker.
+        assert!(!is_lto_marker_candidate(&sym(STB_LOCAL, SHN_ABS as usize)));
     }
 
     #[test]
@@ -17548,8 +17601,10 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
 
-        // A `.gnu.debuglto_` section is LTO bytecode.
-        for section in [".gnu.debuglto_.debug_info", ".gnu.debuglto_"] {
+        // A dotted `.gnu.debuglto_.` section is LTO bytecode; the
+        // bare `.gnu.debuglto_` spelling is not a real GCC section.
+        {
+            let section = ".gnu.debuglto_.debug_info";
             let mut info = syn_info();
             info.sections = vec![vec![sec(".text"), sec(section)]];
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -17563,7 +17618,12 @@ description = "explicit priority string bypasses the system crypto policy"
         }
 
         // Lookalike section names stay silent.
-        for section in [".gnu.debuglto", ".debuglto_.debug_info", ".gnu.lto"] {
+        for section in [
+            ".gnu.debuglto",
+            ".gnu.debuglto_",
+            ".debuglto_.debug_info",
+            ".gnu.lto",
+        ] {
             let mut info = syn_info();
             info.sections = vec![vec![sec(".text"), sec(section)]];
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
