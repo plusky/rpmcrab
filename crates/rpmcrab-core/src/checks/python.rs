@@ -3944,6 +3944,29 @@ mod tests {
     }
 
     #[test]
+    fn missing_require_pep503_floor_transfer_keyring_rows_fire() {
+        // The keyring-pass transfer: the metadata declares
+        // `jaraco-classes` with a floor, carried by an unversioned RPM
+        // Require naming it canonically (`python3-jaraco.classes`), so
+        // the floor tag fires for those rows once canonicalisation
+        // applies -- a real metadata/RPM disagreement the
+        // misclassification was hiding.
+        let reqs = PythonCheck::parse_requirements("jaraco-classes>=3.2.3\n", false, "3.13");
+        let findings = findings_with_pkg(&reqs, |pkg| {
+            pkg.req_names = vec!["python3-jaraco.classes".to_string()];
+            pkg.requires = vec![dep("python3-jaraco.classes", 0, None)];
+        });
+        assert_eq!(findings.len(), 1, "findings: {findings:?}");
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-require-unversioned-despite-metadata-floor");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            "python-test.noarch: W: python-require-unversioned-despite-metadata-floor jaraco-classes metadata-floor 3.2.3 rpm-floor unversioned"
+        );
+    }
+
+    #[test]
     fn missing_require_pep503_unflavoured_require_is_bare_only() {
         // A canonically matching but unflavoured Require routes to
         // the unflavoured arm, not the satisfied one.
@@ -4116,6 +4139,66 @@ mod tests {
                 let disk = pkg.dir_name().join(rel);
                 std::fs::create_dir_all(disk.parent().unwrap()).expect("test dirs");
                 std::fs::write(&disk, content).expect("test METADATA");
+                let mut pf = pkg.files[0].clone();
+                pf.name = format!("/{rel}");
+                pf.path = disk.to_string_lossy().into_owned();
+                pkg.files.push(pf);
+            }
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_binary(&pkg, &config, &mut out);
+            let missing: Vec<_> = out
+                .results()
+                .iter()
+                .filter(|(name, _)| name == "python-missing-require")
+                .collect();
+            if expect_finding {
+                assert_eq!(missing.len(), 1, "results: {:?}", out.results());
+            } else {
+                assert!(missing.is_empty(), "results: {:?}", out.results());
+            }
+            std::fs::remove_dir_all(pkg.dir_name().join(&root)).ok();
+        }
+    }
+
+    #[test]
+    fn coshipped_egg_info_dist_satisfies_through_check_binary() {
+        use crate::color::Color;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+
+        // The same co-shipped credit as the dist-info case, with the
+        // satisfying distribution discovered via egg-info: the outer
+        // distribution declares a requirement on a distribution that
+        // ships only as an egg-info directory (no dist-info, no
+        // `python3.Xdist()` Provide). Same tree: satisfied. A
+        // different interpreter's tree: still missing.
+        let outer =
+            "Metadata-Version: 2.1\nName: outer\nVersion: 1.0\nRequires-Dist: vendored-dep\n";
+        for (vendored_tree, expect_finding) in [("python3.13", false), ("python3.11", true)] {
+            let config = Config::default();
+            let mut check = PythonCheck::new(&config);
+            let mut pkg = fixture_pkg_with_requires(&[]);
+            pkg.requires = Vec::new();
+            pkg.provides = Vec::new();
+            let root = format!("coship-egg-{n}-{vendored_tree}");
+            let files = [
+                (
+                    format!("{root}/usr/lib/python3.13/site-packages/outer-1.0.dist-info/METADATA"),
+                    outer,
+                ),
+                (
+                    format!(
+                        "{root}/usr/lib/{vendored_tree}/site-packages/vendored_dep-2.0.egg-info/requires.txt"
+                    ),
+                    "",
+                ),
+            ];
+            for (rel, content) in &files {
+                let disk = pkg.dir_name().join(rel);
+                std::fs::create_dir_all(disk.parent().unwrap()).expect("test dirs");
+                std::fs::write(&disk, content).expect("test egg-info");
                 let mut pf = pkg.files[0].clone();
                 pf.name = format!("/{rel}");
                 pf.path = disk.to_string_lossy().into_owned();
