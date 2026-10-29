@@ -1899,10 +1899,12 @@ fn zero_perms_ghost_credit(pkg: &Pkg, fname: &str) -> bool {
     if fname.starts_with("/etc/alternatives/") {
         return true;
     }
-    if let Some(rest) = fname.strip_prefix("/etc/selinux/") {
-        if rest.split('/').nth(1) == Some("active") {
-            return true;
-        }
+    // Same boundary as the policy-store predicate used elsewhere: a
+    // non-empty policy component, `active`, and a file below it. The
+    // bare active directory and an empty policy component do not
+    // qualify.
+    if FilesCheck::selinux_policy_store_path(fname) {
+        return true;
     }
     if fname == "/boot/vmlinuz" || fname == "/boot/initrd" {
         return true;
@@ -1911,8 +1913,16 @@ fn zero_perms_ghost_credit(pkg: &Pkg, fname: &str) -> bool {
         return true;
     }
     if let Some(base) = fname.rsplit('/').next() {
-        if base == "icon-theme.cache" && fname.starts_with("/usr/share/icons/") {
-            return true;
+        // A theme cache lives in a theme directory, not directly under
+        // the icons root: require a non-empty theme component between
+        // the root and the basename, matching the icons-tree shape used
+        // elsewhere.
+        if base == "icon-theme.cache" {
+            if let Some(rest) = fname.strip_prefix("/usr/share/icons/") {
+                if rest.contains('/') && rest.split('/').next().is_some_and(|t| !t.is_empty()) {
+                    return true;
+                }
+            }
         }
         if matches!(
             base,
@@ -1945,12 +1955,108 @@ fn find_word(text: &str, word: &str) -> Option<usize> {
     None
 }
 
+/// The byte offset of `word` as a standalone shell keyword in `text`,
+/// if any: bounded by shell metacharacters (whitespace, `;`, `&`,
+/// `|`, `(`, `)`, `<`, `>`) or text edges on both sides, so `for-x`,
+/// a path component, or a quoted word never counts as the keyword.
+/// Stricter than `find_word`, which is kept for `ln`: a command name
+/// reached through a path is still the command.
+fn find_shell_keyword(text: &str, word: &str) -> Option<usize> {
+    fn is_meta(byte: u8) -> bool {
+        byte.is_ascii_whitespace() || matches!(byte, b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>')
+    }
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(word) {
+        let at = from + rel;
+        let before_ok = at == 0 || is_meta(text.as_bytes()[at - 1]);
+        let after = at + word.len();
+        let after_ok = after == text.len() || is_meta(text.as_bytes()[after]);
+        if before_ok && after_ok {
+            return Some(at);
+        }
+        from = at + word.len();
+    }
+    None
+}
+
+/// The text with shell comment tails removed: a `#` starts a comment
+/// only at the start of a line or after whitespace, so a `#` inside a
+/// word (a path, a quoted string) survives. Line endings are kept, so
+/// stripping never joins two commands onto one line.
+fn strip_comment_tails(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (body, newline) = match line.strip_suffix('\n') {
+            Some(body) => (body, "\n"),
+            None => (line, ""),
+        };
+        let mut cut = body.len();
+        for (index, ch) in body.char_indices() {
+            if ch == '#' && (index == 0 || body.as_bytes()[index - 1].is_ascii_whitespace()) {
+                cut = index;
+                break;
+            }
+        }
+        out.push_str(&body[..cut]);
+        out.push_str(newline);
+    }
+    out
+}
+
+/// Whether `tok` is a redirection operator whose target is the next
+/// token: `>`, `>>`, `<`, `<<`, `<<<`, `>|`, `<>`, each optionally
+/// prefixed with a file-descriptor digit (`2>`).
+fn redirect_takes_next_token(tok: &str) -> bool {
+    let op = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+    matches!(op, ">" | ">>" | "<" | "<<" | "<<<" | ">|" | "<>")
+}
+
+/// Whether `tok` is a redirection operator carrying its target along:
+/// `>/dev/null`, `2>&1`, and the standalone fd-duplication forms
+/// `>&`/`<&` (whose target is a descriptor, never a path).
+fn redirect_has_attached_target(tok: &str) -> bool {
+    let op = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+    (op.starts_with('>') || op.starts_with('<')) && !redirect_takes_next_token(tok)
+}
+
+/// Replace the first unbraced `$var` occurrence whose next character
+/// is not a name character (or that ends the string): `$foobar` is
+/// one variable, not `$foo` followed by `bar`.
+fn expand_unbraced_once(link: &str, var: &str, word: &str) -> String {
+    let needle = format!("${var}");
+    let mut from = 0;
+    while let Some(rel) = link[from..].find(&needle) {
+        let at = from + rel;
+        let next = at + needle.len();
+        if next == link.len()
+            || (!link.as_bytes()[next].is_ascii_alphanumeric() && link.as_bytes()[next] != b'_')
+        {
+            let mut out = String::with_capacity(link.len());
+            out.push_str(&link[..at]);
+            out.push_str(word);
+            out.push_str(&link[next..]);
+            return out;
+        }
+        from = at + 1;
+    }
+    link.to_string()
+}
+
 /// The link arguments of literal `ln -s` commands in `text`: each
 /// command contributes its link only when it carries the `-s` flag,
 /// takes exactly two path arguments, and the link is absolute.
-/// Value-taking options and `-t`/`--target-directory` disqualify the
-/// command; quotes around arguments are stripped.
+/// Redirections and their targets are stripped before counting
+/// arguments; value-taking options and every `-t` form (`-t`,
+/// `--target-directory`, `--target-directory=...`, and short clusters
+/// containing `t`) disqualify the command; quotes around arguments
+/// are stripped. The long form must be exactly `--symbolic`: any
+/// other long option containing `s` (a hard link with
+/// `--strip-trailing-slashes`, say) does not credit. Comment tails
+/// are skipped, and the scan resumes past each parsed command so a
+/// command's own arguments are never re-read as commands.
 fn ln_links_in(text: &str) -> Vec<String> {
+    let text = strip_comment_tails(text);
+    let text = text.as_str();
     let mut links = Vec::new();
     let mut from = 0;
     while let Some(rel) = find_word(&text[from..], "ln") {
@@ -1960,7 +2066,7 @@ fn ln_links_in(text: &str) -> Vec<String> {
             .find(|c| [';', '&', '|', '\n', ')'].contains(&c))
             .unwrap_or(rest.len());
         let cmd = &rest[..cmd_end];
-        from = at + 2;
+        from = at + 2 + cmd_end;
         let tokens: Vec<String> = cmd
             .split_whitespace()
             .map(|t| {
@@ -1969,18 +2075,37 @@ fn ln_links_in(text: &str) -> Vec<String> {
                 t.to_string()
             })
             .collect();
+        // Redirections are not arguments: drop each operator and, for
+        // the bare forms, its target token.
+        let mut args: Vec<String> = Vec::new();
+        let mut skip_next = false;
+        for tok in tokens {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if redirect_takes_next_token(&tok) {
+                skip_next = true;
+                continue;
+            }
+            if redirect_has_attached_target(&tok) {
+                continue;
+            }
+            args.push(tok);
+        }
         let mut options: Vec<String> = Vec::new();
         let mut paths: Vec<String> = Vec::new();
         let mut opts_done = false;
         let mut disqualified = false;
-        for tok in &tokens {
+        for tok in &args {
             if !opts_done && tok == "--" {
                 opts_done = true;
             } else if !opts_done && tok.starts_with('-') && tok.as_str() != "-" {
-                if matches!(
-                    tok.as_str(),
-                    "-t" | "--target-directory" | "-b" | "-S" | "--suffix" | "--backup"
-                ) {
+                if tok == "--target-directory"
+                    || tok.starts_with("--target-directory=")
+                    || matches!(tok.as_str(), "-b" | "-S" | "--suffix" | "--backup")
+                    || (!tok.starts_with("--") && tok[1..].contains('t'))
+                {
                     disqualified = true;
                     break;
                 }
@@ -1992,7 +2117,9 @@ fn ln_links_in(text: &str) -> Vec<String> {
         if disqualified {
             continue;
         }
-        let has_s = options.iter().any(|o| o.contains('s'));
+        let has_s = options
+            .iter()
+            .any(|o| o == "--symbolic" || (!o.starts_with("--") && o[1..].contains('s')));
         if has_s && paths.len() == 2 && paths[1].starts_with('/') {
             links.push(paths[1].clone());
         }
@@ -2005,40 +2132,48 @@ fn ln_links_in(text: &str) -> Vec<String> {
 /// `for V in words; do ... done` loop whose `ln -s` link argument
 /// expands `$V` over the word list. A nested loop truncates at the
 /// first `done`: under-coverage only, never a false link. Matching is
-/// syntactic, like the other scriptlet matchers: a commented-out `ln`
-/// line would count.
+/// syntactic, like the other scriptlet matchers: comment tails are
+/// skipped, and a malformed `for` header is skipped rather than
+/// aborting the scan.
 fn scriptlet_creates_symlink(text: &str, path: &str) -> bool {
+    let text = strip_comment_tails(text);
+    let text = text.as_str();
     if ln_links_in(text).iter().any(|link| link == path) {
         return true;
     }
     let mut rest = text;
-    while let Some(for_at) = find_word(rest, "for") {
+    while let Some(for_at) = find_shell_keyword(rest, "for") {
         let mut after = rest[for_at + 3..].trim_start();
         let var_end = after
             .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
             .unwrap_or(after.len());
         let var = &after[..var_end];
         if var.is_empty() {
-            break;
+            rest = &rest[for_at + 3..];
+            continue;
         }
         after = after[var_end..].trim_start();
         let mut words_iter = after.splitn(2, |c: char| c.is_whitespace());
         if words_iter.next() != Some("in") {
-            break;
+            rest = &rest[for_at + 3..];
+            continue;
         }
         after = words_iter.next().unwrap_or("").trim_start();
         let Some(semi) = after.find(';') else {
-            break;
+            rest = &rest[for_at + 3..];
+            continue;
         };
         let words: Vec<&str> = after[..semi].split_whitespace().collect();
         after = after[semi + 1..].trim_start();
         let mut do_iter = after.splitn(2, |c: char| c.is_whitespace());
         if do_iter.next() != Some("do") {
-            break;
+            rest = &rest[for_at + 3..];
+            continue;
         }
         after = do_iter.next().unwrap_or("");
-        let Some(done_at) = find_word(after, "done") else {
-            break;
+        let Some(done_at) = find_shell_keyword(after, "done") else {
+            rest = &rest[for_at + 3..];
+            continue;
         };
         let body = &after[..done_at];
         for link in ln_links_in(body) {
@@ -2047,7 +2182,7 @@ fn scriptlet_creates_symlink(text: &str, path: &str) -> bool {
                 let expanded = if link.contains(&braced) {
                     link.replacen(&braced, word, 1)
                 } else {
-                    link.replacen(&format!("${var}"), word, 1)
+                    expand_unbraced_once(&link, var, word)
                 };
                 if expanded == path {
                     return true;
@@ -18599,6 +18734,105 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
         assert!(!scriptlet_creates_symlink(
             "for j in a b; do ln -sf /t /d/${i}; done\n",
             "/d/a"
+        ));
+    }
+
+    #[test]
+    fn scriptlet_creates_symlink_parser_edge_batch() {
+        // Redirections and their targets are not arguments.
+        assert!(scriptlet_creates_symlink("ln -s /a /b >/dev/null\n", "/b"));
+        assert!(scriptlet_creates_symlink("ln -s /a /b 2>/dev/null\n", "/b"));
+        assert!(scriptlet_creates_symlink("ln -s /a /b > /tmp/x\n", "/b"));
+        assert!(scriptlet_creates_symlink("ln -s /a /b 2> /tmp/x\n", "/b"));
+        // The long form must be exactly --symbolic: a hard link with
+        // another long option containing `s` does not credit.
+        assert!(scriptlet_creates_symlink("ln --symbolic /a /b\n", "/b"));
+        assert!(!scriptlet_creates_symlink(
+            "ln --strip-trailing-slashes /a /b\n",
+            "/b"
+        ));
+        // Equals-joined and clustered -t forms disqualify like -t.
+        assert!(!scriptlet_creates_symlink(
+            "ln -s --target-directory=/dir /a\n",
+            "/a"
+        ));
+        assert!(!scriptlet_creates_symlink("ln -s -st /dir /a\n", "/a"));
+        assert!(!scriptlet_creates_symlink("ln -s -t/dir /a\n", "/a"));
+        // Comment tails are skipped, including a commented-out command.
+        assert!(scriptlet_creates_symlink("ln -s /a /b # comment\n", "/b"));
+        assert!(!scriptlet_creates_symlink("# ln -s /x /y\n", "/y"));
+        assert!(scriptlet_creates_symlink(
+            "ln -s /a /b # ln -s /x /y\n",
+            "/b"
+        ));
+        assert!(!scriptlet_creates_symlink(
+            "ln -s /a /b # ln -s /x /y\n",
+            "/y"
+        ));
+        // A malformed for header is skipped, not fatal to later loops.
+        assert!(scriptlet_creates_symlink(
+            "for in a b; do ln -sf /t /d/${i}; done\nfor i in c d; do ln -sf /t /d/${i}; done\n",
+            "/d/c"
+        ));
+        assert!(scriptlet_creates_symlink(
+            "for i in a b do ln -sf /t /d/${i}; done\nfor j in c d; do ln -sf /t /d/${j}; done\n",
+            "/d/c"
+        ));
+        // Unbraced expansion stops at name characters: `$foobar` is
+        // not `$foo` followed by `bar`.
+        assert!(!scriptlet_creates_symlink(
+            "for foo in a b; do ln -sf /t /d/$foobar; done\n",
+            "/d/abar"
+        ));
+        assert!(scriptlet_creates_symlink(
+            "for foo in a b; do ln -sf /t /d/$foo-bar; done\n",
+            "/d/a-bar"
+        ));
+        // Shell-word boundaries for the keywords: `for-x` is a command
+        // name, and `done` inside a path is not the loop end.
+        assert!(!scriptlet_creates_symlink(
+            "for-x i in a b; do ln -sf /t /d/${i}; done\nfor j in c d; do ln -sf /t /d/${j}; done\n",
+            "/d/a"
+        ));
+        assert!(scriptlet_creates_symlink(
+            "for-x i in a b; do ln -sf /t /d/${i}; done\nfor j in c d; do ln -sf /t /d/${j}; done\n",
+            "/d/c"
+        ));
+        assert!(scriptlet_creates_symlink(
+            "for i in a b; do echo /opt/done/file; ln -sf /t /d/${i}; done\n",
+            "/d/a"
+        ));
+        // The scan resumes past each parsed command, so a command's
+        // own arguments are never re-read as a new command.
+        assert!(!scriptlet_creates_symlink("ln -s /a ln -s /x /y\n", "/y"));
+    }
+
+    #[test]
+    fn zero_perms_ghost_credit_boundaries() {
+        let (pkg, _dir) = pkg_with_files(vec![]);
+        // A theme cache lives in a theme directory.
+        assert!(zero_perms_ghost_credit(
+            &pkg,
+            "/usr/share/icons/hicolor/icon-theme.cache"
+        ));
+        assert!(!zero_perms_ghost_credit(
+            &pkg,
+            "/usr/share/icons/icon-theme.cache"
+        ));
+        // The policy store needs a non-empty policy, `active`, and a
+        // file below it.
+        assert!(zero_perms_ghost_credit(
+            &pkg,
+            "/etc/selinux/targeted/active/modules/400/test/cil"
+        ));
+        assert!(!zero_perms_ghost_credit(
+            &pkg,
+            "/etc/selinux/targeted/active"
+        ));
+        assert!(!zero_perms_ghost_credit(&pkg, "/etc/selinux//active/file"));
+        assert!(!zero_perms_ghost_credit(
+            &pkg,
+            "/etc/selinux/targeted/modules/file"
         ));
     }
 
