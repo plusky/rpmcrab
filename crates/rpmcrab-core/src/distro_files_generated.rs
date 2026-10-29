@@ -45,6 +45,10 @@ const DISTRO_OPENSUSE_FILES: &[(&str, &str)] = &[
         include_str!("../data/distro/opensuse/polkit-rules-whitelist.toml"),
     ),
     (
+        "python-stems.toml",
+        include_str!("../data/distro/opensuse/python-stems.toml"),
+    ),
+    (
         "security.toml",
         include_str!("../data/distro/opensuse/security.toml"),
     ),

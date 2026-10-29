@@ -94,8 +94,8 @@ def main():
     parser.add_argument("--corpus", required=True,
                         help="directory tree of RPMs (walked recursively)")
     parser.add_argument("--config",
-                        default="crates/rpmcrab-core/data/distro/opensuse/opensuse.toml",
-                        help="opensuse.toml carrying [[PythonModuleStems]]")
+                        default="crates/rpmcrab-core/data/distro/opensuse/python-stems.toml",
+                        help="python-stems.toml carrying [[PythonModuleStems]]")
     parser.add_argument("--modules", default="",
                         help="comma-separated module names to check (default: all)")
     parser.add_argument("--jobs", type=int, default=32)

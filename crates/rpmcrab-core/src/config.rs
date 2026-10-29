@@ -1775,4 +1775,23 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn vendored_stem_table_loads_into_merged_config() {
+        // The stem table ships in its own vendored file, not inside
+        // opensuse.toml: loading the vendored set must surface it in the
+        // merged configuration, or PythonCheck reads an empty map.
+        let cfg = load_inner(&[], &[], true).expect("vendored load cleanly");
+        let stems = cfg
+            .configuration
+            .get("PythonModuleStems")
+            .and_then(toml::Value::as_array)
+            .expect("stem table present in merged config");
+        assert_eq!(stems.len(), 23, "stem pairs: {stems:?}");
+        let modules: Vec<&str> = stems
+            .iter()
+            .filter_map(|e| e.get("module").and_then(toml::Value::as_str))
+            .collect();
+        assert!(modules.contains(&"pygobject"));
+        assert!(modules.contains(&"pyxdg"));
+    }
 }

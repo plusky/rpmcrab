@@ -1,0 +1,77 @@
+# PythonModuleStems: distro python-module stem equivalences
+# appended by rpmcrab (not from upstream; see
+# PYTHON_MODULE_STEMS in scripts/generate-distro-configs.py).
+# A package declaring `module` that Requires the stem form
+# satisfies the requirement under the SUSE flavours only;
+# the core check reads this key generically and applies
+# nothing when it is absent. Staleness is flagged by
+# scripts/check-python-module-stems.py (monthly corpus run).
+[[PythonModuleStems]]
+module = "avocado-framework"
+stems = ["avocado"]
+[[PythonModuleStems]]
+module = "pycairo"
+stems = ["cairo"]
+[[PythonModuleStems]]
+module = "python-barbicanclient"
+stems = ["barbicanclient"]
+[[PythonModuleStems]]
+module = "python-bugzilla"
+stems = ["bugzilla"]
+[[PythonModuleStems]]
+module = "python-dateutil"
+stems = ["dateutil"]
+[[PythonModuleStems]]
+module = "python-digitalocean"
+stems = ["digitalocean"]
+[[PythonModuleStems]]
+module = "python-gnupg"
+stems = ["gnupg"]
+[[PythonModuleStems]]
+module = "python-keystoneclient"
+stems = ["keystoneclient"]
+[[PythonModuleStems]]
+module = "python-ldap"
+stems = ["ldap"]
+[[PythonModuleStems]]
+module = "python-linstor"
+stems = ["linstor"]
+[[PythonModuleStems]]
+module = "python-ly"
+stems = ["ly"]
+[[PythonModuleStems]]
+module = "python-magic"
+stems = ["magic"]
+[[PythonModuleStems]]
+module = "python-manilaclient"
+stems = ["manilaclient"]
+[[PythonModuleStems]]
+module = "python-openstackclient"
+stems = ["openstackclient"]
+[[PythonModuleStems]]
+module = "python-swiftclient"
+stems = ["swiftclient"]
+[[PythonModuleStems]]
+module = "pygobject"
+stems = ["gobject"]
+[[PythonModuleStems]]
+module = "pyhamcrest"
+stems = ["hamcrest"]
+[[PythonModuleStems]]
+module = "pyopengl"
+stems = ["opengl"]
+[[PythonModuleStems]]
+module = "pyqt5"
+stems = ["qt5"]
+[[PythonModuleStems]]
+module = "pyqt5-sip"
+stems = ["qt5-sip"]
+[[PythonModuleStems]]
+module = "pyqt6"
+stems = ["qt6"]
+[[PythonModuleStems]]
+module = "pyusb"
+stems = ["usb"]
+[[PythonModuleStems]]
+module = "pyxdg"
+stems = ["xdg"]
