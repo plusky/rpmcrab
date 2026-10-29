@@ -1,0 +1,85 @@
+# Monthly staleness check for the PythonModuleStems table.
+#
+# A stem-table entry stays live only while both sides still exist in
+# the distro. This job fetches the current Tumbleweed repo set's
+# primary.xml files and runs the checker over them; it FAILS
+# with the stale entries listed. Failure is the reminder: table edits
+# stay human-reviewed, so this job never opens a PR and never edits
+# anything itself.
+#
+# Repo set: oss + non-oss. The table was validated against an
+# oss-only snapshot (51,426 of its 51,586 package names appear in the
+# current oss primary; none appear in non-oss; the 160 residuals are
+# Sept-to-Oct Factory removals), but liveness is a distro-wide
+# property, so the job covers both repos: a non-oss carrier must not
+# false-STALE an entry.
+#
+# Schedule: 1st of month 04:00 UTC, same as distro-config-sync.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 1 * *' # 1st of month 04:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stem-table-staleness
+  cancel-in-progress: false
+
+jobs:
+  staleness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The runner image is not relied on for zstd: install it the same
+      # way distro-config-sync installs its generator dependencies.
+      # The cache key folds the runner OS release into `version` so a
+      # floating `ubuntu-latest` image never restores stale .debs onto
+      # a new distro, and rotates on the ISO week so a cache hit never
+      # tests against weeks-old packages.
+      - name: Compute apt cache version
+        id: apt-cache-version
+        run: |
+          . /etc/os-release
+          echo "version=1.0-${VERSION_ID}-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+      - name: Install zstd
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: zstd
+          version: ${{ steps.apt-cache-version.outputs.version }}
+          execute_install_scripts: true
+      # Primary filenames are content hashes that change with every
+      # publish, so resolve them through repomd.xml at run time.
+      - name: Fetch Tumbleweed primary metadata
+        run: |
+          python3 - <<'EOF'
+          import urllib.request
+          import xml.etree.ElementTree as ET
+
+          NS = "http://linux.duke.edu/metadata/repo"
+          for repo in ("oss", "non-oss"):
+              repomd = ET.fromstring(
+                  urllib.request.urlopen(
+                      f"https://download.opensuse.org/tumbleweed/repo/{repo}/repodata/repomd.xml",
+                      timeout=120,
+                  ).read()
+              )
+              href = next(
+                  data.find(f"{{{NS}}}location").get("href")
+                  for data in repomd.findall(f"{{{NS}}}data")
+                  if data.get("type") == "primary"
+              )
+              url = f"https://download.opensuse.org/tumbleweed/repo/{repo}/{href}"
+              with urllib.request.urlopen(url, timeout=300) as r, open(
+                  f"primary-{repo}.xml.zst", "wb"
+              ) as fh:
+                  fh.write(r.read())
+              print(f"fetched primary-{repo}.xml.zst from {href}")
+          EOF
+      - name: Check stem table staleness
+        run: |
+          python3 scripts/check-python-module-stems.py \
+            primary-oss.xml.zst primary-non-oss.xml.zst
