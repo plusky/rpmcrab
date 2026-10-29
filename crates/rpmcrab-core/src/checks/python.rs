@@ -1580,7 +1580,9 @@ impl PythonCheck {
             return Satisfaction::Satisfied;
         }
         let class = Self::classify_matches(pkg, &variants);
-        if !Self::require_satisfied(&pkg.req_names, req, &stems) && matches!(class, MatchClass::Unknown) {
+        if !Self::require_satisfied(&pkg.req_names, req, &stems)
+            && matches!(class, MatchClass::Unknown)
+        {
             return Satisfaction::Missing;
         }
         match class {
