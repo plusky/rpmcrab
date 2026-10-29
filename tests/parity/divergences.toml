@@ -1093,35 +1093,35 @@ since = "0.4.1"
 case = "global"
 check = "DocCheck"
 kind = "behaviour"
-reason = "package-with-huge-docs does not count man pages (/usr/share/man/) or info pages (/usr/share/info/) toward the documentation share. Man and info pages ship with the binaries they document and are never split into a -doc subpackage, so counting them produces findings whose stated remedy does not apply. Measured on the Factory corpus: excluding man/info pages removes 97 of the 554 package-with-huge-docs findings."
+reason = "package-with-huge-docs does not count man pages (/usr/share/man/, /usr/man/) or info pages (/usr/share/info/, /usr/info/) toward the documentation share. Man and info pages ship with the binaries they document and are never split into a -doc subpackage, so counting them produces findings whose stated remedy does not apply. The exclusion applies to the documentation numerator only; total size is unchanged, so mixed packages still fire on their remaining docs. Measured on the Factory corpus: excluding man/info pages removes 97 of the 554 package-with-huge-docs findings. The three class counts are standalone memberships (97 man/info, 113 translations, 15 help, summing to 225); po4a-lang and skladnik-lang sit in both the man/info and translations classes, so distinct removals are 223 and 554 - 223 = 331."
 since = "0.4.1"
 
 [[divergence]]
 case = "global"
 check = "DocCheck"
 kind = "behaviour"
-reason = "package-with-huge-docs does not count help trees (GNOME help under /usr/share/help/, KDE help under /usr/share/doc/HTML/) toward the documentation share. Help books are read by the help viewer from the main package; moving them into an optional -doc subpackage would remove in-app help. Measured on the Factory corpus: excluding help trees removes 15 findings from the set remaining after the man/info exclusion and the translations exemption."
+reason = "package-with-huge-docs does not count help trees (GNOME help under /usr/share/help/, KDE help under /usr/share/doc/HTML/) toward the documentation share. Help books are read by the help viewer from the main package; moving them into an optional -doc subpackage would remove in-app help. The exclusion applies to the documentation numerator only; total size is unchanged. Measured on the Factory corpus: excluding help trees removes 15 findings from the set remaining after the man/info exclusion and the translations exemption."
 since = "0.4.1"
 
 [[divergence]]
 case = "global"
 check = "DocCheck"
 kind = "behaviour"
-reason = "package-with-huge-docs is skipped for translations packages: packages whose every non-doc regular file is a locale file under /usr/share/locale/. Translated help, man pages and manuals belong in the language split, not in a -doc subpackage. A package with no non-doc regular files is not a translations package. Measured on the Factory corpus: 113 findings sit in translations packages."
+reason = "package-with-huge-docs is skipped for translations packages: packages whose every non-doc regular file is a locale file under /usr/share/locale/ or a man/info/help path. Translated help, man pages and manuals belong in the language split, not in a -doc subpackage, so translated man/info/help payload no longer vetoes the exemption. A package with no non-doc regular files is not a translations package. Measured on the Factory corpus: 113 findings sit in translations packages."
 since = "0.4.1"
 
 [[divergence]]
 case = "global"
 check = "DocCheck"
 kind = "behaviour"
-reason = "package-with-huge-docs is skipped for pure-documentation name families: packages whose name contains -manual, -examples, -demo, -testresults, -html or -apidoc. The -doc remedy is circular for these packages: they are the documentation carrier by construction (manuals, example collections, demos, test-result logs, HTML documentation sets, API documentation). Measured on the Factory corpus: extending the ignore_pkg family quiets 60 of the 331 remaining findings, 0 added; 53 of the 67 pure-documentation packages go quiet and 14 remain (names without a family marker)."
+reason = "package-with-huge-docs is skipped for pure-documentation name families: packages whose name contains -manual, -examples, -demo, -testresults, -html or -apidoc. The -doc remedy is circular for these packages: they are the documentation carrier by construction (manuals, example collections, demos, test-result logs, HTML documentation sets, API documentation). Measured on the Factory corpus: extending the ignore_pkg family quiets 60 of the 331 remaining findings, 0 added; 53 of the 67 pure-documentation packages go quiet and 14 remain (names without a family marker). Findings count RPMs and packages count distinct names: the 60 findings span 60 distinct names, the 53 held pure-doc packages plus 7 names outside the held set that carry non-doc files (dpdk-examples, gsl-examples, id3lib-examples, junit-manual, libqt5-qtdoc-html, msv-manual, scala-apidoc) - the known blast radius of the name-based exemption. Substring matching stands; the dash-less forms and the singular -example gap are pinned as negatives by tests."
 since = "0.4.1"
 
 [[divergence]]
 case = "global"
 check = "DocCheck"
 kind = "behaviour"
-reason = "package-with-huge-docs is skipped for fourteen individual pure-documentation packages: books, c-intro-and-ref-pdf, docbook-tdg, fhs, grub2, gtk2-engines, myspell-de, myspell-en, openmpi4-testsuite, php8-test, release-notes-openSUSE, tuxpaint-stamps, xemacs-info, xemacs-packages-info. Each package's RPM header shows zero non-doc regular files: books carries twelve %doc PDFs; c-intro-and-ref-pdf a single PDF; docbook-tdg the guide HTML tree and PDFs; fhs the specification document; grub2 and gtk2-engines only changelog and readme docs with their functional payload in subpackages; myspell-de and myspell-en only licence and readme docs with dictionaries in per-locale subpackages; openmpi4-testsuite and php8-test only test logs; release-notes-openSUSE the release-notes tree; tuxpaint-stamps only changelog and licence docs with stamps in per-category subpackages; xemacs-info and xemacs-packages-info only GNU info files. A -doc split would move the package's entire payload, so the remedy does not apply. Measured on the Factory corpus: exempting the fourteen removes 14 of the 271 remaining findings, 0 added."
+reason = "package-with-huge-docs is skipped for fourteen individual pure-documentation packages: books, c-intro-and-ref-pdf, docbook-tdg, fhs, grub2, gtk2-engines, myspell-de, myspell-en, openmpi4-testsuite, php8-test, release-notes-openSUSE, tuxpaint-stamps, xemacs-info, xemacs-packages-info. Each package's RPM header shows zero non-doc regular files: books carries twelve %doc PDFs; c-intro-and-ref-pdf a single PDF; docbook-tdg the guide HTML tree and PDFs; fhs the specification document; grub2 and gtk2-engines only changelog and readme docs with their functional payload in subpackages; myspell-de and myspell-en only licence and readme docs with dictionaries in per-locale subpackages; openmpi4-testsuite and php8-test only test logs; release-notes-openSUSE the release-notes tree; tuxpaint-stamps only changelog and licence docs with stamps in per-category subpackages; xemacs-info and xemacs-packages-info only GNU info files. A -doc split would move the package's entire payload, so the remedy does not apply. The exemption applies only when the package carries no non-doc regular file: a functional package sharing an exact name keeps firing. Measured on the Factory corpus: exempting the fourteen removes 14 of the 271 remaining findings, 0 added."
 since = "0.4.1"
 
 [[divergence]]

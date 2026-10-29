@@ -9,8 +9,10 @@
 //! rpm-software-management/rpmlint#555, whose reference still flags 100%-docs
 //! javadoc packages.
 //!
-//! Man/info pages, help trees and translations packages do not count
-//! toward huge-docs: man/info pages ship with their binaries, help
+//! Man/info pages and help trees are removed from the documentation
+//! numerator only (total size unchanged); translations packages are
+//! skipped wholesale, and translated man/info/help payload no longer
+//! vetoes that skip. Man/info pages ship with their binaries, help
 //! trees are read by the help viewer from the main package, and a
 //! translations package's documentation is translated content that
 //! belongs in the language split.
@@ -80,11 +82,9 @@ impl DocCheck {
     /// manuals, example collections, demos, test-result logs, HTML
     /// documentation sets and API documentation. The -doc remedy is
     /// circular for these: the package is the documentation carrier.
-    /// Individual pure-documentation packages are listed by exact name
-    /// below: each carries only %doc files, so a -doc split would move
-    /// the package's entire payload (or split a test log) rather than
-    /// separate documentation from a functional payload.
-    fn ignore_pkg(name: &str) -> bool {
+    /// Substring matching stands: the dash-less forms and the singular
+    /// -example gap are pinned as negatives by tests.
+    fn is_doc_family(name: &str) -> bool {
         name.starts_with("bundle-")
             || name.contains("-devel")
             || name.contains("-doc")
@@ -94,29 +94,53 @@ impl DocCheck {
             || name.contains("-testresults")
             || name.contains("-html")
             || name.contains("-apidoc")
-            || matches!(
-                name,
-                "books"
-                    | "c-intro-and-ref-pdf"
-                    | "docbook-tdg"
-                    | "fhs"
-                    | "grub2"
-                    | "gtk2-engines"
-                    | "myspell-de"
-                    | "myspell-en"
-                    | "openmpi4-testsuite"
-                    | "php8-test"
-                    | "release-notes-openSUSE"
-                    | "tuxpaint-stamps"
-                    | "xemacs-info"
-                    | "xemacs-packages-info"
-            )
+    }
+
+    /// Individual pure-documentation packages, by exact name only, so
+    /// siblings and lookalikes stay loud.
+    fn is_exact_doc_name(name: &str) -> bool {
+        matches!(
+            name,
+            "books"
+                | "c-intro-and-ref-pdf"
+                | "docbook-tdg"
+                | "fhs"
+                | "grub2"
+                | "gtk2-engines"
+                | "myspell-de"
+                | "myspell-en"
+                | "openmpi4-testsuite"
+                | "php8-test"
+                | "release-notes-openSUSE"
+                | "tuxpaint-stamps"
+                | "xemacs-info"
+                | "xemacs-packages-info"
+        )
+    }
+
+    /// Whether the exact-name exemption applies to this payload: the
+    /// name alone is not enough. Each listed package carries only %doc
+    /// files, so a -doc split would move the package's entire payload
+    /// (or split a test log) rather than separate documentation from
+    /// a functional payload; a functional package that merely shares
+    /// an exact name keeps firing.
+    fn is_exact_doc_payload(name: &str, files: &[PkgFile], doc_files: &[&str]) -> bool {
+        Self::is_exact_doc_name(name)
+            && files
+                .iter()
+                .filter(|f| is_reg(f.mode))
+                .all(|f| doc_files.contains(&f.name.as_str()))
     }
 
     /// Man and info pages ship with the binaries they document; they
-    /// are never split into a -doc subpackage.
+    /// are never split into a -doc subpackage. Legacy roots count
+    /// like the sibling FilesCheck roots: /usr/man/ and /usr/info/
+    /// alongside /usr/share/man/ and /usr/share/info/.
     fn is_man_or_info_page(path: &str) -> bool {
-        path.starts_with("/usr/share/man/") || path.starts_with("/usr/share/info/")
+        path.starts_with("/usr/share/man/")
+            || path.starts_with("/usr/man/")
+            || path.starts_with("/usr/share/info/")
+            || path.starts_with("/usr/info/")
     }
 
     /// Help trees are read by the help viewer from the main package:
@@ -128,14 +152,20 @@ impl DocCheck {
     }
 
     /// Whether the package is a translations package: every non-doc
-    /// regular file is a locale file. Translated help, man pages and
-    /// manuals belong in the language split, not in a -doc subpackage.
-    /// A package with no non-doc regular files is not a translations
-    /// package (it is a pure documentation package, which keeps firing).
+    /// regular file is a locale file or a man/info/help path.
+    /// Translated help, man pages and manuals belong in the language
+    /// split, not in a -doc subpackage, so translated man/info/help
+    /// payload no longer vetoes the exemption. A package with no
+    /// non-doc regular files is not a translations package (it is a
+    /// pure documentation package, which keeps firing).
     fn is_translations_package(files: &[PkgFile], doc_files: &[&str]) -> bool {
         let mut any = false;
         for f in files {
-            if !is_reg(f.mode) || doc_files.contains(&f.name.as_str()) {
+            if !is_reg(f.mode)
+                || doc_files.contains(&f.name.as_str())
+                || Self::is_man_or_info_page(&f.name)
+                || Self::is_help(&f.name)
+            {
                 continue;
             }
             any = true;
@@ -249,7 +279,9 @@ impl DocCheck {
             .map(|f| f.size.unwrap_or(0))
             .sum();
         // Man/info pages and help trees never move to -doc, so they
-        // do not count toward the documentation share.
+        // are removed from the documentation numerator only; total
+        // size is unchanged, so mixed packages still fire on their
+        // remaining docs.
         let doc_size: u64 = doc_files
             .iter()
             .filter(|n| !Self::is_man_or_info_page(n) && !Self::is_help(n))
@@ -315,7 +347,8 @@ impl Check for DocCheck {
             add_info(out, Level::Info, pkg, "install-file-in-docs", &[f]);
         }
 
-        if !Self::ignore_pkg(&pkg.name)
+        if !Self::is_doc_family(&pkg.name)
+            && !Self::is_exact_doc_payload(&pkg.name, &pkg.files, &doc_refs)
             && !self.exempt_by_suffix(&pkg.name)
             && !Self::is_translations_package(&pkg.files, &doc_refs)
             && let Some(pct) = Self::huge_docs_pct(&pkg.files, &doc_refs)
@@ -433,54 +466,124 @@ mod tests {
 
     #[test]
     fn ignore_pkg_names() {
-        assert!(DocCheck::ignore_pkg("bundle-foo"));
-        assert!(DocCheck::ignore_pkg("foo-devel"));
-        assert!(DocCheck::ignore_pkg("foo-doc"));
-        assert!(!DocCheck::ignore_pkg("foo"));
+        assert!(DocCheck::is_doc_family("bundle-foo"));
+        assert!(DocCheck::is_doc_family("foo-devel"));
+        assert!(DocCheck::is_doc_family("foo-doc"));
+        assert!(!DocCheck::is_doc_family("foo"));
     }
 
     #[test]
     fn ignore_pkg_pure_doc_families() {
         // One member per family, plus mid-name matches.
-        assert!(DocCheck::ignore_pkg("hsqldb-manual"));
-        assert!(DocCheck::ignore_pkg("foo-examples"));
-        assert!(DocCheck::ignore_pkg("blender-demo"));
-        assert!(DocCheck::ignore_pkg("gcc-testresults"));
-        assert!(DocCheck::ignore_pkg("glibc-html"));
-        assert!(DocCheck::ignore_pkg("scala-apidoc"));
-        assert!(DocCheck::ignore_pkg("libspf2-apidocs"));
-        assert!(DocCheck::ignore_pkg("nanoxml-manual-lite"));
-        assert!(DocCheck::ignore_pkg("gmsh-demos"));
-        assert!(DocCheck::ignore_pkg("zsh-htmldoc"));
+        assert!(DocCheck::is_doc_family("hsqldb-manual"));
+        assert!(DocCheck::is_doc_family("foo-examples"));
+        assert!(DocCheck::is_doc_family("blender-demo"));
+        assert!(DocCheck::is_doc_family("gcc-testresults"));
+        assert!(DocCheck::is_doc_family("glibc-html"));
+        assert!(DocCheck::is_doc_family("scala-apidoc"));
+        assert!(DocCheck::is_doc_family("libspf2-apidocs"));
+        assert!(DocCheck::is_doc_family("nanoxml-manual-lite"));
+        assert!(DocCheck::is_doc_family("gmsh-demos"));
+        assert!(DocCheck::is_doc_family("zsh-htmldoc"));
         // Near misses: the family marker without its leading dash.
-        assert!(!DocCheck::ignore_pkg("manual-foo"));
-        assert!(!DocCheck::ignore_pkg("fooexamples"));
-        assert!(!DocCheck::ignore_pkg("apidoc-foo"));
+        assert!(!DocCheck::is_doc_family("manual-foo"));
+        assert!(!DocCheck::is_doc_family("examples-foo"));
+        assert!(!DocCheck::is_doc_family("demo-foo"));
+        assert!(!DocCheck::is_doc_family("testresults-foo"));
+        assert!(!DocCheck::is_doc_family("html-foo"));
+        assert!(!DocCheck::is_doc_family("doc-foo"));
+        assert!(!DocCheck::is_doc_family("devel-foo"));
+        assert!(!DocCheck::is_doc_family("fooexamples"));
+        assert!(!DocCheck::is_doc_family("apidoc-foo"));
+        // Singular -example is not a family marker: the gap stands.
+        assert!(!DocCheck::is_doc_family("foo-example"));
     }
 
     #[test]
     fn ignore_pkg_pure_doc_packages() {
         // Every individually exempted pure-documentation package.
-        assert!(DocCheck::ignore_pkg("books"));
-        assert!(DocCheck::ignore_pkg("c-intro-and-ref-pdf"));
-        assert!(DocCheck::ignore_pkg("docbook-tdg"));
-        assert!(DocCheck::ignore_pkg("fhs"));
-        assert!(DocCheck::ignore_pkg("grub2"));
-        assert!(DocCheck::ignore_pkg("gtk2-engines"));
-        assert!(DocCheck::ignore_pkg("myspell-de"));
-        assert!(DocCheck::ignore_pkg("myspell-en"));
-        assert!(DocCheck::ignore_pkg("openmpi4-testsuite"));
-        assert!(DocCheck::ignore_pkg("php8-test"));
-        assert!(DocCheck::ignore_pkg("release-notes-openSUSE"));
-        assert!(DocCheck::ignore_pkg("tuxpaint-stamps"));
-        assert!(DocCheck::ignore_pkg("xemacs-info"));
-        assert!(DocCheck::ignore_pkg("xemacs-packages-info"));
+        assert!(DocCheck::is_exact_doc_name("books"));
+        assert!(DocCheck::is_exact_doc_name("c-intro-and-ref-pdf"));
+        assert!(DocCheck::is_exact_doc_name("docbook-tdg"));
+        assert!(DocCheck::is_exact_doc_name("fhs"));
+        assert!(DocCheck::is_exact_doc_name("grub2"));
+        assert!(DocCheck::is_exact_doc_name("gtk2-engines"));
+        assert!(DocCheck::is_exact_doc_name("myspell-de"));
+        assert!(DocCheck::is_exact_doc_name("myspell-en"));
+        assert!(DocCheck::is_exact_doc_name("openmpi4-testsuite"));
+        assert!(DocCheck::is_exact_doc_name("php8-test"));
+        assert!(DocCheck::is_exact_doc_name("release-notes-openSUSE"));
+        assert!(DocCheck::is_exact_doc_name("tuxpaint-stamps"));
+        assert!(DocCheck::is_exact_doc_name("xemacs-info"));
+        assert!(DocCheck::is_exact_doc_name("xemacs-packages-info"));
         // Near misses: exact names only - siblings and lookalikes stay loud.
-        assert!(!DocCheck::ignore_pkg("bookshelf"));
-        assert!(!DocCheck::ignore_pkg("grub2-theme"));
-        assert!(!DocCheck::ignore_pkg("myspell-de_DE"));
-        assert!(!DocCheck::ignore_pkg("tuxpaint-stamps-animals"));
-        assert!(!DocCheck::ignore_pkg("xemacs-info-foo"));
+        assert!(!DocCheck::is_exact_doc_name("bookshelf"));
+        assert!(!DocCheck::is_exact_doc_name("grub2-theme"));
+        assert!(!DocCheck::is_exact_doc_name("myspell-de_DE"));
+        assert!(!DocCheck::is_exact_doc_name("tuxpaint-stamps-animals"));
+        assert!(!DocCheck::is_exact_doc_name("xemacs-info-foo"));
+    }
+
+    #[test]
+    fn legacy_man_info_roots_count_as_man_info_pages() {
+        assert!(DocCheck::is_man_or_info_page("/usr/man/man1/foo.1"));
+        assert!(DocCheck::is_man_or_info_page("/usr/info/foo.info"));
+        assert!(DocCheck::is_man_or_info_page("/usr/share/man/man1/foo.1"));
+        assert!(DocCheck::is_man_or_info_page("/usr/share/info/foo.info"));
+        assert!(!DocCheck::is_man_or_info_page(
+            "/usr/share/doc/foo/manual.pdf"
+        ));
+    }
+
+    /// A translations package whose translated man pages are not %doc
+    /// files: the man payload must not veto the exemption.
+    fn translations_with_man_pkg() -> Pkg {
+        let mut pkg = fixture_pkg();
+        pkg.name = "foo-lang".to_string();
+        pkg.arch = "noarch".to_string();
+        let mut doc = big_doc_file("/usr/share/doc/foo-lang/manual.pdf");
+        doc.size = Some(300 * 1024);
+        let mut locale = big_doc_file("/usr/share/locale/de/LC_MESSAGES/foo.mo");
+        locale.size = Some(100 * 1024);
+        let mut man = big_doc_file("/usr/share/man/de/man1/foo.1");
+        man.size = Some(100 * 1024);
+        let doc_name = doc.name.clone();
+        pkg.files = vec![doc, locale, man];
+        pkg.doc_files = vec![doc_name];
+        pkg
+    }
+
+    #[test]
+    fn translated_man_payload_does_not_veto_translations() {
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        assert!(run(&config, &mut check, &translations_with_man_pkg()).is_empty());
+    }
+
+    /// An exact-name package carrying a functional file: the name
+    /// exemption must not silence it.
+    fn exact_name_with_payload_pkg() -> Pkg {
+        let mut pkg = huge_docs_pkg("grub2");
+        let mut tool = big_doc_file("/usr/bin/grub2-foo");
+        tool.size = Some(200 * 1024);
+        pkg.files.push(tool);
+        pkg
+    }
+
+    #[test]
+    fn exact_name_with_functional_payload_still_fires() {
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        let results = run(&config, &mut check, &exact_name_with_payload_pkg());
+        assert_eq!(results.len(), 1, "expected one finding, got {results:?}");
+        assert_eq!(results[0].0, "package-with-huge-docs");
+    }
+
+    #[test]
+    fn exact_name_pure_doc_payload_stays_silent() {
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        assert!(run(&config, &mut check, &huge_docs_pkg("grub2")).is_empty());
     }
 
     /// `Pkg` is header-backed with no test constructor, so open a tiny fixture
@@ -568,11 +671,11 @@ mod tests {
 
     #[test]
     fn custom_suffix_exempts_matching_names_only() {
-        // "-apidoc" chosen deliberately: it does not contain "-doc", so the
-        // pre-existing ignore_pkg() cannot mask the suffix exemption.
-        let config = config_with_suffixes(&["-apidoc"]);
+        // "-handbook" chosen deliberately: outside every ignore_pkg
+        // family, so only the suffix exemption can silence it.
+        let config = config_with_suffixes(&["-handbook"]);
         let mut check = DocCheck::new(&config);
-        assert!(run(&config, &mut check, &huge_docs_pkg("foo-apidoc")).is_empty());
+        assert!(run(&config, &mut check, &huge_docs_pkg("foo-handbook")).is_empty());
         assert_eq!(
             run(&config, &mut check, &huge_docs_pkg("foo-javadoc")).len(),
             1
