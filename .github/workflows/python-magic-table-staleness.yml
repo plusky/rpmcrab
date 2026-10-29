@@ -1,0 +1,33 @@
+# Monthly staleness check for the Python bytecode magic table.
+#
+# A magic-table entry stays live only while its version's CPython
+# branch-head magic is in the table's list. This job probes the
+# CPython release branches and runs the checker over the table; it
+# FAILS with the missing or stale versions listed. Failure is the
+# reminder: table edits stay human-reviewed, so this job never opens
+# a PR and never edits anything itself.
+#
+# Schedule: 1st of month 04:00 UTC, same as the stem-table
+# staleness job.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 1 * *' # 1st of month 04:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-magic-table-staleness
+  cancel-in-progress: false
+
+jobs:
+  staleness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check magic table staleness
+        run: |
+          python3 scripts/check-python-magic-table.py
