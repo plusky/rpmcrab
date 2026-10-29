@@ -209,16 +209,13 @@ impl SourceCheck {
     }
 
     /// The archive-content findings, all rpmcrab-new and ledgered as
-    /// `kind = "behaviour"`: `prebuilt-binary-in-sources` (issue #150,
-    /// upstream rpmlint#4) scans every file of the source package for
-    /// prebuilt binaries — directly by magic bytes, and inside source
-    /// archives (tar, gzip/xz/zstd/bzip2-compressed tar, zip), recursing
-    /// into nested archives; `source-archive-contains-vcs-metadata` and
-    /// `source-archive-contains-lfs-pointer` (issue #1022) inspect only
-    /// the direct members of each source archive. The VCS finding is
-    /// scoped to sources without an upstream URL, so metadata shipped
-    /// inside an upstream tarball stays quiet.
-    fn check_archive_contents(&self, pkg: &Pkg, out: &mut Filter) {
+    /// `kind = "behaviour"`: a payload file in a source package is a
+    /// source archive in its own right, but a declared Source that is
+    /// also part of the payload (the spec's own tarball, or a source
+    /// the build copies into the payload) must not fire twice. Each
+    /// payload file is read once here and the bytes are shared with
+    /// the bidi pass below.
+    fn check_source_archives(&self, pkg: &Pkg, out: &mut Filter) {
         let url_sources = source_url_files(pkg);
         for f in &pkg.files {
             let size = std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0);
@@ -229,40 +226,52 @@ impl SourceCheck {
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            let mut hits = Vec::new();
-            let members = prebuilt::inspect_top_level(&f.name, &data, &f.name, &mut hits);
-            for (kind, path) in hits {
+            self.archive_contents_for(pkg, &url_sources, f, &data, out);
+            self.bidi_controls_for(pkg, f, &data, out);
+        }
+    }
+
+    fn archive_contents_for(
+        &self,
+        pkg: &Pkg,
+        url_sources: &std::collections::HashSet<String>,
+        f: &crate::pkg::pkgfile::PkgFile,
+        data: &[u8],
+        out: &mut Filter,
+    ) {
+        let mut hits = Vec::new();
+        let members = prebuilt::inspect_top_level(&f.name, data, &f.name, &mut hits);
+        for (kind, path) in hits {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "prebuilt-binary-in-sources",
+                &[&path, kind.as_str()],
+            );
+        }
+        if !url_sources.contains(&f.name) {
+            for root in prebuilt::vcs_roots(&members) {
+                let entries = format!("{} entries", root.entries);
+                let bytes = format!("{} bytes", root.bytes);
                 add_info(
                     out,
                     Level::Warning,
                     pkg,
-                    "prebuilt-binary-in-sources",
-                    &[&path, kind.as_str()],
+                    "source-archive-contains-vcs-metadata",
+                    &[&f.name, &root.root, &entries, &bytes],
                 );
             }
-            if !url_sources.contains(&f.name) {
-                for root in prebuilt::vcs_roots(&members) {
-                    let entries = format!("{} entries", root.entries);
-                    let bytes = format!("{} bytes", root.bytes);
-                    add_info(
-                        out,
-                        Level::Warning,
-                        pkg,
-                        "source-archive-contains-vcs-metadata",
-                        &[&f.name, &root.root, &entries, &bytes],
-                    );
-                }
-            }
-            for member in prebuilt::lfs_pointers(&members) {
-                let path = format!("{}: {}", f.name, member);
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "source-archive-contains-lfs-pointer",
-                    &[&path],
-                );
-            }
+        }
+        for member in prebuilt::lfs_pointers(&members) {
+            let path = format!("{}: {}", f.name, member);
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "source-archive-contains-lfs-pointer",
+                &[&path],
+            );
         }
     }
 
@@ -275,32 +284,28 @@ impl SourceCheck {
     /// scanned only when its bytes decode as UTF-8, or as UTF-16
     /// behind a byte-order mark; undecodable members are binary and
     /// stay quiet. Members under the surveyed exclusions stay quiet:
-    /// a `.git` path component, `.desktop` and `.txt` suffixes,
-    /// `Changelog` and `NEWS` basenames, and the `.po`, `.tex`,
-    /// `.html`, `.htm` and `.roff` suffixes.
-    fn check_bidi_controls(&self, pkg: &Pkg, out: &mut Filter) {
-        for f in &pkg.files {
-            let size = std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0);
-            if size > prebuilt::MAX_ARCHIVE_BYTES as u64 {
-                continue;
-            }
-            let data = match std::fs::read(&f.path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            for hit in prebuilt::bidi_hits(&f.name, &data, &f.name) {
-                let detail = format!(
-                    "{} line {}, column {} {}",
-                    hit.path, hit.line, hit.column, hit.control
-                );
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "source-archive-contains-bidi-control",
-                    &[&detail],
-                );
-            }
+    /// a `.git` path component, `.desktop` or `.txt` suffixes,
+    /// `Changelog` and `NEWS` basenames, case-folded, and the `.po`,
+    /// `.tex`, `.html`, `.htm` and `.roff` suffixes.
+    fn bidi_controls_for(
+        &self,
+        pkg: &Pkg,
+        f: &crate::pkg::pkgfile::PkgFile,
+        data: &[u8],
+        out: &mut Filter,
+    ) {
+        for hit in prebuilt::bidi_hits(&f.name, data, &f.name) {
+            let detail = format!(
+                "{} line {}, column {} {}",
+                hit.path, hit.line, hit.column, hit.control
+            );
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "source-archive-contains-bidi-control",
+                &[&detail],
+            );
         }
     }
 }
@@ -932,18 +937,28 @@ mod prebuilt {
     /// text, and stay quiet; unpaired surrogates fail the UTF-16
     /// decode the same way.
     fn first_bidi_control_in_text(data: &[u8]) -> Option<(u32, u32, &'static str)> {
-        let text: Vec<char> = if data.starts_with(b"\xEF\xBB\xBF") {
-            std::str::from_utf8(&data[3..]).ok()?.chars().collect()
+        if data.starts_with(b"\xEF\xBB\xBF") {
+            let text = std::str::from_utf8(&data[3..]).ok()?;
+            scan_chars(text.chars())
         } else if data.starts_with(b"\xFF\xFE") {
-            decode_utf16(&data[2..], true)?
+            scan_chars(decode_utf16(&data[2..], true)?.into_iter())
         } else if data.starts_with(b"\xFE\xFF") {
-            decode_utf16(&data[2..], false)?
+            scan_chars(decode_utf16(&data[2..], false)?.into_iter())
         } else {
-            std::str::from_utf8(data).ok()?.chars().collect()
-        };
+            let text = std::str::from_utf8(data).ok()?;
+            scan_chars(text.chars())
+        }
+    }
+
+    /// First bidi control in a char stream, with its 1-based line
+    /// and character column. The stream is consumed lazily: no
+    /// intermediate text buffer is built. (UTF-16 still validates
+    /// through `decode_utf16`, which must see every unit to fail the
+    /// whole member on an unpaired surrogate.)
+    fn scan_chars(chars: impl Iterator<Item = char>) -> Option<(u32, u32, &'static str)> {
         let mut line = 1u32;
         let mut column = 1u32;
-        for c in text {
+        for c in chars {
             if let Some(name) = bidi_control_name(c) {
                 return Some((line, column, name));
             }
@@ -982,7 +997,7 @@ mod prebuilt {
 
     /// Whether an archive member is outside the bidi scan: a `.git`
     /// path component, a `.desktop` or `.txt` suffix, a `Changelog`
-    /// or `NEWS` basename (with or without a dotted suffix), or one
+    /// or `NEWS` basename, case-folded (with or without a dotted suffix), or one
     /// of the excluded text formats (`.po`, `.tex`, `.html`, `.htm`,
     /// `.roff`).
     fn bidi_excluded(name: &str) -> bool {
@@ -990,10 +1005,11 @@ mod prebuilt {
             return true;
         }
         let basename = name.rsplit('/').next().unwrap_or(name);
-        if basename == "Changelog"
-            || basename == "NEWS"
-            || basename.starts_with("Changelog.")
-            || basename.starts_with("NEWS.")
+        let lower = basename.to_ascii_lowercase();
+        if lower == "changelog"
+            || lower == "news"
+            || lower.starts_with("changelog.")
+            || lower.starts_with("news.")
         {
             return true;
         }
@@ -1033,16 +1049,22 @@ mod prebuilt {
         if is_tar(data) {
             walk_bidi_tar(data, ctx, depth, hits);
         } else {
-            scan_bidi_member(strip_compression_suffix(name), data, ctx, hits);
+            // Anything else may itself be an archive (a zip produced
+            // by decompression) or text: route through the entry walk
+            // instead of scanning the raw bytes opaque. Depth + 1 so
+            // decompression layers consume the nesting budget.
+            inspect_bidi_entry(strip_compression_suffix(name), data, ctx, depth + 1, hits);
         }
     }
 
-    /// The member name without one compression suffix (`.gz`,
-    /// `.xz`, `.zst`, `.bz2`), or the name unchanged.
+    /// The member name without one compression suffix (`.gz`, `.xz`, `.zst`, `.zstd`, `.bz2`, case-insensitive), or the name unchanged.
     fn strip_compression_suffix(name: &str) -> &str {
-        for suffix in [".gz", ".xz", ".zst", ".bz2"] {
-            if let Some(stripped) = name.strip_suffix(suffix) {
-                return stripped;
+        // ASCII-only lowercasing preserves byte length, so slicing
+        // the original name by the stripped length is exact.
+        let lower = name.to_ascii_lowercase();
+        for suffix in [".gz", ".xz", ".zst", ".zstd", ".bz2"] {
+            if let Some(stripped) = lower.strip_suffix(suffix) {
+                return &name[..stripped.len()];
             }
         }
         name
@@ -1108,9 +1130,6 @@ mod prebuilt {
                 Ok(name) => name.into_owned(),
                 Err(_) => continue,
             };
-            if entry.size() > MAX_ENTRY_BYTES as u64 {
-                continue;
-            }
             let mut bytes = Vec::new();
             if entry
                 .take(MAX_ENTRY_BYTES as u64 + 1)
@@ -1513,8 +1532,7 @@ impl Check for SourceCheck {
             }
         }
         self.check_rpmlintrc_setbadness(pkg, config, out);
-        self.check_archive_contents(pkg, out);
-        self.check_bidi_controls(pkg, out);
+        self.check_source_archives(pkg, out);
     }
 }
 
@@ -2667,6 +2685,82 @@ mod prebuilt_tests {
         assert!(
             archive_lines(&findings, "source-archive-contains-bidi-control").is_empty(),
             "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn bidi_zip_member_with_lying_declared_size_still_scanned() {
+        // The bidi walk never trusts the central-directory declared
+        // size: a member declared huge over a small bidi payload
+        // still fires.
+        let patch = |z: &mut Vec<u8>, size: u32| {
+            let pos = z
+                .windows(4)
+                .position(|w| w == b"PK\x01\x02")
+                .expect("central directory present");
+            z[pos + 24..pos + 28].copy_from_slice(&size.to_le_bytes());
+        };
+        let mut z = zip_bytes(&[("src/evil.c", "int a; \u{202A}int b;\n".as_bytes())]);
+        patch(&mut z, 0xFFFF_FFF0);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("bidi-1.0.zip", z),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-bidi-control"),
+            [
+                "prebuilt-test.src: W: source-archive-contains-bidi-control \
+                 bidi-1.0.zip: src/evil.c line 1, column 8 \
+                 U+202A LEFT-TO-RIGHT EMBEDDING",
+            ],
+        );
+    }
+
+    #[test]
+    fn bidi_decompressed_zip_members_fire() {
+        // A gzip whose decompressed bytes are a zip: the members are
+        // walked, not scanned as opaque text.
+        let z = zip_bytes(&[("src/inner.c", "int a; \u{202E}int b;\n".as_bytes())]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("outer.zip.gz", gzip_bytes(&z)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-bidi-control"),
+            [
+                "prebuilt-test.src: W: source-archive-contains-bidi-control \
+                 outer.zip.gz: src/inner.c line 1, column 8 \
+                 U+202E RIGHT-TO-LEFT OVERRIDE",
+            ],
+        );
+    }
+
+    #[test]
+    fn bidi_exclusions_fold_case() {
+        // ChangeLog, CHANGELOG.md and a .GZ-suffixed single file stay
+        // quiet: the exclusion match folds case on both the basename
+        // and the compression suffix.
+        let tar = tarball(&[
+            ("ChangeLog", "x \u{202E}y\n".as_bytes()),
+            ("CHANGELOG.md", "x \u{202E}y\n".as_bytes()),
+            ("docs/NEWS", "x \u{202E}y\n".as_bytes()),
+            ("src/evil.c", "int a; \u{202A}int b;\n".as_bytes()),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("bidi-1.0.tar.gz", gzip_bytes(&tar)),
+            ("single.TXT.GZ", gzip_bytes("x \u{202E}y\n".as_bytes())),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-bidi-control"),
+            [
+                "prebuilt-test.src: W: source-archive-contains-bidi-control \
+                 bidi-1.0.tar.gz: src/evil.c line 1, column 8 \
+                 U+202A LEFT-TO-RIGHT EMBEDDING",
+            ],
         );
     }
 
