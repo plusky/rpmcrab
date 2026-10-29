@@ -1250,6 +1250,19 @@ mod tests {
     }
 
     #[test]
+    fn bundled_defaults_carry_no_python_module_stems() {
+        // The stem table lives only in the vendored distro layer: a
+        // stem row in the bundled defaults would silently give
+        // default runs stem behaviour, breaking the "default runs are
+        // byte-identical" claim.
+        let cfg = load_inner(&[], &[], false).unwrap();
+        assert!(
+            cfg.configuration.get("PythonModuleStems").is_none(),
+            "bundled defaults must not carry PythonModuleStems"
+        );
+    }
+
+    #[test]
     fn bundled_defaults_load_with_checks() {
         // load_bundled skips autoloading, so the vendored distro layer stays
         // out and the bare builtin baseline applies.

@@ -43,18 +43,23 @@ FLAG_OPS = {"EQ": "=", "GE": ">=", "LE": "<=", "GT": ">", "LT": "<"}
 
 
 def canon(name):
-    """PEP 503-ish canonical form: lowercase, runs of -/_/. collapsed."""
-    return re.sub(r"[-_.]+", "-", name).strip("-").lower()
+    """PEP 503-ish canonical form: lowercase, surrounding whitespace
+    stripped, runs of -/_/. collapsed."""
+    return re.sub(r"[-_.]+", "-", name.strip()).strip("-").lower()
 
 
 def stem_patterns(stem):
-    """Regexes matching the flavoured and dist() spellings of a stem."""
+    """Regexes matching the flavoured and dist() spellings of a stem,
+    over canon-collapsed capability lines: the dotted flavour
+    (python3.13-gobject) arrives dash-digitized (python3-13-gobject),
+    so the version group is a dash-digit group, not a dot group."""
     stem = re.escape(canon(stem))
     return [
-        # python3-gobject, python313-gobject, rich-expr atoms included:
-        # the token ends at whitespace, a version operator, ')' or EOS.
-        re.compile(r"python\d*-" + stem + r"(?:\s|[<>=!\)]|$)", re.IGNORECASE),
-        re.compile(r"python\d+(?:\.\d+)?dist\(" + stem + r"\)", re.IGNORECASE),
+        # python3-gobject, python313-gobject, python3-13-gobject,
+        # rich-expr atoms included: the token ends at whitespace, a
+        # version operator, ')' or EOS.
+        re.compile(r"python\d*(?:-\d+)?-" + stem + r"(?:\s|[<>=!\)]|$)", re.IGNORECASE),
+        re.compile(r"python\d+(?:-\d+)?dist\(" + stem + r"\)", re.IGNORECASE),
     ]
 
 
@@ -157,9 +162,10 @@ def pool_from_lines(lines):
         if m:
             provided.add(canon(m.group(1)))
         required_text.append(line)
-    required_joined = "\n".join(
-        re.sub(r"_", "-", line.lower()) for line in required_text
-    )
+    # Canon-collapse every line: the stem patterns match the collapsed
+    # form, so dotted-flavour spellings and separator variants in the
+    # stem position collapse to the canon form the patterns expect.
+    required_joined = "\n".join(canon(line) for line in required_text)
     return provided, required_joined
 
 
