@@ -76,8 +76,20 @@ impl DocCheck {
             .any(|suffix| name.ends_with(suffix))
     }
 
+    /// Packages whose name marks them as pure documentation carriers:
+    /// manuals, example collections, demos, test-result logs, HTML
+    /// documentation sets and API documentation. The -doc remedy is
+    /// circular for these: the package is the documentation carrier.
     fn ignore_pkg(name: &str) -> bool {
-        name.starts_with("bundle-") || name.contains("-devel") || name.contains("-doc")
+        name.starts_with("bundle-")
+            || name.contains("-devel")
+            || name.contains("-doc")
+            || name.contains("-manual")
+            || name.contains("-examples")
+            || name.contains("-demo")
+            || name.contains("-testresults")
+            || name.contains("-html")
+            || name.contains("-apidoc")
     }
 
     /// Man and info pages ship with the binaries they document; they
@@ -404,6 +416,25 @@ mod tests {
         assert!(DocCheck::ignore_pkg("foo-devel"));
         assert!(DocCheck::ignore_pkg("foo-doc"));
         assert!(!DocCheck::ignore_pkg("foo"));
+    }
+
+    #[test]
+    fn ignore_pkg_pure_doc_families() {
+        // One member per family, plus mid-name matches.
+        assert!(DocCheck::ignore_pkg("hsqldb-manual"));
+        assert!(DocCheck::ignore_pkg("foo-examples"));
+        assert!(DocCheck::ignore_pkg("blender-demo"));
+        assert!(DocCheck::ignore_pkg("gcc-testresults"));
+        assert!(DocCheck::ignore_pkg("glibc-html"));
+        assert!(DocCheck::ignore_pkg("scala-apidoc"));
+        assert!(DocCheck::ignore_pkg("libspf2-apidocs"));
+        assert!(DocCheck::ignore_pkg("nanoxml-manual-lite"));
+        assert!(DocCheck::ignore_pkg("gmsh-demos"));
+        assert!(DocCheck::ignore_pkg("zsh-htmldoc"));
+        // Near misses: the family marker without its leading dash.
+        assert!(!DocCheck::ignore_pkg("manual-foo"));
+        assert!(!DocCheck::ignore_pkg("fooexamples"));
+        assert!(!DocCheck::ignore_pkg("apidoc-foo"));
     }
 
     /// `Pkg` is header-backed with no test constructor, so open a tiny fixture
