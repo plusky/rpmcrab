@@ -4013,7 +4013,7 @@ impl FilesCheck {
         self.check_file_udev_rules(pkg, fname, pkgfile, out);
         self.check_file_tmpfiles_conf_in_etc(pkg, fname, out);
         self.check_file_subdir_in_bin(pkg, fname, out);
-        self.check_file_siteperl_in_perl_module(pkg, fname, out);
+        self.check_file_siteperl_in_perl_module(pkg, fname, pkgfile, out);
         self.check_file_backup_file_in_package(pkg, fname, out);
         self.check_file_version_control_internal_file(pkg, fname, out);
         self.check_file_htaccess_file(pkg, fname, pkgfile, out);
@@ -6156,8 +6156,16 @@ impl FilesCheck {
         }
     }
 
-    fn check_file_siteperl_in_perl_module(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        if fname.contains("/site_perl/") {
+    fn check_file_siteperl_in_perl_module(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) {
+        // A directory entry is tree ownership, not a shipped module
+        // file: the perl package itself owns its site_perl tree.
+        if fname.contains("/site_perl/") && !is_dir(pkgfile.mode) {
             add_info(
                 out,
                 Level::Warning,
@@ -8945,6 +8953,54 @@ mod tests {
             .filter(|((name, _), _)| name == "htaccess-file")
             .map(|(_, level)| *level)
             .collect()
+    }
+
+    /// Run the full FilesCheck over `files` and return the levels
+    /// `siteperl-in-perl-module` fired at, in emission order.
+    fn siteperl_levels(files: Vec<PkgFile>) -> Vec<Level> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = files;
+        let (results, levels) = run_files_check_pkgs(&[pkg], &test_config());
+        results
+            .iter()
+            .zip(&levels)
+            .filter(|((name, _), _)| name == "siteperl-in-perl-module")
+            .map(|(_, level)| *level)
+            .collect()
+    }
+
+    fn siteperl_file(name: &str, mode: u32) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn siteperl_module_file_still_warns() {
+        let levels = siteperl_levels(vec![siteperl_file(
+            "/usr/lib/perl5/site_perl/5.44.0/Foo.pm",
+            0o100644,
+        )]);
+        assert_eq!(levels, vec![Level::Warning]);
+    }
+
+    #[test]
+    fn siteperl_directory_entry_is_quiet() {
+        // The perl package itself owns its site_perl tree; a
+        // directory entry is not a shipped module file.
+        let levels = siteperl_levels(vec![
+            siteperl_file("/usr/lib/perl5/site_perl/5.44.0", 0o40755),
+            siteperl_file(
+                "/usr/lib/perl5/site_perl/5.44.0/x86_64-linux-thread-multi",
+                0o40755,
+            ),
+        ]);
+        assert!(levels.is_empty());
     }
 
     /// A regular non-executable file carrying the given header flags.

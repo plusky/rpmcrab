@@ -2403,6 +2403,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1222"
 
 [[divergence]]
 case = "global"
+check = "siteperl-in-perl-module"
+kind = "behaviour"
+reason = "Fix-and-diverge: directory entries under a site_perl tree do not fire. A directory is tree ownership, not a shipped module file: the perl package itself owns /usr/lib/perl5/site_perl/ and its arch subdirectory, and those two directory entries were the only siteperl-in-perl-module findings across the full Factory corpus. The reference fires on any path containing /site_perl/, including directories."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
