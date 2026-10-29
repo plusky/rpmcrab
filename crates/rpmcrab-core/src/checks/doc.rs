@@ -8,6 +8,12 @@
 //! an `ExemptDocSuffixes` entry (default `-javadoc`): fix-in-port for
 //! rpm-software-management/rpmlint#555, whose reference still flags 100%-docs
 //! javadoc packages.
+//!
+//! Man/info pages, help trees and translations packages do not count
+//! toward huge-docs: man/info pages ship with their binaries, help
+//! trees are read by the help viewer from the main package, and a
+//! translations package's documentation is translated content that
+//! belongs in the language split.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -72,6 +78,39 @@ impl DocCheck {
 
     fn ignore_pkg(name: &str) -> bool {
         name.starts_with("bundle-") || name.contains("-devel") || name.contains("-doc")
+    }
+
+    /// Man and info pages ship with the binaries they document; they
+    /// are never split into a -doc subpackage.
+    fn is_man_or_info_page(path: &str) -> bool {
+        path.starts_with("/usr/share/man/") || path.starts_with("/usr/share/info/")
+    }
+
+    /// Help trees are read by the help viewer from the main package:
+    /// GNOME help under /usr/share/help/, KDE help under
+    /// /usr/share/doc/HTML/. Moving help into an optional -doc
+    /// subpackage would remove in-app help.
+    fn is_help(path: &str) -> bool {
+        path.starts_with("/usr/share/help/") || path.starts_with("/usr/share/doc/HTML/")
+    }
+
+    /// Whether the package is a translations package: every non-doc
+    /// regular file is a locale file. Translated help, man pages and
+    /// manuals belong in the language split, not in a -doc subpackage.
+    /// A package with no non-doc regular files is not a translations
+    /// package (it is a pure documentation package, which keeps firing).
+    fn is_translations_package(files: &[PkgFile], doc_files: &[&str]) -> bool {
+        let mut any = false;
+        for f in files {
+            if !is_reg(f.mode) || doc_files.contains(&f.name.as_str()) {
+                continue;
+            }
+            any = true;
+            if !f.name.starts_with("/usr/share/locale/") {
+                return false;
+            }
+        }
+        any
     }
 
     /// Filenames in `doc_files` that are executable docs.
@@ -176,8 +215,11 @@ impl DocCheck {
             .filter(|f| is_reg(f.mode))
             .map(|f| f.size.unwrap_or(0))
             .sum();
+        // Man/info pages and help trees never move to -doc, so they
+        // do not count toward the documentation share.
         let doc_size: u64 = doc_files
             .iter()
+            .filter(|n| !Self::is_man_or_info_page(n) && !Self::is_help(n))
             .filter_map(|n| by_name.get(n))
             .filter(|f| is_reg(f.mode))
             .map(|f| f.size.unwrap_or(0))
@@ -242,6 +284,7 @@ impl Check for DocCheck {
 
         if !Self::ignore_pkg(&pkg.name)
             && !self.exempt_by_suffix(&pkg.name)
+            && !Self::is_translations_package(&pkg.files, &doc_refs)
             && let Some(pct) = Self::huge_docs_pct(&pkg.files, &doc_refs)
         {
             add_info(
@@ -578,5 +621,133 @@ mod tests {
         let config = Config::default();
         let mut check = DocCheck::new(&config);
         assert!(run(&config, &mut check, &huge_docs_pkg("foo-javadoc")).is_empty());
+    }
+
+    /// A package with documentation under the given paths, plus
+    /// optional non-doc files, all regular.
+    fn sized_docs_pkg(name: &str, docs: &[(&str, u64)], others: &[(&str, u64)]) -> Pkg {
+        let mut pkg = fixture_pkg();
+        pkg.name = name.to_string();
+        pkg.arch = "noarch".to_string();
+        let mut files = Vec::new();
+        let mut doc_files = Vec::new();
+        for (path, size) in docs {
+            files.push(PkgFile {
+                name: path.to_string(),
+                mode: 0o100644,
+                size: Some(*size),
+                ..Default::default()
+            });
+            doc_files.push(path.to_string());
+        }
+        for (path, size) in others {
+            files.push(PkgFile {
+                name: path.to_string(),
+                mode: 0o100644,
+                size: Some(*size),
+                ..Default::default()
+            });
+        }
+        pkg.files = files;
+        pkg.doc_files = doc_files;
+        pkg
+    }
+
+    #[test]
+    fn man_page_docs_do_not_count() {
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        let pkg = sized_docs_pkg("foo", &[("/usr/share/man/man1/foo.1", 200 * 1024)], &[]);
+        assert!(run(&config, &mut check, &pkg).is_empty());
+    }
+
+    #[test]
+    fn info_page_docs_do_not_count() {
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        let pkg = sized_docs_pkg("foo", &[("/usr/share/info/foo.info", 200 * 1024)], &[]);
+        assert!(run(&config, &mut check, &pkg).is_empty());
+    }
+
+    #[test]
+    fn help_docs_do_not_count() {
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        for path in [
+            "/usr/share/help/C/foo/index.docbook",
+            "/usr/share/doc/HTML/en/foo/index.docbook",
+        ] {
+            let pkg = sized_docs_pkg("foo", &[(path, 200 * 1024)], &[]);
+            assert!(
+                run(&config, &mut check, &pkg).is_empty(),
+                "expected no finding for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn man_pages_plus_small_real_docs_stay_quiet() {
+        // Counted docs (200 KiB) are 40% of the 500 KiB package.
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        let pkg = sized_docs_pkg(
+            "foo",
+            &[
+                ("/usr/share/man/man1/foo.1", 200 * 1024),
+                ("/usr/share/doc/foo/manual.html", 200 * 1024),
+            ],
+            &[("/usr/bin/foo", 100 * 1024)],
+        );
+        assert!(run(&config, &mut check, &pkg).is_empty());
+    }
+
+    #[test]
+    fn man_pages_plus_large_real_docs_still_fire() {
+        // Counted docs (400 KiB) are 57% of the 700 KiB package.
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        let pkg = sized_docs_pkg(
+            "foo",
+            &[
+                ("/usr/share/man/man1/foo.1", 200 * 1024),
+                ("/usr/share/doc/foo/manual.html", 200 * 1024),
+                ("/usr/share/doc/foo/guide.html", 200 * 1024),
+            ],
+            &[("/usr/bin/foo", 100 * 1024)],
+        );
+        let results = run(&config, &mut check, &pkg);
+        assert_eq!(results.len(), 1, "expected one finding, got {results:?}");
+        assert_eq!(results[0].0, "package-with-huge-docs");
+        assert!(results[0].1.contains("57%"), "got {}", results[0].1);
+    }
+
+    #[test]
+    fn translations_package_is_quiet() {
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        // A counted doc path, so only the translations exemption quiets it.
+        let pkg = sized_docs_pkg(
+            "foo-lang",
+            &[("/usr/share/doc/foo/manual.html", 200 * 1024)],
+            &[("/usr/share/locale/fr/LC_MESSAGES/foo.mo", 50 * 1024)],
+        );
+        assert!(run(&config, &mut check, &pkg).is_empty());
+    }
+
+    #[test]
+    fn translations_package_with_binary_still_fires() {
+        let config = config_with_suffixes(&["-javadoc"]);
+        let mut check = DocCheck::new(&config);
+        let pkg = sized_docs_pkg(
+            "foo-lang",
+            &[("/usr/share/doc/foo/manual.html", 200 * 1024)],
+            &[
+                ("/usr/share/locale/fr/LC_MESSAGES/foo.mo", 50 * 1024),
+                ("/usr/bin/foo", 10 * 1024),
+            ],
+        );
+        let results = run(&config, &mut check, &pkg);
+        assert_eq!(results.len(), 1, "expected one finding, got {results:?}");
+        assert_eq!(results[0].0, "package-with-huge-docs");
     }
 }
