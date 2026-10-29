@@ -38,3 +38,17 @@ kind = "behaviour"
 reason = "Fix-and-diverge (issue #1223): two new warnings from the rpminspect desktop inspection, reimplemented from documented behaviour, not ported. `desktopfile-icon-not-found` fires when a [Desktop Entry] Icon given as an absolute path resolves to no regular file in this package; `desktopfile-icon-not-readable` fires when the icon file it resolves to is not world-readable. A bare or suffixed name never fires on absence (a system icon theme may provide it), and ghost entries, symlink chains leaving the package, and loops all stay silent, since absence is not decidable from this package alone. Only the [Desktop Entry] Icon is read; action icons are out of scope. The frozen 2.10.0 reference validates Exec but never looks at Icon."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1223"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: an Exec first token wrapped in one layer of double quotes is unquoted before the existence check. The Desktop Entry specification permits double-quoted arguments, and the quoted spelling names the same binary: a desktop file with Exec=\"/usr/bin/foo\" whose package ships /usr/bin/foo no longer fires. An unbalanced or lone quote is left alone."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: an absolute Exec path through /sbin or /bin also resolves through its merged-/usr counterpart (/usr/sbin, /usr/bin). On merged-/usr systems /bin and /sbin are symlinks to those directories, so a package shipping the target under the merged path satisfies the entry. Only the legacy-to-merged direction is credited: the merged form is the canonical location."
+since = "0.4.1"

@@ -223,11 +223,42 @@ impl MenuXDGCheck {
         errors
     }
 
+    /// Strip one layer of surrounding double quotes from an Exec first
+    /// token: the Desktop Entry specification permits double-quoted
+    /// arguments, and the quoted spelling names the same binary.
+    /// An unbalanced or lone quote is left alone: it names no binary
+    /// the check could resolve.
+    fn unquote_exec_token(token: &str) -> &str {
+        if token.len() >= 2 && token.starts_with('"') && token.ends_with('"') {
+            &token[1..token.len() - 1]
+        } else {
+            token
+        }
+    }
+
     /// Whether the Exec binary resolves (in the package or on the live root).
     fn binary_exists(pkg: &Pkg, binary: &str) -> bool {
         if binary.starts_with('/') {
             let full = Path::new(pkg.dir_name()).join(binary.trim_start_matches('/'));
-            return full.exists();
+            if full.exists() {
+                return true;
+            }
+            // Merged-/usr systems link /bin and /sbin to /usr/bin and
+            // /usr/sbin, so an absolute path through the legacy directory
+            // resolves when the package ships the merged counterpart.
+            if let Some(rest) = binary.strip_prefix("/sbin/") {
+                return Path::new(pkg.dir_name())
+                    .join("usr/sbin")
+                    .join(rest)
+                    .exists();
+            }
+            if let Some(rest) = binary.strip_prefix("/bin/") {
+                return Path::new(pkg.dir_name())
+                    .join("usr/bin")
+                    .join(rest)
+                    .exists();
+            }
+            return false;
         }
         STANDARD_BIN_DIRS.iter().any(|d| {
             Path::new(pkg.dir_name())
@@ -534,6 +565,7 @@ impl Check for MenuXDGCheck {
                         // The reference uses `partition(' ')`, which splits
                         // on the first ASCII space only.
                         let binary = exec.split(' ').next().unwrap_or("");
+                        let binary = Self::unquote_exec_token(binary);
                         if !binary.is_empty() && !Self::binary_exists(pkg, binary) {
                             add_info(
                                 out,
@@ -1223,5 +1255,156 @@ mod tests {
             ],
         );
         assert!(results.is_empty(), "unexpected findings: {results:?}");
+    }
+
+    /// Drive check_binary over a hand-written desktop file, seeding
+    /// the given relative paths into the fixture package's extracted
+    /// directory first so binary_exists can resolve against them.
+    /// The extraction root is a fresh tempdir per call: tests run in
+    /// parallel and must not share a seeded directory.
+    fn run_desktop_seeded(content: &str, seeded: &[&str]) -> Vec<(String, String)> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seededtest.desktop");
+        std::fs::write(&path, content).unwrap();
+        let extract_root = tempfile::tempdir().unwrap();
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, extract_root.path(), true).expect("open fixture pkg");
+        let root = Path::new(pkg.dir_name()).to_path_buf();
+        for rel in seeded {
+            let full = root.join(rel);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&full, b"").unwrap();
+        }
+        let name = "/usr/share/applications/seededtest.desktop";
+        pkg.files = vec![PkgFile {
+            name: name.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
+        let mut check = MenuXDGCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let results = out.results().to_vec();
+        drop(dir);
+        drop(extract_root);
+        results
+    }
+
+    fn without_binary(results: &[(String, String)]) -> Vec<&String> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "desktopfile-without-binary")
+            .map(|(_, l)| l)
+            .collect()
+    }
+
+    #[test]
+    fn bare_exec_token_resolves_in_bin_dirs() {
+        let results = run_desktop_seeded("[Desktop Entry]\nName=Foo\nExec=foo\n", &["usr/bin/foo"]);
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn quoted_exec_token_resolves_when_unquoted_binary_present() {
+        // gsmartcontrol ships Exec="/usr/bin/gsmartcontrol-root"
+        // (quoted) with the binary in the package: the quoted spelling
+        // names the same binary and must not fire.
+        let results = run_desktop_seeded(
+            "[Desktop Entry]\nName=Foo\nExec=\"/usr/bin/gsmartcontrol-root\"\n",
+            &["usr/bin/gsmartcontrol-root"],
+        );
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn quoted_exec_token_still_fires_when_binary_absent() {
+        let results =
+            run_desktop_seeded("[Desktop Entry]\nName=Foo\nExec=\"/usr/bin/absent\"\n", &[]);
+        let lines = without_binary(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("/usr/bin/absent"),
+            "detail carries the resolved name: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('\"'),
+            "detail carries no quotes: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn unbalanced_quote_token_still_fires() {
+        let results = run_desktop_seeded("[Desktop Entry]\nName=Foo\nExec=\"foo\n", &[]);
+        let lines = without_binary(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn usrmerge_sbin_resolves_via_usr_sbin() {
+        // yast2 ships Exec=/sbin/yast2 with only /usr/sbin/yast2 in
+        // the package: on merged-/usr systems /sbin is a symlink to
+        // /usr/sbin, so the entry resolves.
+        let results = run_desktop_seeded(
+            "[Desktop Entry]\nName=Foo\nExec=/sbin/yast2\n",
+            &["usr/sbin/yast2"],
+        );
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn usrmerge_bin_resolves_via_usr_bin() {
+        let results = run_desktop_seeded(
+            "[Desktop Entry]\nName=Foo\nExec=/bin/tool\n",
+            &["usr/bin/tool"],
+        );
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn usrmerge_absent_still_fires() {
+        let results = run_desktop_seeded("[Desktop Entry]\nName=Foo\nExec=/sbin/yast2\n", &[]);
+        let lines = without_binary(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn binary_exists_usrmerge_edges() {
+        let extract_root = tempfile::tempdir().unwrap();
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let pkg = Pkg::open(&rpm, extract_root.path(), true).expect("open fixture pkg");
+        let root = Path::new(pkg.dir_name()).to_path_buf();
+        std::fs::create_dir_all(root.join("usr/sbin")).unwrap();
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::write(root.join("usr/sbin/yast2"), b"").unwrap();
+        std::fs::write(root.join("usr/bin/tool"), b"").unwrap();
+        assert!(MenuXDGCheck::binary_exists(&pkg, "/sbin/yast2"));
+        assert!(MenuXDGCheck::binary_exists(&pkg, "/bin/tool"));
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/sbin/missing"));
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/bin/missing"));
+        // No trailing component: not a legacy-directory path.
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/sbin"));
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/bin"));
+        // A name merely starting with the legacy prefix is not one.
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/sbinfoo/tool"));
     }
 }
