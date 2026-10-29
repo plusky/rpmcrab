@@ -1024,3 +1024,10 @@ kind = "behaviour"
 reason = "Fix-and-diverge (issue #1222): two new man page compression warnings in FilesCheck. `manpage-gzip-magic-mismatch` fires when a `.gz`-suffixed man page's first two bytes are not the gzip magic (read directly from the file, no decompressor needed); `manpage-empty-after-decompression` fires when a compressed man page (any suffix with a decompressor) decompresses to empty through the shared decompressed cache. Only man-root pages that are regular files are judged: an uncompressed page stays under the existing `manpage-not-compressed` rule and never double-fires, and a page whose decompressor is absent or fails is skipped rather than judged -- a failed decompression is not an empty page. The frozen 2.10.0 reference has no such checks: its `manpage-not-compressed` trusts the extension."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1222"
+
+[[divergence]]
+case = "global"
+check = "siteperl-in-perl-module"
+kind = "behaviour"
+reason = "Fix-and-diverge: directory entries under a site_perl tree do not fire. A directory is tree ownership, not a shipped module file: the perl package itself owns /usr/lib/perl5/site_perl/ and its arch subdirectory, and those two directory entries were the only siteperl-in-perl-module findings across the full Factory corpus. The reference fires on any path containing /site_perl/, including directories."
+since = "0.4.1"
