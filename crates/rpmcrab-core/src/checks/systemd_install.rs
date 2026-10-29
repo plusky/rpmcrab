@@ -284,17 +284,16 @@ impl Check for SystemdInstallCheck {
         let mut aliases: std::collections::HashMap<&str, Vec<&str>> =
             std::collections::HashMap::new();
         for file in &pkg.files {
-            if file.name.contains(".wants/") {
-                if let Some(base) = file.name.rsplit('/').next() {
-                    wants.insert(base);
-                }
+            if file.name.contains(".wants/")
+                && let Some(base) = file.name.rsplit('/').next()
+            {
+                wants.insert(base);
             }
-            if is_symlink(file.mode) {
-                if let Some(target) = pkg.readlink(file) {
-                    if let Some(base) = file.name.rsplit('/').next() {
-                        aliases.entry(target.name.as_str()).or_default().push(base);
-                    }
-                }
+            if is_symlink(file.mode)
+                && let Some(target) = pkg.readlink(file)
+                && let Some(base) = file.name.rsplit('/').next()
+            {
+                aliases.entry(target.name.as_str()).or_default().push(base);
             }
         }
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
