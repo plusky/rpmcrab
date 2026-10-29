@@ -863,6 +863,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "ldd-failed"
+kind = "missing"
+reason = "Removed: the port parses ELF with goblin in both ReadelfInfo and LddInfo, so every input that fails the ldd parse already fails the readelf parse and emits readelf-failed first; ldd-failed is unreachable. The reference runs the ldd tool, whose distinct failure modes the goblin port has no equivalent for. The emission, its description entry, and its pinning test are removed."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "branding-requires-unversioned"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #857): branding-requires-unversioned is charged only when the require name is the generic branding name in full — <base>-branding or <base>-theme, with nothing before it or after it — and the name is not an icon-theme name (<base>-icon-theme; the reference defines re_icon_theme for the same distinction and leaves it unused). The reference matches the generic pattern as a prefix, so it charges concrete data packages whose names merely contain the pattern: the icon themes the desktop packages integrate with, plural and suffixed theme packages (gnome-themes, kalpa-themes-sddm, ocean-sound-theme6) and non-name require forms (a soname, a config() name). A version on a require of a concrete data package pins no flavour, so the finding's rationale — the version pins the flavour of a branding virtual — reaches only the generic name itself, on the theme arm as on the branding arm. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 108 affected source packages re-measured before and after the fix): 133 E in 108 source packages before, 21 E in 19 after, and no other finding changed in those packages. The residue is 15 findings on branding virtuals (wallpaper-branding 2; compiz-branding, distrobox-branding, gcin-branding, libpurple-branding, lxde-common-branding, mate-menus-branding, plymouth-branding, pw3270-branding, systemd-default-settings-branding, systemd-presets-branding, xfce4-notifyd-branding, xfce4-session-branding and yast2-qt-branding 1 each) and 6 on concrete data packages whose names are exactly generic-shaped and so are indistinguishable from a theme virtual by name: yast2-theme 4 and python313/python314-pydata-sphinx-theme 1 each. Pinned by unversioned_requires_scoped_to_generic_branding_names in branding_policy.rs."

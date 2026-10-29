@@ -80,9 +80,6 @@ with the intended shared libraries only.
 readelf-failed="""
 Executing readelf on this file failed, all checks could not be run.
 """
-ldd-failed="""
-Executing ldd on this file failed, all checks could not be run.
-"""
 strings-failed="""
 Executing strings on this file failed, all checks could not be run.
 """

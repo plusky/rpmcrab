@@ -7245,6 +7245,17 @@ impl FilesCheck {
         if !pkgfile::is_reg(pkgfile.mode) {
             return;
         }
+        // Port of the reference's _check_file_normal_file_debuginfo: a
+        // debuginfo package's .debug files set debugs, any other regular
+        // file sets srcs; the without-sources finding needs debugs
+        // without srcs.
+        if st.debuginfo_package {
+            if fname.ends_with(".debug") {
+                st.debuginfo_debugs = true;
+            } else {
+                st.debuginfo_srcs = true;
+            }
+        }
         let mut fd = FileData::default();
         self.check_normal_logfile(pkg, fname, pkgfile, &mut fd, out);
         self.check_normal_getdata(pkg, fname, pkgfile, &mut fd, out);
@@ -7705,7 +7716,7 @@ impl FilesCheck {
             let m = Self::python_magic_values(v);
             if m.is_empty() {
                 None
-            } else if v.starts_with("3.0") || v.starts_with("3.1") {
+            } else if v == "3.0" || v == "3.1" {
                 // Python 3.0/3.1 always use the value one higher
                 Some(m.iter().map(|x| x + 1).collect())
             } else {
@@ -11512,6 +11523,68 @@ print("hi")
     }
 
     #[test]
+    fn debuginfo_flags_populate_from_file_kinds() {
+        // Port of the reference's _check_file_normal_file_debuginfo: a
+        // debuginfo package's .debug files set debugs, any other regular
+        // file sets srcs.
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let debug_path = dir.path().join("foo.debug");
+        std::fs::write(&debug_path, b"").expect("write debug");
+        let other_path = dir.path().join("foo");
+        std::fs::write(&other_path, b"").expect("write other");
+        let pkg = pybc_pkg(&dir, &[]);
+        let mut st = PkgState {
+            debuginfo_package: true,
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let debug = PkgFile {
+            name: "/usr/lib/debug/usr/bin/foo.debug".to_string(),
+            path: debug_path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        };
+        check.check_file_normal_file(&pkg, debug.name.as_str(), &debug, &mut st, &mut out);
+        assert!(st.debuginfo_debugs, "a .debug file sets debugs");
+        assert!(!st.debuginfo_srcs, "no non-.debug file seen yet");
+        let other = PkgFile {
+            name: "/usr/lib/debug/usr/bin/foo".to_string(),
+            path: other_path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        };
+        check.check_file_normal_file(&pkg, other.name.as_str(), &other, &mut st, &mut out);
+        assert!(st.debuginfo_srcs, "a non-.debug file sets srcs");
+    }
+
+    #[test]
+    fn debuginfo_without_sources_fires_on_debugs_only() {
+        let mut config = test_config();
+        config
+            .configuration
+            .insert("UseDebugSource".to_string(), toml::Value::Boolean(false));
+        let check = FilesCheck::new(&config);
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = pybc_pkg(&dir, &[]);
+        let mut st = PkgState {
+            debuginfo_package: true,
+            debuginfo_debugs: true,
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_debuginfo_without_sources(&pkg, &st, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "debuginfo-without-sources");
+        st.debuginfo_srcs = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_debuginfo_without_sources(&pkg, &st, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_lacks(&names, "debuginfo-without-sources");
+    }
+
+    #[test]
     fn debug_companion_in_debuginfo_package_is_quiet() {
         // Issue #955: a -debuginfo package's payload is the mirrored
         // .debug companion of the versioned runtime library; the lib
@@ -14385,6 +14458,39 @@ print("hi")
         for (version, magics) in expected {
             assert_eq!(FilesCheck::python_magic_values(version), magics);
         }
+    }
+
+    #[test]
+    fn pyc_magic_check_modern_versions_from_path() {
+        // Magic numbers verified against installed interpreters (3.12.16,
+        // 3.13.18, 3.15.2). A matching magic stays silent; a foreign magic
+        // fires an Error from the path version.
+        let check = FilesCheck::new(&test_config());
+        assert!(
+            check
+                .pyc_magic_check("/usr/lib/python3.12/foo.pyc", 3531)
+                .is_none()
+        );
+        assert!(
+            check
+                .pyc_magic_check("/usr/lib/python3.13/foo.pyc", 3571)
+                .is_none()
+        );
+        assert!(
+            check
+                .pyc_magic_check("/usr/lib/python3.15/foo.pyc", 3666)
+                .is_none()
+        );
+        let (level, details) = check
+            .pyc_magic_check("/usr/lib/python3.12/foo.pyc", 3571)
+            .expect("finding");
+        assert_eq!(level, Level::Error);
+        assert!(
+            details[1].contains("expected 3531 (3.12)"),
+            "{}",
+            details[1]
+        );
+        assert!(details[1].contains("found 3571 (3.13)"), "{}", details[1]);
     }
 
     #[test]

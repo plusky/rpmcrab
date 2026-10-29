@@ -87,3 +87,15 @@ magics = [3379]
 [[version]]
 version = "3.7"
 magics = [3390, 3391, 3392, 3393, 3394]
+
+[[version]]
+version = "3.12"
+magics = [3531]
+
+[[version]]
+version = "3.13"
+magics = [3571]
+
+[[version]]
+version = "3.15"
+magics = [3666]

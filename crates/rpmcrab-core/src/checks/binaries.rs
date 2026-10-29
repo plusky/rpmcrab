@@ -5224,9 +5224,11 @@ impl BinariesCheck {
     }
 
     fn check_invalid_la_file(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
-        if invalid_dir_ref_regex().is_match(fname).unwrap_or(false)
-            && la_file_regex().is_match(fname).unwrap_or(false)
-        {
+        // Reference parity (BinariesCheck.py _check_invalid_la_file): the
+        // gate is the .la suffix alone; the /home|/tmp test applies to
+        // content lines, not to the shipped path (a .la file never ships
+        // under /home or /tmp).
+        if la_file_regex().is_match(fname).unwrap_or(false) {
             // Find the matching line number via grep on the extracted file.
             if let Ok(content) = std::fs::read_to_string(&pkgfile.path) {
                 for (idx, line) in content.lines().enumerate() {
@@ -7424,19 +7426,6 @@ impl BinariesCheck {
                 &[&pkgfile.name, reason],
             );
             return;
-        }
-
-        if let Some(ldd) = analysis.ldd.as_ref() {
-            if let Some(reason) = &ldd.failed {
-                add_info(
-                    out,
-                    Level::Error,
-                    pkg,
-                    "ldd-failed",
-                    &[&pkgfile.name, reason],
-                );
-                return;
-            }
         }
 
         // The reference runs these in a thread pool; serial is equivalent.
@@ -12321,32 +12310,6 @@ description = "explicit priority string bypasses the system crypto policy"
 
     // A minimal ELF64 executable parseable by goblin, so run_elf_checks
     // reaches the ldd branch without a toolchain-produced fixture.
-    fn parseable_elf() -> Vec<u8> {
-        let mut elf: Vec<u8> = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        elf.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
-        elf.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
-        elf.extend_from_slice(&1u32.to_le_bytes()); // version
-        elf.extend_from_slice(&0u64.to_le_bytes()); // entry
-        elf.extend_from_slice(&64u64.to_le_bytes()); // phoff
-        elf.extend_from_slice(&0u64.to_le_bytes()); // shoff
-        elf.extend_from_slice(&0u32.to_le_bytes()); // flags
-        elf.extend_from_slice(&64u16.to_le_bytes()); // ehsize
-        elf.extend_from_slice(&56u16.to_le_bytes()); // phentsize
-        elf.extend_from_slice(&1u16.to_le_bytes()); // phnum
-        elf.extend_from_slice(&0u16.to_le_bytes()); // shentsize
-        elf.extend_from_slice(&0u16.to_le_bytes()); // shnum
-        elf.extend_from_slice(&0u16.to_le_bytes()); // shstrndx
-        // One PT_LOAD segment.
-        elf.extend_from_slice(&1u32.to_le_bytes()); // p_type
-        elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags R+X
-        elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset
-        elf.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
-        elf.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
-        elf.extend_from_slice(&120u64.to_le_bytes()); // p_filesz
-        elf.extend_from_slice(&120u64.to_le_bytes()); // p_memsz
-        elf.extend_from_slice(&0x1000u64.to_le_bytes()); // p_align
-        elf
-    }
 
     /// A minimal ELF64 with the given `e_type` and programme header
     /// types, parseable by goblin: the byte-level counterpart of the
@@ -22316,32 +22279,62 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn ldd_failed_is_unreachable_on_parseable_elf() {
-        // ReadelfInfo::parse and LddInfo::parse fail on exactly the same
-        // inputs (both read the file and run goblin over it), so
-        // readelf-failed always fires first: ldd-failed has no reachable
-        // emission in the port. Pin the negative on a parseable ELF.
+    fn invalid_la_file_fires_on_home_tmp_content_ref() {
+        // Reference parity (BinariesCheck.py _check_invalid_la_file): the
+        // gate is the .la suffix; the shipped path is never under /home
+        // or /tmp, so a path conjunct can never pass. A .la file whose
+        // content references /home or /tmp fires.
         let dir = tempfile::TempDir::new().expect("tmpdir");
-        let elf_path = dir.path().join("libok.so");
-        std::fs::write(&elf_path, parseable_elf()).expect("write elf");
+        let la_path = dir.path().join("libfoo.la");
+        std::fs::write(&la_path, "libdir='/home/abuild/rpmbuild/BUILD/foo'\n").expect("write la");
         let config = test_config();
-        let mut check = BinariesCheck::with_tool_dir(&config, None);
-        check.is_dynamically_linked = true;
+        let check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let pkgfile = PkgFile {
-            name: "/usr/lib64/libok.so".to_string(),
-            path: elf_path.to_string_lossy().into_owned(),
-            magic: "ELF 64-bit LSB shared object, x86-64, dynamically linked".to_string(),
-            mode: 0o100755,
+            name: "/usr/lib64/libfoo.la".to_string(),
+            path: la_path.to_string_lossy().into_owned(),
+            mode: 0o100644,
             ..Default::default()
         };
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let analysis =
-            ElfAnalysis::wants_analysis(&pkgfile, false).then(|| ElfAnalysis::parse(&pkgfile));
-        check.run_elf_checks(&pkg, &pkgfile, &config, &mut out, analysis.as_ref());
+        check.check_invalid_la_file(&pkg, "/usr/lib64/libfoo.la", &pkgfile, &mut out);
         let results = out.results().to_vec();
-        assert_lacks(&results, "readelf-failed");
-        assert_lacks(&results, "ldd-failed");
+        let lines = lines_for(&results, "invalid-la-file");
+        assert_eq!(lines.len(), 1, "one invalid-la-file: {results:?}");
+        assert!(
+            lines[0].contains(" E: "),
+            "invalid-la-file is Error: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn invalid_la_file_quiet_without_dir_ref_and_on_non_la() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let clean_path = dir.path().join("libclean.la");
+        std::fs::write(&clean_path, "libdir='/usr/lib64'\n").expect("write la");
+        let dirty_path = dir.path().join("notes.txt");
+        std::fs::write(&dirty_path, "built in /tmp/foo\n").expect("write txt");
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let clean = PkgFile {
+            name: "/usr/lib64/libclean.la".to_string(),
+            path: clean_path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        };
+        check.check_invalid_la_file(&pkg, "/usr/lib64/libclean.la", &clean, &mut out);
+        let dirty = PkgFile {
+            name: "/usr/share/doc/notes.txt".to_string(),
+            path: dirty_path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        };
+        check.check_invalid_la_file(&pkg, "/usr/share/doc/notes.txt", &dirty, &mut out);
+        let results = out.results().to_vec();
+        assert_lacks(&results, "invalid-la-file");
     }
 
     #[test]
@@ -22356,7 +22349,6 @@ description = "explicit priority string bypasses the system crypto policy"
         let rpm_path = fixture_path("rpmcrab-binaries-dangling-gnuhash-1.0-1.aarch64.rpm");
         let (results, _dir) = run_binaries_check(&rpm_path);
         assert_lacks(&results, "readelf-failed");
-        assert_lacks(&results, "ldd-failed");
         let hash_lines = lines_for(&results, "missing-hash-section");
         assert_eq!(hash_lines.len(), 1, "one missing-hash-section: {results:?}");
         assert!(
