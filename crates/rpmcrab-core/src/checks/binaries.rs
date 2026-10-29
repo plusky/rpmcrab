@@ -731,7 +731,15 @@ struct ReadelfInfo {
     vendored_crates: Vec<VendoredCrate>,
     soname: Option<String>,
     needed: Vec<String>,
+    /// DT_RUNPATH entries of this object, one per tag occurrence, in
+    /// dynamic-section order. Kept distinct from `rpaths`: the two
+    /// tags have different search semantics, and an object carrying
+    /// both is a defect of its own.
     runpaths: Vec<String>,
+    /// DT_RPATH entries of this object, one per tag occurrence, in
+    /// dynamic-section order. Split from `runpaths` so the
+    /// both-present predicate stays visible.
+    rpaths: Vec<String>,
     has_textrel: bool,
     /// Raw `e_type` from the ELF header. ET_EXEC versus ET_DYN is the
     /// ground truth for the hardening checks where the file name cannot
@@ -853,6 +861,7 @@ impl ReadelfInfo {
             soname: None,
             needed: Vec::new(),
             runpaths: Vec::new(),
+            rpaths: Vec::new(),
             has_textrel: false,
             has_nonweak_undefined: false,
             defines_main: false,
@@ -1214,9 +1223,14 @@ impl ReadelfInfo {
                             self.needed.push(s.to_string());
                         }
                     }
-                    goblin::elf::dynamic::DT_RUNPATH | goblin::elf::dynamic::DT_RPATH => {
+                    goblin::elf::dynamic::DT_RUNPATH => {
                         if let Some(s) = dynstrtab.get_at(d.d_val as usize) {
                             self.runpaths.push(s.to_string());
+                        }
+                    }
+                    goblin::elf::dynamic::DT_RPATH => {
+                        if let Some(s) = dynstrtab.get_at(d.d_val as usize) {
+                            self.rpaths.push(s.to_string());
                         }
                     }
                     goblin::elf::dynamic::DT_TEXTREL => {
@@ -6927,7 +6941,7 @@ impl BinariesCheck {
     }
 
     fn check_rpath(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
-        for runpaths in &info.runpaths {
+        for runpaths in info.runpaths.iter().chain(info.rpaths.iter()) {
             // The reference readelf parser only records non-empty
             // `Library runpath: [...]` matches, so an empty entry never
             // reaches its check.
@@ -6958,6 +6972,50 @@ impl BinariesCheck {
                     return;
                 }
             }
+        }
+    }
+
+    fn check_rpath_runpath(
+        &self,
+        pkg: &Pkg,
+        pkgfile: &PkgFile,
+        info: &ReadelfInfo,
+        out: &mut Filter,
+    ) {
+        // An object carrying both DT_RPATH and DT_RUNPATH is a defect:
+        // the two tags have different search semantics, so the pair is
+        // never a meaningful combination. Presence keys on a non-empty
+        // value on each side, matching the existing check's rule that
+        // an empty entry never counts. Archive members merge into one
+        // info like every other vector field, so for an archive the
+        // predicate reads the file's merged view.
+        let has_rpath = info.rpaths.iter().any(|r| !r.is_empty());
+        let has_runpath = info.runpaths.iter().any(|r| !r.is_empty());
+        if has_rpath && has_runpath {
+            let rpath = info
+                .rpaths
+                .iter()
+                .filter(|r| !r.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(":");
+            let runpath = info
+                .runpaths
+                .iter()
+                .filter(|r| !r.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(":");
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "binary-or-shlib-defines-rpath-and-runpath",
+                &[
+                    &pkgfile.name,
+                    &format!("(RPATH: {rpath}, RUNPATH: {runpath})"),
+                ],
+            );
         }
     }
 
@@ -7046,7 +7104,11 @@ impl BinariesCheck {
                 );
             }
         } else {
-            let runpath_has_libc = info.runpaths.iter().any(|r| r.contains("libc."));
+            let runpath_has_libc = info
+                .runpaths
+                .iter()
+                .chain(info.rpaths.iter())
+                .any(|r| r.contains("libc."));
             let soname_is_libc = info
                 .soname
                 .as_ref()
@@ -7257,6 +7319,7 @@ impl BinariesCheck {
         self.check_go_toolchain(pkg, pkgfile, info, out);
         self.check_bundled_library_provides(pkg, pkgfile, info, out);
         self.check_rpath(pkg, pkgfile, info, out);
+        self.check_rpath_runpath(pkg, pkgfile, info, out);
         self.check_library_dependency(pkg, pkgfile, info, out);
         self.check_forbidden_functions(pkg, pkgfile, info, config, out);
         self.check_optflags(pkg, pkgfile, config, out);
@@ -8779,6 +8842,7 @@ mod tests {
                 soname: None,
                 needed: Vec::new(),
                 runpaths,
+                rpaths: Vec::new(),
                 has_textrel: false,
                 has_nonweak_undefined: false,
                 defines_main: false,
@@ -8832,6 +8896,148 @@ mod tests {
             "/opt/foo/lib rpath should fire: {results:?}"
         );
     }
+    // Minimal ELF64 with a PT_DYNAMIC section, for testing the dynamic
+    // tag parse without a linker: one PT_LOAD maps the whole file at
+    // vaddr 0, so DT_STRTAB values double as file offsets.
+    fn craft_dynamic_elf(entries: &[(u64, &str)]) -> Vec<u8> {
+        const DT_STRTAB: u64 = 5;
+        const DT_STRSZ: u64 = 10;
+        const DT_NULL: u64 = 0;
+        let mut strtab = vec![0u8];
+        let mut offsets = Vec::new();
+        for (_, s) in entries {
+            offsets.push(strtab.len());
+            strtab.extend_from_slice(s.as_bytes());
+            strtab.push(0);
+        }
+        let dyn_count = entries.len() + 3;
+        let strtab_off = 64 + 2 * 56 + dyn_count * 16;
+        let total = strtab_off + strtab.len();
+        let mut buf = Vec::new();
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2; // 64-bit
+        ehdr[5] = 1; // little-endian
+        ehdr[6] = 1; // version
+        ehdr[16..18].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN
+        ehdr[18..20].copy_from_slice(&62u16.to_le_bytes()); // x86_64
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes()); // version
+        ehdr[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
+        ehdr[52..54].copy_from_slice(&64u16.to_le_bytes()); // ehsize
+        ehdr[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
+        ehdr[56..58].copy_from_slice(&2u16.to_le_bytes()); // phnum
+        buf.extend_from_slice(&ehdr);
+        let mut ph = vec![0u8; 56];
+        ph[0..4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        ph[4..8].copy_from_slice(&5u32.to_le_bytes()); // R+X
+        ph[8..16].copy_from_slice(&0u64.to_le_bytes()); // offset
+        ph[16..24].copy_from_slice(&0u64.to_le_bytes()); // vaddr
+        ph[24..32].copy_from_slice(&0u64.to_le_bytes()); // paddr
+        ph[32..40].copy_from_slice(&(total as u64).to_le_bytes()); // filesz
+        ph[40..48].copy_from_slice(&(total as u64).to_le_bytes()); // memsz
+        ph[48..56].copy_from_slice(&0x1000u64.to_le_bytes()); // align
+        buf.extend_from_slice(&ph);
+        let mut ph = vec![0u8; 56];
+        ph[0..4].copy_from_slice(&2u32.to_le_bytes()); // PT_DYNAMIC
+        ph[4..8].copy_from_slice(&6u32.to_le_bytes()); // RW
+        ph[8..16].copy_from_slice(&176u64.to_le_bytes()); // offset
+        ph[16..24].copy_from_slice(&176u64.to_le_bytes()); // vaddr
+        ph[24..32].copy_from_slice(&176u64.to_le_bytes()); // paddr
+        ph[32..40].copy_from_slice(&((dyn_count * 16) as u64).to_le_bytes());
+        ph[40..48].copy_from_slice(&((dyn_count * 16) as u64).to_le_bytes());
+        ph[48..56].copy_from_slice(&8u64.to_le_bytes()); // align
+        buf.extend_from_slice(&ph);
+        for (i, (tag, _)) in entries.iter().enumerate() {
+            buf.extend_from_slice(&tag.to_le_bytes());
+            // d_val is strtab-relative: DT_STRTAB supplies the base.
+            buf.extend_from_slice(&(offsets[i] as u64).to_le_bytes());
+        }
+        buf.extend_from_slice(&DT_STRTAB.to_le_bytes());
+        buf.extend_from_slice(&(strtab_off as u64).to_le_bytes());
+        buf.extend_from_slice(&DT_STRSZ.to_le_bytes());
+        buf.extend_from_slice(&(strtab.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&DT_NULL.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&strtab);
+        debug_assert_eq!(buf.len(), total);
+        buf
+    }
+
+    #[test]
+    fn rpath_and_runpath_both_present_fires() {
+        use goblin::elf::dynamic::{DT_RPATH, DT_RUNPATH};
+        const TAG: &str = "binary-or-shlib-defines-rpath-and-runpath";
+        // Parse-level: the split keeps each tag's values on its own side.
+        let both = parse_elf_bytes(
+            "both",
+            &craft_dynamic_elf(&[(DT_RPATH, "/opt/r"), (DT_RUNPATH, "/opt/u")]),
+        );
+        assert_eq!(both.rpaths, vec!["/opt/r".to_string()]);
+        assert_eq!(both.runpaths, vec!["/opt/u".to_string()]);
+        let rpath_only = parse_elf_bytes("ronly", &craft_dynamic_elf(&[(DT_RPATH, "/opt/r")]));
+        assert_eq!(rpath_only.rpaths, vec!["/opt/r".to_string()]);
+        assert!(rpath_only.runpaths.is_empty());
+        let runpath_only = parse_elf_bytes("uonly", &craft_dynamic_elf(&[(DT_RUNPATH, "/opt/u")]));
+        assert!(runpath_only.rpaths.is_empty());
+        assert_eq!(runpath_only.runpaths, vec!["/opt/u".to_string()]);
+        let neither = parse_elf_bytes("neither", &craft_dynamic_elf(&[]));
+        assert!(neither.rpaths.is_empty());
+        assert!(neither.runpaths.is_empty());
+
+        // Check-level: fires only on the both-present object, at Error.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let rpm_path = fixture_path("rpmcrab-binaries-fixture-1.0-1.aarch64.rpm");
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg =
+            Pkg::open(std::path::Path::new(&rpm_path), dir.path(), true).expect("open fixture");
+        let fire = |info: &ReadelfInfo| {
+            let pkgfile = PkgFile {
+                name: "/usr/bin/probe".to_string(),
+                ..Default::default()
+            };
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_rpath_runpath(&pkg, &pkgfile, info, &mut out);
+            out.results().to_vec()
+        };
+        let both_results = fire(&both);
+        let both_lines = lines_for(&both_results, TAG);
+        assert_eq!(
+            both_lines.len(),
+            1,
+            "both-present object must fire exactly once: {both_lines:?}"
+        );
+        assert!(
+            both_lines[0].contains(" E: "),
+            "both-present finding must be Error: {}",
+            both_lines[0]
+        );
+        assert!(
+            both_lines[0].contains("/opt/r") && both_lines[0].contains("/opt/u"),
+            "finding must name both values: {}",
+            both_lines[0]
+        );
+        // Near-miss negatives: each tag alone, neither, and an empty
+        // entry on one side stay silent.
+        assert_lacks(&fire(&rpath_only), TAG);
+        assert_lacks(&fire(&runpath_only), TAG);
+        assert_lacks(&fire(&neither), TAG);
+        let empty_rpath = parse_elf_bytes(
+            "emptyr",
+            &craft_dynamic_elf(&[(DT_RPATH, ""), (DT_RUNPATH, "/opt/u")]),
+        );
+        assert_lacks(&fire(&empty_rpath), TAG);
+        let empty_runpath = parse_elf_bytes(
+            "emptyu",
+            &craft_dynamic_elf(&[(DT_RPATH, "/opt/r"), (DT_RUNPATH, "")]),
+        );
+        assert_lacks(&fire(&empty_runpath), TAG);
+        // Cross-object: RPATH on one object and RUNPATH on another
+        // object of the same package never combine into a firing --
+        // each object's info is checked on its own, and both stay
+        // silent above.
+    }
+
     /// rpmcrab#17: checksec-style hardening verification. Each fixture
     /// binary misses exactly one protection; hardenedbin misses none.
     #[test]
@@ -11666,6 +11872,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 soname: None,
                 needed: Vec::new(),
                 runpaths: Vec::new(),
+                rpaths: Vec::new(),
                 has_textrel: false,
                 has_nonweak_undefined: false,
                 defines_main: false,
@@ -11819,6 +12026,7 @@ description = "explicit priority string bypasses the system crypto policy"
             soname: None,
             needed: Vec::new(),
             runpaths: Vec::new(),
+            rpaths: Vec::new(),
             has_textrel: false,
             has_nonweak_undefined: false,
             defines_main: false,

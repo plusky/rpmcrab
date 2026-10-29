@@ -567,3 +567,11 @@ kind = "behaviour"
 reason = "Fix-and-diverge (issue #1217): a new `binary-or-shlib-calls-legacy-network` warning fires on an undefined reference to the 14 legacy network entry points (inet_addr, inet_aton, inet_ntoa, inet_nsap_addr, inet_nsap_ntoa, inet_makeaddr, inet_netof, inet_network, inet_neta, inet_net_ntop, inet_net_pton, rcmd, rexec, rresvport), FUNC or NOTYPE alike. A definition alone never fires: the implementing library is the provider, not a caller. The frozen 2.10.0 reference has no such check; the names come from rpminspect's badfuncs list, reimplemented from documented behaviour, not ported."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1217"
+
+[[divergence]]
+case = "global"
+check = "BinariesCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1219): a new `binary-or-shlib-defines-rpath-and-runpath` error fires when a single object carries both DT_RPATH and DT_RUNPATH. The ELF parse previously merged both tags into one runpaths vector, so the both-present state was invisible; the parse now keeps them distinct (DT_RPATH entries in rpaths, DT_RUNPATH entries in runpaths), and the existing defines-rpath check reads both vectors, so its verdicts are unchanged. The predicate keys on tag presence with a non-empty value on each side: an empty entry on either side stays silent, matching the existing check's non-empty rule. Archive members merge into one info like every other vector field, so for an archive the predicate reads the file's merged view. The frozen 2.10.0 reference has no such check; the predicate comes from rpminspect's runpath inspection, reimplemented from documented behaviour, not ported."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1219"
