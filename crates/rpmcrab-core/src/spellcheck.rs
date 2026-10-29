@@ -5,8 +5,8 @@
 //! gracefully when the dictionary is absent. Package descriptions are
 //! en_US text, so en_US is the only dictionary consulted and British
 //! spellings are findings. One deliberate extension sits on top of the
-//! system dictionary: the bundled supplementary vocabulary
-//! (`data/spelling-wordlist.txt`) is added to it.
+//! system dictionary: the bundled supplementary vocabulary and
+//! the bundled package-names list are added to it.
 
 use std::path::Path;
 
@@ -32,6 +32,15 @@ const DICT_PATHS: &[&str] = &[
 /// established vocabulary that package prose uses correctly and the
 /// system dictionary lacks, so reporting them was noise.
 const SUPPLEMENTARY_WORDS: &str = include_str!("../data/spelling-wordlist.txt");
+
+/// Bundled package and project names, one literal stem per line
+/// (hash lines are comments). Curated, not generated: a name
+/// enters only when a filed issue rules it in, so the list
+/// grows by filing and needs no staleness job. Added to the
+/// system dictionary at load alongside the supplementary
+/// vocabulary: a name the system dictionary lacks would
+/// otherwise be reported as a misspelling.
+const PACKAGE_NAMES: &str = include_str!("../data/spelling-package-names.txt");
 
 /// Well-known generic TLDs, for recognising a bare host (no scheme) as
 /// a URL. Country-code TLDs are absent on purpose: the reference checks
@@ -183,7 +192,8 @@ fn load_dictionary(lang: &str) -> Option<spellbook::Dictionary<DictionaryBuildHa
     None
 }
 
-/// Add the bundled supplementary vocabulary to `dict`. An entry the
+/// Add the bundled supplementary vocabulary and the bundled
+/// package-names list to `dict`. An entry the
 /// dictionary's affix parser rejects is skipped: the bundled list is
 /// pinned by a unit test, so a bad entry fails the test suite, never
 /// a user run.
@@ -191,6 +201,13 @@ fn add_supplementary_words(dict: &mut spellbook::Dictionary<DictionaryBuildHashe
     for line in SUPPLEMENTARY_WORDS.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let _ = dict.add(line);
+    }
+    for line in PACKAGE_NAMES.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("#") {
             continue;
         }
         let _ = dict.add(line);
@@ -1093,6 +1110,29 @@ SFX N 0 en [^ey]\n";
             checker
                 .check("hello funkoverage world", "testpkg", &[])
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn package_names_seed_entry_is_accepted() {
+        // The package-names file carries issue-ruled package and
+        // project names only; its seed entry must be accepted once
+        // added, or the file silently contributes nothing.
+        let mut checker =
+            Spellchecker::from_strings(TEST_AFF_WITH_AFFIXES, TEST_DIC).expect("test dictionary");
+        for line in PACKAGE_NAMES.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("#") {
+                continue;
+            }
+            assert!(
+                checker.dict.add(line).is_ok(),
+                "package-names entry {line:?} does not parse"
+            );
+        }
+        assert!(
+            checker.accepts("funkoverage"),
+            "package-names seed entry funkoverage not accepted"
         );
     }
 

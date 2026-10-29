@@ -1,0 +1,14 @@
+# Package and project names for the spellchecker.
+#
+# Curated, not generated: a name enters only when a filed issue
+# rules it in, so this list grows by filing and needs no
+# staleness job. Entries are literal stems, one per line, with
+# no affix flags: a name is accepted exactly as written.
+#
+# Names live here rather than in spelling-wordlist.txt, so the
+# wordlist rule stays true: package-specific names and library
+# identifiers are not listed there.
+#
+# Seed entry: funkoverage, the project name from issue 1284.
+#
+funkoverage
