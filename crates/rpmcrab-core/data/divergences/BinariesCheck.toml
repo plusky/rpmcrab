@@ -582,3 +582,19 @@ kind = "behaviour"
 reason = "Fix-and-diverge (issue #1219): a new `binary-or-shlib-defines-rpath-and-runpath` error fires when a single object carries both DT_RPATH and DT_RUNPATH. The ELF parse previously merged both tags into one runpaths vector, so the both-present state was invisible; the parse now keeps them distinct (DT_RPATH entries in rpaths, DT_RUNPATH entries in runpaths), and the existing defines-rpath check reads both vectors, so its verdicts are unchanged. The predicate keys on tag presence with a non-empty value on each side: an empty entry on either side stays silent, matching the existing check's non-empty rule. Archive members merge into one info like every other vector field, so for an archive the predicate reads the file's merged view. The frozen 2.10.0 reference has no such check; the predicate comes from rpminspect's runpath inspection, reimplemented from documented behaviour, not ported."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1219"
+
+[[divergence]]
+case = "global"
+check = "invalid-note-GNU-stack-flags"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1225): new Error with no reference counterpart. The reference judges linked images only; rpmcrab also judges relocatable objects, whose stack marking lives in the `.note.GNU-stack` section: the section may carry no flag besides SHF_EXECINSTR, so any other flag fires. A section with no flags, or with only SHF_EXECINSTR, stays silent, as does a relocatable object with no such section. Images built for a different instruction set than the package architecture are not charged, the same foreign-machine treatment the executable-stack arm applies: their markings state the target ABI's conventions. Pinned by the executable-stack gate tests in binaries.rs."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1225"
+
+[[divergence]]
+case = "global"
+check = "invalid-PT_GNU_STACK-flags"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1225): new Error with no reference counterpart. The reference charges an executable stack and a missing PT_GNU_STACK but stays silent on other invalid flag sets; rpmcrab rejects every PT_GNU_STACK flag set other than RW and RWE on linked images. RW stays silent and RWE keeps its existing executable-stack verdict only: the new finding fires exactly on the flag sets the existing arms leave silent (no flags, read-only, write-only). Images built for a different instruction set than the package architecture are not charged, the same foreign-machine treatment the executable-stack arm applies. Pinned by the executable-stack gate tests in binaries.rs."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1225"

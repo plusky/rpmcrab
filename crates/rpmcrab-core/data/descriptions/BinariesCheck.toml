@@ -105,6 +105,23 @@ make the stack executable.  Binaries built for a different instruction set
 than the package architecture are not reported: they are payload for
 another machine, which this package's dynamic linker never loads.
 """
+invalid-note-GNU-stack-flags="""
+The relocatable object carries a .note.GNU-stack section with a flag besides
+SHF_EXECINSTR. Only the executable flag, or no flag, is a valid stack marking
+for an object file; any other flag states a stack property the link step must
+not inherit from this object. Binaries built for a different instruction set
+than the package architecture are not reported: they are payload for another
+machine, which this package's dynamic linker never loads.
+"""
+invalid-PT_GNU_STACK-flags="""
+The binary's PT_GNU_STACK segment carries a flag set other than RW or RWE. A
+stack that cannot be read or cannot be written is not a usable stack, and a
+flagless segment states no stack policy; only RW (non-executable) and RWE
+(executable, reported separately) are valid markings. Binaries built for a
+different instruction set than the package architecture are not reported:
+they are payload for another machine, which this package's dynamic linker
+never loads.
+"""
 non-position-independent-executable="""
 This executable must be position independent. Check that it is built with
 -fPIE/-fpie in compiler flags and -pie in linker flags.

@@ -833,6 +833,22 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1219"
 
 [[divergence]]
 case = "global"
+check = "invalid-note-GNU-stack-flags"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1225): new Error with no reference counterpart. The reference judges linked images only; rpmcrab also judges relocatable objects, whose stack marking lives in the `.note.GNU-stack` section: the section may carry no flag besides SHF_EXECINSTR, so any other flag fires. A section with no flags, or with only SHF_EXECINSTR, stays silent, as does a relocatable object with no such section. Images built for a different instruction set than the package architecture are not charged, the same foreign-machine treatment the executable-stack arm applies: their markings state the target ABI's conventions. Pinned by the executable-stack gate tests in binaries.rs."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1225"
+
+[[divergence]]
+case = "global"
+check = "invalid-PT_GNU_STACK-flags"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1225): new Error with no reference counterpart. The reference charges an executable stack and a missing PT_GNU_STACK but stays silent on other invalid flag sets; rpmcrab rejects every PT_GNU_STACK flag set other than RW and RWE on linked images. RW stays silent and RWE keeps its existing executable-stack verdict only: the new finding fires exactly on the flag sets the existing arms leave silent (no flags, read-only, write-only). Images built for a different instruction set than the package architecture are not charged, the same foreign-machine treatment the executable-stack arm applies. Pinned by the executable-stack gate tests in binaries.rs."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1225"
+
+[[divergence]]
+case = "global"
 check = "branding-requires-unversioned"
 kind = "behaviour"
 reason = "Fix-and-diverge (issue #857): branding-requires-unversioned is charged only when the require name is the generic branding name in full — <base>-branding or <base>-theme, with nothing before it or after it — and the name is not an icon-theme name (<base>-icon-theme; the reference defines re_icon_theme for the same distinction and leaves it unused). The reference matches the generic pattern as a prefix, so it charges concrete data packages whose names merely contain the pattern: the icon themes the desktop packages integrate with, plural and suffixed theme packages (gnome-themes, kalpa-themes-sddm, ocean-sound-theme6) and non-name require forms (a soname, a config() name). A version on a require of a concrete data package pins no flavour, so the finding's rationale — the version pins the flavour of a branding virtual — reaches only the generic name itself, on the theme arm as on the branding arm. Measured on the Factory corpus (sweep run-20261022-857d5ece population; the 108 affected source packages re-measured before and after the fix): 133 E in 108 source packages before, 21 E in 19 after, and no other finding changed in those packages. The residue is 15 findings on branding virtuals (wallpaper-branding 2; compiz-branding, distrobox-branding, gcin-branding, libpurple-branding, lxde-common-branding, mate-menus-branding, plymouth-branding, pw3270-branding, systemd-default-settings-branding, systemd-presets-branding, xfce4-notifyd-branding, xfce4-session-branding and yast2-qt-branding 1 each) and 6 on concrete data packages whose names are exactly generic-shaped and so are indistinguishable from a theme virtual by name: yast2-theme 4 and python313/python314-pydata-sphinx-theme 1 each. Pinned by unversioned_requires_scoped_to_generic_branding_names in branding_policy.rs."
