@@ -2491,6 +2491,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "non-executable-in-bin"
+kind = "behaviour"
+reason = "Fix-and-diverge: a non-executable file in a bin dir that is dot-sourced by another payload file in the same package does not fire. The file is a helper library the package own entry points source at runtime, not an entry point itself. The sourcing line must start (after whitespace) with a dot or source followed by whitespace, and the sourced path must be exactly the candidate basename or end with /<basename>; comments, strings and execute forms do not credit. Corpus instances: clevis-luks-common-functions (7 same-package sourcers), wsrep_sst_common (5), vboot common_minimal.sh (3), brltty-prologue.sh (7 same-package sourcing lines). The reference fires on the shape. Pinned by non_executable_in_bin_sourced_by_sibling_is_silent in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."

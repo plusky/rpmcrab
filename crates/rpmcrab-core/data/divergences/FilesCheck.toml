@@ -1046,3 +1046,10 @@ check = "non-executable-in-bin"
 kind = "behaviour"
 reason = "Fix-and-diverge: %ghost entries do not fire. A %ghost entry is bookkeeping, not payload: the package installs no file, and the header mode is a placeholder (regular-file type with permission bits 0), not a permission. The corpus instances are update-alternatives placeholders (java-*-devel/headless /usr/bin/java, javac and siblings; cpio-mt /usr/bin/mt): update-alternatives creates the real symlink at install time. The reference fires on the shape (FilesCheck.py _check_file_normal_file_bin has no ghost guard), while its own non-readable check skips ghosts with the same rationale (Do not check permissions for ghosts files, rpmlint#1287). Measured on the Factory corpus (51,589 RPMs): the exemption removes exactly 310 of the 363 findings for this tag, all of them %ghost entries with header mode 0100000, and no other finding changes. Pinned by non_executable_in_bin_ghost_is_silent in files.rs."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "non-executable-in-bin"
+kind = "behaviour"
+reason = "Fix-and-diverge: a non-executable file in a bin dir that is dot-sourced by another payload file in the same package does not fire. The file is a helper library the package own entry points source at runtime, not an entry point itself. The sourcing line must start (after whitespace) with a dot or source followed by whitespace, and the sourced path must be exactly the candidate basename or end with /<basename>; comments, strings and execute forms do not credit. Corpus instances: clevis-luks-common-functions (7 same-package sourcers), wsrep_sst_common (5), vboot common_minimal.sh (3), brltty-prologue.sh (7 same-package sourcing lines). The reference fires on the shape. Pinned by non_executable_in_bin_sourced_by_sibling_is_silent in files.rs."
+since = "0.4.1"
