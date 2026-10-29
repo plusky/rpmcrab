@@ -6670,6 +6670,23 @@ impl BinariesCheck {
                 info.has_function_matching(&self.setgroups_call_regex),
             )
         };
+        // A linked object that only defines setuid/setgid and
+        // references dlsym is an LD_PRELOAD-style interposer: it
+        // provides its own setuid/setgid wrapper and forwards the
+        // call through dlsym, so it makes no privilege decision
+        // itself. A tracing wrapper must not drop the caller's
+        // groups, so there is no package-side fix and the finding
+        // stays quiet. The credit is conservative: an object that
+        // both defines and calls (an undefined setuid/setgid
+        // reference exists) still fires, and a defined pair with
+        // no dlsym reference still fires. Archives are unchanged:
+        // they already charge references only. The undefined sets
+        // carry bare names, so the dlsym test is an exact match.
+        let interposer = !self.is_archive
+            && !info.has_undefined_function_matching(&self.setgid_call_regex)
+            && !info.has_undefined_function_matching(&self.setuid_call_regex)
+            && (info.undefined_function_refs.iter().any(|s| s == "dlsym")
+                || info.undefined_functions.iter().any(|s| s == "dlsym"));
         // An archive charges only a reference: its members are separate
         // objects, so the member that defines mktemp (newlib's libc.a
         // carries the definition in libc_a-mktemp.o) makes no call and
@@ -6790,7 +6807,7 @@ impl BinariesCheck {
                 .iter()
                 .any(|s| self.legacy_network_call_regex.is_match(s).unwrap_or(false));
 
-        if setgid && setuid && !setgroups {
+        if setgid && setuid && !setgroups && !interposer {
             // Warning unconditionally (fix-and-diverge, #743). The
             // reference splits the level on the setuid bit (E when
             // installed setuid, W otherwise). The symbol pattern
@@ -21314,6 +21331,92 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             out.results().is_empty(),
             "referenced setgroups must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn setgroups_interposer_credit() {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libtrace.so", "ELF 64-bit LSB shared object");
+
+        // Interposer shape: defines setuid/setgid, references dlsym,
+        // no setgroups -> quiet.
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        info.undefined_function_refs = vec!["dlsym".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "defined setuid/setgid with undefined dlsym must be quiet: {:?}",
+            out.results()
+        );
+
+        // Both defines and calls: an undefined setuid/setgid
+        // reference exists -> still fires, even with dlsym.
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        info.undefined_function_refs = vec![
+            "setuid".to_string(),
+            "setgid".to_string(),
+            "dlsym".to_string(),
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
+        assert_eq!(
+            lines.len(),
+            1,
+            "defining caller must still fire: {results:?}"
+        );
+
+        // Defined setuid/setgid without a dlsym reference -> still fires.
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
+        assert_eq!(
+            lines.len(),
+            1,
+            "defined pair without dlsym must still fire: {results:?}"
+        );
+
+        // Archive behaviour unchanged: a referenced pair still fires
+        // even with a dlsym reference, and a defined-only member
+        // stays quiet.
+        let mut archive_check = BinariesCheck::with_tool_dir(&config, None);
+        archive_check.is_archive = true;
+        let archive_file = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        info.undefined_function_refs = vec![
+            "setuid".to_string(),
+            "setgid".to_string(),
+            "dlsym".to_string(),
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        archive_check.check_security_functions(&pkg, &archive_file, &info, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
+        assert_eq!(
+            lines.len(),
+            1,
+            "archive reference pair must still fire: {results:?}"
+        );
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        info.undefined_function_refs = vec!["dlsym".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        archive_check.check_security_functions(&pkg, &archive_file, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "defined-only archive member must stay quiet: {:?}",
             out.results()
         );
     }
