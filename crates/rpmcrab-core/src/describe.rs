@@ -402,7 +402,7 @@ mod tests {
             ),
             (
                 "MenuXDGCheck.toml",
-                "6e55c908f703f4c00f2c153788210298c98bb1b1ca0017ad9bcdd79622f9a34f",
+                "5c6634b0cfbca8e717b665a5c51ccf8948e09fc38bb79a6b550e8006f559a293",
             ),
             (
                 "MixedOwnershipCheck.toml",
