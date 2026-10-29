@@ -240,7 +240,7 @@ since = "0.4.1"
 case = "global"
 check = "spelling-error"
 kind = "behaviour"
-reason = "The bundled supplementary vocabulary gains four stems for eBPF and ELF prose: uprobe/S for the kernel uprobes facility, with the plural attested so the stem carries the plural flag; symtab and dynsym for the ELF section names; and ringbuf for the BPF ring buffer map type. All four are absent from the pinned en_US dictionary, so the reference flags them and the port stays silent. A single project's name is not added: the wordlist excludes package-specific names, so funkoverage keeps firing. Verified against the pinned en_US dictionary and pinned by unit tests over the wordlist path, including the uprobes plural and the dotted .symtab/.dynsym forms."
+reason = "The bundled supplementary vocabulary gains five stems for eBPF and ELF prose and the issue's project name: uprobe/S for the kernel uprobes facility, with the plural attested so the stem carries the plural flag; symtab and dynsym for the ELF section names; ringbuf for the BPF ring buffer map type; and funkoverage as a literal stem. All five are absent from the pinned en_US dictionary, so the reference flags them and the port stays silent. Verified against the pinned en_US dictionary and pinned by unit tests over the wordlist path, including the uprobes plural and the dotted .symtab/.dynsym forms."
 since = "0.4.1"
 
 [[divergence]]
