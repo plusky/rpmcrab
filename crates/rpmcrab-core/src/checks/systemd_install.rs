@@ -534,6 +534,86 @@ mod tests {
     }
 
     #[test]
+    fn postun_bare_stem_helper_prefix_and_boundaries() {
+        // Echo of the bare action name does not credit.
+        let missing = SystemdInstallCheck::check_unit(
+            "pmcd.service",
+            true,
+            "",
+            "",
+            "",
+            "echo mark-restart-system-units pmcd",
+            false,
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+        // Longer action spelling does not credit.
+        let missing = SystemdInstallCheck::check_unit(
+            "pmcd.service",
+            true,
+            "",
+            "",
+            "",
+            "systemd-update-helper mark-restart-system-units-foo pmcd",
+            false,
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+        // Shell operators end the invocation, so a stem after one is a separate command and does not credit.
+        let missing = SystemdInstallCheck::check_unit(
+            "pmcd.service",
+            true,
+            "",
+            "",
+            "",
+            "systemd-update-helper mark-restart-system-units foo;pmcd || :",
+            false,
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+        // Commas separate nothing: a comma-glued stem does not credit.
+        let missing = SystemdInstallCheck::check_unit(
+            "pmcd.service",
+            true,
+            "",
+            "",
+            "",
+            "systemd-update-helper mark-restart-system-units foo,pmcd",
+            false,
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+        let missing = SystemdInstallCheck::check_unit(
+            "pmcd.service",
+            true,
+            "",
+            "",
+            "",
+            "systemd-update-helper mark-restart-system-units ,pmcd",
+            false,
+        );
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+        // The helper is invoked by path in real scriptlets.
+        let missing = SystemdInstallCheck::check_unit(
+            "pmcd.service",
+            true,
+            "",
+            "",
+            "",
+            "/usr/lib/systemd/systemd-update-helper mark-restart-system-units pmcd",
+            false,
+        );
+        assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
+        // An unrecognised dotted suffix gains .service, so foo.bar credits; only recognised unit-type suffixes withhold credit.
+        let missing = SystemdInstallCheck::check_unit(
+            "foo.bar.service",
+            true,
+            "",
+            "",
+            "",
+            "systemd-update-helper mark-restart-system-units foo.bar",
+            false,
+        );
+        assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
+    }
+
+    #[test]
     fn sibling_tags_ignore_bare_stems() {
         let script = "systemd-update-helper mark-install-system-units foo\n\
                       systemd-update-helper install-system-units foo\n\
