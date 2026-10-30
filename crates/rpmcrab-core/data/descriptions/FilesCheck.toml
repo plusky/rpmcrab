@@ -439,9 +439,6 @@ The symlink contains both `..` and `.` segments. Simplify the symlink target.
 symlink-has-too-many-up-segments="""
 The symlink contains more `..` segments than the path depth allows. The symlink likely escapes its directory.
 """
-symlink-should-be-absolute="""
-The symlink uses a relative target where an absolute one is required.
-"""
 sysconfig-fillup-usage="""
 The package uses the legacy sysconfig/fillup configuration scheme: it ships
 a file below /etc/sysconfig or a fillup template, calls fillup from a

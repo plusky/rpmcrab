@@ -359,7 +359,6 @@ suse-update-desktop-file-deprecated = W
 symlink-contains-up-and-down-segments = E
 symlink-has-too-many-up-segments = E
 symlink-loop = E
-symlink-should-be-absolute = W
 symlink-should-be-relative = W
 symlink-to-binary-with-shebang = W
 sysconfig-fillup-usage = W

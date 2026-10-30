@@ -201,7 +201,7 @@ since = "0.1.0"
 case = "global"
 check = "FilesCheck"
 kind = "detail"
-reason = "Port-only `--explain` descriptions for `debug-files-in-non-debug-package`, `infopage-not-compressed`, `kernel-modules-not-in-kernel-packages`, `manpage-not-compressed`, `mimeinfo-cache-packaged`, `no-dependency-on`, `noarch-python-in-64bit-path`, `symlink-contains-up-and-down-segments`, `symlink-has-too-many-up-segments`, `symlink-should-be-absolute`: the reference emits these findings but ships no descriptions."
+reason = "Port-only `--explain` descriptions for `debug-files-in-non-debug-package`, `infopage-not-compressed`, `kernel-modules-not-in-kernel-packages`, `manpage-not-compressed`, `mimeinfo-cache-packaged`, `no-dependency-on`, `noarch-python-in-64bit-path`, `symlink-contains-up-and-down-segments`, `symlink-has-too-many-up-segments`: the reference emits these findings but ships no descriptions."
 since = "0.1.0"
 
 [[divergence]]
@@ -1066,4 +1066,11 @@ case = "global"
 check = "file-in-meta-package"
 kind = "behaviour"
 reason = "Fix-and-diverge: patterns-* packages fire file-in-meta-package. The reference MetaPackageRegexp is '^(bundle|task)-' (configdefaults.toml, no override anywhere in the reference tree), so a patterns package shipping files stays silent there. patterns packages are meta packages in the same sense as bundle/task packages -- a package whose purpose is to pull in a set of other packages -- so shipping files in one is the same defect the finding reports. rpmcrab widens the pattern to '^(bundle|task|patterns)-'. Measured on the Factory corpus (51,586 binary RPMs): 0 findings before the widening, 160 after, every one on a patterns-* package and none on any other name shape. Pinned by the meta_package_* tests in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "symlink-should-be-absolute"
+kind = "missing"
+reason = "Intentional: the check is dead by design under the shipped config — UseRelativeSymlinks is true in the builtin defaults and inherited unchanged by every flavour, so the config gate on this finding can never open. Its predicate is empty over Factory even when ungated (0 firings over 136,060 ../-leading relative links). The reference still emits it when the config is flipped; the port does not ship the check."
 since = "0.4.1"
