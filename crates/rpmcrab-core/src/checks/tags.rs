@@ -334,7 +334,7 @@ impl TagsCheck {
                 if !self.use_epoch {
                     add_info(out, Level::Error, pkg, "epoch-tag", &[&e.to_string()]);
                 }
-                if e > 99 {
+                if self.use_epoch && e > 99 {
                     add_info(
                         out,
                         Level::Warning,
@@ -3365,13 +3365,27 @@ mod tests {
     #[test]
     fn unreasonable_epoch_emits() {
         let (_tmp, pkg) = fixture_pkg("tags-highepoch-1.0-1.noarch.rpm");
-        let results = run_check(&pkg);
+        let config = test_config_with_epoch(true);
+        let results = run_check_with(&config, &pkg);
         let hits = tag_hits(&results, "unreasonable-epoch");
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert_eq!(
             hits[0].1,
             "tags-highepoch.noarch: W: unreasonable-epoch 100"
         );
+    }
+
+    #[test]
+    fn unreasonable_epoch_gated_when_use_epoch_false() {
+        // Default config has UseEpoch=false: the Epoch already fires
+        // E epoch-tag, and the warning must not ride along.
+        let (_tmp, pkg) = fixture_pkg("tags-highepoch-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        assert!(
+            tag_hits(&results, "unreasonable-epoch").is_empty(),
+            "must stay silent: {results:?}"
+        );
+        assert_eq!(tag_hits(&results, "epoch-tag").len(), 1, "all: {results:?}");
     }
 
     #[test]

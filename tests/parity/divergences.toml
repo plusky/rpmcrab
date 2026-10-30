@@ -4426,6 +4426,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "unreasonable-epoch"
+kind = "behaviour"
+reason = "Reference _check_no_epoch_tag fires unreasonable-epoch for any Epoch over 99 regardless of configuration. The port fires it only when the configuration uses Epoch (UseEpoch=true): under UseEpoch=false, the default, any Epoch tag already fires E epoch-tag, so the warning would only ever ride along on the same package as a weaker second finding. Pinned by unreasonable_epoch_emits and unreasonable_epoch_gated_when_use_epoch_false in tags.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
 reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."
