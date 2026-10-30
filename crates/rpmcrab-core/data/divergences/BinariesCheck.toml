@@ -390,7 +390,7 @@ since = "0.4.1"
 case = "global"
 check = "go-toolchain-outdated"
 kind = "behaviour"
-reason = "New warning with no reference counterpart (issue #972): the reference has no Go toolchain finder. rpmcrab reads the toolchain version a Go binary's .go.buildinfo section records and warns when it is below the floor in data/go-toolchain-floor.toml (as of 2026-10-26: go1.23.8 on the 1.23 line, go1.24.2 on the 1.24 line, anchored on CVE-2025-22871). A version on an unlisted older line fires; a version on an unlisted newer line stays silent, so a stale floor under-fires and never false-fires. Factory corpus: 874 Go binaries in 613 binary packages record a parseable toolchain version, 44 files in 4 binary packages fire."
+reason = "New warning with no reference counterpart (issue #972): the reference has no Go toolchain finder. rpmcrab reads the toolchain version a Go binary's .go.buildinfo section records and warns when it is below the floor in data/go-toolchain-floor.toml (as of 2026-10-26: go1.23.8 on the 1.23 line, go1.24.2 on the 1.24 line, anchored on CVE-2025-22871). A version on an unlisted older line fires; a version on an unlisted newer line stays silent, so a stale floor under-fires and never false-fires. Factory corpus: 874 Go binaries in 613 binary packages record a parseable toolchain version, 44 files in 4 binary packages fire. Versioned toolchain packages own tools are credited: a file under a toolchain own /usr/lib64/go/<line>/ tree in package go<line>, recording that same line, does not fire, since the rebuild remedy cannot apply to a package whose purpose is shipping that line; the Factory corpus then reads 2 files in 2 binary packages firing."
 since = "0.4.1"
 
 [[divergence]]

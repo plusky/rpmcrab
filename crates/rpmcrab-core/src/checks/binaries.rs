@@ -2418,6 +2418,37 @@ fn go_toolchain_below_floor(version: GoVersion, floor: &[(GoVersion, GoVersion)]
         .is_some_and(|lowest| line < lowest)
 }
 
+/// Whether one recorded toolchain version belongs to a versioned
+/// Go toolchain package own tools: the package name is exactly
+/// `go<line>`, the file lives under that line own tree
+/// (`/usr/lib/go/<line>/` or `/usr/lib64/go/<line>/`), and the
+/// version belongs to that same line. The credit is decidable
+/// from facts about the package and the file, never a package
+/// list.
+fn go_toolchain_self_version(pkg_name: &str, file_name: &str, version: GoVersion) -> bool {
+    let Some(tree_line) = go_toolchain_tree_line(file_name) else {
+        return false;
+    };
+    pkg_name == format!("go{}.{}", tree_line.major, tree_line.minor) && version.line() == tree_line
+}
+
+/// The release line of a Go toolchain tree path, if the file lives
+/// under one: `/usr/lib/go/<line>/...` or `/usr/lib64/go/<line>/...`
+/// with `<line>` a bare `major.minor` release line. Anything else
+/// (the unversioned tree, a doc path, a binary outside any tree)
+/// yields None.
+fn go_toolchain_tree_line(file_name: &str) -> Option<GoVersion> {
+    let rest = file_name
+        .strip_prefix("/usr/lib/go/")
+        .or_else(|| file_name.strip_prefix("/usr/lib64/go/"))?;
+    let line_text = rest.split("/").next()?;
+    let line = GoVersion::parse(&format!("go{line_text}"))?;
+    if line.patch != 0 {
+        return None;
+    }
+    Some(line)
+}
+
 struct LddInfo {
     dependencies: Vec<String>,
     unused_dependencies: Vec<String>,
@@ -7689,11 +7720,26 @@ impl BinariesCheck {
         out: &mut Filter,
     ) {
         let floor = go_toolchain_floor();
-        let Some(version) = info
+        let below_floor: Vec<GoVersion> = info
             .go_toolchains
             .iter()
             .copied()
             .filter(|version| go_toolchain_below_floor(*version, floor))
+            .collect();
+        if below_floor.is_empty() {
+            return;
+        }
+        // A versioned toolchain package own tools do not fire (see
+        // `go_toolchain_self_version`): the rebuild remedy cannot
+        // apply to a package whose purpose is shipping that
+        // toolchain line. When a file records several toolchains,
+        // the finding reports the oldest version outside the own
+        // line; a file whose every below-floor version is the
+        // toolchain own stays quiet.
+        let Some(version) = below_floor
+            .iter()
+            .copied()
+            .filter(|version| !go_toolchain_self_version(&pkg.name, &pkgfile.name, *version))
             .min()
         else {
             return;
@@ -24545,6 +24591,88 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(!go_toolchain_below_floor(v(1, 23, 8), &reversed));
         assert!(go_toolchain_below_floor(v(1, 22, 4), &reversed));
         assert!(!go_toolchain_below_floor(v(1, 25, 0), &reversed));
+    }
+
+    /// Run `check_go_toolchain` over a synthetic package file with
+    /// the given recorded toolchain versions.
+    fn go_toolchain_results(
+        pkg_name: &str,
+        file_name: &str,
+        versions: Vec<GoVersion>,
+    ) -> Vec<(String, String)> {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg(pkg_name, "x86_64", vec![]);
+        let pkgfile = syn_file(file_name, "ELF 64-bit LSB executable, x86-64");
+        let mut info = syn_info();
+        info.go_toolchains = versions;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_go_toolchain(&pkg, &pkgfile, &info, &mut out);
+        out.results().to_vec()
+    }
+
+    #[test]
+    fn go_toolchain_own_tools_are_quiet() {
+        let v = |major, minor, patch| GoVersion {
+            major,
+            minor,
+            patch,
+        };
+        for (pkg, file, version) in [
+            ("go1.21", "/usr/lib64/go/1.21/bin/go", v(1, 21, 13)),
+            ("go1.22", "/usr/lib64/go/1.22/bin/go", v(1, 22, 12)),
+            (
+                "go1.21",
+                "/usr/lib64/go/1.21/pkg/tool/linux_amd64/link",
+                v(1, 21, 13),
+            ),
+        ] {
+            let results = go_toolchain_results(pkg, file, vec![version]);
+            assert!(
+                lines_for(&results, "go-toolchain-outdated").is_empty(),
+                "{pkg} {file} must stay quiet: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn go_toolchain_non_self_still_fires() {
+        let v = |major, minor, patch| GoVersion {
+            major,
+            minor,
+            patch,
+        };
+        for (pkg, file, versions) in [
+            (
+                "kubectl-validate",
+                "/usr/bin/kubectl-validate",
+                vec![v(1, 22, 12)],
+            ),
+            (
+                "aws-nitro-enclaves-binaryblobs-upstream",
+                "/usr/share/nitro_enclaves/blobs/linuxkit",
+                vec![v(1, 22, 3)],
+            ),
+            ("somepkg", "/usr/bin/somepkg", vec![v(1, 22, 12)]),
+            // Package line and tree line disagree.
+            ("go1.21", "/usr/lib64/go/1.22/bin/go", vec![v(1, 22, 12)]),
+            // Recorded version belongs to another line than the tree.
+            ("go1.21", "/usr/lib64/go/1.21/bin/go", vec![v(1, 20, 0)]),
+            // Mixed members: one below-floor version outside the
+            // toolchain own line keeps the file firing.
+            (
+                "go1.21",
+                "/usr/lib64/go/1.21/bin/go",
+                vec![v(1, 21, 13), v(1, 23, 0)],
+            ),
+        ] {
+            let results = go_toolchain_results(pkg, file, versions);
+            assert_eq!(
+                lines_for(&results, "go-toolchain-outdated").len(),
+                1,
+                "{pkg} {file} must fire exactly once: {results:?}"
+            );
+        }
     }
 
     #[test]
