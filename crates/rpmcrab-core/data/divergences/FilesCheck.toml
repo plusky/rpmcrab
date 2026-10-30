@@ -1060,3 +1060,10 @@ check = "non-executable-in-bin"
 kind = "behaviour"
 reason = "Fix-and-diverge: non-executable files in bin dirs with a data extension do not fire unless they carry a shebang. The evidenced extensions are fpc compiler data (tdf, rsj, pt, ans), ooRexx class libraries (cls, dtd, xsd, xsl), FIPS sidecars (hmac), configs (conf, defs), PowerShell scripts (ps1) and host-loaded interpreter sources (lua, tcl). A shebang script in a bin dir is an entry point whatever its suffix, so shebang-carrying files still fire. Corpus instances: 45 rows (fpc 19, ooRexx 17, hmac 4, paraview.conf, spack.ps1, trigger-rally.config.defs, brltty-prologue.lua/.tcl). The reference fires on the shape. Pinned by non_executable_in_bin_data_files_are_silent in files.rs."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "file-in-meta-package"
+kind = "behaviour"
+reason = "Fix-and-diverge: patterns-* packages fire file-in-meta-package. The reference MetaPackageRegexp is '^(bundle|task)-' (configdefaults.toml, no override anywhere in the reference tree), so a patterns package shipping files stays silent there. patterns packages are meta packages in the same sense as bundle/task packages -- a package whose purpose is to pull in a set of other packages -- so shipping files in one is the same defect the finding reports. rpmcrab widens the pattern to '^(bundle|task|patterns)-'. Measured on the Factory corpus (51,586 binary RPMs): 0 findings before the widening, 160 after, every one on a patterns-* package and none on any other name shape. Pinned by the meta_package_* tests in files.rs."
+since = "0.4.1"
