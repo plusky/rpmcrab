@@ -854,6 +854,18 @@ impl Pkg {
             .unwrap_or_default()
     }
 
+    /// Read at most `limit` bytes of an extracted file, resolved within
+    /// the package exactly like `read_file`, so a prefix scan never
+    /// opens a raw header path.
+    pub fn read_prefix(&self, filename: &str, limit: u64) -> std::io::Result<Vec<u8>> {
+        use std::io::Read as _;
+        let path = file_path(self.source.base_dir(), filename);
+        let file = std::fs::File::open(path)?;
+        let mut buf = Vec::new();
+        file.take(limit).read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+
     /// The first 1-based line number in `filename` matching `regex` (rpmlint
     /// `grep`), or `None`.
     pub fn grep(&self, regex: &fancy_regex::Regex, filename: &str) -> Option<usize> {

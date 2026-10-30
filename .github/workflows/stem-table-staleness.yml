@@ -58,7 +58,9 @@ jobs:
       - name: Fetch Tumbleweed primary metadata
         run: |
           python3 - <<'EOF'
+          import http.client
           import shutil
+          import ssl
           import time
           import urllib.error
           import urllib.request
@@ -101,7 +103,24 @@ jobs:
                       print(f"fetched primary-{repo}.xml.zst from {href}")
                       last_err = None
                       break
-                  except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+                  # Mirror the generator's _TRANSIENT_FETCH_ERRORS set,
+                  # plus http.client.HTTPException (the parent of the
+                  # mid-transfer protocol errors) and ET.ParseError (a
+                  # truncated repomd body): all of these fail fast
+                  # without backoff under the old tuple, for both the
+                  # repomd fetch and the primary download above.
+                  except (
+                      urllib.error.HTTPError,
+                      urllib.error.URLError,
+                      TimeoutError,
+                      http.client.HTTPException,
+                      ssl.SSLError,
+                      ConnectionResetError,
+                      ConnectionRefusedError,
+                      ConnectionAbortedError,
+                      BrokenPipeError,
+                      ET.ParseError,
+                  ) as e:
                       last_err = e
                       if cycle + 1 < CYCLES:
                           time.sleep(BACKOFF[cycle])

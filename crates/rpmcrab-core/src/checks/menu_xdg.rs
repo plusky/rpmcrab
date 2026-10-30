@@ -239,6 +239,13 @@ impl MenuXDGCheck {
     /// Whether the Exec binary resolves (in the package or on the live root).
     fn binary_exists(pkg: &Pkg, binary: &str) -> bool {
         if binary.starts_with('/') {
+            // A `..` segment never names a binary the package ships:
+            // inside the tree it aliases another package path, and a
+            // leading chain escapes the package root into a host
+            // `.exists()` probe.
+            if binary.split('/').any(|seg| seg == "..") {
+                return false;
+            }
             let full = Path::new(pkg.dir_name()).join(binary.trim_start_matches('/'));
             if full.exists() {
                 return true;
@@ -1427,5 +1434,12 @@ mod tests {
         // even though the merged directory itself exists.
         assert!(!MenuXDGCheck::binary_exists(&pkg, "/sbin/"));
         assert!(!MenuXDGCheck::binary_exists(&pkg, "/bin/"));
+        // `..` segments never resolve: an in-tree `..` would alias
+        // another package path, and a leading chain would escape the
+        // package root into a host `.exists()` probe.
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/sbin/.."));
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/sbin/../usr/bin/tool"));
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/sbin/../../etc/passwd"));
+        assert!(!MenuXDGCheck::binary_exists(&pkg, "/bin/../usr/sbin/yast2"));
     }
 }

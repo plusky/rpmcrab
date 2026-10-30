@@ -174,19 +174,65 @@ impl SystemdInstallCheck {
 
     /// Whether one %post line manually enables or presets a unit in
     /// system scope: full-line comments never credit, and a
-    /// scope-changing flag (`--user`, `--global`) moves the operation
-    /// to the user manager, so it never credits the system unit.
+    /// scope-changing flag moves the operation elsewhere, so it never
+    /// credits the system unit. The scope test runs over the shared
+    /// tokenizer's words, so a flag inside a comment or a quoted word
+    /// counts exactly as the shell would see it: a trailing `# --user`
+    /// comment denies nothing, a quoted `'--user'` still scopes away,
+    /// and a remote-machine flag (`-H`, `--host`, `-M`, `--machine`,
+    /// with or without `=value`) scopes away like `--user` does. The
+    /// pattern itself runs against the comment-stripped line, so a
+    /// commented-out systemctl invocation never credits.
     fn manual_line_credits(line: &str, manual_re: &Regex) -> bool {
         if line.trim_start().starts_with('#') {
             return false;
         }
-        if line
-            .split_whitespace()
-            .any(|token| token == "--user" || token == "--global")
-        {
+        if Self::shell_words(line).iter().any(|(word, _, _)| {
+            matches!(
+                word.as_str(),
+                "--user" | "--global" | "-H" | "-M" | "--host" | "--machine"
+            ) || word.starts_with("--host=")
+                || word.starts_with("--machine=")
+        }) {
             return false;
         }
-        is_match(manual_re, line)
+        is_match(manual_re, Self::strip_comment(line))
+    }
+
+    /// The line up to a `#` comment start: `#` begins a comment only
+    /// at the start of a word (line start, after whitespace, or after
+    /// a shell operator) and never inside quotes, so `foo#bar` keeps
+    /// its `#` while `foo # bar` drops everything from the `#`.
+    fn strip_comment(line: &str) -> &str {
+        let bytes = line.as_bytes();
+        let mut quote: Option<u8> = None;
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            match quote {
+                Some(q) => {
+                    if b == q {
+                        quote = None;
+                    }
+                }
+                None => {
+                    if b == b'"' || b == b'\'' {
+                        quote = Some(b);
+                    } else if b == b'#'
+                        && (i == 0
+                            || bytes[i - 1].is_ascii_whitespace()
+                            || matches!(
+                                bytes[i - 1],
+                                b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>'
+                            ))
+                    {
+                        return &line[..i];
+                    }
+                }
+            }
+            i += 1;
+        }
+        line
     }
 
     /// Whether `stem` is a bare name systemctl resolves with the default
@@ -1094,6 +1140,46 @@ mod tests {
         let post = "systemctl enable bar.service";
         let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
         assert!(missing.contains(&"systemd-service-without-service_add_post"));
+    }
+
+    #[test]
+    fn manual_scope_flags_in_comments_and_quotes() {
+        // A scope flag in a trailing comment denies nothing: the
+        // operation itself runs in system scope.
+        let post = "systemctl preset foo.service # --user";
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert!(!missing.contains(&"systemd-service-without-service_add_post"));
+        // A quoted scope flag still scopes away: the shell strips the
+        // quotes before systemctl sees the flag.
+        let post = "systemctl preset '--user' foo.service";
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert!(missing.contains(&"systemd-service-without-service_add_post"));
+        // A commented-out invocation never credits.
+        let post = "echo hi # systemctl preset foo.service";
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert!(missing.contains(&"systemd-service-without-service_add_post"));
+        // A `#` inside quotes is not a comment start.
+        let post = "systemctl preset 'foo#bar.service'";
+        let missing =
+            SystemdInstallCheck::check_unit("foo#bar.service", true, "", post, "", "", false);
+        assert!(!missing.contains(&"systemd-service-without-service_add_post"));
+    }
+
+    #[test]
+    fn manual_remote_machine_flags_do_not_credit() {
+        for post in [
+            "systemctl -H remote preset foo.service",
+            "systemctl --host=remote preset foo.service",
+            "systemctl -M container preset foo.service",
+            "systemctl --machine=container enable foo.service",
+        ] {
+            let missing =
+                SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+            assert!(
+                missing.contains(&"systemd-service-without-service_add_post"),
+                "{post} must not credit: {missing:?}"
+            );
+        }
     }
 
     #[test]
