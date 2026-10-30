@@ -3503,6 +3503,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/656"
 
 [[divergence]]
 case = "global"
+check = "shlib-policy-etc-payload"
+kind = "behaviour"
+reason = "Two credits narrow the port-only shlib-policy-etc-payload Warning, both pinned by unit tests in shared_library_policy.rs. A scheme-shaped name on a package shipping no versioned shared library is not a SONAME generation and stays quiet (libostree-grub2 ships only a grub script, no .so; the same guard the obsoletes-sibling arm already applies). A file named after the package itself (or its lib-stem) belongs to this generation and stays quiet: the next generation's package has a different name and ships a differently-named file (libakai0.conf, libgig14.conf, ThePEG30.conf). Scoped delta over the 28 firing packages from the 2026-10-26 enumeration: 47 -> 43, exactly these 4 rows removed, 0 added, nothing else moved."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "shlib-devel-unversioned-requires"
 kind = "behaviour"
 reason = "New port-only Warning: SharedLibraryPolicyCheck reports a library -devel package whose sibling versioned shared library package (same source package, policy naming scheme, shipping a versioned .so file) is not required with a version relation, under the sibling's name or one of its `lib`-prefixed non-SONAME provides names. The frozen 2.10.0 reference has no such finding; the reference has no source-scoped sibling pairing: its `no-version-dependency-on` matches the devel package's name stem, not the co-built sibling. Warning only: automatic SONAME dependencies often bind the right library generation anyway, so a missing or unversioned pairing does not always produce a broken install. Measured on the Factory corpus: 14 findings over 988 evaluated (devel, shlib) pairs in 860 source sets. Rich (boolean) requires satisfy the rule only through a versioned leaf naming the sibling. It can co-fire with the existing no-library-dependency-on and no-version-dependency-on findings, which judge a package's own dependency names (no-library-dependency-on reaches across packages only through file ownership); the delta this check adds is the keyed cross-package pairing: records pair by SOURCERPM and group by the naming scheme (base and -32bit/-64bit flavours as one), the specific co-built shared-library sibling must be required, by its package name or a `lib`-prefixed non-SONAME provides name, with a version relation, and the pairing fires without any shipped `.so` link between the two packages."

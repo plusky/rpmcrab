@@ -643,14 +643,27 @@ impl Check for SharedLibraryPolicyCheck {
         // package for the next SONAME generation, and the two conflict
         // at file level. Directory entries are shared by design and
         // %ghost entries are not shipped payload, so only
-        // non-directory, non-ghost entries fire.
-        if is_match(&self.re_soname_pkg, &pkg.name) {
+        // non-directory, non-ghost entries fire. Two shapes stay quiet:
+        // a scheme-shaped name on a package shipping no versioned
+        // library is not a SONAME generation, and a file named after
+        // the package itself (or its lib-stem) belongs to this
+        // generation — the next generation's package has a different
+        // name and ships a differently-named file.
+        if is_match(&self.re_soname_pkg, &pkg.name) && self.ships_versioned_library(pkg) {
             let mut etc_files: Vec<&str> = pkg
                 .files
                 .iter()
                 .filter(|f| f.name.starts_with("/etc/") || f.name.starts_with("/usr/etc/"))
                 .filter(|f| !is_dir(f.mode))
                 .filter(|f| !f.is_ghost())
+                .filter(|f| {
+                    let base = f.name.rsplit('/').next().unwrap_or(f.name.as_str());
+                    let stem = match base.rfind('.') {
+                        Some(i) if i > 0 => &base[..i],
+                        _ => base,
+                    };
+                    stem != pkg.name.as_str() && Some(stem) != pkg.name.strip_prefix("lib")
+                })
                 .map(|f| f.name.as_str())
                 .collect();
             etc_files.sort_unstable();
@@ -3115,6 +3128,23 @@ mod tests {
         out.results().to_vec()
     }
 
+    fn etc_results_no_lib(name: &str, extra: Vec<PkgFile>) -> Vec<(String, String)> {
+        // Same run as etc_results but without the versioned library
+        // fixture file: the package under test ships no library.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture header");
+        pkg.name = name.to_string();
+        pkg.files = extra;
+        pkg.requires = vec![];
+
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = checker();
+        check.check_binary(&pkg, &config, &mut out);
+        out.results().to_vec()
+    }
+
     fn etc_file(name: &str) -> PkgFile {
         PkgFile {
             name: name.to_string(),
@@ -3282,6 +3312,47 @@ mod tests {
             etc_lines(&results).len(),
             1,
             "exactly one finding: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_package_named_file_is_quiet() {
+        // A file named after the package itself belongs to this SONAME
+        // generation: the next generation's package has a different name
+        // and ships a differently-named file (libakai0.conf, libgig14.conf).
+        let results = etc_results(
+            "libakai0",
+            vec![etc_file("/etc/ld.so.conf.d/libakai0.conf")],
+        );
+        assert!(
+            etc_lines(&results).is_empty(),
+            "package-named file must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_lib_stem_named_file_is_quiet() {
+        // The lib-stem form: ThePEG30.conf belongs to libThePEG30.
+        let results = etc_results(
+            "libThePEG30",
+            vec![etc_file("/etc/ld.so.conf.d/ThePEG30.conf")],
+        );
+        assert!(
+            etc_lines(&results).is_empty(),
+            "lib-stem-named file must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_payload_without_library_payload_is_quiet() {
+        // A scheme-shaped name on a package shipping no versioned
+        // library is not a SONAME generation (libostree-grub2 ships
+        // only a grub script, no .so).
+        let results =
+            etc_results_no_lib("libostree-grub2", vec![etc_file("/etc/grub.d/15_ostree")]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "no-library package must stay quiet: {results:?}"
         );
     }
 
