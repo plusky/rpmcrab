@@ -4030,9 +4030,21 @@ fn is_binary_container(path: &Path) -> bool {
 /// risk. Both shipped copies share the `/doc/TestPage.txt` suffix; a
 /// general test-path rule would not match these paths (they contain no
 /// test or demo directory), and a doc-directory exemption would silence
-/// genuine content, so the credit is scoped to this file.
-fn is_bidi_demo_page(name: &str) -> bool {
+/// genuine content, so the credit is scoped to this file in the yudit
+/// package: the binary name `yudit`, or a subpackage built from the
+/// yudit source package (the `sysconfig_fillup_exempt` shape). The
+/// same suffix in any other package still fires: an ungated suffix
+/// rule would silence a trojan-source control in whatever package
+/// happened to ship that path.
+fn is_bidi_demo_page(pkg: &Pkg, name: &str) -> bool {
     name.ends_with("/doc/TestPage.txt")
+        && (pkg.name == "yudit"
+            || matches!(
+                pkg.tag_str(librpm::Tag::SOURCERPM)
+                    .as_deref()
+                    .map(source_pkg_name),
+                Some("yudit")
+            ))
 }
 
 fn strip_quotes(re: &Regex, s: &str) -> String {
@@ -4255,7 +4267,7 @@ impl FilesCheck {
     /// control-looking triples in compressed or binary data; such files are
     /// skipped on their content signature (see `is_binary_container`).
     /// The yudit demonstration page is likewise out of scope: its controls
-    /// are deliberate demo content (see `is_bidi_demo_page`).
+    /// are deliberate demo content in the yudit package (see `is_bidi_demo_page`).
     fn check_bidi_controls(&self, pkg: &Pkg, out: &mut Filter) {
         for pkgfile in &pkg.files {
             if !is_reg(pkgfile.mode) {
@@ -4271,7 +4283,7 @@ impl FilesCheck {
             if is_binary_container(path) {
                 continue;
             }
-            if is_bidi_demo_page(&pkgfile.name) {
+            if is_bidi_demo_page(pkg, &pkgfile.name) {
                 continue;
             }
             if let Some(found) = first_bidi_control_in_file(path) {
@@ -13247,7 +13259,43 @@ print("hi")
     fn bidi_demo_test_page_not_scanned() {
         // Yudit's demonstration page carries deliberate bidi controls
         // (Arabic demo text); both shipped copies share the
-        // /doc/TestPage.txt suffix and stay silent.
+        // /doc/TestPage.txt suffix and stay silent -- in the yudit
+        // package only (see `is_bidi_demo_page`).
+        let content =
+            "Arabic - \u{202B}\u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}\u{202C}\n"
+                .as_bytes()
+                .to_vec();
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = bidi_pkg(
+            &dir,
+            vec![
+                (
+                    "/usr/share/yudit/doc/TestPage.txt",
+                    "UTF-8 Unicode text",
+                    content.clone(),
+                ),
+                (
+                    "/usr/share/doc/packages/yudit/doc/TestPage.txt",
+                    "UTF-8 Unicode text",
+                    content,
+                ),
+            ],
+        );
+        pkg.name = "yudit".to_string();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        assert!(
+            bidi_findings(&out).is_empty(),
+            "demo test page out of scope"
+        );
+    }
+
+    #[test]
+    fn bidi_same_suffix_in_non_yudit_package_still_fires() {
+        // The credit is package-scoped, not suffix-scoped: the same
+        // /doc/TestPage.txt paths in a non-yudit package carry
+        // controls that must still fire.
         let content =
             "Arabic - \u{202B}\u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}\u{202C}\n"
                 .as_bytes()
@@ -13271,9 +13319,11 @@ print("hi")
         );
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
-        assert!(
-            bidi_findings(&out).is_empty(),
-            "demo test page out of scope"
+        let findings = bidi_findings(&out);
+        assert_eq!(
+            findings.len(),
+            2,
+            "same suffix outside yudit fires: {findings:?}"
         );
     }
 
