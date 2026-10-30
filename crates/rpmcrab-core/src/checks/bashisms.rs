@@ -138,6 +138,9 @@ fn is_template_script(name: &str) -> bool {
 /// covers the first fifteen code lines (blank lines and comments skipped): a
 /// switch idiom there means the rest of the file is the other language's
 /// code, and a `dash -n` failure in it is not a shell syntax error.
+/// Limitation: the skip covers the whole file, so a genuine bashism
+/// on a pre-switch prologue line is silenced too, and both findings
+/// are suppressed (`bin-sh-syntax-error` and `potential-bashisms`).
 fn is_polyglot_wrapper(content: &str) -> bool {
     let mut self_vars: Vec<String> = Vec::new();
     let mut code_lines = 0;
@@ -647,7 +650,7 @@ mod tests {
         let script = scripts.path().join("gui");
         std::fs::write(
             &script,
-            b"#!/bin/sh\nexec wish \"$0\" -- \"$@\"\n# caf\xe9\nset x {1}\n",
+            b"#!/bin/sh\nexec wish \"$0\" -- \"$@\"\n# \xff\nset x {1}\n",
         )
         .expect("write script");
         let mut pkg = Pkg::open(

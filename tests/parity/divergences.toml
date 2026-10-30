@@ -244,7 +244,7 @@ upstream = "https://github.com/plusky/rpmcrab/issues/593"
 case = "global"
 check = "bin-sh-syntax-error"
 kind = "behaviour"
-reason = "Fix-and-diverge: the port skips polyglot wrappers (a shell prologue that hands execution to another interpreter via an exec, eval-exec, bare-interpreter, or variable -x switch on the script itself) and generator-template files (.skel, .ww, .in) instead of running `dash -n` on them; the reference reports the other language's code and unrendered template text as shell syntax errors."
+reason = "Fix-and-diverge: the port skips polyglot wrappers (a shell prologue that hands execution to another interpreter via an exec, eval-exec, bare-interpreter, or variable -x switch on the script itself) and generator-template files (.skel, .ww, .in) instead of running `dash -n` on them; the reference reports the other language's code and unrendered template text as shell syntax errors. Limitation, disclosed: the skip covers the whole file, so a genuine bashism on a pre-switch prologue line is silenced along with the other language's code, and both findings are suppressed -- `bin-sh-syntax-error` (`dash -n`) and `potential-bashisms` (checkbashisms) -- not just the `dash -n` failure."
 since = "0.4.1"
 
 [[divergence]]
