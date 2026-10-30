@@ -2397,6 +2397,13 @@ struct LddInfo {
     /// of this file names it.
     copy_symbols: Vec<String>,
     undefined_symbols: Vec<String>,
+    /// Weak undefined `.dynsym` names (SHN_UNDEF with STB_WEAK
+    /// binding): excluded from the undefined-non-weak-symbol
+    /// finding (the loader resolves them to zero), but counted as
+    /// use by the unused-dependency producer, matching `ldd -u`,
+    /// which binds weak references when the provider defines the
+    /// symbol.
+    weak_undefined_symbols: Vec<String>,
     /// Symbols this file defines in `.dynsym`; the provider side of
     /// the DT_NEEDED closure resolution in `resolve_undefined_symbols`.
     defined_symbols: Vec<String>,
@@ -2424,6 +2431,7 @@ impl LddInfo {
             unused_dependencies: Vec::new(),
             copy_symbols: Vec::new(),
             undefined_symbols: Vec::new(),
+            weak_undefined_symbols: Vec::new(),
             defined_symbols: Vec::new(),
             is_64: None,
             rpath: Vec::new(),
@@ -2513,11 +2521,18 @@ impl LddInfo {
             if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize {
                 // Weak undefined symbols resolve to zero at load
                 // time, so ldd -r stays silent on them and the
-                // reference never reports them. A name can repeat
-                // across version references; report it once.
-                if goblin::elf::sym::st_bind(sym.st_info) != goblin::elf::sym::STB_WEAK
-                    && !info.undefined_symbols.iter().any(|u| u == name)
-                {
+                // reference never reports them; they are still
+                // captured separately, because the unused-
+                // dependency producer counts a weak reference as
+                // use, matching `ldd -u`, which binds weak
+                // references when the provider defines the symbol.
+                // A name can repeat across version references;
+                // report it once per list.
+                if goblin::elf::sym::st_bind(sym.st_info) == goblin::elf::sym::STB_WEAK {
+                    if !info.weak_undefined_symbols.iter().any(|u| u == name) {
+                        info.weak_undefined_symbols.push(name.to_string());
+                    }
+                } else if !info.undefined_symbols.iter().any(|u| u == name) {
                     info.undefined_symbols.push(name.to_string());
                 }
             } else {
@@ -3095,6 +3110,10 @@ struct ConsumerFile {
     /// Undefined non-weak `.dynsym` names, in `.dynsym` order (the
     /// emission order).
     undefined_symbols: Vec<String>,
+    /// Weak undefined `.dynsym` names, in `.dynsym` order: the
+    /// unused-dependency producer counts these as use, matching
+    /// `ldd -u`; the undefined-symbol resolution never sees them.
+    weak_undefined_symbols: Vec<String>,
     /// The file's own defined symbols: subtracted after the closure
     /// walk, as in `resolve_undefined_symbols`. A set: the residue
     /// loop tests every undefined symbol against it.
@@ -3203,14 +3222,16 @@ fn strip_symbol_version(name: &str) -> &str {
 }
 
 /// The set-difference producer for one direct dependency: the
-/// dependency is unused iff no non-weak undefined symbol of the
-/// consumer names a symbol the provider defines, and no symbol
+/// dependency is unused iff no undefined symbol of the
+/// consumer, weak or strong, names a symbol the provider defines,
+/// and no symbol
 /// the consumer copies out of a provider is defined by this one.
 /// The provider must already be located; a dependency whose
 /// provider cannot be located never reaches this function and
 /// stays silent.
 fn dep_is_unused(
     undefined_symbols: &[String],
+    weak_undefined_symbols: &[String],
     copy_symbols: &[String],
     provider_defined: &HashSet<String>,
 ) -> bool {
@@ -3220,6 +3241,7 @@ fn dep_is_unused(
         .collect();
     !undefined_symbols
         .iter()
+        .chain(weak_undefined_symbols.iter())
         .any(|sym| defined.contains(strip_symbol_version(sym)))
         && !copy_symbols
             .iter()
@@ -3415,7 +3437,12 @@ fn resolve_undefined_symbols(
                     // Unlocatable: silent, never reported.
                     continue;
                 };
-                if dep_is_unused(&ldd.undefined_symbols, &ldd.copy_symbols, &provider.defined) {
+                if dep_is_unused(
+                    &ldd.undefined_symbols,
+                    &ldd.weak_undefined_symbols,
+                    &ldd.copy_symbols,
+                    &provider.defined,
+                ) {
                     unused.push(dep.clone());
                 }
             }
@@ -6739,6 +6766,7 @@ impl BinariesCheck {
                         record.files.push(ConsumerFile {
                             file_name: pkgfile.name.clone(),
                             undefined_symbols: ldd.undefined_symbols.clone(),
+                            weak_undefined_symbols: ldd.weak_undefined_symbols.clone(),
                             // Only the intersection is kept
                             // (issue #799): `after_checks` tests
                             // membership for the consumer's own
@@ -6805,6 +6833,7 @@ impl BinariesCheck {
                 record.files.push(ConsumerFile {
                     file_name: pkgfile.name.clone(),
                     undefined_symbols: ldd.undefined_symbols.clone(),
+                    weak_undefined_symbols: ldd.weak_undefined_symbols.clone(),
                     // The unused resolution intersects
                     // undefined symbols with the provider's
                     // defined set only; the consumer's own
@@ -8072,6 +8101,7 @@ impl Check for BinariesCheck {
                     };
                     if dep_is_unused(
                         &consumer.undefined_symbols,
+                        &consumer.weak_undefined_symbols,
                         &consumer.copy_symbols,
                         &provider.defined,
                     ) {
@@ -12548,6 +12578,7 @@ description = "explicit priority string bypasses the system crypto policy"
             unused_dependencies: Vec::new(),
             copy_symbols: Vec::new(),
             undefined_symbols: Vec::new(),
+            weak_undefined_symbols: Vec::new(),
             defined_symbols: Vec::new(),
             is_64: None,
             rpath: Vec::new(),
@@ -12579,14 +12610,20 @@ description = "explicit priority string bypasses the system crypto policy"
     fn dep_is_unused_set_difference_with_copy_credit() {
         let defined: HashSet<String> = ["bar_sym".to_string()].into_iter().collect();
         // Used: an undefined symbol names a defined one.
-        assert!(!dep_is_unused(&["bar_sym".to_string()], &[], &defined));
+        assert!(!dep_is_unused(&["bar_sym".to_string()], &[], &[], &defined));
         // Unused: no undefined symbol names a defined one.
-        assert!(dep_is_unused(&["other_sym".to_string()], &[], &defined));
+        assert!(dep_is_unused(
+            &["other_sym".to_string()],
+            &[],
+            &[],
+            &defined
+        ));
         // COPY-only: credited, not fired.
-        assert!(!dep_is_unused(&[], &["bar_sym".to_string()], &defined));
+        assert!(!dep_is_unused(&[], &[], &["bar_sym".to_string()], &defined));
         // A versioned spelling on either side still matches.
         assert!(!dep_is_unused(
             &["bar_sym@VERSION".to_string()],
+            &[],
             &[],
             &defined
         ));
@@ -12594,7 +12631,24 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(dep_is_unused(
             &["bar_sym".to_string()],
             &[],
+            &[],
             &HashSet::new()
+        ));
+        // Weak-only: a weak reference to a defined symbol counts as
+        // use, matching `ldd -u` (observed instance: a Haskell
+        // library's weak __cxa_finalize reference to libc).
+        assert!(!dep_is_unused(
+            &[],
+            &["__cxa_finalize".to_string()],
+            &[],
+            &["__cxa_finalize".to_string()].into_iter().collect()
+        ));
+        // Weak-only with no defined match stays unused.
+        assert!(dep_is_unused(
+            &[],
+            &["other_sym".to_string()],
+            &[],
+            &defined
         ));
     }
 
@@ -12645,6 +12699,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 files: vec![ConsumerFile {
                     file_name: "/usr/bin/tool".to_string(),
                     undefined_symbols: vec!["bar_sym".to_string()],
+                    weak_undefined_symbols: Vec::new(),
                     defined_symbols: HashSet::new(),
                     dependencies: vec!["libfoo.so.1".to_string(), "libbar.so.1".to_string()],
                     is_64: Some(true),
@@ -12675,6 +12730,83 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             unused[0].contains(" W: "),
             "executable unused dep is Warning: {}",
+            unused[0]
+        );
+    }
+
+    #[test]
+    fn after_checks_weak_only_dependency_is_silent() {
+        let config = test_config();
+        let mut check = BinariesCheck::new(&config);
+        let pkg_id = (
+            "testpkg".to_string(),
+            "x86_64".to_string(),
+            "testpkg-1.0-1.x86_64.rpm".to_string(),
+        );
+        let mut providers = HashMap::new();
+        providers.insert(
+            "libfoo.so.1".to_string(),
+            SymbolProvider {
+                defined: ["other_sym".to_string()].into_iter().collect(),
+                needs: Vec::new(),
+                origin: PathBuf::from("/usr/lib64"),
+                rpath: Vec::new(),
+                runpath: Vec::new(),
+                has_runpath: false,
+            },
+        );
+        providers.insert(
+            "libbar.so.1".to_string(),
+            SymbolProvider {
+                defined: ["bar_sym".to_string()].into_iter().collect(),
+                needs: Vec::new(),
+                origin: PathBuf::from("/usr/lib64"),
+                rpath: Vec::new(),
+                runpath: Vec::new(),
+                has_runpath: false,
+            },
+        );
+        let state = BinariesState {
+            provider_sets: vec![PackageProviders {
+                pkg_name: pkg_id.0.clone(),
+                pkg_arch: pkg_id.1.clone(),
+                pkg_filename: pkg_id.2.clone(),
+                providers,
+            }],
+            packages: Vec::new(),
+            unused_packages: vec![PackageConsumers {
+                pkg_name: pkg_id.0.clone(),
+                pkg_arch: pkg_id.1.clone(),
+                pkg_filename: pkg_id.2.clone(),
+                files: vec![ConsumerFile {
+                    file_name: "/usr/bin/tool".to_string(),
+                    undefined_symbols: Vec::new(),
+                    weak_undefined_symbols: vec!["bar_sym".to_string()],
+                    defined_symbols: HashSet::new(),
+                    dependencies: vec!["libfoo.so.1".to_string(), "libbar.so.1".to_string()],
+                    is_64: Some(true),
+                    rpath: Vec::new(),
+                    runpath: Vec::new(),
+                    has_runpath: false,
+                    is_shlib: false,
+                    copy_symbols: Vec::new(),
+                }],
+            }],
+            contributors: vec![pkg_id],
+        };
+        check.import_state(Box::new(state));
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        let unused = lines_for(&results, "unused-direct-shlib-dependency");
+        assert_eq!(
+            unused.len(),
+            1,
+            "only the genuinely unused dep fires; the weak-only dep is silent: {results:?}"
+        );
+        assert!(
+            unused[0].contains("libfoo.so.1"),
+            "firing dep is libfoo: {}",
             unused[0]
         );
     }
