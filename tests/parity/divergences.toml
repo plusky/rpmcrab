@@ -891,9 +891,51 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "missing-cf-protection"
+kind = "behaviour"
+reason = "Fix-and-diverge: missing-cf-protection stays quiet for Free Pascal output, identified by a `.fpcdata` section (the compiler's own data section, present in every FPC-produced binary). FPC emits no IBT/SHSTK property record and no ENDBR64 for Pascal code, so the C-compiler finding would be noise. The gate is scoped to this emission: the linker-level RELRO findings still fire on FPC binaries. Measured over the full Factory corpus (51,586 binary RPMs): 48 findings removed, all in the fpc package, zero added. Pinned by hardening_fpc_binary_skips_cf_protection in binaries.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "linked-against-opt-library"
 kind = "behaviour"
 reason = "Resolved-path expansion: the reference fires only when a DT_NEEDED entry itself starts with /opt/ -- an ldd line for an ordinary soname dependency reads 'soname => /opt/...' and does not start with /opt/, so it stays silent. The port keeps that literal arm at the emission site (raw DT_NEEDED strings) and adds a resolved-path arm at the deferred site: a soname dependency whose located provider path is under /opt/ fires at E for any consumer, including bundled-library self-linkage and RPATH-into-/opt shapes the reference never sees. Measured over the full Factory corpus (51,586 readable RPMs; Factory-only measurement): the soname-provider index holds zero providers under /opt/ -- the only /opt/ content is 1,028 files in four packages (mingw32-filesystem, mingw64-filesystem, openQA-llm-server, rpmlint-mini), whose 85 .so files are Python extension modules with no DT_SONAME and no soname Provides -- and per-file confirmation finds 0 firings, with no RPATH/RUNPATH dir under /opt/ observed. The expansion therefore changes nothing on Factory; the arm can only fire where linkable /opt/ libraries exist. Pinned by the linked_against_opt_library and linked_against_findings_resolves_index_paths tests."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "missing-cf-protection"
+kind = "behaviour"
+reason = "Fix-and-diverge: missing-cf-protection stays quiet for Mono AOT images: paths under `/usr/lib/mono/` or `/usr/lib64/mono/` with suffix `.dll.so` or `.exe.so` (precompiled managed assemblies, not C-compiler output under this distro's flags). The gate is scoped to this emission. Measured over the full Factory corpus (51,586 binary RPMs): 7 findings removed, all in mono-core, zero added. Pinned by hardening_mono_aot_image_skips_cf_protection in binaries.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "missing-cf-protection"
+kind = "behaviour"
+reason = "Fix-and-diverge: missing-cf-protection stays quiet for the kernel vdso, identified by a path ending in `/vdso/vdso64.so` (hand-written assembly built by the kernel build, not `%{optflags}` output). The gate is scoped to this emission: the linker-level RELRO findings still fire on vdso files. Measured over the full Factory corpus (51,586 binary RPMs): 3 findings removed (kernel-default-vdso, kernel-kvmsmall-vdso, kernel-vanilla-vdso), zero added. Pinned by hardening_vdso_skips_cf_protection in binaries.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "missing-fortify"
+kind = "behaviour"
+reason = "Fix-and-diverge: missing-fortify stays quiet for GCC Go frontend output (defined `__go_` FUNC symbols). gccgo emits no `_FORTIFY_SOURCE` instrumentation for Go code, so the C-compiler finding would be noise. Measured over the full Factory corpus (51,586 binary RPMs): 14 findings removed (the libgo.so file in each of libgo11, libgo22, libgo23, libgo24, libgo25, gcc7-go, gcc13-go, gcc14-go, gcc15-go, plus go, gofmt, buildid, cgo and libgo.so in gcc16-go), zero added. Pinned by hardening_gccgo_binary_skips_compile_time_findings in binaries.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "missing-stack-protector"
+kind = "behaviour"
+reason = "Fix-and-diverge: missing-stack-protector stays quiet for GCC Go frontend output (defined `__go_` FUNC symbols). gccgo emits no stack-protector instrumentation for Go code, so the C-compiler finding would be noise. Measured over the full Factory corpus (51,586 binary RPMs): 26 findings removed (libgo.so in libgo11, libgo22, libgo23, libgo24, libgo25 and gcc7-go, plus go, gofmt, buildid, cgo and libgo.so in each of gcc13-go, gcc14-go, gcc15-go, gcc16-go), zero added. Pinned by hardening_gccgo_binary_skips_compile_time_findings in binaries.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "optflags-not-applied"
+kind = "behaviour"
+reason = "Fix-and-diverge: optflags-not-applied no longer judges GCC Go frontend output (defined `__go_` FUNC symbols): a gated language's own symbols are not the C instrumentation the OPTFLAGS tag asks for, so a gccgo file contributes to no arm of the rollup. Measured over the full Factory corpus (51,586 binary RPMs): 5 findings removed (libgo11, libgo22, libgo23, libgo24, libgo25, each holding only a gccgo file) and the gcc7-go detail recomputed over the 2 still-judged C++ files (gccgo-7, go1) after the gccgo-built tools (go-7, gofmt-7) and libgo.so left the population; zero findings added. Pinned by optflags_not_applied_gccgo_file_judges_nothing in binaries.rs."
 since = "0.4.1"
 
 [[divergence]]

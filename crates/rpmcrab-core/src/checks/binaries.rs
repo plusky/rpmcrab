@@ -1495,6 +1495,36 @@ impl ReadelfInfo {
         })
     }
 
+    /// Free Pascal toolchain output carries a `.fpcdata` section
+    /// (the compiler's own data section, present in every
+    /// FPC-produced binary). FPC emits no IBT/SHSTK property
+    /// record and no ENDBR64 for Pascal code, so the C-compiler
+    /// CF finding would be noise.
+    fn is_fpc_binary(&self) -> bool {
+        self.sections.iter().flatten().any(|s| s.name == ".fpcdata")
+    }
+
+    /// GCC Go frontend output defines the Go runtime's `__go_`
+    /// symbols; gccgo emits no IBT/SHSTK property record, no
+    /// ENDBR64, no stack-protector instrumentation and no
+    /// `_FORTIFY_SOURCE` instrumentation for Go code, so the
+    /// C-compiler findings would be noise.
+    ///
+    /// Only defined symbols count, mirroring the OCaml gate:
+    /// `functions` also carries undefined dynsym entries, so an
+    /// imported `__go_` symbol must not classify the binary. A C
+    /// program merely linking libgo imports `__go_` symbols with
+    /// zero defined ones, and its own C code stays checked.
+    fn is_gccgo_binary(&self) -> bool {
+        self.functions.iter().any(|s| {
+            s.starts_with("__go_")
+                && !self
+                    .undefined_functions
+                    .iter()
+                    .any(|u| symbol_base(u) == symbol_base(s))
+        })
+    }
+
     /// A shared object for which an empty DT_NEEDED is legitimate, not
     /// "missing dependency information": a dlopen-only plugin (no
     /// DT_SONAME, so never DT_NEEDED-linked), a fully self-contained
@@ -6384,6 +6414,8 @@ impl BinariesCheck {
         let is_rust = info.is_rust_binary();
         let is_haskell = info.is_haskell_binary();
         let is_ocaml = info.is_ocaml_binary();
+        let is_fpc = info.is_fpc_binary();
+        let is_gccgo = info.is_gccgo_binary();
         // The two compile-time findings judge code this distro's
         // toolchain built: a binary for a different ISA family (a
         // cross-compiler's target libraries, payload for another
@@ -6425,6 +6457,7 @@ impl BinariesCheck {
         if !is_rust
             && !is_haskell
             && !is_ocaml
+            && !is_gccgo
             && is_fortify_applicable(info)
             && !foreign_machine
             && !info.ghc_comment
@@ -6446,6 +6479,7 @@ impl BinariesCheck {
         if !is_rust
             && !is_haskell
             && !is_ocaml
+            && !is_gccgo
             && is_stack_protector_applicable(info)
             && !foreign_machine
             && !info.ghc_comment
@@ -6478,6 +6512,16 @@ impl BinariesCheck {
                 add_info(out, Level::Warning, pkg, "partial-relro", &[&pkgfile.name]);
             }
         }
+        // Two populations are not C-compiler output under this
+        // distro's flags and carry no CET record of their own:
+        // Mono AOT images (precompiled managed assemblies under
+        // the mono lib directories) and the kernel vdso
+        // (hand-written assembly built by the kernel build, not
+        // `%{optflags}`).
+        let is_mono_aot = (pkgfile.name.starts_with("/usr/lib/mono/")
+            || pkgfile.name.starts_with("/usr/lib64/mono/"))
+            && (pkgfile.name.ends_with(".dll.so") || pkgfile.name.ends_with(".exe.so"));
+        let is_vdso = pkgfile.name.ends_with("/vdso/vdso64.so");
         // Control-flow protection (rpmcrab#667): openSUSE's
         // `%{optflags}` carry `-fcf-protection` on x86_64, which makes
         // the compiler record the IBT and SHSTK features in
@@ -6505,6 +6549,11 @@ impl BinariesCheck {
         // and OCaml emit neither the property nor ENDBR64 for their
         // own code. A truncated property entry is Unreadable, not
         // absent: damage proves nothing either way.
+        //
+        // Three populations are gated out of this emission: Free
+        // Pascal output (a `.fpcdata` section), Mono AOT images and
+        // the kernel vdso; the fpc, mono and vdso gates are scoped
+        // to this emission only.
         let cf_unprotected = match info.x86_feature_1_and {
             X86Feature1And::Present(f) => f & X86_FEATURE_1_IBT_SHSTK != X86_FEATURE_1_IBT_SHSTK,
             X86Feature1And::Absent => true,
@@ -6514,6 +6563,9 @@ impl BinariesCheck {
             && !is_rust
             && !is_haskell
             && !is_ocaml
+            && !is_fpc
+            && !is_mono_aot
+            && !is_vdso
             && !info.has_endbr64
             && cf_unprotected
         {
@@ -6529,7 +6581,7 @@ impl BinariesCheck {
         // applicability: a gated language's own symbols are not the
         // C instrumentation the OPTFLAGS tag asks for, so they
         // cannot stand as presence for the package either.
-        let language_gated = is_rust || is_haskell || is_ocaml;
+        let language_gated = is_rust || is_haskell || is_ocaml || is_gccgo;
         HardeningObservation {
             in_population: true,
             ssp_applicable: !language_gated && is_stack_protector_applicable(info),
@@ -10776,6 +10828,142 @@ mod tests {
             lines_for(&results, "missing-relro").len(),
             1,
             "missing-relro must still fire for Rust: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_fpc_binary_skips_cf_protection() {
+        // Free Pascal output carries a `.fpcdata` section and no
+        // CET record of its own; the CF finding would be noise.
+        // The gate is scoped to this emission: RELRO still applies.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/probe", "ELF 64-bit LSB pie executable");
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".fpcdata")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            lines_for(&results, "missing-cf-protection").is_empty(),
+            "missing-cf-protection must not fire for FPC: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-relro").len(),
+            1,
+            "missing-relro must still fire for FPC: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_gccgo_binary_skips_compile_time_findings() {
+        // libgo defines `__go_` runtime symbols; gccgo emits none
+        // of the fortify/stack-protector instrumentation for Go code. The
+        // flagless imports make the fortify and stack-protector
+        // findings applicable, so their silence is the gate's
+        // doing, not vacuous applicability.
+        let results = hardening_results_with(&[], None, &["__go_construct_map"], FLAGLESS_IMPORTS);
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire for gccgo: {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire for gccgo: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-cf-protection").len(),
+            1,
+            "missing-cf-protection must still fire for gccgo (no CF exemption): {results:?}"
+        );
+        // Linker-level RELRO checks still apply to gccgo binaries.
+        assert_eq!(
+            lines_for(&results, "missing-relro").len(),
+            1,
+            "missing-relro must still fire for gccgo: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_gccgo_import_only_still_fires() {
+        // A C program merely linking libgo imports `__go_` symbols
+        // with zero defined ones; its own C code stays checked.
+        let results = hardening_results_with(&[], None, &[], &["__go_construct_map"]);
+        assert_eq!(
+            lines_for(&results, "missing-cf-protection").len(),
+            1,
+            "missing-cf-protection must still fire for a __go_ import-only binary: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_mono_aot_image_skips_cf_protection() {
+        // Mono AOT images are precompiled managed assemblies, not
+        // C-compiler output under this distro's flags.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        for path in [
+            "/usr/lib/mono/4.5/mscorlib.dll.so",
+            "/usr/lib/mono/4.5/mcs.exe.so",
+        ] {
+            let pkgfile = syn_file(path, "ELF 64-bit LSB shared object");
+            let info = syn_info();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            assert!(
+                lines_for(&results, "missing-cf-protection").is_empty(),
+                "missing-cf-protection must not fire for Mono AOT {path}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hardening_vdso_skips_cf_protection() {
+        // The kernel vdso is hand-written assembly built by the
+        // kernel build, not `%{optflags}` output. The gate is
+        // scoped to this emission: RELRO still applies.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file(
+            "/usr/lib/modules/7.2.9-1-default/vdso/vdso64.so",
+            "ELF 64-bit LSB shared object",
+        );
+        let info = syn_info();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            lines_for(&results, "missing-cf-protection").is_empty(),
+            "missing-cf-protection must not fire for the vdso: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-relro").len(),
+            1,
+            "missing-relro must still fire for the vdso: {results:?}"
+        );
+    }
+
+    #[test]
+    fn optflags_not_applied_gccgo_file_judges_nothing() {
+        // A gccgo file joins the language gates, so a package
+        // holding only it gets no optflags-not-applied detail at
+        // all: no arm of the rollup judges gccgo code.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = flagless_info(FLAGLESS_IMPORTS);
+        info.functions = vec!["__go_construct_map".to_string()];
+        let files: Vec<(&str, ReadelfInfo)> = vec![("/usr/lib64/libgo.so.11.0.0", info)];
+        let check = optflags_rollup_check(&pkg, &files);
+        assert_eq!(
+            check
+                .optflags_not_applied_detail(
+                    "-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=3 -fcf-protection"
+                )
+                .as_deref(),
+            None
         );
     }
 
