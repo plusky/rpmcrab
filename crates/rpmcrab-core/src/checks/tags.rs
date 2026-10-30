@@ -289,11 +289,7 @@ impl TagsCheck {
             self.check_obsolete_not_provided(pkg, out, &prov_names);
         }
 
-        for dep in &pkg.obsoletes {
-            let value = format_require(dep);
-            self.unexpanded_macro(out, pkg, &format!("Obsoletes {value}"), &value);
-        }
-
+        // Obsoletes are probed for unexpanded macros in check_forbidden_controlchar.
         self.check_useless_provides(pkg, out);
         self.check_forbidden_controlchar(pkg, out);
         self.check_self_obsoletion(pkg, out);
@@ -4478,6 +4474,26 @@ mod rich_dep_emission_tests {
         );
         assert!(hits[0].1.contains("Group"), "line: {}", hits[0].1);
         assert!(hits[0].1.ends_with(" %foo"), "line: {}", hits[0].1);
+    }
+
+    #[test]
+    fn obsoletes_macro_emitted_once() {
+        // An Obsoletes entry carrying macros emits one finding per macro:
+        // the entry is probed for unexpanded macros in exactly one place.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.obsoletes = vec![DepInfo {
+            name: "foo".to_string(),
+            flags: RPMSENSE_LESS,
+            epoch: None,
+            version: Some("%{version}".to_string()),
+            release: Some("%{release}".to_string()),
+        }];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let obs: Vec<_> = named(&results, "unexpanded-macro")
+            .into_iter()
+            .filter(|(_, line)| line.contains("Obsoletes foo <"))
+            .collect();
+        assert_eq!(obs.len(), 2, "all: {results:?}");
     }
 
     #[test]
