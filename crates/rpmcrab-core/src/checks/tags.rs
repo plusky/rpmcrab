@@ -1011,6 +1011,19 @@ impl TagsCheck {
                 if let (Some(dep), true) = (dep_match, !version.is_empty()) {
                     let exp = (epoch, Some(version.as_str()), None);
                     let sexp = version_to_string(exp.0, exp.1, exp.2);
+                    // A lower bound at an ancestor version is not a pin to
+                    // a different version: the same-build library satisfies
+                    // it, and the bound names the base version the package
+                    // version extends with a further dot component.
+                    let lower_bound_at_ancestor = dep.epoch == epoch
+                        && dep.flags & RPMSENSE_GREATER != 0
+                        && dep.flags & RPMSENSE_LESS == 0
+                        && dep.version.as_deref().is_some_and(|v| {
+                            !v.is_empty()
+                                && version
+                                    .strip_prefix(v)
+                                    .is_some_and(|rest| rest.starts_with('.'))
+                        });
                     if dep.flags == 0 {
                         add_info(
                             out,
@@ -1019,7 +1032,9 @@ impl TagsCheck {
                             "no-version-dependency-on",
                             &[&base_or_libs, &sexp],
                         );
-                    } else if (dep.epoch, dep.version.as_deref()) != (exp.0, exp.1) {
+                    } else if (dep.epoch, dep.version.as_deref()) != (exp.0, exp.1)
+                        && !lower_bound_at_ancestor
+                    {
                         let v = version_to_string(dep.epoch, dep.version.as_deref(), None);
                         add_info(
                             out,
@@ -4387,6 +4402,16 @@ mod rich_dep_emission_tests {
         }
     }
 
+    fn flagged_dep(name: &str, flags: u32, version: &str) -> DepInfo {
+        DepInfo {
+            name: name.to_string(),
+            flags,
+            epoch: None,
+            version: Some(version.to_string()),
+            release: None,
+        }
+    }
+
     fn so_file() -> crate::pkg::pkgfile::PkgFile {
         crate::pkg::pkgfile::PkgFile {
             name: "/usr/lib64/libtags-missingdep.so".to_string(),
@@ -4970,6 +4995,91 @@ mod rich_dep_emission_tests {
                 "requirer {requirer}: {results:?}"
             );
         }
+    }
+
+    #[test]
+    fn missing_dependency_on_lower_bound_at_ancestor_version_is_silent() {
+        // The readline shape: the package version extends the bound
+        // version with a further dot component (8.3 under 8.3.6), and
+        // the bound is a lower bound the same-build library satisfies.
+        // The i18n fixture carries version 1.0, so the bound is 1.
+        for flags in [RPMSENSE_GREATER | RPMSENSE_EQUAL, RPMSENSE_GREATER] {
+            let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+            pkg.name = "tags-missingdep-devel".to_string();
+            pkg.files.push(so_file());
+            pkg.requires = vec![flagged_dep("tags-missingdep-libs", flags, "1")];
+            let results = run(&pkg, &rich_test_config(&[], false));
+            assert!(
+                named(&results, "missing-dependency-on").is_empty(),
+                "flags {flags}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_dependency_on_exact_pin_at_ancestor_version_still_fires() {
+        // An exact pin to the ancestor version is a claim about the
+        // library's version, not a floor: it keeps firing.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![versioned_dep("tags-missingdep-libs", "1")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "missing-dependency-on");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+    }
+
+    #[test]
+    fn missing_dependency_on_upper_bound_at_ancestor_version_still_fires() {
+        // An upper bound at the ancestor version excludes the package's
+        // own version, so it keeps firing.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![flagged_dep(
+            "tags-missingdep-libs",
+            RPMSENSE_LESS | RPMSENSE_EQUAL,
+            "1",
+        )];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "missing-dependency-on");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+    }
+
+    #[test]
+    fn missing_dependency_on_lower_bound_off_ancestor_still_fires() {
+        // 1.1 under 1.15.1 is a string prefix, not a dot-boundary one,
+        // and a lower bound there excludes the package's own version.
+        let mut pkg = rich_fixture_pkg("distrelease-1.15.1-3.fc42.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![flagged_dep(
+            "tags-missingdep-libs",
+            RPMSENSE_GREATER | RPMSENSE_EQUAL,
+            "1.1",
+        )];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "missing-dependency-on");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+    }
+
+    #[test]
+    fn missing_dependency_on_lower_bound_epoch_mismatch_still_fires() {
+        // The epoch must match too: a bound on a different epoch line
+        // names a different EVR even at an ancestor version.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![DepInfo {
+            name: "tags-missingdep-libs".to_string(),
+            flags: RPMSENSE_GREATER | RPMSENSE_EQUAL,
+            epoch: Some(1),
+            version: Some("1".to_string()),
+            release: None,
+        }];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "missing-dependency-on");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
     }
 
     #[test]
