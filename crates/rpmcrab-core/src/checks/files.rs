@@ -13276,6 +13276,76 @@ print("hi")
     }
 
     #[test]
+    fn bidi_empty_archive_container_not_scanned() {
+        // An empty zip (end-of-central-directory record) is still a
+        // container: its bytes are not characters in a text file.
+        let mut content = b"PK\x05\x06".to_vec();
+        content.extend_from_slice("/* \u{2066} */".as_bytes());
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(
+            &dir,
+            vec![(
+                "/empty-archive.zip",
+                "ASCII text (Zip archive data, empty archive)",
+                content,
+            )],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        assert!(
+            bidi_findings(&out).is_empty(),
+            "empty zip archives out of scope"
+        );
+    }
+
+    #[test]
+    fn bidi_spanned_archive_container_not_scanned() {
+        // A spanned zip (split-archive marker) is likewise a container.
+        let mut content = b"PK\x07\x08".to_vec();
+        content.extend_from_slice("/* \u{202D} */".as_bytes());
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(
+            &dir,
+            vec![(
+                "/split-archive.zip",
+                "ASCII text (Zip archive data, spanned archive)",
+                content,
+            )],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        assert!(
+            bidi_findings(&out).is_empty(),
+            "spanned zip archives out of scope"
+        );
+    }
+
+    #[test]
+    fn bidi_big_endian_catalog_not_scanned() {
+        // A big-endian compiled catalog, mirroring the little-endian pin.
+        let mut content = vec![0x95, 0x04, 0x12, 0xde];
+        content.extend_from_slice("/* \u{202A} */".as_bytes());
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(
+            &dir,
+            vec![(
+                "/gnome-text-editor.mo",
+                "GNU message catalog (big endian), revision 1.1, 286 messages, Project-Id-Version: gnome-text-editor main",
+                content,
+            )],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        assert!(
+            bidi_findings(&out).is_empty(),
+            "big-endian compiled catalogs out of scope"
+        );
+    }
+
+    #[test]
     fn bidi_demo_test_page_not_scanned() {
         // Yudit's demonstration page carries deliberate bidi controls
         // (Arabic demo text); both shipped copies share the
