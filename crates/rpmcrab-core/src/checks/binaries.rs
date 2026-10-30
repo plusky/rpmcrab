@@ -22950,6 +22950,20 @@ description = "explicit priority string bypasses the system crypto policy"
             out.results()
         );
 
+        // A dlsym reference in the broad undefined set alone
+        // credits too: the dlsym half reads either set, not just
+        // the FUNC-only refs.
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        info.undefined_functions = vec!["dlsym".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "broad-set dlsym must credit: {:?}",
+            out.results()
+        );
+
         // A define-plus-NOTYPE-call shape cannot take the credit: the
         // setuid call lives only in the broad undefined set (NOTYPE),
         // not in the FUNC-only refs list, yet it still defeats the
