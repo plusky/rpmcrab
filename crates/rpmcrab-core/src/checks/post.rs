@@ -3771,11 +3771,7 @@ mod tests {
         // the flags and is itself skipped, so a two-operand shape
         // after `--` still credits; a lone `-` is an operand, so it
         // breaks the two-operand shape.
-        assert!(!PostCheck::is_rotation(
-            "mv /etc/foo.rpmsave",
-            "mv",
-            2
-        ));
+        assert!(!PostCheck::is_rotation("mv /etc/foo.rpmsave", "mv", 2));
         assert!(!PostCheck::is_rotation("mv", "mv", 2));
         assert!(PostCheck::is_rotation(
             "mv -- /etc/foo.rpmsave /etc/foo.rpmsave.old",
