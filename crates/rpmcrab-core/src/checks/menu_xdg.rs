@@ -2581,6 +2581,32 @@ mod tests {
     }
 
     #[test]
+    fn resolve_in_build_cycle_returns_none() {
+        // A->B->A never resolves to a regular file: the iteration
+        // cap returns None instead of hanging, so the candidate
+        // fires (check-level pin:
+        // sibling_symlink_loop_fires_on_complete_build).
+        let build = DesktopBuild {
+            symlinks: HashMap::from([
+                ("/usr/bin/a".to_string(), "/usr/bin/b".to_string()),
+                ("/usr/bin/b".to_string(), "/usr/bin/a".to_string()),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(MenuXDGCheck::resolve_in_build(&build, "/usr/bin/a"), None);
+        // Positive control: a chain ending at a regular file resolves.
+        let build = DesktopBuild {
+            regular: HashSet::from(["/usr/bin/real".to_string()]),
+            symlinks: HashMap::from([("/usr/bin/c".to_string(), "/usr/bin/real".to_string())]),
+            ..Default::default()
+        };
+        assert_eq!(
+            MenuXDGCheck::resolve_in_build(&build, "/usr/bin/c"),
+            Some("/usr/bin/real".to_string())
+        );
+    }
+
+    #[test]
     fn sibling_symlink_loop_fires_on_complete_build() {
         // A symlink chain that loops never resolves to a regular
         // file, so the candidate fires even on a complete build
