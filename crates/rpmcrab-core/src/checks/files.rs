@@ -1983,7 +1983,7 @@ fn find_shell_keyword(text: &str, word: &str) -> Option<usize> {
 /// and never inside quotes, so a `#` inside a word (a path) or a quoted
 /// string survives. Line endings are kept, so stripping never joins two
 /// commands onto one line.
-fn strip_comment_tails(text: &str) -> String {
+pub(crate) fn strip_comment_tails(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
         let (body, newline) = match line.strip_suffix('\n') {
@@ -3761,6 +3761,7 @@ fn fillup_template_without_call_reports(pkg: &Pkg) -> Vec<FillupTemplateReport> 
                 "/usr/lib/tmpfiles.d/",
                 "/etc/tmpfiles.d/",
                 "/run/tmpfiles.d/",
+                "/usr/local/lib/tmpfiles.d/",
             ]
             .iter()
             .any(|dir| f.name.starts_with(dir))
@@ -4270,6 +4271,8 @@ impl FilesCheck {
     /// The yudit demonstration page is likewise out of scope: its controls
     /// are deliberate demo content in the yudit package (see `is_bidi_demo_page`).
     fn check_bidi_controls(&self, pkg: &Pkg, out: &mut Filter) {
+        let sourcerpm = pkg.tag_str(librpm::Tag::SOURCERPM);
+        let source_name = sourcerpm.as_deref().map(source_pkg_name);
         for pkgfile in &pkg.files {
             if !is_reg(pkgfile.mode) {
                 continue;
@@ -4284,13 +4287,7 @@ impl FilesCheck {
             if is_binary_container(path) {
                 continue;
             }
-            if is_bidi_demo_page(
-                &pkg.name,
-                pkg.tag_str(librpm::Tag::SOURCERPM)
-                    .as_deref()
-                    .map(source_pkg_name),
-                &pkgfile.name,
-            ) {
+            if is_bidi_demo_page(&pkg.name, source_name, &pkgfile.name) {
                 continue;
             }
             if let Some(found) = first_bidi_control_in_file(path) {
@@ -4352,6 +4349,9 @@ impl FilesCheck {
     }
 
     fn check_bindir_exes(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
+        if st.bindir_exes.is_empty() {
+            return;
+        }
         // Ghost names once, not per executable per path: the
         // per-path linear scan over the file list is the hot
         // shape for packages with many bindir entries.
@@ -22368,6 +22368,32 @@ x /etc/sysconfig/f - - - -
             found[0].1.contains("/etc/sysconfig/demo"),
             "detail names the target: {}",
             found[0].1
+        );
+    }
+
+    #[test]
+    fn fillup_usrlocal_tmpfiles_snippet_exempts_target() {
+        // A snippet below /usr/local/lib/tmpfiles.d/ is a real
+        // tmpfiles.d(5) search dir, so its created target exempts
+        // the template like snippets in the other three dirs.
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\nExecStart=/usr/bin/demo\n";
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[
+                ("/usr/share/fillup-templates/sysconfig.demo", "DEMO_HOST=\n"),
+                ("/usr/lib/systemd/system/demo.service", unit),
+                (
+                    "/usr/local/lib/tmpfiles.d/demo.conf",
+                    "f /etc/sysconfig/demo 0644 root root -\n",
+                ),
+            ],
+            &[],
+            &|_| {},
+        );
+        assert!(
+            fillup_findings(&pkg).is_empty(),
+            "usr-local snippet must exempt: {:?}",
+            fillup_findings(&pkg)
         );
     }
 

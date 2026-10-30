@@ -32,6 +32,7 @@ use crate::level::Level;
 use crate::pkg::Pkg;
 use crate::pkg::pkgfile::{is_reg, is_symlink};
 
+use super::post::PostCheck;
 use super::shared::script_body_or_prog;
 use librpm::Tag;
 
@@ -89,6 +90,14 @@ impl SystemdInstallCheck {
         postun: &str,
         statically_enabled: bool,
     ) -> Vec<&'static str> {
+        // Heredoc bodies and comments name no invocation: match
+        // over blanked text, so a unit named only in a heredoc
+        // body or a comment earns no credit. Quoted text stays
+        // live (a quoted unit name still credits).
+        let pre = Self::blanked_scriptlet(pre);
+        let post = Self::blanked_scriptlet(post);
+        let preun = Self::blanked_scriptlet(preun);
+        let postun = Self::blanked_scriptlet(postun);
         let escaped = fancy_regex::escape(basename);
         // install-system-units itself runs `systemctl preset` on the
         // units it is given, so a %post line that presets or enables
@@ -124,7 +133,7 @@ impl SystemdInstallCheck {
                     r"systemd-update-helper mark-restart-system-units .*{}",
                     escaped
                 ),
-                postun,
+                postun.clone(),
                 "systemd-service-without-service_del_postun",
             ),
         ];
@@ -163,7 +172,7 @@ impl SystemdInstallCheck {
             // `postun_marks_bare_service`).
             if *finding == "systemd-service-without-service_del_postun"
                 && (postun.lines().any(|l| l.trim() == ":")
-                    || Self::postun_marks_bare_service(basename, postun))
+                    || Self::postun_marks_bare_service(basename, &postun))
             {
                 continue;
             }
@@ -197,6 +206,16 @@ impl SystemdInstallCheck {
             return false;
         }
         is_match(manual_re, Self::strip_comment(line))
+    }
+
+    /// A scriptlet with heredoc bodies blanked and comments
+    /// stripped, for unit matching: quoted text stays live.
+    fn blanked_scriptlet(script: &str) -> String {
+        PostCheck::without_heredoc_bodies(script)
+            .lines()
+            .map(|line| Self::strip_comment(line).to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The line up to a `#` comment start: `#` begins a comment only
@@ -611,6 +630,26 @@ mod tests {
             false,
         );
         assert!(missing.is_empty(), "{missing:?}");
+    }
+
+    #[test]
+    fn heredoc_body_unit_mention_earns_no_credit() {
+        let post = "cat <<'EOF'\nsystemd-update-helper install-system-units foo.service\nEOF\n";
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert!(
+            missing.contains(&"systemd-service-without-service_add_post"),
+            "a unit named only in a heredoc body must not credit: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn comment_unit_mention_earns_no_credit() {
+        let post = "# systemd-update-helper install-system-units foo.service\n";
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert!(
+            missing.contains(&"systemd-service-without-service_add_post"),
+            "a unit named only in a comment must not credit: {missing:?}"
+        );
     }
 
     #[test]

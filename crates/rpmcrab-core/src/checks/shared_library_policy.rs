@@ -737,8 +737,11 @@ impl Check for SharedLibraryPolicyCheck {
             }
             match Self::elf_dynamic(&file.path) {
                 Err(reason) => {
+                    // Record the failure and keep collecting later
+                    // files: one unreadable file must not skip the
+                    // rest of the package's libraries.
                     readelf_failed = Some((fname, reason));
-                    break;
+                    continue;
                 }
                 Ok((soname, needed)) => {
                     lib_files.push(file.path.as_str());
@@ -1246,8 +1249,8 @@ mod tests {
         // policy-named package whose only library-shaped file is an
         // unreadable ELF gets BOTH findings, as it did when the
         // decision came from file names alone -- the unreadable
-        // file counts as carrying no SONAME, and the walk still
-        // stops there.
+        // file counts as carrying no SONAME, and the walk continues
+        // past it (a single-file package, so the outcome is unchanged).
         let dir = std::env::temp_dir().join("rpmcrab-shlib-missinglib-unreadable");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
@@ -1284,12 +1287,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_lib_walk_stops_at_the_first_unreadable_elf() {
-        // The ELF pass breaks on the first file it cannot read: a
-        // SONAME credit earned earlier in the walk stands (the
+    fn missing_lib_walk_continues_past_unreadable_elf() {
+        // The ELF pass records a file it cannot read and continues:
+        // a SONAME credit earned earlier in the walk stands (the
         // missing-lib finding stays silent, readelf-failed still
-        // fires), while a carrier sitting behind the unreadable
-        // file goes unseen and the finding fires.
+        // fires), and a carrier sitting behind the unreadable
+        // file is now seen, so the finding stays silent too.
         let run = |order: &[bool]| {
             let dir = std::env::temp_dir().join(format!(
                 "rpmcrab-shlib-missinglib-mixedorder-{}",
@@ -1342,8 +1345,8 @@ mod tests {
         );
         let names = run(&[false, true]);
         assert!(
-            names.iter().any(|n| n == "shlib-policy-missing-lib"),
-            "a SONAME behind the unreadable file goes unseen: {names:?}"
+            !names.iter().any(|n| n == "shlib-policy-missing-lib"),
+            "a SONAME behind the unreadable file is now seen: {names:?}"
         );
         assert!(
             names.iter().any(|n| n == "readelf-failed"),
