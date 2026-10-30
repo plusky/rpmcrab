@@ -3905,6 +3905,31 @@ fn magic_is_text(magic: &str) -> bool {
         .any(|word| word.eq_ignore_ascii_case("text"))
 }
 
+/// Whether `path` starts with the signature of a binary container whose
+/// bytes are not text even when its description claims text: zip archives
+/// (local-file, empty, and spanned signatures) and compiled gettext
+/// catalogs (little- and big-endian magic). Control-looking triples in
+/// such bytes are compressed or binary data, not characters in a text
+/// file, so they are out of scope for the bidi scan.
+fn is_binary_container(path: &Path) -> bool {
+    let mut head = [0u8; 4];
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    if std::io::Read::read_exact(&mut file, &mut head).is_err() {
+        return false;
+    }
+    matches!(
+        head,
+        [b'P', b'K', 0x03, 0x04]
+            | [b'P', b'K', 0x05, 0x06]
+            | [b'P', b'K', 0x07, 0x08]
+            | [0xde, 0x12, 0x04, 0x95]
+            | [0x95, 0x04, 0x12, 0xde]
+    )
+}
+
 fn strip_quotes(re: &Regex, s: &str) -> String {
     re.replace_all(s, "").to_string()
 }
@@ -4118,7 +4143,12 @@ impl FilesCheck {
     /// triples). Windows overlap by 2 bytes so a control split across a
     /// window boundary is still seen whole. One finding per file, naming the
     /// first control found. Only libmagic-described text files are scanned,
-    /// per the issue's scope.
+    /// per the issue's scope. A description claiming text does not make
+    /// the bytes text: zip containers described as "OpenDocument Text" or
+    /// "ASCII text (Zip archive data, ...)" and compiled message catalogs
+    /// whose description echoes a package name containing "text" both carry
+    /// control-looking triples in compressed or binary data; such files are
+    /// skipped on their content signature (see `is_binary_container`).
     fn check_bidi_controls(&self, pkg: &Pkg, out: &mut Filter) {
         for pkgfile in &pkg.files {
             if !is_reg(pkgfile.mode) {
@@ -4129,6 +4159,9 @@ impl FilesCheck {
             }
             let path = Path::new(&pkgfile.path);
             if !path.is_file() {
+                continue;
+            }
+            if is_binary_container(path) {
                 continue;
             }
             if let Some(found) = first_bidi_control_in_file(path) {
@@ -12909,6 +12942,72 @@ print("hi")
         assert!(
             bidi_findings(&out).is_empty(),
             "binary texture payloads out of scope"
+        );
+    }
+
+    #[test]
+    fn bidi_zip_container_not_scanned() {
+        // A zip whose description claims text ("ASCII text (Zip archive
+        // data, ...)") still holds compressed bytes: control-looking
+        // triples in them are not characters in a text file.
+        let mut content = b"PK\x03\x04".to_vec();
+        content.extend_from_slice("/* \u{2066} */".as_bytes());
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(
+            &dir,
+            vec![(
+                "/top-domains.csv.zip",
+                "ASCII text (Zip archive data, at least v2.0 to extract, compression method=deflate)",
+                content,
+            )],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        assert!(
+            bidi_findings(&out).is_empty(),
+            "zip containers out of scope"
+        );
+    }
+
+    #[test]
+    fn bidi_opendocument_container_not_scanned() {
+        // Same container, described as "OpenDocument Text": the text claim
+        // names the document format, but the bytes are a zip.
+        let mut content = b"PK\x03\x04".to_vec();
+        content.extend_from_slice("/* \u{202D} */".as_bytes());
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(&dir, vec![("/template.odt", "OpenDocument Text", content)]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        assert!(
+            bidi_findings(&out).is_empty(),
+            "zip-based documents out of scope"
+        );
+    }
+
+    #[test]
+    fn bidi_compiled_catalog_not_scanned() {
+        // A compiled catalog whose description echoes a package name
+        // containing "text" passes the text gate, but the file is binary.
+        let mut content = vec![0xde, 0x12, 0x04, 0x95];
+        content.extend_from_slice("/* \u{202A} */".as_bytes());
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(
+            &dir,
+            vec![(
+                "/gnome-text-editor.mo",
+                "GNU message catalog (little endian), revision 1.1, 286 messages, Project-Id-Version: gnome-text-editor main",
+                content,
+            )],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        assert!(
+            bidi_findings(&out).is_empty(),
+            "compiled catalogs out of scope"
         );
     }
 
