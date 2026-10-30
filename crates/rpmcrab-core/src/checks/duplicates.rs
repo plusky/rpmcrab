@@ -36,6 +36,15 @@
 //! reported and contributes nothing to the waste total (ledgered as a
 //! `behaviour` divergence). Mixed groups — variants plus a real file, or
 //! bytecode of different modules or directories — report as before.
+//! A duplicate group whose members are all %config files is not
+//! reported either: every copy is meant to be edited independently
+//! after install (per-version copies, a live file beside its
+//! example or default template), so hardlinking any two would
+//! couple edits that must stay separate. The group contributes
+//! nothing to the waste total. Existing hardlinks between config
+//! files still fire `hardlink-across-config-files`: an
+//! already-hardlinked pair is a hazard regardless of whether the
+//! group itself is reported.
 //! A duplicate that forms a pair listed in the `DuplicatesWhitelistPairs`
 //! config key does not count toward the same `diff`: both directories of
 //! a whitelisted pair are exacted by different tooling, so neither copy
@@ -346,6 +355,17 @@ impl DuplicatesCheck {
                         ));
                     }
                 }
+            }
+
+            // Config-only groups are not actionable: every copy is a
+            // %config file, meant to be edited independently after
+            // install, so no copy can be hardlinked to another
+            // without coupling edits. The group contributes nothing
+            // to the waste total and is not reported. Hardlink
+            // findings above still fire: existing hardlinks between
+            // config files are a hazard of their own.
+            if indices.iter().all(|&i| is_config(&files[i].name)) {
+                continue;
             }
 
             // `diff` counts duplicates of `first` that are not hardlinks to it.
@@ -1047,6 +1067,72 @@ mod tests {
             DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist)
                 .is_empty(),
             "suppressed variants contribute no files-duplicated-waste"
+        );
+    }
+
+    #[test]
+    fn config_only_group_is_not_reported() {
+        // Every copy is a %config file, meant to be edited
+        // independently after install (per-version copies here), so
+        // no copy can be hardlinked to another without coupling
+        // edits: the group is not actionable and stays unreported,
+        // even at a size that would cross the waste threshold.
+        let files = [
+            pkgfile("/etc/mono/2.0/Browsers/Compat.browser", "aaa", 60_000, 1),
+            pkgfile("/etc/mono/4.0/Browsers/Compat.browser", "aaa", 60_000, 2),
+            pkgfile("/etc/mono/4.5/Browsers/Compat.browser", "aaa", 60_000, 3),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        let is_config = |n: &str| n.starts_with("/etc/");
+        assert!(
+            DuplicatesCheck::find_duplicates(&refs, 0, is_config, no_ghost, no_whitelist)
+                .is_empty(),
+            "config-only groups contribute no duplicate or waste finding"
+        );
+    }
+
+    #[test]
+    fn mixed_config_group_still_reports() {
+        // One config copy beside non-config copies under the same
+        // top-level tree is still a genuine duplicate: the group is
+        // not config-only, so the duplicate and the waste total fire.
+        let files = [
+            pkgfile("/usr/share/foo/a.conf", "aaa", 60_000, 1),
+            pkgfile("/usr/share/foo/b.conf", "aaa", 60_000, 2),
+            pkgfile("/usr/share/foo/c.dat", "aaa", 60_000, 3),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        let is_config = |n: &str| n.ends_with("a.conf");
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(&refs, 0, is_config, no_ghost, no_whitelist),
+            vec![
+                DuplicateFinding::FilesDuplicate(
+                    "/usr/share/foo/c.dat".into(),
+                    "/usr/share/foo/a.conf:/usr/share/foo/b.conf".into(),
+                ),
+                DuplicateFinding::FilesDuplicatedWaste(120_000),
+            ],
+        );
+    }
+
+    #[test]
+    fn config_only_group_with_hardlink_still_reports_hardlink() {
+        // The suppression covers only the duplicate and waste
+        // findings: an already-hardlinked pair of config files still
+        // fires hardlink-across-config-files.
+        let files = [
+            pkgfile("/etc/a.conf", "aaa", 60_000, 1),
+            pkgfile("/etc/b.conf", "aaa", 60_000, 1),
+            pkgfile("/etc/c.conf", "aaa", 60_000, 2),
+        ];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        let is_config = |n: &str| n.starts_with("/etc/");
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(&refs, 0, is_config, no_ghost, no_whitelist),
+            vec![DuplicateFinding::HardlinkAcrossConfigFiles(
+                "/etc/b.conf".into(),
+                "/etc/a.conf".into(),
+            )],
         );
     }
 

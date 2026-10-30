@@ -1218,6 +1218,20 @@ upstream = "https://github.com/plusky/rpmcrab/issues/594"
 
 [[divergence]]
 case = "global"
+check = "files-duplicate"
+kind = "behaviour"
+reason = "Fix-and-diverge: a duplicate group whose members are all %config files is not reported. Each copy is meant to be edited independently after install (per-version copies, a live file beside its example or default template), so hardlinking any two would couple edits that must stay separate; the duplication is not reclaimable space. Measured on the Factory corpus: 20,933 rows fall to 20,878 (-55/+0)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "files-duplicated-waste"
+kind = "behaviour"
+reason = "Fix-and-diverge: the waste total excludes duplicate groups whose members are all %config files (see the files-duplicate entry): the copies are meant to be edited independently after install, so the space is not reclaimable. Measured on the Factory corpus: 227 findings fall to 226 (-1/+0); the one silenced package is mono-web, whose entire waste total rests on such groups."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "beam-was-not-recompiled"
 kind = "behaviour"
 reason = "The reference expands the %_builddir macro at check time; rpmcrab has no macro expansion, so the expected build dir comes from the ErlangBuildDir config key (default /home/abuild/rpmbuild/BUILD, the OBS value). A local ~/rpmbuild/BUILD build reports beam-was-not-recompiled unless the key is set."
