@@ -9192,6 +9192,77 @@ mod tests {
         results.iter().map(|(n, _)| n.clone()).collect()
     }
 
+    #[test]
+    fn meta_package_patterns_fires() {
+        let names = named_pkg_findings(
+            "patterns-base-apparmor",
+            vec![PkgFile {
+                name: "/usr/share/doc/patterns-base-apparmor".to_string(),
+                path: "/usr/share/doc/patterns-base-apparmor".to_string(),
+                ..Default::default()
+            }],
+        );
+        assert_has(&names, "file-in-meta-package");
+    }
+
+    #[test]
+    fn meta_package_patterns_empty_silent() {
+        let names = named_pkg_findings("patterns-base-apparmor", vec![]);
+        assert_lacks(&names, "file-in-meta-package");
+    }
+
+    #[test]
+    fn meta_package_bundle_fires() {
+        let names = named_pkg_findings(
+            "bundle-lang-common",
+            vec![PkgFile {
+                name: "/usr/share/doc/bundle-lang-common".to_string(),
+                path: "/usr/share/doc/bundle-lang-common".to_string(),
+                ..Default::default()
+            }],
+        );
+        assert_has(&names, "file-in-meta-package");
+    }
+
+    #[test]
+    fn meta_package_task_fires() {
+        let names = named_pkg_findings(
+            "task-devel",
+            vec![PkgFile {
+                name: "/usr/share/doc/task-devel".to_string(),
+                path: "/usr/share/doc/task-devel".to_string(),
+                ..Default::default()
+            }],
+        );
+        assert_has(&names, "file-in-meta-package");
+    }
+
+    #[test]
+    fn meta_package_ordinary_silent() {
+        let names = named_pkg_findings(
+            "vim",
+            vec![PkgFile {
+                name: "/usr/bin/vim".to_string(),
+                path: "/usr/bin/vim".to_string(),
+                ..Default::default()
+            }],
+        );
+        assert_lacks(&names, "file-in-meta-package");
+    }
+
+    #[test]
+    fn meta_package_patterns_prefix_without_dash_silent() {
+        let names = named_pkg_findings(
+            "patternsbase",
+            vec![PkgFile {
+                name: "/usr/share/doc/patternsbase".to_string(),
+                path: "/usr/share/doc/patternsbase".to_string(),
+                ..Default::default()
+            }],
+        );
+        assert_lacks(&names, "file-in-meta-package");
+    }
+
     fn mode_file(name: &str, mode: u32) -> PkgFile {
         PkgFile {
             name: name.to_string(),

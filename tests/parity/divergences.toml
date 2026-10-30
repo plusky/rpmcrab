@@ -2526,6 +2526,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "file-in-meta-package"
+kind = "behaviour"
+reason = "Fix-and-diverge: patterns-* packages fire file-in-meta-package. The reference MetaPackageRegexp is '^(bundle|task)-' (configdefaults.toml, no override anywhere in the reference tree), so a patterns package shipping files stays silent there. patterns packages are meta packages in the same sense as bundle/task packages -- a package whose purpose is to pull in a set of other packages -- so shipping files in one is the same defect the finding reports. rpmcrab widens the pattern to '^(bundle|task|patterns)-'. Measured on the Factory corpus (51,586 binary RPMs): 0 findings before the widening, 160 after, every one on a patterns-* package and none on any other name shape. Pinned by the meta_package_* tests in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
