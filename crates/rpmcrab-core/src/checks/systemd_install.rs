@@ -14,11 +14,11 @@
 //! One `del_preun`-only credit diverges from the reference's literal
 //! substring predicate: a `%preun` helper line naming a `.service` unit
 //! by its bare stem (the helper passes its arguments verbatim to
-//! `systemctl disable`, which resolves a bare name to the `.service`).
+//! `systemctl disable --now`, which resolves a bare name to the `.service`).
 //! The stem must be a whole shell word of a genuine
 //! `systemd-update-helper remove-system-units` invocation, and a stem
-//! ending in a recognised unit-type suffix is not bare at all. The other
-//! three findings keep the literal predicate.
+//! carrying a dot is not bare at all. The add_pre and add_post arms
+//! keep the literal predicate; del_postun credits bare stems the same way.
 
 use std::path::Path;
 
@@ -135,8 +135,8 @@ impl SystemdInstallCheck {
             }
             let re = Regex::new(pattern).expect("unit pattern");
             let mut present = script.lines().any(|line| is_match(&re, line));
-            // The del_preun-only credit: the other three arms keep the
-            // literal-substring predicate above.
+            // The del_preun bare-stem credit: the add_pre and add_post
+            // arms keep the literal-substring predicate above.
             if !present && *finding == "systemd-service-without-service_del_preun" {
                 present = Self::bare_stem_removed(basename, script);
             }
@@ -189,118 +189,205 @@ impl SystemdInstallCheck {
         is_match(manual_re, line)
     }
 
-    /// Unit-type suffixes systemd recognises (systemd.unit(5)). A name
-    /// ending in one of these is used as-is by systemctl; any other
-    /// dotted name gains the default `.service` suffix.
-    const UNIT_TYPES: [&str; 11] = [
-        "service",
-        "socket",
-        "target",
-        "device",
-        "mount",
-        "automount",
-        "swap",
-        "path",
-        "timer",
-        "slice",
-        "scope",
-    ];
-
     /// Whether `stem` is a bare name systemctl resolves with the default
-    /// `.service` suffix. A stem with no dot, or with an unrecognised
-    /// suffix, gains `.service` (`foo` and `foo.bar` name `foo.service`
-    /// and `foo.bar.service`); a stem ending in a recognised unit type
-    /// names that unit instead (`foo.timer` is the timer, never
-    /// `foo.timer.service`), so it is not a bare stem for a `.service`
-    /// unit of the same name.
+    /// `.service` suffix. Only a suffix-less stem gains `.service`:
+    /// systemctl appends the suffix only when the name has no dot, so
+    /// any dotted stem names a unit of its own suffix (or is invalid),
+    /// never the `.service` unit of that name (`foo.timer` is the timer,
+    /// and `foo.bar` names no `.service` unit). No unit-type suffix
+    /// list is consulted.
     fn stem_is_bare(stem: &str) -> bool {
-        match stem.rsplit_once('.') {
-            Some((_, suffix)) => !Self::UNIT_TYPES.contains(&suffix),
-            None => true,
-        }
+        !stem.contains('.')
     }
 
-    /// Split a scriptlet line into shell words, each flagged as starting
-    /// a command (line start or just after an operator). Whitespace and
-    /// the operators `; & | < > ( )` separate words, single- and
+    /// Split a scriptlet line into shell words. Each word is flagged as
+    /// starting a command (line start or just after a command separator)
+    /// and as a redirection target (the word after a redirection
+    /// operator, which names no argument). ASCII whitespace only splits
+    /// words; the operators `; & | ( )` separate words, single- and
     /// double-quoted spans are one word with quotes stripped, and `#`
     /// at the start of a word drops the rest of the line as a comment.
-    /// An unterminated quote drops the partial word: the line would not
-    /// execute as written, so it credits nothing.
-    fn shell_words(line: &str) -> Vec<(String, bool)> {
-        let mut words: Vec<(String, bool)> = Vec::new();
+    /// An unterminated quote drops the whole line: the line would not
+    /// execute as written, so it credits nothing. A redirection operator
+    /// with a digit prefix (`2>`) drops the digit word with it, and the
+    /// operator's target is flagged rather than starting a command, so
+    /// arguments after a redirection still count.
+    /// Backslash is an ordinary word character: escapes are not
+    /// interpreted, and a backslash-newline continuation is never joined,
+    /// since tokenization is per-line and cannot see the next line.
+    fn shell_words(line: &str) -> Vec<(String, bool, bool)> {
+        fn push_word(
+            words: &mut Vec<(String, bool, bool)>,
+            cur: &mut String,
+            word_command: bool,
+            word_target: bool,
+            at_command: &mut bool,
+        ) {
+            let word = std::mem::take(cur);
+            *at_command = false;
+            words.push((word, word_command, word_target));
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut words: Vec<(String, bool, bool)> = Vec::new();
         let mut cur = String::new();
         let mut in_word = false;
         let mut at_command = true;
         let mut word_command = false;
+        let mut word_target = false;
         let mut quote: Option<char> = None;
-        for c in line.chars() {
+        let mut redir_op = false;
+        let mut redir_target_next = false;
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
             if let Some(q) = quote {
                 if c == q {
                     quote = None;
                 } else {
                     cur.push(c);
                 }
+                i += 1;
                 continue;
+            }
+            if redir_op {
+                match c {
+                    '<' | '>' | '&' => {
+                        i += 1;
+                        continue;
+                    }
+                    c if c.is_ascii_whitespace() => {
+                        redir_op = false;
+                        redir_target_next = true;
+                        i += 1;
+                        continue;
+                    }
+                    _ => {
+                        redir_op = false;
+                        redir_target_next = true;
+                        continue;
+                    }
+                }
             }
             match c {
                 '\'' | '"' => {
                     if !in_word {
-                        word_command = at_command;
+                        word_command = at_command && !redir_target_next;
+                        word_target = redir_target_next;
+                        redir_target_next = false;
                         in_word = true;
                         at_command = false;
                     }
                     quote = Some(c);
+                    i += 1;
                 }
                 '#' if !in_word => break,
-                c if c.is_whitespace() => {
+                c if c.is_ascii_whitespace() => {
                     if in_word {
-                        words.push((std::mem::take(&mut cur), word_command));
+                        push_word(
+                            &mut words,
+                            &mut cur,
+                            word_command,
+                            word_target,
+                            &mut at_command,
+                        );
                         in_word = false;
                     }
+                    i += 1;
                 }
-                ';' | '&' | '|' | '<' | '>' | '(' | ')' => {
+                ';' | '&' | '|' | '(' | ')' => {
                     if in_word {
-                        words.push((std::mem::take(&mut cur), word_command));
+                        push_word(
+                            &mut words,
+                            &mut cur,
+                            word_command,
+                            word_target,
+                            &mut at_command,
+                        );
                         in_word = false;
                     }
+                    redir_target_next = false;
                     at_command = true;
+                    i += 1;
+                }
+                '<' | '>' => {
+                    if in_word {
+                        if cur.chars().all(|d| d.is_ascii_digit()) {
+                            // File-descriptor prefix: dropped with the
+                            // operator, never an argument.
+                            cur.clear();
+                            in_word = false;
+                        } else {
+                            push_word(
+                                &mut words,
+                                &mut cur,
+                                word_command,
+                                word_target,
+                                &mut at_command,
+                            );
+                            in_word = false;
+                        }
+                    }
+                    redir_target_next = false;
+                    redir_op = true;
+                    i += 1;
                 }
                 _ => {
                     if !in_word {
-                        word_command = at_command;
+                        word_command = at_command && !redir_target_next;
+                        word_target = redir_target_next;
+                        redir_target_next = false;
                         in_word = true;
                         at_command = false;
                     }
                     cur.push(c);
+                    i += 1;
                 }
             }
         }
-        if quote.is_none() && in_word {
-            words.push((cur, word_command));
+        if quote.is_some() {
+            return Vec::new();
+        }
+        if in_word {
+            push_word(
+                &mut words,
+                &mut cur,
+                word_command,
+                word_target,
+                &mut at_command,
+            );
         }
         words
     }
 
-    /// The arguments of every genuine `systemd-update-helper <verb>`
-    /// invocation on this line. The helper word must start a command and
-    /// be followed by the verb as its own word, so a bare verb substring
-    /// (another command, a comment, a longer word) never counts, and
-    /// each invocation's arguments end at the next command. A helper
-    /// word spelled with a directory prefix counts (`/usr/lib/systemd/
-    /// systemd-update-helper` is the same helper).
-    fn helper_arg_words(line: &str, verb: &str) -> Vec<String> {
+    /// Whether a genuine `systemd-update-helper <verb>` invocation on this
+    /// line names `stem` as an argument. The helper word must start a
+    /// command and be followed by the verb as its own word in the same
+    /// command, so a bare verb substring (another command, a comment, a
+    /// longer word, a verb after an operator) never counts, and every
+    /// invocation on the line is examined. Arguments end at the next
+    /// command; redirection targets are skipped, not counted. A helper
+    /// word spelled with an absolute directory prefix counts
+    /// (`/usr/lib/systemd/systemd-update-helper` is the same helper); a
+    /// relative-path spelling does not. Arguments are checked while
+    /// scanning, without collecting them.
+    fn helper_names_stem(line: &str, verb: &str, stem: &str) -> bool {
         let words = Self::shell_words(line);
-        let mut args = Vec::new();
         let mut i = 0;
         while i < words.len() {
-            let (word, command) = &words[i];
-            let is_helper =
-                word == "systemd-update-helper" || word.ends_with("/systemd-update-helper");
-            if *command && is_helper && i + 1 < words.len() && words[i + 1].0 == verb {
+            let (word, command, _) = &words[i];
+            let is_helper = word == "systemd-update-helper"
+                || (word.starts_with('/') && word.ends_with("/systemd-update-helper"));
+            if *command
+                && is_helper
+                && i + 1 < words.len()
+                && words[i + 1].0 == verb
+                && !words[i + 1].1
+            {
                 let mut j = i + 2;
                 while j < words.len() && !words[j].1 {
-                    args.push(words[j].0.clone());
+                    if !words[j].2 && words[j].0 == stem {
+                        return true;
+                    }
                     j += 1;
                 }
                 i = j;
@@ -308,14 +395,14 @@ impl SystemdInstallCheck {
                 i += 1;
             }
         }
-        args
+        false
     }
 
     /// Whether a `mark-restart-system-units` line in `%postun` names a
     /// `.service` unit by its bare stem: a genuine helper invocation
-    /// naming the stem as its own shell word, with no recognised
-    /// unit-type suffix on the stem. Other unit types get no such credit,
-    /// since a bare name never resolves to them.
+    /// naming the stem as its own shell word, with no dot in the stem.
+    /// Other unit types get no such credit, since a bare name never
+    /// resolves to them.
     fn postun_marks_bare_service(basename: &str, postun: &str) -> bool {
         let Some(stem) = basename.strip_suffix(".service") else {
             return false;
@@ -323,19 +410,17 @@ impl SystemdInstallCheck {
         if !Self::stem_is_bare(stem) {
             return false;
         }
-        postun.lines().any(|line| {
-            Self::helper_arg_words(line, "mark-restart-system-units")
-                .iter()
-                .any(|arg| arg == stem)
-        })
+        postun
+            .lines()
+            .any(|line| Self::helper_names_stem(line, "mark-restart-system-units", stem))
     }
 
     /// Whether a `%preun` helper line removes `basename` by its bare
     /// stem: a genuine `systemd-update-helper remove-system-units`
-    /// invocation naming the stem as its own shell word, with no
-    /// recognised unit-type suffix on the stem. Only `.service` units: a
-    /// bare stem for a socket, target or path resolves to the `.service`
-    /// of that name, a different unit, so those firings stay real.
+    /// invocation naming the stem as its own shell word, with no dot in
+    /// the stem. Only `.service` units: a bare stem for a socket, target
+    /// or path resolves to the `.service` of that name, a different unit,
+    /// so those firings stay real.
     fn bare_stem_removed(basename: &str, preun: &str) -> bool {
         let Some(stem) = basename.strip_suffix(".service") else {
             return false;
@@ -343,11 +428,9 @@ impl SystemdInstallCheck {
         if !Self::stem_is_bare(stem) {
             return false;
         }
-        preun.lines().any(|line| {
-            Self::helper_arg_words(line, "remove-system-units")
-                .iter()
-                .any(|arg| arg == stem)
-        })
+        preun
+            .lines()
+            .any(|line| Self::helper_names_stem(line, "remove-system-units", stem))
     }
 }
 
@@ -631,7 +714,8 @@ mod tests {
             false,
         );
         assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
-        // An unrecognised dotted suffix gains .service, so foo.bar credits; only recognised unit-type suffixes withhold credit.
+        // Any dotted stem names no .service unit, so foo.bar does not
+        // credit even though its suffix is not a unit type.
         let missing = SystemdInstallCheck::check_unit(
             "foo.bar.service",
             true,
@@ -641,7 +725,7 @@ mod tests {
             "systemd-update-helper mark-restart-system-units foo.bar",
             false,
         );
-        assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
+        assert!(missing.contains(&"systemd-service-without-service_del_postun"));
     }
 
     #[test]
@@ -1428,8 +1512,8 @@ mod tests {
             false,
         );
         assert!(missing.contains(&"systemd-service-without-service_del_preun"));
-        // An unrecognised suffix gains .service: foo.bar names
-        // foo.bar.service.
+        // Any dotted stem names no .service unit: foo.bar does not
+        // name foo.bar.service.
         let missing = SystemdInstallCheck::check_unit(
             "foo.bar.service",
             true,
@@ -1439,10 +1523,7 @@ mod tests {
             "",
             false,
         );
-        assert!(
-            !missing.contains(&"systemd-service-without-service_del_preun"),
-            "{missing:?}"
-        );
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
     }
 
     #[test]
@@ -1457,6 +1538,58 @@ mod tests {
             false,
         );
         assert!(missing.contains(&"systemd-service-without-service_del_postun"));
+    }
+
+    #[test]
+    fn tokenizer_edges() {
+        // An unterminated quote drops the whole line, including words
+        // completed before the quote: the line would not execute.
+        let missing = missing_with("systemd-update-helper remove-system-units foo \"bar");
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+        // A verb after an operator is a new command, not this helper's
+        // verb.
+        let missing = missing_with("systemd-update-helper ; remove-system-units foo");
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+        let missing = missing_with("systemd-update-helper || remove-system-units foo");
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+        // Redirections neither start a command nor end the argument
+        // list: arguments after the target still count, and the target
+        // itself never counts as a stem.
+        let missing = missing_with("systemd-update-helper remove-system-units foo > /dev/null");
+        assert!(
+            !missing.contains(&"systemd-service-without-service_del_preun"),
+            "{missing:?}"
+        );
+        let missing = missing_with("systemd-update-helper remove-system-units > /dev/null foo");
+        assert!(
+            !missing.contains(&"systemd-service-without-service_del_preun"),
+            "{missing:?}"
+        );
+        let missing = missing_with("systemd-update-helper remove-system-units foo>/dev/null");
+        assert!(
+            !missing.contains(&"systemd-service-without-service_del_preun"),
+            "{missing:?}"
+        );
+        let missing = missing_with("systemd-update-helper remove-system-units foo 2>/dev/null");
+        assert!(
+            !missing.contains(&"systemd-service-without-service_del_preun"),
+            "{missing:?}"
+        );
+        let missing = missing_with("systemd-update-helper remove-system-units > foo");
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+        // Non-ASCII whitespace does not split words.
+        let missing = missing_with("systemd-update-helper remove-system-units\u{a0}foo");
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+    }
+
+    #[test]
+    fn relative_path_helper_does_not_credit() {
+        // Only a bare helper name or an absolute directory-prefixed
+        // spelling counts; a relative-path spelling may be an impostor.
+        let missing = missing_with("foo/systemd-update-helper remove-system-units foo");
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
+        let missing = missing_with("./systemd-update-helper remove-system-units foo");
+        assert!(missing.contains(&"systemd-service-without-service_del_preun"));
     }
 
     #[test]
