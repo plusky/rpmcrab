@@ -3312,14 +3312,19 @@ fn copy_reloc_type(e_machine: u16) -> Option<u32> {
 /// in DT_NEEDED order: the dependency is unused iff no
 /// still-unsatisfied undefined symbol of the consumer, weak or
 /// strong, names a symbol the provider defines, and no
-/// still-unsatisfied symbol the consumer copies out of a provider
-/// is defined by this one. "Still-unsatisfied" means neither
-/// defined by the consumer itself (the loader binds such references
-/// to the consumer's own definition first) nor already satisfied by
-/// an earlier direct dependency in DT_NEEDED order (the loader
-/// binds each reference to the first defining provider in scope
-/// order, so a later duplicate defining the same symbol earns no
-/// credit from it). On a used verdict the symbols this provider
+/// not-yet-satisfied symbol the consumer copies out of a provider
+/// is defined by this one. For undefined references,
+/// "still-unsatisfied" means neither defined by the consumer
+/// itself (the loader binds such references to the consumer's own
+/// definition first) nor already satisfied by an earlier direct
+/// dependency in DT_NEEDED order (the loader binds each reference
+/// to the first defining provider in scope order, so a later
+/// duplicate defining the same symbol earns no credit from it).
+/// Copied symbols are exempt from the self-definition half: the
+/// consumer defines a copied name by construction (its own BSS
+/// holds the copy), so that definition is the use itself, not a
+/// reason to skip; only the satisfied ordering applies to them.
+/// On a used verdict the symbols this provider
 /// satisfies are added to `satisfied`, so later dependencies are
 /// judged against the residue. The provider must already be
 /// located; a dependency whose provider cannot be located never
@@ -3340,10 +3345,26 @@ fn dep_is_unused<'a>(
     for sym in undefined_symbols
         .iter()
         .chain(weak_undefined_symbols.iter())
-        .chain(copy_symbols.iter())
     {
         let base = symbol_base(sym);
         if consumer_defined.contains(base) || satisfied.contains(base) {
+            continue;
+        }
+        if defined.contains(base) {
+            satisfied.insert(base);
+            used = true;
+        }
+    }
+    // COPY names are exempt from the self-definition skip: a copied
+    // name is defined by the consumer by construction (the loader
+    // copies the object into the consumer's own BSS), so skipping on
+    // consumer_defined would make the provider check unreachable and
+    // COPY-only dependencies could never be credited. Only the
+    // satisfied ordering still applies: the first provider in
+    // DT_NEEDED order defining the copied name earns the credit.
+    for sym in copy_symbols.iter() {
+        let base = symbol_base(sym);
+        if satisfied.contains(base) {
             continue;
         }
         if defined.contains(base) {
@@ -13378,6 +13399,28 @@ description = "explicit priority string bypasses the system crypto policy"
             &no_self,
             &mut satisfied
         ));
+        // COPY credit with the realistic production shape: the
+        // consumer defines the copied name itself, yet the first
+        // provider still earns the credit and the duplicate does
+        // not (satisfied ordering preserved).
+        let self_with_copy: HashSet<&str> = ["copied_sym"].into_iter().collect();
+        let mut satisfied: HashSet<&str> = HashSet::new();
+        assert!(!dep_is_unused(
+            &empty,
+            &empty,
+            &copied,
+            &first_copy,
+            &self_with_copy,
+            &mut satisfied
+        ));
+        assert!(dep_is_unused(
+            &empty,
+            &empty,
+            &copied,
+            &second_copy,
+            &self_with_copy,
+            &mut satisfied
+        ));
     }
 
     #[test]
@@ -13416,6 +13459,20 @@ description = "explicit priority string bypasses the system crypto policy"
             &["bar_sym".to_string()],
             &defined,
             &HashSet::new(),
+            &mut HashSet::new()
+        ));
+        // COPY-only with the realistic production shape: the
+        // consumer defines the copied name itself (its own BSS
+        // holds the copy). The COPY credit must survive a
+        // non-empty self set; skipping on it would make the
+        // provider check unreachable and the dep always fire.
+        let self_with_copy: HashSet<&str> = ["bar_sym"].into_iter().collect();
+        assert!(!dep_is_unused(
+            &[],
+            &[],
+            &["bar_sym".to_string()],
+            &defined,
+            &self_with_copy,
             &mut HashSet::new()
         ));
         // A versioned spelling on either side still matches.
@@ -13539,6 +13596,93 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             unused[0].contains(" W: "),
             "executable unused dep is Warning: {}",
+            unused[0]
+        );
+    }
+
+    #[test]
+    fn after_checks_copy_only_dependency_is_silent() {
+        // #1317 scenario in its realistic production shape: the
+        // consumer's only use of libbar is a COPY relocation, and
+        // the consumer itself defines the copied name (its own BSS
+        // holds the copy). The COPY credit must silence libbar;
+        // only the genuinely unused libfoo fires. Before the fix
+        // this fired libbar too: the self-definition skip made the
+        // provider check unreachable for COPY names.
+        let config = test_config();
+        let mut check = BinariesCheck::new(&config);
+        let pkg_id = (
+            "testpkg".to_string(),
+            "x86_64".to_string(),
+            "testpkg-1.0-1.x86_64.rpm".to_string(),
+        );
+        let mut providers = HashMap::new();
+        providers.insert(
+            "libfoo.so.1".to_string(),
+            SymbolProvider {
+                path: PathBuf::from("/usr/lib64/libfoo.so.1"),
+                defined: ["other_sym".to_string()].into_iter().collect(),
+                needs: Vec::new(),
+                origin: PathBuf::from("/usr/lib64"),
+                rpath: Vec::new(),
+                runpath: Vec::new(),
+                has_runpath: false,
+            },
+        );
+        providers.insert(
+            "libbar.so.1".to_string(),
+            SymbolProvider {
+                path: PathBuf::from("/usr/lib64/libbar.so.1"),
+                defined: ["bar_sym".to_string()].into_iter().collect(),
+                needs: Vec::new(),
+                origin: PathBuf::from("/usr/lib64"),
+                rpath: Vec::new(),
+                runpath: Vec::new(),
+                has_runpath: false,
+            },
+        );
+        let state = BinariesState {
+            provider_sets: vec![PackageProviders {
+                pkg_name: pkg_id.0.clone(),
+                pkg_arch: pkg_id.1.clone(),
+                pkg_filename: pkg_id.2.clone(),
+                providers,
+            }],
+            packages: Vec::new(),
+            unused_packages: vec![PackageConsumers {
+                pkg_name: pkg_id.0.clone(),
+                pkg_arch: pkg_id.1.clone(),
+                pkg_filename: pkg_id.2.clone(),
+                files: vec![ConsumerFile {
+                    file_name: "/usr/bin/tool".to_string(),
+                    undefined_symbols: Vec::new(),
+                    weak_undefined_symbols: Vec::new(),
+                    defined_symbols: ["bar_sym".to_string()].into_iter().collect(),
+                    dependencies: vec!["libfoo.so.1".to_string(), "libbar.so.1".to_string()],
+                    is_64: Some(true),
+                    rpath: Vec::new(),
+                    runpath: Vec::new(),
+                    has_runpath: false,
+                    is_shlib: false,
+                    copy_symbols: vec!["bar_sym".to_string()],
+                }],
+            }],
+            linked_packages: Vec::new(),
+            contributors: vec![pkg_id],
+        };
+        check.import_state(Box::new(state));
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        let unused = lines_for(&results, "unused-direct-shlib-dependency");
+        assert_eq!(
+            unused.len(),
+            1,
+            "only the genuinely unused dep fires; the COPY-only dep is silent: {results:?}"
+        );
+        assert!(
+            unused[0].contains("libfoo.so.1"),
+            "firing dep is libfoo: {}",
             unused[0]
         );
     }
