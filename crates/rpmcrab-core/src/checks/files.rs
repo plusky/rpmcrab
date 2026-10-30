@@ -3759,7 +3759,15 @@ fn fillup_template_without_call_reports(pkg: &Pkg) -> Vec<FillupTemplateReport> 
                     .map(|target| (f.name.as_str(), target)),
             );
         }
-        if f.name.contains("/tmpfiles.d/") && f.name.ends_with(".conf") {
+        if f.name.ends_with(".conf")
+            && [
+                "/usr/lib/tmpfiles.d/",
+                "/etc/tmpfiles.d/",
+                "/run/tmpfiles.d/",
+            ]
+            .iter()
+            .any(|dir| f.name.starts_with(dir))
+        {
             let content = pkg.read_file(&f.name);
             created.extend(
                 tmpfiles_created_paths(&content)
