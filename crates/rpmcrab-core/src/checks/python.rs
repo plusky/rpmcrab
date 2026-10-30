@@ -1264,7 +1264,13 @@ impl Check for PythonCheck {
                 }
             }
 
+            // A .pyc under /usr/share/doc is documentation payload, not
+            // importable code: no interpreter loads a doc-tree __pycache__,
+            // so a version mismatch there is a docs-build cache compiled
+            // under the build host interpreter, not a mixed-interpreter
+            // shipment. Such files neither set nor break the expectation.
             if filename.ends_with(".pyc")
+                && !filename.starts_with("/usr/share/doc/")
                 && let Some(caps) = pyc_re.captures(filename).ok().flatten()
             {
                 let version = caps.get(1).map(|m| m.as_str().to_string());
@@ -3605,6 +3611,69 @@ mod tests {
     fn err_path_tests_matches() {
         let (re, _) = &PythonCheck::err_paths()[0];
         assert!(is_match(re, "/usr/lib64/python3.12/site-packages/tests"));
+    }
+
+    fn pyc_multiple_version_lines(names: &[&str]) -> Vec<String> {
+        use crate::color::Color;
+        use crate::pkg::pkgfile::PkgFile;
+        let config = Config::default();
+        let mut check = PythonCheck::new(&config);
+        let mut pkg = fixture_pkg_with_requires(&[]);
+        pkg.files = names
+            .iter()
+            .map(|n| PkgFile {
+                name: n.to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .filter(|(name, _)| name == "python-pyc-multiple-versions")
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
+
+    #[test]
+    fn pyc_multiple_versions_doc_tree_pyc_ignored() {
+        // The python314-mypy shape: a docs-build cache compiled under
+        // the build host interpreter sits in the docs tree ahead of the
+        // package's own site-packages bytecode. The doc file must
+        // neither fire nor set the expectation the site files are
+        // judged against.
+        let got = pyc_multiple_version_lines(&[
+            "/usr/share/doc/packages/python314-mypy/docs/source/__pycache__/html_builder.cpython-313.pyc",
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/__init__.cpython-314.pyc",
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/api.cpython-314.pyc",
+        ]);
+        assert!(got.is_empty(), "unexpected findings: {got:?}");
+    }
+
+    #[test]
+    fn pyc_multiple_versions_site_packages_mismatch_still_fires() {
+        let got = pyc_multiple_version_lines(&[
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/__init__.cpython-314.pyc",
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/api.cpython-313.pyc",
+        ]);
+        assert_eq!(
+            got,
+            vec![
+                "python-test.noarch: W: python-pyc-multiple-versions expected: 314 /usr/lib/python3.14/site-packages/mypy/__pycache__/api.cpython-313.pyc"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn pyc_multiple_versions_doc_prefix_is_exact() {
+        // Only the doc directory itself is exempt: a sibling directory
+        // merely starting with `doc` keeps firing.
+        let got = pyc_multiple_version_lines(&[
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/__init__.cpython-314.pyc",
+            "/usr/share/docfoo/pkg/__pycache__/x.cpython-313.pyc",
+        ]);
+        assert_eq!(got.len(), 1, "unexpected findings: {got:?}");
     }
 
     fn fixture_pkg_with_requires(req_names: &[&str]) -> Pkg {
