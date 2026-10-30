@@ -281,6 +281,198 @@ impl PostCheck {
         operands > 0
     }
 
+    /// Whether a token names a backup file: a `.rpmsave` or `.rpmtmp`
+    /// name, the names rpm itself writes when it preserves a modified
+    /// config file across an upgrade.
+    fn is_backup_name(token: &str) -> bool {
+        token.ends_with(".rpmsave") || token.ends_with(".rpmtmp")
+    }
+
+    /// The logical command line starting at byte `at` in `text`: the
+    /// rest of the physical line, with backslash-newline continuations
+    /// (outside single quotes) joined. Stops at an unquoted newline.
+    fn logical_line_after(text: &str, at: usize) -> String {
+        let mut out = String::new();
+        let mut chars = text[at..].chars().peekable();
+        let mut quote: Option<char> = None;
+        while let Some(c) = chars.next() {
+            match quote {
+                Some(q) => {
+                    if c == '\\' && q == '"' {
+                        match chars.peek() {
+                            Some('\n') => {
+                                chars.next();
+                            }
+                            Some(n) => {
+                                out.push(*n);
+                                chars.next();
+                            }
+                            None => {}
+                        }
+                    } else if c == q {
+                        quote = None;
+                        out.push(c);
+                    } else {
+                        out.push(c);
+                    }
+                }
+                None => {
+                    if c == '\'' || c == '"' {
+                        quote = Some(c);
+                        out.push(c);
+                    } else if c == '\\' {
+                        match chars.peek() {
+                            Some('\n') => {
+                                chars.next();
+                            }
+                            Some(n) => {
+                                out.push(c);
+                                out.push(*n);
+                                chars.next();
+                            }
+                            None => out.push(c),
+                        }
+                    } else if c == '\n' {
+                        break;
+                    } else {
+                        out.push(c);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Split a logical command line into operand tokens, honouring
+    /// single/double quotes and backslash escapes. Stops at an
+    /// unquoted command separator, redirection, or comment start; a
+    /// trailing all-digit token before a redirection is the
+    /// redirection's file descriptor, not an operand, and is dropped.
+    fn split_operands(line: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut cur = String::new();
+        let mut in_token = false;
+        let mut chars = line.chars().peekable();
+        let mut quote: Option<char> = None;
+        while let Some(c) = chars.next() {
+            match quote {
+                Some(q) => {
+                    if c == '\\' && q == '"' {
+                        match chars.peek() {
+                            Some('\n') => {
+                                chars.next();
+                            }
+                            Some(n) => {
+                                cur.push(*n);
+                                chars.next();
+                            }
+                            None => {}
+                        }
+                    } else if c == q {
+                        quote = None;
+                    } else {
+                        cur.push(c);
+                    }
+                }
+                None => match c {
+                    '\'' | '"' => {
+                        quote = Some(c);
+                        in_token = true;
+                    }
+                    '\\' => {
+                        if let Some(n) = chars.next() {
+                            cur.push(n);
+                            in_token = true;
+                        }
+                    }
+                    ' ' | '\t' => {
+                        if in_token {
+                            tokens.push(std::mem::take(&mut cur));
+                            in_token = false;
+                        }
+                    }
+                    '#' if !in_token => break,
+                    ';' | '|' | '&' | '(' | ')' => break,
+                    '<' | '>' => {
+                        if in_token {
+                            let tok = std::mem::take(&mut cur);
+                            if !tok.chars().all(|c| c.is_ascii_digit()) {
+                                tokens.push(tok);
+                            }
+                            in_token = false;
+                        }
+                        if tokens
+                            .last()
+                            .is_some_and(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()))
+                        {
+                            tokens.pop();
+                        }
+                        break;
+                    }
+                    _ => {
+                        cur.push(c);
+                        in_token = true;
+                    }
+                },
+            }
+        }
+        if in_token {
+            tokens.push(cur);
+        }
+        tokens
+    }
+
+    /// Whether a dangerous-command match at a command position is a
+    /// backup-direction operation: `cp`/`mv` writing to a `.rpmsave`
+    /// or `.rpmtmp` destination, or `rm` removing such a name. A
+    /// restore (a backup name as the source, live path as the
+    /// destination) is not a backup operation and keeps firing, and
+    /// neither is a rotation (a backup name moved to a `.old` name,
+    /// whose destination carries no backup suffix).
+    fn dangerous_match_is_backup(scan_text: &str, operand_at: usize, verb: &str) -> bool {
+        if !matches!(verb, "cp" | "mv" | "rm") {
+            return false;
+        }
+        let line = Self::logical_line_after(scan_text, operand_at);
+        let tokens = Self::split_operands(&line);
+        // Walk flags: `--` ends them; `-t` / `--target-directory`
+        // take the destination as their argument.
+        let mut positionals: Vec<&str> = Vec::new();
+        let mut target_dir: Option<&str> = None;
+        let mut i = 0;
+        let mut no_more_flags = false;
+        while i < tokens.len() {
+            let tok = tokens[i].as_str();
+            if !no_more_flags && tok == "--" {
+                no_more_flags = true;
+            } else if !no_more_flags && tok.starts_with('-') && tok.len() > 1 {
+                if tok == "-t" {
+                    target_dir = tokens.get(i + 1).map(|s| s.as_str());
+                    i += 1;
+                } else if let Some(dir) = tok.strip_prefix("--target-directory=") {
+                    target_dir = Some(dir);
+                } else if tok == "--target-directory" {
+                    target_dir = tokens.get(i + 1).map(|s| s.as_str());
+                    i += 1;
+                }
+                // Any other dash token is a flag (or a bundle) and
+                // carries no operand of its own here.
+            } else {
+                positionals.push(tok);
+            }
+            i += 1;
+        }
+        match verb {
+            // `rm` is credited only when every operand is a backup
+            // name: a mixed removal still deletes live files.
+            "rm" => !positionals.is_empty() && positionals.iter().all(|t| Self::is_backup_name(t)),
+            _ => {
+                let dest = target_dir.or_else(|| positionals.last().copied());
+                dest.is_some_and(Self::is_backup_name)
+            }
+        }
+    }
+
     fn selinux_regex() -> &'static Regex {
         static SELINUX_REGEX: OnceLock<Regex> = OnceLock::new();
         SELINUX_REGEX.get_or_init(|| {
@@ -1465,8 +1657,8 @@ impl PostCheck {
             // invocations.
             let scan_text = Self::without_heredoc_bodies(script);
             // Every dangerous-command match is examined: the finding
-            // fires on the first match that is not a credited `rm` of
-            // package state, so a credited `rm` cannot hide a later
+            // fires on the first match that is neither a credited `rm` of
+            // package state nor a credited backup-direction operation, so a credited match cannot hide a later
             // genuinely-dangerous command on the same line or a later
             // line. No match, or every match credited, stays quiet.
             let mut offending: Option<String> = None;
@@ -1479,7 +1671,10 @@ impl PostCheck {
                     .map(|i| m.end() + i)
                     .unwrap_or(scan_text.len());
                 let rest = &scan_text[m.end()..line_end];
-                if !Self::rm_var_state_credit(tag, m.as_str(), rest) {
+                let backup = caps.get(0).is_some_and(|full| {
+                    Self::dangerous_match_is_backup(&scan_text, full.end(), m.as_str())
+                });
+                if !Self::rm_var_state_credit(tag, m.as_str(), rest) && !backup {
                     offending = Some(m.as_str().to_string());
                     break;
                 }
@@ -2930,6 +3125,55 @@ mod tests {
                 .iter()
                 .any(|(_, f, _)| f == "dangerous-command-in-%post")
         );
+    }
+
+    #[test]
+    fn dangerous_command_backup_direction_is_silent() {
+        for script in [
+            "cp -p /etc/dat.conf /etc/dat.conf.rpmtmp\n",
+            "mv /etc/conman.conf /etc/conman.conf.rpmsave\n",
+            "rm -f /usr/share/smartmontools/drivedb.h.rpmsave\n",
+            "[ -f /boot/efi/config.txt ] && cp /boot/efi/config.txt /boot/efi/config.txt.rpmsave\n",
+            "cp /etc/zypp/repos.d/$repo_file /etc/zypp/repos.d/$repo_file.rpmsave\n",
+            "cp \"/etc/foo\" \"/etc/foo.rpmsave\"\n",
+            "cp -t /etc/foo.rpmsave /etc/foo\n",
+            "cp --target-directory=/etc/foo.rpmtmp /etc/foo\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "backup direction should stay silent: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_restore_and_rotation_still_fire() {
+        for (script, verb) in [
+            ("cp /etc/foo.rpmsave /etc/foo\n", "cp"),
+            ("mv /etc/foo.rpmsave /etc/foo.rpmsave.old\n", "mv"),
+            ("cp -t /etc /etc/foo.rpmsave\n", "cp"),
+            ("rm -f /etc/foo\n", "rm"),
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec![verb.to_string()]),
+                "should still fire: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_after_backup_still_fires() {
+        let script = "cp /etc/foo /etc/foo.rpmsave; rm -rf /bar\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "dangerous-command-in-%post"
+            && d == &vec!["rm".to_string()]));
     }
 
     #[test]

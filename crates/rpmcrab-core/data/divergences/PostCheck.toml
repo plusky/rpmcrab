@@ -229,6 +229,13 @@ kind = "behaviour"
 reason = "Fix-and-diverge: `dangerous-command-in-<scriptlet>` no longer fires when every dangerous-command match in a %post, %postun, %pre, %preun or %trigger scriptlet is an `rm` removing only paths under /var/lib, /var/adm, /var/log, /var/cache or /var/yp: those are package state, not payload, and removing them on install or erase is the package cleaning up its own runtime data. The credit is operand-exact: flags are skipped, quoted operands count by their inner path, parsing stops at the first operator or redirect, a continued line is never credited, a `..` component keeps firing, a glob operand keeps firing, and any operand outside the five prefixes keeps the finding firing. /run and /var/run deliberately stay firing, and the credit does not extend to %posttrans, %pretrans, %verifyscript or the filetrigger scriptlets. Measured over all 1,579 dangerous-firing packages from the preserved PostCheck census (PostCheck-only old-vs-new binary run, isolated config; the credit only suppresses, so non-firing packages cannot change): exactly 61 go quiet — the 60 classified findings plus one same-shape quoted-operand row the classifier bucketed elsewhere; 0 added; %posttrans/%pretrans unchanged; /var/run rows unchanged. Pinned by unit tests in post.rs."
 since = "0.4.1"
 
+[[divergence]]
+case = "global"
+check = "dangerous-command-in"
+kind = "behaviour"
+reason = "Fix-and-diverge: `dangerous-command-in-<scriptlet>` no longer fires on a backup-direction operation: `cp`/`mv` writing to a `.rpmsave` or `.rpmtmp` destination, or `rm` removing such a name. A restore (a backup name as the source, live path as the destination) keeps firing, as does a rotation (a backup name moved to a `.old` name, whose destination carries no backup suffix); a backup operation followed by a genuine command in the same scriptlet still fires on the genuine command. Measured over the Factory corpus firing population (1,579 packages firing a dangerous-command finding, old vs new binary over the complete firing set): exactly 12 backup matches go quiet -- 8 findings drop and 4 packages keep firing on a later genuine command (conman, raspberrypi-firmware-config, raspberrypi-firmware-config-camera, smartmontools); 0 added, 0 verb changes, no other phase changes. Pinned by unit tests in post.rs."
+since = "0.4.1"
+
 
 [[divergence]]
 case = "global"
