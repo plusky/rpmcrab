@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Build the pem-private-key-fixture RPM (pem-private-key whole-content scan).
 #
-# pem-private-key-fixture: four .pem files exercising the whole-content
+# pem-private-key-fixture: five .pem files exercising the whole-content
 # pem-private-key scan end to end through a real RPM payload --
 #   genuine.pem:   well-formed five-dash private-key header (must fire),
 #   cert.pem:      certificate header (fires only pem-certificate),
 #   malformed.pem: reference's four-dash header (must stay silent),
-#   text.pem:      non-PEM text (must stay silent).
+#   text.pem:      non-PEM text (must stay silent),
+#   multiline.pem: full header-plus-body-plus-footer key (must stay
+#     silent, pinning the whole-content anchor).
 #
 # Usage: bash tests/parity/pkg/inputs/build-pem-private-key-fixture.sh
 # Needs: podman (or PODMAN=/path/to/podman), an openSUSE container image

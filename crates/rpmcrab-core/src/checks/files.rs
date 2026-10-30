@@ -10300,7 +10300,9 @@ mod tests {
         // header fires only the certificate tag, a malformed four-dash
         // header stays silent, and non-PEM text stays silent. The match
         // is whole-content (anchored, no multiline), so each fixture
-        // file holds exactly its header line.
+        // file holds exactly its header line, except multiline.pem: a
+        // full header-plus-body-plus-footer key that must stay silent,
+        // pinning the anchor.
         let config = test_config();
         let (results, _dirs) = run_files_check_session(
             &[&fixture_path("pem-private-key-fixture-1.0-1.noarch.rpm")],
@@ -10316,6 +10318,10 @@ mod tests {
             key_lines[0].contains("genuine.pem"),
             "pem-private-key line: {:?}",
             key_lines[0]
+        );
+        assert!(
+            !key_lines.iter().any(|l| l.contains("multiline.pem")),
+            "multiline key must stay silent under the whole-content anchor: {key_lines:?}"
         );
         let cert_lines: Vec<&str> = results
             .iter()
