@@ -337,8 +337,34 @@ SystemLibPaths = [
 PieExecutables = []
 # Architecture dependent paths in which packages are allowed to install files
 # even if they are all non-binary
-# List of forbidden compilation flags
-ForbiddenOptflags = []
+# List of forbidden compilation flags: host-dependent, IEEE-breaking and
+# code-bloating options that have no place in distribution builds, which
+# must use %optflags. Matched as exact tokens against DW_AT_producer.
+ForbiddenOptflags = [
+    # Host-dependent: the binary depends on the build machine's CPU,
+    # breaking portability across the distribution's supported CPUs and
+    # reproducible builds (the same source builds differently per builder).
+    "-march=native",
+    "-mtune=native",
+    # Fast-math: breaks strict standards compliance and IEEE semantics
+    # (-Ofast is -O3 plus -ffast-math; the rest are its components,
+    # each passable on its own).
+    "-Ofast",
+    "-ffast-math",
+    "-funsafe-math-optimizations",
+    "-ffinite-math-only",
+    "-fno-signed-zeros",
+    "-fno-trapping-math",
+    "-fassociative-math",
+    "-freciprocal-math",
+    "-fno-rounding-math",
+    "-fno-signaling-nans",
+    "-fcx-limited-range",
+    "-fexcess-precision=fast",
+    # Loop unrolling: code bloat, enabled by no -O level (not even -O3).
+    "-funroll-loops",
+    "-funroll-all-loops",
+]
 # Interpreters whose scriptlets are allowed to be empty
 ValidEmptyShells = [
     "/sbin/ldconfig",
