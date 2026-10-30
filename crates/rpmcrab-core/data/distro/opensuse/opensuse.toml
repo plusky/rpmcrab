@@ -3,7 +3,6 @@
 # Configuration options used by the checks
 CompressExtension = "gz"
 UseVarLockSubsys = false
-UseVersionInChangelog = false
 
 # Set to true to issue a warning for ghost entries outside snapshots
 # when checking for atomic update compatibility

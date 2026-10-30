@@ -109,7 +109,7 @@ since = "0.1.0"
 case = "global"
 check = "TagsCheck"
 kind = "detail"
-reason = "Port-only `--explain` descriptions for `description-use-invalid-word`, `invalid-buildhost`, `invalid-changelog-author`, `invalid-license`, `invalid-license-spellcheck`, `invalid-url`, `missing-dependency-on`, `no-buildhost-tag`, `no-version-dependency-on`, `summary-use-invalid-word`: the reference emits these findings but ships no descriptions."
+reason = "Port-only `--explain` descriptions for `invalid-buildhost`, `invalid-changelog-author`, `invalid-license`, `invalid-license-spellcheck`, `invalid-url`, `missing-dependency-on`, `no-buildhost-tag`, `no-version-dependency-on`: the reference emits these findings but ships no descriptions."
 since = "0.1.0"
 
 [[divergence]]
@@ -416,3 +416,23 @@ kind = "behaviour"
 reason = "Fix-and-diverge: for binary packages the verdict is run-scoped. A candidate (an Obsoletes name the binary package's own Provides do not carry) is credited when the run is source-complete for its build — the run holds the build's source package, keyed by header name-version-release plus .src.rpm/.nosrc.rpm equal to the binaries' SOURCERPM — and any package of that build provides the name under its exact spelling: on such a set the finding does not fire, and that sibling-provided candidate is the only one the run scope suppresses. The gate is source presence only — whether the run holds the build's full package closure is not checked. Source packages' verdicts stay per-package, judged on their own headers in the per-package pass, and a binary package with no SOURCERPM key always fires. On single-package and partial input — partial meaning the run holds no source package for the build — every candidate fires, exactly the per-package verdict. The reference judges each package alone and fires whenever the package's own Provides lack the name, regardless of run contents. Matching is by exact name only — a sibling Provides differing in case or in separators does not credit. The grouping keys come from the shared helpers binary_source_key and source_package_keys in shared.rs. Measured on the Factory corpus (51,589 RPMs): 2,820 findings per-package; the source-complete runs credit 85 of them (62 packages — one subpackage provides the name, sibling subpackages carry the Obsoletes), 2,735 fire in both modes and no other TagsCheck finding moves. Pinned by obsolete_sibling_credit_on_complete_build, obsolete_sibling_name_bearer_credited_on_complete_build, obsolete_sibling_no_credit_on_partial_build, obsolete_single_package_still_fires, obsolete_case_mismatch_sibling_does_not_credit, obsolete_separator_mismatch_sibling_does_not_credit, obsolete_unrelated_sibling_provide_does_not_credit, obsolete_foreign_source_does_not_open_the_gate, obsolete_credit_survives_state_export and obsolete_reset_drops_the_run in tags.rs."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1031"
+[[divergence]]
+case = "global"
+check = "description-use-invalid-word"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- the ForbiddenWords option that fed it was never non-empty in any shipped configuration (the defaults carry an empty value and no shipped flavour sets it), so the finding could never fire; the option, the emission site, the staged `--explain` entry, and the config plumbing are removed. The reference still emits it when its ForbiddenWords list is populated."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "summary-use-invalid-word"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- the ForbiddenWords option that fed it was never non-empty in any shipped configuration (the defaults carry an empty value and no shipped flavour sets it), so the finding could never fire; the option, the emission site, the staged `--explain` entry, and the config plumbing are removed. The reference still emits it when its ForbiddenWords list is populated."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "no-version-in-last-changelog"
+kind = "missing"
+reason = "Deliberate removal: the port does not emit this finding -- SUSE changelog practice puts versions in .changes headers and change lines, not in the entry header the check wants, so the check fired on 93.9% of the Factory corpus (48,447 packages) once its disabling override was dropped; the check and the UseVersionInChangelog option are removed together. The reference still emits it when UseVersionInChangelog is set."
+since = "0.4.1"

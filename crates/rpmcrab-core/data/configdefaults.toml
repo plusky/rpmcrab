@@ -99,7 +99,6 @@ CompressExtension = "bz2"
 # Default is to use mktemp from python to provide one
 ExtractDir = ""
 # Regexp string for words that must never exist in preamble tag values
-ForbiddenWords = ""
 # Accepted non-XDG legacy icon filenames, string regexp format
 IconFilename = '.*\.png$'
 # Regexp string to disallow in various URL tags
@@ -141,8 +140,6 @@ UseDebugSource = true
 UseEpoch = false
 # Whether symlinks between directories should be relative.
 UseRelativeSymlinks = true
-# Whether %changelog entries should contain a version
-UseVersionInChangelog = true
 # Regexp string with value for the BuildHost preamble tag
 ValidBuildHost = ''
 # Standard "needs" values for non-XDG legacy menu items
