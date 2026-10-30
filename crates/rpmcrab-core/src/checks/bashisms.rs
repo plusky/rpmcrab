@@ -164,9 +164,22 @@ fn is_polyglot_wrapper(content: &str) -> bool {
 }
 
 /// A `var=$0` assignment in the prologue, for the indirection form
-/// (`argv0=$0`, then `exec wish "$argv0"`).
+/// (`argv0=$0`, then `exec wish "$argv0"`). An `export`/`local`
+/// prefix is accepted (`export argv0=$0`); a longer variable name that
+/// merely starts with those letters (`exportfoo=$0`) is not a prefix.
 fn self_var_assignment(line: &str) -> Option<String> {
-    let (var, mut value) = line.split_once('=')?;
+    // Strip a leading `export`/`local` keyword (keyword + whitespace
+    // only, so `exportfoo=$0` keeps its full variable name).
+    let mut rest = line;
+    for kw in ["export", "local"] {
+        if let Some(after) = rest.strip_prefix(kw)
+            && after.starts_with(char::is_whitespace)
+        {
+            rest = after.trim_start();
+            break;
+        }
+    }
+    let (var, mut value) = rest.split_once('=')?;
     if var.is_empty()
         || !var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         || var.chars().next().is_some_and(|c| c.is_ascii_digit())
@@ -196,8 +209,8 @@ fn exec_switch_re() -> &'static Regex {
 /// An `exec` command whose target is another interpreter and whose
 /// arguments re-run the script itself: `exec wish "$0"`, `eval 'exec perl
 /// -x $0'`, `//bin/true && exec stap -g $0`, `exec 'wish' "$argv0"` after
-/// `argv0=$0`. A re-exec under `sh` or of the script itself is not a
-/// switch.
+/// `argv0=$0`. A re-exec under a shell (`sh`, `dash`, `bash`, `ksh`,
+/// `zsh`) or of the script itself is not a switch.
 fn exec_switch(line: &str, self_vars: &[String]) -> bool {
     let Some(caps) = exec_switch_re().captures(line).ok().flatten() else {
         return false;
@@ -208,7 +221,11 @@ fn exec_switch(line: &str, self_vars: &[String]) -> bool {
     if target == "$0" || target == "${0}" {
         return false;
     }
-    if target.rsplit('/').next().is_some_and(|base| base == "sh") {
+    if target
+        .rsplit('/')
+        .next()
+        .is_some_and(|base| matches!(base, "sh" | "dash" | "bash" | "ksh" | "zsh"))
+    {
         return false;
     }
     let Some(m) = caps.get(0) else {
@@ -527,6 +544,61 @@ mod tests {
         assert!(is_polyglot_wrapper(
             "#!/bin/sh\n# Tcl ignores the next line\nif test x; then\n  echo v;\n  exit;\nfi;\nargv0=$0;\nexec 'wish' \"$argv0\" -- \"$@\"\n"
         ));
+    }
+
+    #[test]
+    fn shell_reexec_is_not_wrapper() {
+        // A re-exec under another shell is still shell, not a switch.
+        for shell in ["sh", "dash", "bash", "ksh", "zsh"] {
+            assert!(
+                !is_polyglot_wrapper(&format!("#!/bin/sh\nexec {shell} \"$0\" \"$@\"\n")),
+                "{shell} re-exec must not count as a wrapper"
+            );
+        }
+        assert!(!is_polyglot_wrapper(
+            "#!/bin/sh\nexec /bin/zsh \"$0\" \"$@\"\n"
+        ));
+    }
+
+    #[test]
+    fn wrapper_export_local_self_var() {
+        // export-/local-prefixed self-var assignments feed the
+        // indirection form, like a bare assignment.
+        assert!(is_polyglot_wrapper(
+            "#!/bin/sh\nexport argv0=$0;\nexec 'wish' \"$argv0\" -- \"$@\"\n"
+        ));
+        assert!(is_polyglot_wrapper(
+            "#!/bin/sh\nlocal argv0=$0\nexec 'wish' \"$argv0\" -- \"$@\"\n"
+        ));
+        // A longer variable name merely starting with "export" is not
+        // a keyword prefix: the full name still works.
+        assert!(is_polyglot_wrapper(
+            "#!/bin/sh\nexportfoo=$0\nexec 'wish' \"$exportfoo\"\n"
+        ));
+    }
+
+    #[test]
+    fn wrapper_switch_on_line_16_is_plain_shell() {
+        // The 15-line window counts code lines only: a switch on code
+        // line 16 is past the window and must not count as a wrapper.
+        // (A 15 -> 100 mutant would catch this switch and fail here.)
+        let mut content = String::from("#!/bin/sh\n");
+        for i in 0..15 {
+            content.push_str(&format!("VAR{i}=x\n"));
+        }
+        content.push_str("exec wish \"$0\" \"$@\"\n");
+        assert!(!is_polyglot_wrapper(&content));
+    }
+
+    #[test]
+    fn wrapper_negatives_without_switch_shape() {
+        // variable_x needs both -x and $0: a $0 without -x, and a -x
+        // without $0, are not wrapper-style.
+        assert!(!is_polyglot_wrapper("#!/bin/sh\n$foo -y $0\n"));
+        assert!(!is_polyglot_wrapper("#!/bin/sh\n$ruby -x foo\n"));
+        // bare_interp needs $0 too: a bare interpreter line without it
+        // is not wrapper-style.
+        assert!(!is_polyglot_wrapper("#!/bin/sh\nwish \"$@\"\n"));
     }
 
     #[test]
