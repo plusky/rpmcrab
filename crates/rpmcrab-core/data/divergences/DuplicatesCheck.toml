@@ -93,3 +93,17 @@ kind = "severity"
 reason = "Config-only (issue #594): the vendored configs carry no [Scoring] table (#594 dropped this entry via DROP_SCORING in the generator; #699 then removed the vendored scoring tables wholesale), so the port prints W where the reference prints E: files-duplicated-waste (Badness: 100) (the emission demotion to W is ledgered under issue #593; without the drop the surviving Scoring entry would silently re-promote it to E via the b > 0 rule)."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/594"
+
+[[divergence]]
+case = "global"
+check = "files-duplicate"
+kind = "behaviour"
+reason = "Fix-and-diverge: a duplicate group whose members are all %config files is not reported. Each copy is meant to be edited independently after install (per-version copies, a live file beside its example or default template), so hardlinking any two would couple edits that must stay separate; the duplication is not reclaimable space. Measured on the Factory corpus: 20,933 rows fall to 20,878 (-55/+0)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "files-duplicated-waste"
+kind = "behaviour"
+reason = "Fix-and-diverge: the waste total excludes duplicate groups whose members are all %config files (see the files-duplicate entry): the copies are meant to be edited independently after install, so the space is not reclaimable. Measured on the Factory corpus: 227 findings fall to 226 (-1/+0); the one silenced package is mono-web, whose entire waste total rests on such groups."
+since = "0.4.1"
