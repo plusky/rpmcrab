@@ -9,6 +9,7 @@ use std::process::Command;
 
 use fancy_regex::Regex;
 
+use super::files::strip_comment_tails;
 use crate::check::{Check, add_info};
 use crate::checks::atomic_update::direct_user_creation_in_body;
 use crate::checks::atomic_update::rc_link_invocations_in_body;
@@ -163,10 +164,13 @@ impl PostCheck {
         HOME_REGEX
             .get_or_init(|| Regex::new(r"(?m)[^a-zA-Z]+~/|\$\{?HOME(\W|$)").expect("static regex"))
     }
+    /// The verb terminator is a space or tab, never a newline: a
+    /// bare verb at end-of-line must not swallow the next line's
+    /// words as its operands.
     fn dangerous_regex() -> &'static Regex {
         static DANGEROUS_REGEX: OnceLock<Regex> = OnceLock::new();
         DANGEROUS_REGEX.get_or_init(|| Regex::new(
-            r"(?m)(^|[;`|]|&&|$\()\s*(?:\S*/s?bin/)?(cp|mv|ln|tar|rpm|chmod|chown|rm|cpio|install|perl|userdel|groupdel)\s",
+            r"(?m)(^|[;`|]|&&|$\()\s*(?:\S*/s?bin/)?(cp|mv|ln|tar|rpm|chmod|chown|rm|cpio|install|perl|userdel|groupdel)[ \t]",
         )
         .expect("static regex"))
     }
@@ -291,6 +295,9 @@ impl PostCheck {
     /// The logical command line starting at byte `at` in `text`: the
     /// rest of the physical line, with backslash-newline continuations
     /// (outside single quotes) joined. Stops at an unquoted newline.
+    /// Inside double quotes a backslash unescapes the next character
+    /// (`\"` becomes `"`); outside quotes the backslash is preserved
+    /// except for continuations.
     fn logical_line_after(text: &str, at: usize) -> String {
         let mut out = String::new();
         let mut chars = text[at..].chars().peekable();
@@ -344,7 +351,9 @@ impl PostCheck {
     }
 
     /// Split a logical command line into operand tokens, honouring
-    /// single/double quotes and backslash escapes. Stops at an
+    /// single/double quotes and backslash escapes (inside double
+    /// quotes a backslash unescapes only `$`, backtick, `"`, `\` and
+    /// newline, as in shell). Stops at an
     /// unquoted command separator, redirection, or comment start; a
     /// trailing all-digit token before a redirection is the
     /// redirection's file descriptor, not an operand, and is dropped.
@@ -362,7 +371,14 @@ impl PostCheck {
                             Some('\n') => {
                                 chars.next();
                             }
+                            Some(n) if matches!(n, '$' | '`' | '"' | '\\') => {
+                                cur.push(*n);
+                                chars.next();
+                            }
                             Some(n) => {
+                                // Shell keeps the backslash before any
+                                // other character inside double quotes.
+                                cur.push('\\');
                                 cur.push(*n);
                                 chars.next();
                             }
@@ -438,7 +454,8 @@ impl PostCheck {
         let line = Self::logical_line_after(scan_text, operand_at);
         let tokens = Self::split_operands(&line);
         // Walk flags: `--` ends them; `-t` / `--target-directory`
-        // take the destination as their argument.
+        // take the destination as their argument, for cp/mv only:
+        // GNU rm has no -t, so for rm every operand stays positional.
         let mut positionals: Vec<&str> = Vec::new();
         let mut target_dir: Option<&str> = None;
         let mut i = 0;
@@ -448,12 +465,14 @@ impl PostCheck {
             if !no_more_flags && tok == "--" {
                 no_more_flags = true;
             } else if !no_more_flags && tok.starts_with('-') && tok.len() > 1 {
-                if tok == "-t" {
+                if tok == "-t" && verb != "rm" {
                     target_dir = tokens.get(i + 1).map(|s| s.as_str());
                     i += 1;
                 } else if let Some(dir) = tok.strip_prefix("--target-directory=") {
-                    target_dir = Some(dir);
-                } else if tok == "--target-directory" {
+                    if verb != "rm" {
+                        target_dir = Some(dir);
+                    }
+                } else if tok == "--target-directory" && verb != "rm" {
                     target_dir = tokens.get(i + 1).map(|s| s.as_str());
                     i += 1;
                 }
@@ -1045,7 +1064,10 @@ impl PostCheck {
 
     /// Scriptlet text with heredoc bodies blanked. Text a scriptlet
     /// writes out (an update message, a generated file) is not executed,
-    /// so a command named inside it is not an invocation.
+    /// so a command named inside it is not an invocation — but a body
+    /// fed directly to a shell (`sh <<'EOF'`) IS executed, so directly
+    /// shell-fed heredocs are left unblanked (see `line_feeds_shell`);
+    /// piped-to-a-shell and wrapped shapes stay blanked.
     pub(crate) fn without_heredoc_bodies(script: &str) -> String {
         // Parse the delimiter following a `<<` at byte offset `at` in
         // `line`: the delimiter word, and whether the operator is the
@@ -1281,6 +1303,60 @@ impl PostCheck {
                 line == delim
             }
         }
+        // Whether `line` feeds a heredoc directly to a shell: the
+        // last command segment's first word (after `env` and `VAR=`
+        // prefixes and shell keywords, with any directory stripped)
+        // names a POSIX shell. Piped-to-a-shell (`cat <<EOF | sh`),
+        // sudo-wrapped and substitution shapes are not recognised
+        // here and stay blanked.
+        fn line_feeds_shell(line: &str) -> bool {
+            let before = match line.rfind("<<") {
+                Some(i) => &line[..i],
+                None => return false,
+            };
+            let last = before.split([';', '|', '&', '(']).next_back().unwrap_or("");
+            let mut words = last
+                .split_whitespace()
+                .map(|w| w.trim_matches(|c| c == '"' || c == '\''));
+            let mut word = match words.next() {
+                Some(w) => w,
+                None => return false,
+            };
+            loop {
+                if matches!(word, "then" | "do" | "else" | "time" | "!") {
+                    word = match words.next() {
+                        Some(w) => w,
+                        None => return false,
+                    };
+                    continue;
+                }
+                if word == "env" {
+                    word = match words.next() {
+                        Some(w) => w,
+                        None => return false,
+                    };
+                    continue;
+                }
+                if word.contains('=')
+                    && word
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                {
+                    word = match words.next() {
+                        Some(w) => w,
+                        None => return false,
+                    };
+                    continue;
+                }
+                break;
+            }
+            let base = word.rsplit('/').next().unwrap_or(word);
+            matches!(
+                base,
+                "sh" | "bash" | "dash" | "ash" | "ksh" | "mksh" | "zsh"
+            )
+        }
         let lines: Vec<&str> = script.lines().collect();
         let mut pending: Vec<(String, bool)> = Vec::new();
         let mut out: Vec<&str> = Vec::new();
@@ -1296,8 +1372,14 @@ impl PostCheck {
             }
             // Only blank when a terminator actually appears later in
             // the scriptlet: a false opener otherwise blanks the rest
-            // of the scriptlet and hides genuine invocations.
+            // of the scriptlet and hides genuine invocations. A body
+            // fed directly to a shell is executed, so it is never
+            // blanked.
+            let shell_fed = line_feeds_shell(line);
             for (delim, strip_tabs) in delimiters_in_line(line) {
+                if shell_fed {
+                    continue;
+                }
                 if lines[idx + 1..]
                     .iter()
                     .any(|l| is_terminator(l, &delim, strip_tabs))
@@ -2206,6 +2288,7 @@ impl Check for PostCheck {
             let prein = pkg.tag_str(Tag::PREIN).unwrap_or_default();
             let posttrans = pkg.tag_str(Tag::POSTTRANS).unwrap_or_default();
             let tmpfiles = tmpfiles_declared_paths(pkg);
+            let posttrans_mentions = posttrans_mention_tokens(&posttrans);
             for f in &pkg.ghost_files {
                 if pkg.missingok_files.iter().any(|m| m == f) {
                     continue;
@@ -2213,7 +2296,7 @@ impl Check for PostCheck {
                 if is_icon_theme_cache(f) {
                     continue;
                 }
-                if scriptlet_mentions_path(&posttrans, f) {
+                if posttrans_mentions.contains(f.as_str()) {
                     continue;
                 }
                 if tmpfiles.contains(f.as_str()) {
@@ -2227,16 +2310,39 @@ impl Check for PostCheck {
     }
 }
 
-/// Whether a %posttrans scriptlet mentions a path as a whole token.
-/// A pure substring match credits prefixes (`/etc/foobar` for a
+/// The whole-token path mentions of a scriptlet: a pure
+/// substring match credits prefixes (`/etc/foobar` for a
 /// `/etc/foo` ghost), so the scriptlet is split on whitespace and
 /// shell separators and each token is compared whole, with
-/// surrounding quotes stripped.
-fn scriptlet_mentions_path(scriptlet: &str, path: &str) -> bool {
+/// surrounding quotes stripped and a trailing slash ignored
+/// (except root `/`), matching the tmpfiles credit.
+/// A mention is not a creation: any whole-token mention credits
+/// the ghost, including non-creation reads (`test -f`, `cat`,
+/// `echo`, `[ -e`, `dirname`), so a ghost only tested, never
+/// created, goes silent. Narrowing the credit to creation
+/// context is a behaviour change and is not done here.
+fn scriptlet_path_tokens(scriptlet: &str) -> HashSet<String> {
     scriptlet
         .split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '<' | '>'))
         .map(|tok| tok.trim_matches(|c| c == '"' || c == '\''))
-        .any(|tok| tok == path)
+        .map(|tok| {
+            tok.strip_suffix('/')
+                .filter(|t| !t.is_empty())
+                .unwrap_or(tok)
+        })
+        .filter(|tok| !tok.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The %posttrans path mentions the ghost credit reads: whole
+/// tokens of the heredoc-blanked, comment-stripped scriptlet, so a
+/// path named only in a comment or a heredoc body does not credit
+/// the ghost. Tokenized once for the whole ghost loop.
+fn posttrans_mention_tokens(posttrans: &str) -> HashSet<String> {
+    scriptlet_path_tokens(&strip_comment_tails(&PostCheck::without_heredoc_bodies(
+        posttrans,
+    )))
 }
 
 /// The icon-theme cache ghost: `/usr/share/icons/<theme>/icon-theme.cache`,
@@ -2863,22 +2969,34 @@ mod tests {
     }
 
     #[test]
-    fn scriptlet_mentions_path_is_boundary_aware() {
-        assert!(scriptlet_mentions_path(
-            "ln -sf /etc/foo /etc/bar",
-            "/etc/foo"
-        ));
-        assert!(scriptlet_mentions_path(
-            "ln -sf \"/etc/foo\" /etc/bar",
-            "/etc/foo"
-        ));
-        assert!(scriptlet_mentions_path("test -f /etc/foo", "/etc/foo"));
-        assert!(!scriptlet_mentions_path(
-            "ln -sf /etc/foobar /etc/bar",
-            "/etc/foo"
-        ));
-        assert!(!scriptlet_mentions_path("test -f /etc/foobar", "/etc/foo"));
-        assert!(!scriptlet_mentions_path("", "/etc/foo"));
+    fn scriptlet_path_tokens_is_boundary_aware() {
+        assert!(scriptlet_path_tokens("ln -sf /etc/foo /etc/bar").contains("/etc/foo"));
+        assert!(scriptlet_path_tokens("ln -sf \"/etc/foo\" /etc/bar").contains("/etc/foo"));
+        // A mention pin, not a creation pin: `test -f` only tests
+        // the path, yet the whole-token mention credits the ghost.
+        assert!(scriptlet_path_tokens("test -f /etc/foo").contains("/etc/foo"));
+        // A trailing slash on the mention is ignored, matching the
+        // tmpfiles credit; the boundary rule still applies.
+        assert!(scriptlet_path_tokens("mkdir -p /run/foo/").contains("/run/foo"));
+        assert!(!scriptlet_path_tokens("mkdir -p /run/foobar/").contains("/run/foo"));
+        assert!(!scriptlet_path_tokens("ln -sf /etc/foobar /etc/bar").contains("/etc/foo"));
+        assert!(!scriptlet_path_tokens("test -f /etc/foobar").contains("/etc/foo"));
+        assert!(!scriptlet_path_tokens("").contains("/etc/foo"));
+    }
+
+    #[test]
+    fn posttrans_mention_tokens_ignore_comments_and_heredoc_bodies() {
+        let script = "# mkdir -p /etc/commented\ncat <<'EOF'\nmkdir -p /etc/heredoc\nEOF\nmkdir -p /etc/real/\n";
+        let tokens = posttrans_mention_tokens(script);
+        assert!(tokens.contains("/etc/real"));
+        assert!(
+            !tokens.contains("/etc/commented"),
+            "a path named only in a comment must not credit: {tokens:?}"
+        );
+        assert!(
+            !tokens.contains("/etc/heredoc"),
+            "a path named only in a heredoc body must not credit: {tokens:?}"
+        );
     }
 
     #[test]
@@ -3307,6 +3425,35 @@ mod tests {
     }
 
     #[test]
+    fn dangerous_command_in_shell_fed_heredoc_still_fires() {
+        // A body fed directly to a shell IS executed, so its
+        // invocations fire; the path-qualified and flagged forms
+        // count as directly fed too.
+        for script in [
+            "sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "/bin/sh -e <<EOF\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "shell-fed body must fire: {script}"
+            );
+        }
+        // Piped-to-a-shell stays blanked (known residual): the body
+        // reaches the shell through the pipe, not as its stdin.
+        let script = "cat <<'EOF' | sh\nrm -rf /foo\nEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+            "piped-to-shell body stays blanked: {found:?}"
+        );
+    }
+
+    #[test]
     fn dangerous_command_after_heredoc_still_fires() {
         let script = "cat > /tmp/note << 'EOF'\nln -s a b\nEOF\nrm -rf /bar\n";
         let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
@@ -3388,6 +3535,81 @@ mod tests {
                 "backup direction should stay silent: {script}"
             );
         }
+    }
+
+    #[test]
+    fn dangerous_command_rm_target_directory_still_fires() {
+        // GNU rm has no -t: the separate "target dir" argument is a
+        // live operand, so the removal is mixed and keeps firing.
+        for script in [
+            "rm -t /live /a.rpmsave\n",
+            "rm --target-directory /live /a.rpmsave\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "rm with a live operand must fire: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_mixed_rm_still_fires() {
+        // The rm arm credits only all-backup operand sets: a backup
+        // name next to a live path still deletes live files.
+        for script in [
+            "rm -f /etc/foo.rpmsave /etc/passwd\n",
+            "rm -f /etc/passwd /etc/foo.rpmsave\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "mixed rm must fire: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_bare_verb_newline_does_not_swallow_next_line() {
+        // A bare verb at end-of-line is not a match: the next
+        // line's words are not its operands, so the finding names
+        // the real verb on the next line.
+        let script = "cp\nrm -rf /bar\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["rm".to_string()]),
+            "finding must name rm, not cp: {found:?}"
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, d)| f == "dangerous-command-in-%post" && d == &vec!["cp".to_string()]),
+            "bare cp must not swallow the next line: {found:?}"
+        );
+    }
+
+    #[test]
+    fn split_operands_double_quote_escape_set() {
+        // Shell unescapes only `$`, backtick, `"`, `\` and newline
+        // inside double quotes; any other backslash stays.
+        assert_eq!(
+            PostCheck::split_operands("cp \"x\\ay\" z"),
+            vec!["cp".to_string(), "x\\ay".to_string(), "z".to_string()]
+        );
+        assert_eq!(
+            PostCheck::split_operands("cp \"x\\$y\" z"),
+            vec!["cp".to_string(), "x$y".to_string(), "z".to_string()]
+        );
+        assert_eq!(
+            PostCheck::split_operands("cp \"x\\\"y\" z"),
+            vec!["cp".to_string(), "x\"y".to_string(), "z".to_string()]
+        );
     }
 
     #[test]

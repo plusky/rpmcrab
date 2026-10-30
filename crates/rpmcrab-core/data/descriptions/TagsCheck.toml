@@ -71,7 +71,7 @@ no-epoch-tag="""
 There is no Epoch tag in your package.
 """
 unreasonable-epoch="""
-The value of your Epoch tag is unreasonably large (> 99).
+The value of your Epoch tag is unreasonably large (> 99) under a configuration that uses Epoch (UseEpoch=true); under a no-Epoch configuration the tag fires epoch-tag instead.
 """
 epoch-tag="""
 The package carries an Epoch tag, but Epoch tags are not used in this

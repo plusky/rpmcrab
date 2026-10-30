@@ -11455,8 +11455,20 @@ mod tests {
         let results = hardening_results_with(
             &[],
             None,
-            &["__go_construct_map", "memcpy", "strcpy", "strcat", "sprintf"],
-            &["__go_construct_map", "memcpy", "strcpy", "strcat", "sprintf"],
+            &[
+                "__go_construct_map",
+                "memcpy",
+                "strcpy",
+                "strcat",
+                "sprintf",
+            ],
+            &[
+                "__go_construct_map",
+                "memcpy",
+                "strcpy",
+                "strcat",
+                "sprintf",
+            ],
         );
         assert_eq!(
             lines_for(&results, "missing-cf-protection").len(),
