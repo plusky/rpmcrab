@@ -184,6 +184,42 @@ fn flavour_conjunct(expr: &DepExpr, atom: &str) -> bool {
     }
 }
 
+/// True when `expr` is a plain conjunction carrying a `branding-<flavor>`
+/// marker atom — unversioned, unqualified — as a direct or nested
+/// conjunct. Such an Enhances is the flavour-selection gate, not an
+/// excessive dependency: it suggests the package only when the base
+/// package and the flavour marker are both present, the same gate the
+/// supplement doctrine credits. A bare marker atom is not a
+/// conjunction and does not credit; a marker under `or`, `if`,
+/// `unless`, `with` or `without`, a versioned marker, and the zypp
+/// `packageand()` spelling (a Simple, not a conjunction) all still
+/// fire.
+fn flavour_gate(expr: &DepExpr) -> bool {
+    match expr {
+        DepExpr::And(children) => children.iter().any(|child| match child {
+            DepExpr::Simple {
+                name,
+                qualifier,
+                flags,
+                epoch,
+                version,
+                release,
+            } => {
+                qualifier.is_none()
+                    && *flags == 0
+                    && epoch.is_none()
+                    && version.is_none()
+                    && release.is_none()
+                    && name.len() > "branding-".len()
+                    && name.starts_with("branding-")
+            }
+            DepExpr::And(_) => flavour_gate(child),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
 impl Check for BrandingPolicyCheck {
     fn name(&self) -> &'static str {
         "BrandingPolicyCheck"
@@ -330,7 +366,13 @@ impl Check for BrandingPolicyCheck {
                 &[&r.name],
             );
         }
+        // An Enhances gated on a flavour marker is the selection
+        // mechanism for the flavour variant, not an excessive
+        // dependency; any other Enhances still fires.
         for r in &pkg.enhances {
+            if flavour_gate(&parse_dep_expr(&r.name)) {
+                continue;
+            }
             add_info(
                 out,
                 Level::Warning,
@@ -948,5 +990,58 @@ mod tests {
             has(&results, "branding-requires-unversioned").is_empty(),
             "{results:?}"
         );
+    }
+
+    fn excessive_enhances(pkg: &Pkg) -> Vec<String> {
+        has(&run(pkg), "branding-excessive-enhances")
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn enhances_pkg(enhances: Vec<DepInfo>) -> Pkg {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.enhances = enhances;
+        pkg
+    }
+
+    // The corpus shape: the openSUSE variant of a theme whose base
+    // requires the generic theme name enhances the base-and-marker
+    // conjunction, tipping the solver toward this variant when the
+    // flavour marker is present. The upstream variant carries no
+    // Enhances, so the gate is the selection mechanism, not excess.
+    // A nested plain conjunction carrying the marker gates the same
+    // way.
+    #[test]
+    fn flavour_gated_enhances_is_quiet() {
+        let pkg = enhances_pkg(vec![dep("(bla and branding-openSUSE)", 0)]);
+        assert!(excessive_enhances(&pkg).is_empty(), "{:?}", run(&pkg));
+        let pkg = enhances_pkg(vec![dep("((bla or bla-common) and branding-openSUSE)", 0)]);
+        assert!(excessive_enhances(&pkg).is_empty(), "{:?}", run(&pkg));
+    }
+
+    // The zypp spelling of the same gate is not credited: the
+    // packageand form stays charged until it is converted to the
+    // native rich form.
+    #[test]
+    fn packageand_enhances_still_fires() {
+        let pkg = enhances_pkg(vec![dep("packageand(bla:branding-openSUSE)", 0)]);
+        assert_eq!(excessive_enhances(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
+    // Near misses: a bare marker atom, a marker under `or`, a marker
+    // under `if`, a versioned marker, and a conjunction with no
+    // marker atom all still fire.
+    #[test]
+    fn non_gated_enhances_still_fire() {
+        let pkg = enhances_pkg(vec![
+            dep("branding-openSUSE", 0),
+            dep("(bla or branding-openSUSE)", 0),
+            dep("(bla if branding-openSUSE)", 0),
+            dep("(bla and branding-openSUSE >= 84)", 0),
+            dep("(bla and bla-common)", 0),
+        ]);
+        assert_eq!(excessive_enhances(&pkg).len(), 5, "{:?}", run(&pkg));
     }
 }
