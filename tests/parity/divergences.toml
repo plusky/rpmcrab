@@ -1003,6 +1003,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "branding-excessive-suggests"
+kind = "behaviour"
+reason = "Fix-and-diverge: branding-excessive-suggests is not charged on a Suggests naming the package's own documentation subpackage (<pkg>-doc). The reference charges every Suggests on a branding- or theme-shaped package. A Suggests on the package's own docs pulls in nothing but that package's documentation, and a Suggests is not installed by default, so it is not an excessive dependency in the sense the finding polices: a branding package dragging in other software. Any other Suggests still fires, versioned or not. Measured on the Factory corpus (51,589 binary RPMs, scoped re-run): the tag moves 1 finding to 0; the removed finding is exactly texlive-beamer-theme-albi suggesting texlive-beamer-theme-albi-doc, the universal TeX pattern of suggesting the -doc companion (182 Suggests *-doc lines in texlive-specs-c alone) surfacing only here because beamer-theme-albi is the only TeX package in the theme shape that carries a Suggests. Pinned by own_doc_suggests_is_quiet and non_own_doc_suggests_still_fire in branding_policy.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "BuildRootAndDateCheck"
 kind = "behaviour"
 reason = "The run day derives from UTC (OffsetDateTime::now_utc(), rendered by format_date()), while the reference's time.strftime('%b %e %Y') uses local time. Near midnight the two disagree on the civil date, which moves which files trigger file-contains-current-date and file-contains-date-and-time. The port takes UTC so the findings do not depend on the lint host's timezone."
