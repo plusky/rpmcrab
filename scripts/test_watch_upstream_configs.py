@@ -99,6 +99,7 @@ def _fake_generate(files, provenance):
             [],
             [],
             [],
+            [],
         )
 
     return fake_generate

@@ -284,6 +284,10 @@
 # threshold: severity decides the exit code; issue #699):
 #   BadnessThreshold: dropped 'BadnessThreshold = 999' from opensuse/opensuse.toml
 #
+# Removed UseVersionInChangelog lines (the port does not
+# implement the changelog-version check):
+#   UseVersionInChangelog: dropped 'UseVersionInChangelog = false' from opensuse/opensuse.toml
+#
 # Adjudicated digest records (Factory content decides;
 # see DIGEST_ADJUDICATIONS):
 #   digest: adjudicated dbus-services.toml record for cups path /usr/share/dbus-1/system.d/cups.conf to the Factory-shipped hash set (issue #760)
