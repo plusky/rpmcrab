@@ -170,6 +170,112 @@ impl PostCheck {
         )
         .expect("static regex"))
     }
+    /// State directories whose removal is credited in the
+    /// dangerous-command scan: `rm` operands under these paths are
+    /// package state, not payload. Deliberately not including /run or
+    /// /var/run: state-file removal there stays firing.
+    const VAR_STATE_PREFIXES: [&str; 5] = [
+        "/var/lib/",
+        "/var/adm/",
+        "/var/log/",
+        "/var/cache/",
+        "/var/yp/",
+    ];
+
+    /// Whether the first `rm` invocation on this line is credited:
+    /// every operand sits under a state prefix.
+    ///
+    /// `rest` is the text after the `rm` verb on the matched line.
+    /// Flags (`-rf`, `--one-file-system`, `--`) are skipped; parsing
+    /// stops at the first operator or redirect, so later commands and
+    /// redirect targets are never mistaken for operands. A line
+    /// continued with a trailing backslash is never credited: its
+    /// operands continue on the next line and are not all visible
+    /// here. Quoted operands count by their inner path. A non-`rm`
+    /// verb, a tag outside the five ruled scriptlet phases, an empty
+    /// operand list, or any operand outside the state prefixes keeps
+    /// the finding firing. Ledgered in
+    /// tests/parity/divergences.toml.
+    fn rm_var_state_credit(tag: &str, verb: &str, rest: &str) -> bool {
+        if verb != "rm" || !matches!(tag, "%post" | "%postun" | "%pre" | "%preun" | "%trigger") {
+            return false;
+        }
+        let rest = rest.trim_end();
+        if rest.ends_with('\\') {
+            return false;
+        }
+        let mut tokens: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut quote: Option<char> = None;
+        let mut in_token = false;
+        for ch in rest.chars() {
+            match quote {
+                Some(q) => {
+                    if ch == q {
+                        quote = None;
+                    } else {
+                        cur.push(ch);
+                    }
+                }
+                None => {
+                    if ch == '"' || ch == '\'' {
+                        quote = Some(ch);
+                        in_token = true;
+                    } else if ch.is_whitespace() {
+                        if in_token {
+                            tokens.push(std::mem::take(&mut cur));
+                            in_token = false;
+                        }
+                    } else {
+                        cur.push(ch);
+                        in_token = true;
+                    }
+                }
+            }
+        }
+        if in_token {
+            tokens.push(cur);
+        }
+        let mut idx = 0;
+        while idx < tokens.len() {
+            let t = &tokens[idx];
+            if t == "--" {
+                idx += 1;
+                break;
+            }
+            if t.starts_with('-') && t.len() > 1 {
+                idx += 1;
+            } else {
+                break;
+            }
+        }
+        let mut operands = 0;
+        while idx < tokens.len() {
+            let t = &tokens[idx];
+            let first = t.chars().next().unwrap_or(' ');
+            if first == ';'
+                || first == '&'
+                || first == '|'
+                || first == '>'
+                || first == '<'
+                || (t.chars().take_while(|c| c.is_ascii_digit()).count() > 0
+                    && (t.contains('>') || t.contains('<')))
+            {
+                break;
+            }
+            // A `..` component escapes the prefix, so it keeps firing.
+            if t.split('/').any(|c| c == "..") {
+                return false;
+            }
+            if !Self::VAR_STATE_PREFIXES.iter().any(|p| t.starts_with(p)) {
+                return false;
+            }
+            operands += 1;
+            idx += 1;
+        }
+        operands > 0
+    }
+
     fn selinux_regex() -> &'static Regex {
         static SELINUX_REGEX: OnceLock<Regex> = OnceLock::new();
         SELINUX_REGEX.get_or_init(|| {
@@ -1353,17 +1459,23 @@ impl PostCheck {
             // appears later, so a false opener cannot hide genuine
             // invocations.
             let scan_text = Self::without_heredoc_bodies(script);
-            if let Some(m) = Self::dangerous_regex()
-                .captures(&scan_text)
-                .ok()
-                .flatten()
-                .and_then(|c| c.get(2))
+            if let Some(caps) = Self::dangerous_regex().captures(&scan_text).ok().flatten()
+                && let Some(m) = caps.get(2)
             {
-                out.push((
-                    Level::Warning,
-                    finding("dangerous-command-in"),
-                    vec![m.as_str().to_string()],
-                ));
+                // The first dangerous command is the finding; a
+                // credited `rm` of package state is not one.
+                let line_end = scan_text[m.end()..]
+                    .find('\n')
+                    .map(|i| m.end() + i)
+                    .unwrap_or(scan_text.len());
+                let rest = &scan_text[m.end()..line_end];
+                if !Self::rm_var_state_credit(tag, m.as_str(), rest) {
+                    out.push((
+                        Level::Warning,
+                        finding("dangerous-command-in"),
+                        vec![m.as_str().to_string()],
+                    ));
+                }
             }
             if let Some(m) = Self::selinux_regex()
                 .captures(script)
@@ -2627,6 +2739,94 @@ mod tests {
         assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
             && f == "dangerous-command-in-%post"
             && d == &vec!["rm".to_string()]));
+    }
+
+    #[test]
+    fn dangerous_command_var_state_credit() {
+        // Every credited prefix, in the ruled phases, goes quiet.
+        for prefix in [
+            "/var/lib/",
+            "/var/adm/",
+            "/var/log/",
+            "/var/cache/",
+            "/var/yp/",
+        ] {
+            let script = format!("rm -rf {prefix}foo");
+            for tag in ["%post", "%postun", "%pre", "%preun", "%trigger"] {
+                let found = check().check_scriptlet("/bin/sh", &script, tag, &[], &[]);
+                assert!(
+                    !found
+                        .iter()
+                        .any(|(_, f, _)| f == &format!("dangerous-command-in-{tag}")),
+                    "{tag} {script} should be credited"
+                );
+            }
+        }
+        // /run and /var/run stay firing.
+        for path in ["/run/foo", "/var/run/foo"] {
+            let script = format!("rm -rf {path}");
+            let found = check().check_scriptlet("/bin/sh", &script, "%post", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post")
+            );
+        }
+        // Ruled phases only: %posttrans and %pretrans keep firing.
+        for tag in ["%posttrans", "%pretrans"] {
+            let found = check().check_scriptlet("/bin/sh", "rm -rf /var/lib/foo", tag, &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == &format!("dangerous-command-in-{tag}"))
+            );
+        }
+        // Mixed operands, variables, payload paths and other verbs keep firing.
+        for script in [
+            "rm -rf /var/lib/foo /etc/bar",
+            "rm -rf $dir",
+            "rm -rf /etc/foo",
+            "rm -rf /var/lib",
+            "rm -rf /var/lib/../etc/passwd",
+            "cp -f /var/lib/foo /var/lib/bar",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "{script} should still fire"
+            );
+        }
+        // Quoted operands, long flags, redirects and operators.
+        for script in [
+            "rm -f \"/var/lib/foo\"",
+            "rm -rf --one-file-system /var/lib/foo || true",
+            "rm /var/log/dump >/dev/null 2>&1 || true",
+            "rm -f /var/yp/nicknames ||:",
+            "/usr/bin/rm -f /var/lib/a /var/lib/b",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "{script} should be credited"
+            );
+        }
+        // A continued line is never credited: its operands are not all visible.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "rm -rf /var/lib/foo \\\n/etc/bar",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post")
+        );
     }
 
     #[test]
