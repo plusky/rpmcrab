@@ -3464,15 +3464,12 @@ fn is_bin_data_file(fname: &str) -> bool {
 
 /// Whether the first bytes of a payload file are a shebang. A file
 /// that cannot be opened is not proven shebang-free, so it counts as
-/// having one: the data credit is withheld (fail closed).
+/// having one: the data credit is withheld (fail closed). The read
+/// goes through the package, never a raw path: for a header-only
+/// package the stored path is the installed name, and opening it
+/// would probe a colliding host file.
 fn file_has_shebang(pkg: &Pkg, fname: &str) -> bool {
-    let Some(pkgfile) = pkg.files.iter().find(|f| f.name == fname) else {
-        return true;
-    };
-    let Ok(file) = std::fs::File::open(&pkgfile.path) else {
-        return true;
-    };
-    let Ok(bytes) = read_prefix(file, 2) else {
+    let Ok(bytes) = pkg.read_prefix(fname, 2) else {
         return true;
     };
     bytes.starts_with(b"#!")
@@ -4355,6 +4352,15 @@ impl FilesCheck {
     }
 
     fn check_bindir_exes(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
+        // Ghost names once, not per executable per path: the
+        // per-path linear scan over the file list is the hot
+        // shape for packages with many bindir entries.
+        let ghost_names: HashSet<&str> = pkg
+            .files
+            .iter()
+            .filter(|f| f.is_ghost())
+            .map(|f| f.name.as_str())
+            .collect();
         for (exe, paths) in &st.bindir_exes {
             if paths.len() > 1 {
                 // Rendered as a Python list repr, matching the reference
@@ -4376,17 +4382,20 @@ impl FilesCheck {
                 );
             }
             // A lone %ghost executable installs nothing, so it draws no
-            // man-page demand. Its duplicate bookkeeping is unchanged:
-            // a ghost entry still registers, so a ghost+real pair still
-            // fires duplicate-executable (pinned by
+            // man-page demand -- unless a symlink of the same name
+            // installs: the symlink still owes a man page, so the
+            // suppression is gated on the symlink paths too. Its
+            // duplicate bookkeeping is unchanged: a ghost entry
+            // still registers, so a ghost+real pair still fires
+            // duplicate-executable (pinned by
             // non_executable_in_bin_ghost_executable_registers_for_duplicates).
             let all_ghost = !paths.is_empty()
-                && paths.iter().all(|path| {
-                    pkg.files
-                        .iter()
-                        .find(|f| &f.name == path)
-                        .is_some_and(|f| f.is_ghost())
-                });
+                && paths.iter().all(|path| ghost_names.contains(path.as_str()))
+                && st
+                    .bindir_links
+                    .get(exe)
+                    .map(|links| links.iter().all(|path| ghost_names.contains(path.as_str())))
+                    .unwrap_or(true);
             if !all_ghost
                 && !st.man_basenames.contains(exe)
                 && !self.documented_alias(exe, paths, st)
@@ -16641,6 +16650,30 @@ print("hi")
                 .iter()
                 .any(|(n, d)| n == "duplicate-executable" && d.contains("ghosttool")),
             "ghost exe must draw no duplicate: {results:?}"
+        );
+    }
+
+    #[test]
+    fn symlink_plus_ghost_regular_still_owes_man_page() {
+        // A symlink of the exe name installs even when the only
+        // regular file of that name is %ghost: the ghost
+        // suppresses nothing, since the installed symlink still
+        // owes a man page.
+        let mut ghost = mkfile("/usr/bin/ghosttool", 0o100755, 41);
+        ghost.flags = RPMFILE_GHOST;
+        let (pkg, _dir) = pkg_with_files(vec![
+            ghost,
+            PkgFile {
+                linkto: "/usr/libexec/ghosttool-backend".to_string(),
+                ..mkfile("/bin/ghosttool", 0o120777, 42)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("ghosttool")),
+            "symlink exe with only a ghost regular must still owe a man page: {results:?}"
         );
     }
 
