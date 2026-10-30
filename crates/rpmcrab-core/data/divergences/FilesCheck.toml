@@ -1079,7 +1079,7 @@ since = "0.4.1"
 case = "global"
 check = "pem-private-key"
 kind = "behaviour"
-reason = "pem-private-key: the reference pattern spells the private-key header with four leading dashes, so it cannot match a well-formed PEM header; the port uses five dashes and fires on genuine shipped private keys."
+reason = "pem-private-key: the reference pattern spells the private-key header with four leading dashes, so it cannot match a well-formed PEM header; the port uses five dashes and fires on genuine shipped private keys. Scope: the match is whole-content (anchored, no multiline), so only a .pem file whose entire content is the header line fires -- a multi-line key file with body and footer stays silent. Pinned by files_check_pem_private_key and the pem-private-key-fixture (genuine.pem fires; multiline.pem stays silent)."
 since = "0.4.1"
 
 [[divergence]]
