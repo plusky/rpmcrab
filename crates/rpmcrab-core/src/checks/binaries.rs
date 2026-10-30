@@ -2550,7 +2550,16 @@ impl LddInfo {
         // `resolve_undefined_symbols` (installed packages) and in
         // `after_checks` (extracted packages); it is never filled
         // here.
-        if let Some(copy_type) = copy_reloc_type(elf.header.e_machine) {
+        if let Some(copy_type) = copy_reloc_type(elf.header.e_machine)
+            && elf
+                .dynrelas
+                .iter()
+                .chain(elf.dynrels.iter())
+                .any(|reloc| reloc.r_type == copy_type)
+        {
+            // The dynsym name table is collected only when a COPY
+            // relocation exists: most files carry none, and the
+            // loop below would push nothing for them.
             let dynsym_names: Vec<Option<&str>> = elf
                 .dynsyms
                 .iter()
@@ -3253,52 +3262,66 @@ impl BinariesState {
 /// Machines with no COPY relocation (RISC-V, LoongArch) yield
 /// `None`, so no COPY credit is captured for them.
 fn copy_reloc_type(e_machine: u16) -> Option<u32> {
+    use goblin::elf::header::*;
     match e_machine {
-        2 | 4 | 20 | 21 => Some(19), // SPARC, 68K, PPC, PPC64
-        3 | 62 => Some(5),           // 386, X86_64
-        8 => Some(126),              // MIPS
-        15 => Some(128),             // PARISC
-        22 => Some(9),               // S390
-        40 => Some(20),              // ARM
-        50 => Some(0x84),            // IA_64
-        183 => Some(1024),           // AARCH64
-        0x9026 => Some(24),          // ALPHA
+        EM_SPARC | EM_SPARCV9 | EM_68K | EM_PPC | EM_PPC64 => Some(19),
+        EM_386 | EM_X86_64 => Some(5),
+        EM_MIPS => Some(126),
+        EM_PARISC => Some(128),
+        EM_S390 => Some(9),
+        EM_ARM => Some(20),
+        EM_IA_64 => Some(0x84),
+        EM_AARCH64 => Some(1024),
+        // goblin defines no EM_ALPHA; 0x9026 is the Alpha machine.
+        0x9026 => Some(24),
         _ => None,
     }
 }
 
-/// A versioned dynamic symbol name with its `@VERSION` suffix
-/// removed: a version mismatch is a load error, not an unused
-/// dependency, so the producer compares bare names on both sides.
-fn strip_symbol_version(name: &str) -> &str {
-    name.split('@').next().unwrap_or(name)
-}
-
-/// The set-difference producer for one direct dependency: the
-/// dependency is unused iff no undefined symbol of the
-/// consumer, weak or strong, names a symbol the provider defines,
-/// and no symbol
-/// the consumer copies out of a provider is defined by this one.
-/// The provider must already be located; a dependency whose
-/// provider cannot be located never reaches this function and
-/// stays silent.
-fn dep_is_unused(
-    undefined_symbols: &[String],
-    weak_undefined_symbols: &[String],
-    copy_symbols: &[String],
+/// The set-difference producer for one direct dependency, judged
+/// in DT_NEEDED order: the dependency is unused iff no
+/// still-unsatisfied undefined symbol of the consumer, weak or
+/// strong, names a symbol the provider defines, and no
+/// still-unsatisfied symbol the consumer copies out of a provider
+/// is defined by this one. "Still-unsatisfied" means neither
+/// defined by the consumer itself (the loader binds such references
+/// to the consumer's own definition first) nor already satisfied by
+/// an earlier direct dependency in DT_NEEDED order (the loader
+/// binds each reference to the first defining provider in scope
+/// order, so a later duplicate defining the same symbol earns no
+/// credit from it). On a used verdict the symbols this provider
+/// satisfies are added to `satisfied`, so later dependencies are
+/// judged against the residue. The provider must already be
+/// located; a dependency whose provider cannot be located never
+/// reaches this function and stays silent.
+fn dep_is_unused<'a>(
+    undefined_symbols: &'a [String],
+    weak_undefined_symbols: &'a [String],
+    copy_symbols: &'a [String],
     provider_defined: &HashSet<String>,
+    consumer_defined: &HashSet<&str>,
+    satisfied: &mut HashSet<&'a str>,
 ) -> bool {
     let defined: HashSet<&str> = provider_defined
         .iter()
-        .map(|sym| strip_symbol_version(sym))
+        .map(|sym| symbol_base(sym))
         .collect();
-    !undefined_symbols
+    let mut used = false;
+    for sym in undefined_symbols
         .iter()
         .chain(weak_undefined_symbols.iter())
-        .any(|sym| defined.contains(strip_symbol_version(sym)))
-        && !copy_symbols
-            .iter()
-            .any(|sym| defined.contains(strip_symbol_version(sym)))
+        .chain(copy_symbols.iter())
+    {
+        let base = symbol_base(sym);
+        if consumer_defined.contains(base) || satisfied.contains(base) {
+            continue;
+        }
+        if defined.contains(base) {
+            satisfied.insert(base);
+            used = true;
+        }
+    }
+    !used
 }
 
 /// Locate one direct dependency the way the loader does: the
@@ -3311,16 +3334,18 @@ fn direct_provider(
     system: &SystemLibraries,
     soname: &str,
     is_64: Option<bool>,
-    ctx: &SearchContext,
+    chain_dirs: &[PathBuf],
+    runpath_dirs: &[PathBuf],
     owner: &PackageId,
 ) -> Option<Arc<SymbolProvider>> {
     if let Some((_id, provider)) = providers.lookup(soname, owner) {
         return Some(provider);
     }
-    let chain_dirs: Vec<PathBuf> = ctx.rpath_chain.iter().flatten().cloned().collect();
+    // The caller flattens the RPATH chain once per consumer file;
+    // flattening here would repeat it for every direct dependency.
     system
-        .provider_in_dirs(soname, is_64, &chain_dirs)
-        .or_else(|| system.provider_in_dirs(soname, is_64, &ctx.runpath_dirs))
+        .provider_in_dirs(soname, is_64, chain_dirs)
+        .or_else(|| system.provider_in_dirs(soname, is_64, runpath_dirs))
         .or_else(|| system.provider(soname, is_64))
 }
 
@@ -3652,22 +3677,45 @@ fn resolve_undefined_symbols(
         // locatable dependency look unused). A file with
         // DT_NEEDED entries but no undefined symbols has every
         // dependency unused unless COPY-credited.
+        if ldd.dependencies.is_empty() && ldd.undefined_symbols.is_empty() {
+            continue;
+        }
+        // One search context serves both the unused producer below
+        // and the undefined resolution after it (previously built twice).
+        let root_ctx = SearchContext::for_object(
+            &ldd.rpath,
+            &ldd.runpath,
+            ldd.has_runpath,
+            &installed_dir(&pkgfile.name),
+            &[],
+        );
         if !ldd.dependencies.is_empty() {
-            let root_ctx = SearchContext::for_object(
-                &ldd.rpath,
-                &ldd.runpath,
-                ldd.has_runpath,
-                &installed_dir(&pkgfile.name),
-                &[],
-            );
             let mut unused = Vec::new();
+            let consumer_defined: HashSet<&str> = ldd
+                .defined_symbols
+                .iter()
+                .map(|sym| symbol_base(sym))
+                .collect();
+            let mut satisfied: HashSet<&str> = HashSet::new();
+            // Each distinct dependency is judged once, in
+            // first-occurrence DT_NEEDED order: re-judging a repeat
+            // after its first occurrence satisfied its symbols would
+            // wrongly report the repeat as unused.
+            let mut seen: HashSet<&str> = HashSet::new();
+            let chain_dirs: Vec<PathBuf> = root_ctx.rpath_chain.iter().flatten().cloned().collect();
             for dep in &ldd.dependencies {
-                if unused.iter().any(|u| u == dep) {
+                if !seen.insert(dep.as_str()) {
                     continue;
                 }
-                let Some(provider) =
-                    direct_provider(&providers, system, dep, ldd.is_64, &root_ctx, owner)
-                else {
+                let Some(provider) = direct_provider(
+                    &providers,
+                    system,
+                    dep,
+                    ldd.is_64,
+                    &chain_dirs,
+                    &root_ctx.runpath_dirs,
+                    owner,
+                ) else {
                     // Unlocatable: silent, never reported.
                     continue;
                 };
@@ -3676,6 +3724,8 @@ fn resolve_undefined_symbols(
                     &ldd.weak_undefined_symbols,
                     &ldd.copy_symbols,
                     &provider.defined,
+                    &consumer_defined,
+                    &mut satisfied,
                 ) {
                     unused.push(dep.clone());
                 }
@@ -3687,13 +3737,6 @@ fn resolve_undefined_symbols(
         }
         let direct = ldd.dependencies.clone();
         let is_64 = ldd.is_64;
-        let root_ctx = SearchContext::for_object(
-            &ldd.rpath,
-            &ldd.runpath,
-            ldd.has_runpath,
-            &installed_dir(&pkgfile.name),
-            &[],
-        );
         let provided = provided_by_closure(
             &providers,
             system,
@@ -5655,9 +5698,12 @@ impl BinariesCheck {
                 let head = &data[..data.len().min(2048)];
                 // A 50-byte window could never equal the 52-byte marker
                 // prefix; the substring search alone matches the reference.
-                if String::from_utf8_lossy(head).contains(
-                    "This wrapper script should never be moved out of the build directory",
-                ) {
+                // Byte-window search: the marker is pure ASCII,
+                // and lossy conversion preserves ASCII bytes
+                // exactly, so searching the raw bytes matches the
+                // lossy string without allocating it.
+                let marker = "This wrapper script should never be moved out of the build directory";
+                if head.windows(marker.len()).any(|w| w == marker.as_bytes()) {
                     add_info(
                         out,
                         Level::Error,
@@ -7147,11 +7193,12 @@ impl BinariesCheck {
                     file_name: pkgfile.name.clone(),
                     undefined_symbols: ldd.undefined_symbols.clone(),
                     weak_undefined_symbols: ldd.weak_undefined_symbols.clone(),
-                    // The unused resolution intersects
-                    // undefined symbols with the provider's
-                    // defined set only; the consumer's own
-                    // defined symbols are never consulted.
-                    defined_symbols: HashSet::new(),
+                    // The consumer's own defined symbols:
+                    // the unused producer excludes them from
+                    // provider credit, since the loader binds
+                    // such references to the consumer's own
+                    // definition first.
+                    defined_symbols: ldd.defined_symbols.iter().cloned().collect(),
                     dependencies: ldd.dependencies.clone(),
                     is_64: ldd.is_64,
                     rpath: ldd.rpath.clone(),
@@ -8429,14 +8476,28 @@ impl Check for BinariesCheck {
                     Level::Warning
                 };
                 let mut seen: Vec<&str> = Vec::new();
+                let consumer_defined: HashSet<&str> = consumer
+                    .defined_symbols
+                    .iter()
+                    .map(|sym| symbol_base(sym))
+                    .collect();
+                let mut satisfied: HashSet<&str> = HashSet::new();
+                let chain_dirs: Vec<PathBuf> =
+                    root_ctx.rpath_chain.iter().flatten().cloned().collect();
                 for dep in &consumer.dependencies {
                     if seen.iter().any(|d| d == dep) {
                         continue;
                     }
                     seen.push(dep);
-                    let Some(provider) =
-                        direct_provider(&providers, system, dep, consumer.is_64, &root_ctx, &owner)
-                    else {
+                    let Some(provider) = direct_provider(
+                        &providers,
+                        system,
+                        dep,
+                        consumer.is_64,
+                        &chain_dirs,
+                        &root_ctx.runpath_dirs,
+                        &owner,
+                    ) else {
                         continue;
                     };
                     if dep_is_unused(
@@ -8444,6 +8505,8 @@ impl Check for BinariesCheck {
                         &consumer.weak_undefined_symbols,
                         &consumer.copy_symbols,
                         &provider.defined,
+                        &consumer_defined,
+                        &mut satisfied,
                     ) {
                         out.add_info(make_finding(
                             &package.pkg_name,
@@ -13060,39 +13123,130 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn strip_symbol_version_strips_suffix() {
-        assert_eq!(strip_symbol_version("foo@VERSION"), "foo");
-        assert_eq!(strip_symbol_version("foo@@VERSION"), "foo");
-        assert_eq!(strip_symbol_version("foo"), "foo");
+    fn symbol_base_strips_suffix() {
+        assert_eq!(symbol_base("foo@VERSION"), "foo");
+        assert_eq!(symbol_base("foo@@VERSION"), "foo");
+        assert_eq!(symbol_base("foo"), "foo");
+    }
+
+    #[test]
+    fn dep_is_unused_loader_order_and_self_definition() {
+        // DT_NEEDED order: the first provider defining a symbol
+        // satisfies it; a later duplicate earns no credit from it.
+        let undef: Vec<String> = vec!["shared_sym".to_string()];
+        let empty: Vec<String> = Vec::new();
+        let first: HashSet<String> = ["shared_sym".to_string()].into_iter().collect();
+        let second: HashSet<String> = ["shared_sym".to_string()].into_iter().collect();
+        let no_self: HashSet<&str> = HashSet::new();
+        let mut satisfied: HashSet<&str> = HashSet::new();
+        assert!(!dep_is_unused(
+            &undef,
+            &empty,
+            &empty,
+            &first,
+            &no_self,
+            &mut satisfied
+        ));
+        assert!(dep_is_unused(
+            &undef,
+            &empty,
+            &empty,
+            &second,
+            &no_self,
+            &mut satisfied
+        ));
+        // Self-definition: a symbol the consumer itself defines
+        // never credits a provider that defines it.
+        let own_undef: Vec<String> = vec!["own_sym".to_string()];
+        let provider: HashSet<String> = ["own_sym".to_string()].into_iter().collect();
+        let self_defined: HashSet<&str> = ["own_sym"].into_iter().collect();
+        let mut satisfied: HashSet<&str> = HashSet::new();
+        assert!(dep_is_unused(
+            &own_undef,
+            &empty,
+            &empty,
+            &provider,
+            &self_defined,
+            &mut satisfied
+        ));
+        // COPY credit follows the same order.
+        let copied: Vec<String> = vec!["copied_sym".to_string()];
+        let first_copy: HashSet<String> = ["copied_sym".to_string()].into_iter().collect();
+        let second_copy: HashSet<String> = ["copied_sym".to_string()].into_iter().collect();
+        let mut satisfied: HashSet<&str> = HashSet::new();
+        assert!(!dep_is_unused(
+            &empty,
+            &empty,
+            &copied,
+            &first_copy,
+            &no_self,
+            &mut satisfied
+        ));
+        assert!(dep_is_unused(
+            &empty,
+            &empty,
+            &copied,
+            &second_copy,
+            &no_self,
+            &mut satisfied
+        ));
+    }
+
+    #[test]
+    fn copy_reloc_type_covers_sparcv9() {
+        assert_eq!(copy_reloc_type(goblin::elf::header::EM_SPARCV9), Some(19));
+        assert_eq!(copy_reloc_type(goblin::elf::header::EM_SPARC), Some(19));
+        assert_eq!(copy_reloc_type(goblin::elf::header::EM_RISCV), None);
+        assert_eq!(copy_reloc_type(goblin::elf::header::EM_LOONGARCH), None);
     }
 
     #[test]
     fn dep_is_unused_set_difference_with_copy_credit() {
         let defined: HashSet<String> = ["bar_sym".to_string()].into_iter().collect();
         // Used: an undefined symbol names a defined one.
-        assert!(!dep_is_unused(&["bar_sym".to_string()], &[], &[], &defined));
+        assert!(!dep_is_unused(
+            &["bar_sym".to_string()],
+            &[],
+            &[],
+            &defined,
+            &HashSet::new(),
+            &mut HashSet::new()
+        ));
         // Unused: no undefined symbol names a defined one.
         assert!(dep_is_unused(
             &["other_sym".to_string()],
             &[],
             &[],
-            &defined
+            &defined,
+            &HashSet::new(),
+            &mut HashSet::new()
         ));
         // COPY-only: credited, not fired.
-        assert!(!dep_is_unused(&[], &[], &["bar_sym".to_string()], &defined));
+        assert!(!dep_is_unused(
+            &[],
+            &[],
+            &["bar_sym".to_string()],
+            &defined,
+            &HashSet::new(),
+            &mut HashSet::new()
+        ));
         // A versioned spelling on either side still matches.
         assert!(!dep_is_unused(
             &["bar_sym@VERSION".to_string()],
             &[],
             &[],
-            &defined
+            &defined,
+            &HashSet::new(),
+            &mut HashSet::new()
         ));
         // A provider defining nothing leaves the dep unused.
         assert!(dep_is_unused(
             &["bar_sym".to_string()],
             &[],
             &[],
-            &HashSet::new()
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut HashSet::new()
         ));
         // Weak-only: a weak reference to a defined symbol counts as
         // use, matching `ldd -u` (observed instance: a Haskell
@@ -13101,14 +13255,18 @@ description = "explicit priority string bypasses the system crypto policy"
             &[],
             &["__cxa_finalize".to_string()],
             &[],
-            &["__cxa_finalize".to_string()].into_iter().collect()
+            &["__cxa_finalize".to_string()].into_iter().collect(),
+            &HashSet::new(),
+            &mut HashSet::new()
         ));
         // Weak-only with no defined match stays unused.
         assert!(dep_is_unused(
             &[],
             &["other_sym".to_string()],
             &[],
-            &defined
+            &defined,
+            &HashSet::new(),
+            &mut HashSet::new()
         ));
     }
 
