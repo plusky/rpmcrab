@@ -1043,12 +1043,16 @@ impl Check for SharedLibraryPolicyCheck {
         // source, or a provider set with no same-source member still fires:
         // single-package runs are unchanged, and the requiring package
         // itself never satisfies its own pin (its own entry is excluded).
+        // No candidates, no index: the provider maps scan the whole
+        // run, so they are built only when a candidate needs them.
         let mut by_name: HashMap<&str, Vec<&SeenPkg>> = HashMap::new();
         let mut by_provide: HashMap<&str, Vec<&SeenPkg>> = HashMap::new();
-        for entry in &self.seen {
-            by_name.entry(entry.name.as_str()).or_default().push(entry);
-            for provide in &entry.provides {
-                by_provide.entry(provide.as_str()).or_default().push(entry);
+        if !self.fixed_dep_candidates.is_empty() {
+            for entry in &self.seen {
+                by_name.entry(entry.name.as_str()).or_default().push(entry);
+                for provide in &entry.provides {
+                    by_provide.entry(provide.as_str()).or_default().push(entry);
+                }
             }
         }
         for candidate in std::mem::take(&mut self.fixed_dep_candidates) {
@@ -3098,6 +3102,90 @@ mod tests {
             results.len(),
             1,
             "same-arch different-source pin must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_dependency_candidates_merge_across_workers() {
+        // The merge path must carry fixed-dependency candidates, not
+        // just seen records: a candidate dropped in export/import
+        // would diverge -j runs from sequential runs silently, so
+        // the firing shape is the load-bearing half (a silenced pin
+        // shows no finding either way).
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let requirer = fixed_dep_requirer(&dir, "barbaz", "foo-1-1.src.rpm");
+        let provider = set_pkg("barbaz", "other-1-1.src.rpm", vec![], vec![], None);
+        let config = Config::default();
+        let mut w0 = checker();
+        let mut out0 = Filter::new(&config, Color::for_tty(false)).unwrap();
+        w0.check_binary(&requirer, &config, &mut out0);
+        let s0 = w0.export_state().expect("worker 0 exports");
+        let mut w1 = checker();
+        let mut out1 = Filter::new(&config, Color::for_tty(false)).unwrap();
+        w1.check_binary(&provider, &config, &mut out1);
+        let s1 = w1.export_state().expect("worker 1 exports");
+        let mut main = checker();
+        main.import_state(s0);
+        main.import_state(s1);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        main.after_checks(&config, &mut out);
+        let results: Vec<_> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "shlib-fixed-dependency")
+            .collect();
+        assert_eq!(
+            results.len(),
+            1,
+            "merged candidate must still fire: {:?}",
+            out.results()
+        );
+        // Same-source through the merge stays silent.
+        let requirer = fixed_dep_requirer(&dir, "barbaz", "foo-1-1.src.rpm");
+        let provider = set_pkg("barbaz", "foo-1-1.src.rpm", vec![], vec![], None);
+        let mut w0 = checker();
+        let mut out0 = Filter::new(&config, Color::for_tty(false)).unwrap();
+        w0.check_binary(&requirer, &config, &mut out0);
+        let s0 = w0.export_state().expect("worker 0 exports");
+        let mut w1 = checker();
+        let mut out1 = Filter::new(&config, Color::for_tty(false)).unwrap();
+        w1.check_binary(&provider, &config, &mut out1);
+        let s1 = w1.export_state().expect("worker 1 exports");
+        let mut main = checker();
+        main.import_state(s0);
+        main.import_state(s1);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        main.after_checks(&config, &mut out);
+        assert!(
+            out.results()
+                .iter()
+                .all(|(n, _)| n != "shlib-fixed-dependency"),
+            "merged same-source candidate must stay quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn fixed_dependency_name_first_ignores_provides() {
+        // Exclusive name-first lookup: an exact-name provider from a
+        // different source beats a same-source provides-only provider,
+        // so the pin still fires. Unioning provides in would silence
+        // it through the same-source provider.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let requirer = fixed_dep_requirer(&dir, "barbaz", "foo-1-1.src.rpm");
+        let named = set_pkg("barbaz", "other-1-1.src.rpm", vec![], vec![], None);
+        let providing = set_pkg(
+            "other-pkg",
+            "foo-1-1.src.rpm",
+            vec![],
+            vec![dep("barbaz")],
+            None,
+        );
+        let results = fixed_dep_results(&[&requirer, &named, &providing]);
+        assert_eq!(
+            results.len(),
+            1,
+            "name-first exclusivity must keep firing: {results:?}"
         );
     }
 
