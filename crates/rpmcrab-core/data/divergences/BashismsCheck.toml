@@ -16,3 +16,10 @@ kind = "severity"
 reason = "Deliberate severity recalibration (plusky/rpmcrab#593): the port reports I where the reference reports W. The finding is a heuristic portability hint produced by the external checkbashisms tool, not a defect in the script; the companion bin-sh-syntax-error, a real parse failure, stays W (pcp calibration set)."
 since = "0.3.0"
 upstream = "https://github.com/plusky/rpmcrab/issues/593"
+
+[[divergence]]
+case = "global"
+check = "bin-sh-syntax-error"
+kind = "behaviour"
+reason = "Fix-and-diverge: the port skips polyglot wrappers (a shell prologue that hands execution to another interpreter via an exec, eval-exec, bare-interpreter, or variable -x switch on the script itself) and generator-template files (.skel, .ww, .in) instead of running `dash -n` on them; the reference reports the other language's code and unrendered template text as shell syntax errors."
+since = "0.4.1"
