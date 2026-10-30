@@ -446,7 +446,7 @@ impl PostCheck {
     /// A rotation (a backup name moved to a `.old` name, whose
     /// destination carries no backup suffix) is not a
     /// backup-direction operation either; it is credited separately
-    /// by first_dangerous_command_is_rotation.
+    /// by is_rotation.
     fn dangerous_match_is_backup(scan_text: &str, operand_at: usize, verb: &str) -> bool {
         if !matches!(verb, "cp" | "mv" | "rm") {
             return false;
@@ -494,15 +494,20 @@ impl PostCheck {
         }
     }
 
-    /// Whether the first dangerous command in the heredoc-blanked
+    /// Whether a dangerous command in the heredoc-blanked
     /// scriptlet text is a `.rpmsave` rotation aside-step: `mv`/`cp`
     /// of a `.rpmsave` path to the same path with `.old` appended,
     /// so rpm's own leftover saved config is set aside for a fresh
     /// `.rpmsave` to be created. The command is read from the end of
     /// the verb match: backslash-newline continuations are joined,
-    /// option flags are skipped, and the first operands are compared
+    /// option flags are skipped (a target-directory flag fails
+    /// closed instead), and the first operands are compared
     /// with quotes stripped, so variable-carrying paths
     /// (`/etc/${i}.rpmsave`) match their rotated form literally.
+    /// The tokenizer below stays separate from
+    /// `logical_line_after`+`split_operands`: the two are close but
+    /// not provably identical (a trailing token before an operator
+    /// is kept here and dropped there), so no sharing.
     /// Exactly two operands are required: a restore to the live
     /// path, a backup to `.rpmsave`, a multi-operand move, or any
     /// other verb still fires. A glob operand keeps firing too: a
@@ -510,7 +515,7 @@ impl PostCheck {
     /// one rpm leftover, so it is not operand-exact (the same rule
     /// the `rm` state credit applies). An unescaped newline ends the
     /// command, so words on later lines are never operands.
-    fn first_dangerous_command_is_rotation(scan_text: &str, verb: &str, verb_end: usize) -> bool {
+    fn is_rotation(scan_text: &str, verb: &str, verb_end: usize) -> bool {
         if verb != "mv" && verb != "cp" {
             return false;
         }
@@ -519,7 +524,7 @@ impl PostCheck {
         let mut in_token = false;
         let mut in_single = false;
         let mut in_double = false;
-        let mut chars = scan_text[verb_end..].chars().peekable();
+        let mut chars = scan_text[verb_end..].chars();
         // Push the pending token, if any. The whitespace arm
         // resets `in_token` itself because the loop continues there;
         // the break arms leave it alone (the value is never read
@@ -615,11 +620,19 @@ impl PostCheck {
         push_token!();
         // Skip option flags (`-v`, `--backup=numbered`); `--` ends
         // the flags and is itself skipped. A lone `-` is an operand.
+        // A target-directory flag fails closed: a move into a
+        // directory is never a rotation aside-step.
         let mut operands = tokens.into_iter().peekable();
         while let Some(t) = operands.peek() {
             if t == "--" {
                 operands.next();
                 break;
+            }
+            if t.starts_with("-t")
+                || t == "--target-directory"
+                || t.starts_with("--target-directory=")
+            {
+                return false;
             }
             if t.len() > 1 && t.starts_with('-') {
                 operands.next();
@@ -631,26 +644,17 @@ impl PostCheck {
         if operands.len() != 2 {
             return false;
         }
-        fn strip_quotes(t: &str) -> &str {
-            let b = t.as_bytes();
-            if b.len() >= 2
-                && ((b[0] == b'\'' && b[b.len() - 1] == b'\'')
-                    || (b[0] == b'"' && b[b.len() - 1] == b'"'))
-            {
-                &t[1..t.len() - 1]
-            } else {
-                t
-            }
-        }
-        let source = strip_quotes(&operands[0]);
-        let dest = strip_quotes(&operands[1]);
+        // The tokenizer above already drops quote characters, so
+        // the operands never carry surrounding quotes.
+        let source = operands[0].as_str();
+        let dest = operands[1].as_str();
         // A glob operand is not operand-exact: `mv /etc/*.rpmsave
         // /etc/*.rpmsave.old` moves a set of files, not one rpm
         // leftover, so it keeps firing.
         if source.contains(['*', '?', '[']) || dest.contains(['*', '?', '[']) {
             return false;
         }
-        source.ends_with(".rpmsave") && dest == format!("{source}.old")
+        source.ends_with(".rpmsave") && dest.strip_suffix(".old") == Some(source)
     }
 
     fn selinux_regex() -> &'static Regex {
@@ -1923,7 +1927,7 @@ impl PostCheck {
                 });
                 if !Self::rm_var_state_credit(tag, m.as_str(), rest)
                     && !backup
-                    && !Self::first_dangerous_command_is_rotation(&scan_text, m.as_str(), m.end())
+                    && !Self::is_rotation(&scan_text, m.as_str(), m.end())
                 {
                     offending = Some(m.as_str().to_string());
                     break;
@@ -3677,6 +3681,10 @@ mod tests {
             ),
             // Multi-operand move: not a two-operand rotation.
             ("mv /etc/foo.rpmsave /etc/foo.rpmsave.old /etc/spare/", "mv"),
+            // The cp firing shapes: wrong destination and
+            // multi-operand, mirroring the mv shapes above.
+            ("cp /etc/foo.rpmsave /etc/bar.rpmsave.old", "cp"),
+            ("cp /etc/foo.rpmsave /etc/foo.rpmsave.old /etc/spare/", "cp"),
         ] {
             let found = check().check_scriptlet("/bin/sh", script, "%pre", &[], &[]);
             assert!(
@@ -3686,6 +3694,99 @@ mod tests {
                 "shape went silent: {script}"
             );
         }
+    }
+
+    #[test]
+    fn dangerous_command_rotation_then_dangerous_still_fires() {
+        // Every match is evaluated: a credited rotation first must
+        // not hide a genuine dangerous command later.
+        let script = "mv /etc/foo.rpmsave /etc/foo.rpmsave.old; rm -rf /bar\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "dangerous-command-in-%post"
+            && d == &vec!["rm".to_string()]));
+    }
+
+    #[test]
+    fn dangerous_command_rotation_posttrans_is_silent() {
+        // The rotation census counts one %posttrans row: the credit
+        // carries no phase gate, so the %posttrans rotation stays
+        // quiet — while a genuine command in %posttrans still fires,
+        // proving the scan runs for the phase.
+        let script = "mv /etc/foo.rpmsave /etc/foo.rpmsave.old\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%posttrans", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%posttrans"),
+            "posttrans rotation must stay silent: {found:?}"
+        );
+        let found = check().check_scriptlet("/bin/sh", "rm -rf /bar\n", "%posttrans", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "dangerous-command-in-%posttrans"
+            && d == &vec!["rm".to_string()]));
+    }
+
+    #[test]
+    fn dangerous_command_rotation_verb_gate_still_fires() {
+        // The rotation rule gates to mv/cp: a rotation-shaped ln
+        // (matched by the dangerous regex) still fires.
+        let script = "ln /etc/foo.rpmsave /etc/foo.rpmsave.old\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "dangerous-command-in-%post"
+            && d == &vec!["ln".to_string()]));
+    }
+
+    #[test]
+    fn dangerous_command_rotation_target_directory_still_fires() {
+        // A target-directory move is a move into a directory, never
+        // a rotation aside-step — including the attached forms,
+        // where the old flag-skip left exactly the rotation shape.
+        for script in [
+            "mv --target-directory=/tmp/dir /etc/foo.rpmsave /etc/foo.rpmsave.old\n",
+            "mv -t/tmp/dir /etc/foo.rpmsave /etc/foo.rpmsave.old\n",
+            "mv --target-directory /tmp/dir /etc/foo.rpmsave /etc/foo.rpmsave.old\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["mv".to_string()]),
+                "target-directory move must fire: {script}"
+            );
+        }
+        // The separate `-t` form at the rotation-function level:
+        // the old flag-skip read it as the rotation operands.
+        assert!(!PostCheck::is_rotation(
+            "mv -t /etc/foo.rpmsave /etc/foo.rpmsave.old",
+            "mv",
+            2
+        ));
+    }
+
+    #[test]
+    fn rotation_operand_count_and_terminator_shapes() {
+        // 1-operand and 0-operand shapes never credit; `--` ends
+        // the flags and is itself skipped, so a two-operand shape
+        // after `--` still credits; a lone `-` is an operand, so it
+        // breaks the two-operand shape.
+        assert!(!PostCheck::is_rotation(
+            "mv /etc/foo.rpmsave",
+            "mv",
+            2
+        ));
+        assert!(!PostCheck::is_rotation("mv", "mv", 2));
+        assert!(PostCheck::is_rotation(
+            "mv -- /etc/foo.rpmsave /etc/foo.rpmsave.old",
+            "mv",
+            2
+        ));
+        assert!(!PostCheck::is_rotation(
+            "mv - /etc/foo.rpmsave /etc/foo.rpmsave.old",
+            "mv",
+            2
+        ));
     }
 
     #[test]
