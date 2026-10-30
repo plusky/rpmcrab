@@ -3316,6 +3316,37 @@ mod tests {
     }
 
     #[test]
+    fn dangerous_command_in_plain_heredoc_body_is_silent() {
+        // Unquoted delimiter: the body is still written out, not
+        // executed, so the named command stays silent.
+        let script = "cat > /tmp/note <<EOF\nrm -rf /foo\nEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post")
+        );
+    }
+
+    #[test]
+    fn dangerous_command_heredoc_body_lines_fire_standalone() {
+        // Firing controls for the silenced body lines: the same
+        // commands outside any heredoc still fire.
+        for script in [
+            "rm -rf /foo\n",
+            "/usr/bin/perl /usr/share/texmf/tlpkg/tlpostcode/x.pl install /usr/share/texmf\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "standalone line should fire: {script}"
+            );
+        }
+    }
+
+    #[test]
     fn dangerous_command_in_dash_heredoc_body_is_silent() {
         let script = "cat <<- 'EOF'\n\trm -rf /foo\n\tEOF\n";
         let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
