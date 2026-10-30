@@ -3607,6 +3607,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn epoch_tag_emits_for_explicit_zero() {
+        // Explicit Epoch: 0 fires epoch-tag: the gate is the
+        // presence of the tag (Some(0)), not its value, so zero
+        // earns no exemption. An absent epoch would report
+        // no-epoch-tag instead under UseEpoch, never epoch-tag.
+        let (_tmp, pkg) = fixture_pkg("tags-zeroepoch-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "epoch-tag");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(hits[0].1, "tags-zeroepoch.noarch: E: epoch-tag 0");
+        assert!(
+            tag_hits(&results, "unreasonable-epoch").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
+
     /// Negative pin for the deleted `summary-use-invalid-word` finding:
     /// a summary matching the configured ForbiddenWords must stay silent,
     /// and `cargo test` (not just the reference-coverage auditor) must
