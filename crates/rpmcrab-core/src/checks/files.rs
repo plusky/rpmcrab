@@ -4036,15 +4036,11 @@ fn is_binary_container(path: &Path) -> bool {
 /// same suffix in any other package still fires: an ungated suffix
 /// rule would silence a trojan-source control in whatever package
 /// happened to ship that path.
-fn is_bidi_demo_page(pkg: &Pkg, name: &str) -> bool {
-    name.ends_with("/doc/TestPage.txt")
-        && (pkg.name == "yudit"
-            || matches!(
-                pkg.tag_str(librpm::Tag::SOURCERPM)
-                    .as_deref()
-                    .map(source_pkg_name),
-                Some("yudit")
-            ))
+fn is_bidi_demo_page(pkg_name: &str, source_name: Option<&str>, name: &str) -> bool {
+    // The SOURCERPM value arrives pre-parsed (the `sysconfig_fillup_exempt`
+    // shape), so the arm is directly unit-testable without a fixture
+    // whose header names a yudit source package.
+    name.ends_with("/doc/TestPage.txt") && (pkg_name == "yudit" || source_name == Some("yudit"))
 }
 
 fn strip_quotes(re: &Regex, s: &str) -> String {
@@ -4283,7 +4279,13 @@ impl FilesCheck {
             if is_binary_container(path) {
                 continue;
             }
-            if is_bidi_demo_page(pkg, &pkgfile.name) {
+            if is_bidi_demo_page(
+                &pkg.name,
+                pkg.tag_str(librpm::Tag::SOURCERPM)
+                    .as_deref()
+                    .map(source_pkg_name),
+                &pkgfile.name,
+            ) {
                 continue;
             }
             if let Some(found) = first_bidi_control_in_file(path) {
@@ -13379,6 +13381,43 @@ print("hi")
             bidi_findings(&out).is_empty(),
             "demo test page out of scope"
         );
+    }
+
+    #[test]
+    fn bidi_demo_page_sourcerpm_arm() {
+        // SOURCERPM-subpackage arm, previously untested: a non-yudit
+        // binary built from the yudit source package is silent on both
+        // shipped demo-page paths, while any other source, no source,
+        // or a non-demo path is not credited.
+        for path in [
+            "/usr/share/yudit/doc/TestPage.txt",
+            "/usr/share/doc/packages/yudit/doc/TestPage.txt",
+        ] {
+            assert!(
+                is_bidi_demo_page("yudit-doc", Some("yudit"), path),
+                "SOURCERPM arm must credit {path}"
+            );
+        }
+        assert!(is_bidi_demo_page(
+            "yudit",
+            None,
+            "/usr/share/yudit/doc/TestPage.txt"
+        ));
+        assert!(!is_bidi_demo_page(
+            "other",
+            Some("other"),
+            "/usr/share/yudit/doc/TestPage.txt"
+        ));
+        assert!(!is_bidi_demo_page(
+            "yudit-doc",
+            None,
+            "/usr/share/yudit/doc/TestPage.txt"
+        ));
+        assert!(!is_bidi_demo_page(
+            "yudit-doc",
+            Some("yudit"),
+            "/usr/share/yudit/doc/Other.txt"
+        ));
     }
 
     #[test]
