@@ -35,7 +35,11 @@ impl TmpFilesCheck {
 
     /// Compare tmpfiles.d paths ignoring trailing slashes: a declared
     /// `/run/foo/` and a shipped `/run/foo` denote the same path, and so
-    /// do a declared `/run/foo` and a shipped `/run/foo/`. The root path
+    /// do a declared `/run/foo` and a shipped `/run/foo/`. The strip
+    /// applies to every interesting type, not only directories: a
+    /// trailing slash on a non-directory declaration is invalid input,
+    /// and exact equality after normalization prevents prefix matches
+    /// (`/run/foo/` never matches a shipped `/run/foobar`). The root path
     /// itself is never emptied by the strip.
     fn normalize_path(path: &str) -> &str {
         let stripped = path.trim_end_matches('/');
@@ -65,10 +69,8 @@ impl TmpFilesCheck {
                 continue;
             }
             let path = parts[1];
-            if !normalized_files
-                .iter()
-                .any(|f| *f == Self::normalize_path(path))
-            {
+            let normalized_path = Self::normalize_path(path);
+            if !normalized_files.contains(&normalized_path) {
                 missing.push(path.to_string());
             }
         }
@@ -201,6 +203,13 @@ mod tests {
         let content = "d /run/foo/// 0755 root root -\n";
         let missing = TmpFilesCheck::missing_paths(content, &["/run/foo".to_string()]);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn prefix_lookalike_still_fires() {
+        let content = "d /run/foo/ 0755 root root -\n";
+        let missing = TmpFilesCheck::missing_paths(content, &["/run/foobar".to_string()]);
+        assert_eq!(missing, vec!["/run/foo/".to_string()]);
     }
 
     #[test]
