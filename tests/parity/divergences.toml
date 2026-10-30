@@ -4248,7 +4248,7 @@ since = "0.1.0"
 case = "global"
 check = "TagsCheck"
 kind = "detail"
-reason = "Port-only `--explain` descriptions for `invalid-buildhost`, `invalid-changelog-author`, `invalid-license`, `invalid-license-spellcheck`, `invalid-url`, `missing-dependency-on`, `no-buildhost-tag`, `no-version-dependency-on`: the reference emits these findings but ships no descriptions."
+reason = "Port-only `--explain` descriptions for `invalid-buildhost`, `invalid-changelog-author`, `invalid-license`, `invalid-license-spellcheck`, `invalid-url`, `missing-dependency-on`, `no-buildhost-tag`, `no-version-dependency-on`, `epoch-tag`: the reference emits these findings but ships no descriptions."
 since = "0.1.0"
 
 [[divergence]]

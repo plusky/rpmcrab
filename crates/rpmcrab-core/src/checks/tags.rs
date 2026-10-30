@@ -3558,6 +3558,31 @@ mod tests {
         config
     }
 
+    fn test_config_with_removed_keys() -> Config {
+        // Same minimal keys as test_config_with_epoch, plus the removed
+        // TagsCheck keys at values that fired the old findings.
+        let mut config = Config::default();
+        let tbl = &mut config.configuration;
+        tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(false));
+        tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(79));
+        tbl.insert("ValidLicenses".to_string(), toml::Value::Array(vec![]));
+        tbl.insert(
+            "ValidLicenseExceptions".to_string(),
+            toml::Value::Array(vec![]),
+        );
+        tbl.insert("InvalidRequires".to_string(), toml::Value::Array(vec![]));
+        tbl.insert(
+            "ForbiddenWords".to_string(),
+            toml::Value::String("probe".to_string()),
+        );
+        tbl.insert(
+            "UseVersionInChangelog".to_string(),
+            toml::Value::Boolean(true),
+        );
+        config.finalize().expect("fixture config");
+        config
+    }
+
     #[test]
     fn epoch_tag_emits_when_use_epoch_false() {
         let (_tmp, pkg) = fixture_pkg("tags-highepoch-1.0-1.noarch.rpm");
@@ -3565,6 +3590,66 @@ mod tests {
         let hits = tag_hits(&results, "epoch-tag");
         assert_eq!(hits.len(), 1, "all: {results:?}");
         assert_eq!(hits[0].1, "tags-highepoch.noarch: E: epoch-tag 100");
+    }
+
+    #[test]
+    fn epoch_tag_emits_for_small_epoch() {
+        // Epoch 1 fires epoch-tag without unreasonable-epoch, isolating
+        // the !use_epoch gate from the e > 99 gate.
+        let (_tmp, pkg) = fixture_pkg("tags-smallepoch-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "epoch-tag");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(hits[0].1, "tags-smallepoch.noarch: E: epoch-tag 1");
+        assert!(
+            tag_hits(&results, "unreasonable-epoch").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
+
+    /// Negative pin for the deleted `summary-use-invalid-word` finding:
+    /// a summary matching the configured ForbiddenWords must stay silent,
+    /// and `cargo test` (not just the reference-coverage auditor) must
+    /// catch a re-add.
+    #[test]
+    fn killed_summary_use_invalid_word_stays_absent() {
+        // fcprobe's summary contains "probe", the configured word.
+        let (_tmp, pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let config = test_config_with_removed_keys();
+        let results = run_check_with(&config, &pkg);
+        assert!(
+            tag_hits(&results, "summary-use-invalid-word").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
+
+    /// Negative pin for the deleted `description-use-invalid-word`
+    /// finding: a description line matching the configured
+    /// ForbiddenWords must stay silent.
+    #[test]
+    fn killed_description_use_invalid_word_stays_absent() {
+        // fcprobe's description contains "Probe", matching case-insensitively.
+        let (_tmp, pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        let config = test_config_with_removed_keys();
+        let results = run_check_with(&config, &pkg);
+        assert!(
+            tag_hits(&results, "description-use-invalid-word").is_empty(),
+            "must stay silent: {results:?}"
+        );
+    }
+
+    /// Negative pin for the deleted `no-version-in-last-changelog`
+    /// finding: a last changelog entry without a version must stay
+    /// silent even with UseVersionInChangelog set.
+    #[test]
+    fn killed_no_version_in_last_changelog_stays_absent() {
+        let (_tmp, pkg) = fixture_pkg("tags-nochangelogversion-1.0-1.noarch.rpm");
+        let config = test_config_with_removed_keys();
+        let results = run_check_with(&config, &pkg);
+        assert!(
+            tag_hits(&results, "no-version-in-last-changelog").is_empty(),
+            "must stay silent: {results:?}"
+        );
     }
 
     #[test]

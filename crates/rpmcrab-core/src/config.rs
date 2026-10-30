@@ -156,6 +156,17 @@ impl Config {
                 ));
             }
         }
+        // Keys the TagsCheck removals dropped (`ForbiddenWords`,
+        // `UseVersionInChangelog`): read by nothing, but a config that
+        // still carries one records a load warning instead of going
+        // silently inert. No since-claim: the removals carry no single
+        // tracking issue, unlike the #699 keys above.
+        for key in ["ForbiddenWords", "UseVersionInChangelog"] {
+            if self.configuration.contains_key(key) {
+                self.load_warnings
+                    .push(format!("warning: '{key}' has no effect; ignoring it"));
+            }
+        }
         // A present-but-non-table `Scoring`: the whole map is ignored,
         // with a warning recorded. (A table's individual values are
         // coerced per finding at emit time; see the field docs.)
@@ -1105,6 +1116,27 @@ mod tests {
             cfg.finalize()
                 .unwrap_or_else(|e| panic!("key must be inert, got {e}"));
             assert!(!cfg.permissive, "no permissive default from config");
+        }
+    }
+
+    #[test]
+    fn removed_tagscheck_keys_warn_in_finalize() {
+        // ForbiddenWords and UseVersionInChangelog were dropped with the
+        // TagsCheck removals: setting either must warn instead of going
+        // silently inert, and must not fail finalize.
+        for key in ["ForbiddenWords", "UseVersionInChangelog"] {
+            let mut cfg = Config::default();
+            cfg.configuration
+                .insert(key.to_string(), toml::Value::String("probe".to_string()));
+            cfg.finalize()
+                .unwrap_or_else(|e| panic!("key must be inert, got {e}"));
+            let warnings = cfg.take_load_warnings();
+            assert_eq!(warnings.len(), 1, "warnings: {warnings:?}");
+            assert!(
+                warnings[0].contains(key) && warnings[0].contains("has no effect"),
+                "warning: {}",
+                warnings[0]
+            );
         }
     }
 

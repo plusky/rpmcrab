@@ -98,7 +98,6 @@ CompressExtension = "bz2"
 # Base directory where to extract uninstalled packages while checking
 # Default is to use mktemp from python to provide one
 ExtractDir = ""
-# Regexp string for words that must never exist in preamble tag values
 # Accepted non-XDG legacy icon filenames, string regexp format
 IconFilename = '.*\.png$'
 # Regexp string to disallow in various URL tags
