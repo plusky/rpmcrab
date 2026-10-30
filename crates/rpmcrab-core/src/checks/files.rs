@@ -4290,7 +4290,7 @@ impl FilesCheck {
         for f in &pkg.files {
             // A %ghost entry has no payload on disk: nothing debug lands
             // in the package.
-            if pkg.ghost_files.iter().any(|g| g == &f.name) {
+            if pkg.ghost_files.contains(&f.name) {
                 continue;
             }
             if is_debug_path(&f.name) {
@@ -6509,7 +6509,7 @@ impl FilesCheck {
     fn check_file_dir_or_file(&self, pkg: &Pkg, fname: &str, pkgfile: &PkgFile, out: &mut Filter) {
         // A %ghost entry installs no payload, so there is nothing in the
         // directory to forbid.
-        if pkgfile.is_ghost() || pkg.ghost_files.iter().any(|g| g == fname) {
+        if pkgfile.is_ghost() || pkg.ghost_files.contains(fname) {
             return;
         }
         for d in &self.disallowed_dirs {
@@ -6536,7 +6536,7 @@ impl FilesCheck {
     ) {
         if fname == "/usr/share/applications/mimeinfo.cache"
             && !pkgfile.is_ghost()
-            && !pkg.ghost_files.iter().any(|g| g == fname)
+            && !pkg.ghost_files.contains(fname)
         {
             add_info(out, Level::Error, pkg, "mimeinfo-cache-packaged", &[fname]);
         }
@@ -6550,7 +6550,7 @@ impl FilesCheck {
         // The reference emits W; the port previously reached E only via
         // shipped scoring. The %ghost exemption is unchanged.
         if (fname.starts_with("/run/") || fname.starts_with("/var/run/"))
-            && !pkg_ref.ghost_files.contains(&fname.to_string())
+            && !pkg_ref.ghost_files.contains(fname)
         {
             add_info(out, Level::Error, pkg, "non-ghost-in-run", &[fname]);
         }
@@ -6580,7 +6580,7 @@ impl FilesCheck {
             return;
         }
         // A %ghost entry installs no payload, so nothing ships on disk.
-        if pkgfile.is_ghost() || pkg.ghost_files.iter().any(|g| g == fname) {
+        if pkgfile.is_ghost() || pkg.ghost_files.contains(fname) {
             return;
         }
         for dir in [
@@ -7598,7 +7598,7 @@ impl FilesCheck {
                 );
             }
         }
-        if !pkg.ghost_files.iter().any(|g| g == fname) {
+        if !pkg.ghost_files.contains(fname) {
             add_info(out, Level::Error, pkg, "non-ghost-file", &[fname]);
         }
     }
@@ -8581,7 +8581,7 @@ impl FilesCheck {
     }
 
     fn check_normal_pem(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
-        if !fname.ends_with(".pem") || pkg.ghost_files.iter().any(|g| g == fname) {
+        if !fname.ends_with(".pem") || pkg.ghost_files.contains(fname) {
             return;
         }
         // NB: the reference's regexes are anchored without re.M, so they only
@@ -14416,7 +14416,7 @@ print("hi")
             ..Default::default()
         };
         pkg.files = vec![target, link];
-        pkg.ghost_files = vec![];
+        pkg.ghost_files = vec![].into();
         pkg.requires = requires.iter().map(|n| dep_named(n)).collect();
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -17694,7 +17694,7 @@ print("hi")
             size: Some(100),
             ..Default::default()
         }];
-        pkg.ghost_files = vec!["/usr/share/applications/mimeinfo.cache".to_string()];
+        pkg.ghost_files = vec!["/usr/share/applications/mimeinfo.cache".to_string()].into();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = FilesCheck::new(&config);
         check.check_binary(&pkg, &config, &mut out);

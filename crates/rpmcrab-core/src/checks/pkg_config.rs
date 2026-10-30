@@ -331,7 +331,7 @@ impl Check for PkgConfigCheck {
             // AbstractCheck.py:45 filters ghosts out of the dispatch list,
             // so check_file never runs for one and a ghost `.pc` file draws
             // no finding.
-            if pkg.ghost_files.iter().any(|g| g == &file.name) {
+            if pkg.ghost_files.contains(&file.name) {
                 continue;
             }
             let emit = |out: &mut Filter, check: &str, line: &Option<String>| match line {
@@ -730,7 +730,7 @@ mod tests {
         let pc_path = dir.path().join("usr/lib64/pkgconfig/ghost.pc");
         let mut pkg = pkg_with_pc_path(&pc_path, "/usr/lib64/pkgconfig/ghost.pc");
         pkg.files[0].flags = RPMFILE_GHOST;
-        pkg.ghost_files = vec!["/usr/lib64/pkgconfig/ghost.pc".to_string()];
+        pkg.ghost_files = vec!["/usr/lib64/pkgconfig/ghost.pc".to_string()].into();
         let results = run_pkg_config_check(&pkg);
         assert!(results.is_empty(), "unexpected results: {results:?}");
     }
@@ -1083,7 +1083,7 @@ mod tests {
         let devel = pc_pkg(dir.path(), "foo-devel", "foo.pc", FOO_PC);
         let mut ghost_lib = lib_pkg("libfoo", &["/usr/lib64/libfoo.so"]);
         ghost_lib.files[0].flags = RPMFILE_GHOST;
-        ghost_lib.ghost_files = vec!["/usr/lib64/libfoo.so".to_string()];
+        ghost_lib.ghost_files = vec!["/usr/lib64/libfoo.so".to_string()].into();
         let results = run_dangling(true, &[devel, ghost_lib]);
         assert_eq!(results.len(), 1, "unexpected results: {results:?}");
     }

@@ -16,7 +16,7 @@ pub mod pkgfile;
 pub mod spec;
 pub mod tags;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
@@ -326,7 +326,7 @@ pub struct Pkg {
     pub files: Vec<PkgFile>,
     pub config_files: Vec<String>,
     pub doc_files: Vec<String>,
-    pub ghost_files: Vec<String>,
+    pub ghost_files: GhostFiles,
     pub noreplace_files: Vec<String>,
     pub missingok_files: Vec<String>,
     /// Where this package's bytes come from (`docs/DESIGN.md` §7.5). Private:
@@ -336,6 +336,86 @@ pub struct Pkg {
     /// `-t` (`pkg.py:534`).
     pub timers: Timers,
     header: PackageHeader,
+}
+
+/// The ghost-name list of a package, with a precomputed membership set.
+///
+/// `Pkg::ghost_files` is consulted by name in per-file loops across the
+/// checks; a linear scan there makes every file's ghost test O(ghosts).
+/// This wrapper keeps the declaration-order list (iteration order is
+/// observable: the post check reports per ghost) alongside a `HashSet`
+/// built once, so membership is O(1) while iteration stays identical to
+/// the plain `Vec` it replaces. Every mutation goes through here, so the
+/// two can never drift: construction, `push` and `clear` all maintain
+/// both.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GhostFiles {
+    list: Vec<String>,
+    set: HashSet<String>,
+}
+
+impl GhostFiles {
+    /// Membership test: O(1), exact string equality, the same answer as
+    /// a linear scan of the list.
+    pub fn contains(&self, name: &str) -> bool {
+        self.set.contains(name)
+    }
+
+    /// The declaration-order list, as the old `Vec` field exposed it.
+    pub fn iter(&self) -> impl Iterator<Item = &String> + '_ {
+        self.list.iter()
+    }
+
+    /// True when no ghost is declared.
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// Append a declared ghost, maintaining the set.
+    pub fn push(&mut self, name: String) {
+        self.set.insert(name.clone());
+        self.list.push(name);
+    }
+
+    /// Drop every declared ghost.
+    pub fn clear(&mut self) {
+        self.list.clear();
+        self.set.clear();
+    }
+}
+
+impl From<Vec<String>> for GhostFiles {
+    fn from(list: Vec<String>) -> Self {
+        let set = list.iter().cloned().collect();
+        Self { list, set }
+    }
+}
+
+impl FromIterator<String> for GhostFiles {
+    fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Self {
+        Self::from(iter.into_iter().collect::<Vec<String>>())
+    }
+}
+
+impl PartialEq<Vec<String>> for GhostFiles {
+    fn eq(&self, other: &Vec<String>) -> bool {
+        self.list == *other
+    }
+}
+
+impl<'a> IntoIterator for &'a GhostFiles {
+    type Item = &'a String;
+    type IntoIter = std::slice::Iter<'a, String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.iter()
+    }
+}
+
+impl std::ops::Deref for GhostFiles {
+    type Target = [String];
+    fn deref(&self) -> &[String] {
+        &self.list
+    }
 }
 
 /// rpmlint's `Pkg.timers`: seconds spent per named phase (`ExtractRpm`,
@@ -633,7 +713,7 @@ impl Pkg {
             files,
             config_files,
             doc_files,
-            ghost_files,
+            ghost_files: ghost_files.into(),
             noreplace_files,
             missingok_files,
             source,
@@ -1563,6 +1643,91 @@ mod tests {
             ACCOUNT_GENERATOR_FLAG | (1 << 2),
             &stamp_dep("user(svcfoo)")
         ));
+    }
+
+    #[test]
+    fn ghost_files_set_matches_list() {
+        // Empty, present, absent, duplicate, and mutated shapes: the
+        // set must answer exactly like a linear scan of the list.
+        let mut ghosts = GhostFiles::default();
+        assert!(ghosts.is_empty());
+        assert!(!ghosts.contains("/etc/foo"));
+        ghosts.push("/etc/foo".to_string());
+        ghosts.push("/var/lib/bar".to_string());
+        ghosts.push("/etc/foo".to_string());
+        assert!(!ghosts.is_empty());
+        assert!(ghosts.contains("/etc/foo"));
+        assert!(ghosts.contains("/var/lib/bar"));
+        assert!(!ghosts.contains("/etc/other"));
+        assert!(!ghosts.contains(""));
+        // Iteration keeps declaration order, duplicates included, as
+        // the plain Vec did.
+        assert_eq!(
+            ghosts.iter().cloned().collect::<Vec<_>>(),
+            vec![
+                "/etc/foo".to_string(),
+                "/var/lib/bar".to_string(),
+                "/etc/foo".to_string(),
+            ]
+        );
+        ghosts.clear();
+        assert!(ghosts.is_empty());
+        assert!(!ghosts.contains("/etc/foo"));
+    }
+
+    #[test]
+    fn ghost_files_from_vec_and_iter_agree_with_linear_scan() {
+        let names = vec![
+            "/a".to_string(),
+            "/b/c".to_string(),
+            "/a".to_string(),
+            "/d".to_string(),
+        ];
+        let ghosts = GhostFiles::from(names.clone());
+        assert_eq!(ghosts, names);
+        let collected: GhostFiles = names.iter().cloned().collect();
+        assert_eq!(collected, names);
+        for query in ["/a", "/b/c", "/d", "/missing", ""] {
+            assert_eq!(
+                ghosts.contains(query),
+                names.iter().any(|g| g == query),
+                "query {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn ghost_files_set_timing_smoke() {
+        // Measurement only: asserts correctness of the set against a
+        // linear scan, and prints both timings for manual runs
+        // (--nocapture). No assertion on time: CI machines vary.
+        let names: Vec<String> = (0..10_000)
+            .map(|i| format!("/usr/share/ghost/{i}"))
+            .collect();
+        let ghosts = GhostFiles::from(names.clone());
+        let queries: Vec<String> = (0..10_000)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("/usr/share/ghost/{i}")
+                } else {
+                    format!("/usr/share/other/{i}")
+                }
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let set_hits = queries.iter().filter(|q| ghosts.contains(q)).count();
+        let set_elapsed = start.elapsed();
+        let start = std::time::Instant::now();
+        let scan_hits = queries
+            .iter()
+            .filter(|q| names.iter().any(|g| g == *q))
+            .count();
+        let scan_elapsed = start.elapsed();
+        assert_eq!(set_hits, scan_hits);
+        eprintln!(
+            "ghost set: {set_elapsed:?} for {} queries, linear scan: {scan_elapsed:?}",
+            queries.len()
+        );
     }
 }
 

@@ -378,7 +378,7 @@ impl Check for SystemdTmpfilesCheck {
             if !self.is_path_restricted(&pkgfile.name, pkgfile.mode) {
                 continue;
             }
-            if pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+            if pkg.ghost_files.contains(&pkgfile.name) {
                 add_info(
                     out,
                     Level::Error,

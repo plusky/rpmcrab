@@ -204,9 +204,7 @@ impl FilelistCheck {
                                 .map(|pf| (pf.mode >> 12) & 0o17 != 0o12)
                                 .unwrap_or(true)
                         }),
-                        Some("ghostfile") => {
-                            Some(|p: &Pkg, f: &str| p.ghost_files.iter().any(|g| g == f))
-                        }
+                        Some("ghostfile") => Some(|p: &Pkg, f: &str| p.ghost_files.contains(f)),
                         Some("cargotomlorig") => Some(|_p: &Pkg, f: &str| is_cargo_toml_orig(f)),
                         _ => None,
                     };

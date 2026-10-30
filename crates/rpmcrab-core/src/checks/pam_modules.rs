@@ -15,7 +15,7 @@ use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
-use crate::pkg::Pkg;
+use crate::pkg::{GhostFiles, Pkg};
 
 pub struct PAMModulesCheck {
     pam_module_re: Regex,
@@ -85,14 +85,14 @@ impl PAMModulesCheck {
     fn findings<'a>(
         &self,
         files: impl Iterator<Item = &'a str>,
-        ghosts: &[&str],
+        ghosts: &GhostFiles,
     ) -> Vec<(&'static str, String)> {
         let mut out = Vec::new();
         for fname in files {
             let Ok(Some(caps)) = self.pam_module_re.captures(fname) else {
                 continue;
             };
-            if ghosts.contains(&fname) {
+            if ghosts.contains(fname) {
                 out.push(("pam-ghost-module", fname.to_string()));
                 continue;
             }
@@ -115,9 +115,8 @@ impl Check for PAMModulesCheck {
     }
 
     fn check_binary(&mut self, pkg: &Pkg, _config: &Config, out: &mut Filter) {
-        let ghosts: Vec<&str> = pkg.ghost_files.iter().map(|s| s.as_str()).collect();
         let files = pkg.files.iter().map(|f| f.name.as_str());
-        for (finding, detail) in self.findings(files, &ghosts) {
+        for (finding, detail) in self.findings(files, &pkg.ghost_files) {
             add_info(out, Level::Error, pkg, finding, &[&detail]);
         }
     }
@@ -148,14 +147,20 @@ mod tests {
     #[test]
     fn authorized_module_is_quiet() {
         let c = checker(&["pam_unix.so"]);
-        let found = c.findings(["/usr/lib64/security/pam_unix.so"].into_iter(), &[]);
+        let found = c.findings(
+            ["/usr/lib64/security/pam_unix.so"].into_iter(),
+            &GhostFiles::default(),
+        );
         assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]
     fn unauthorized_module_is_flagged() {
         let c = checker(&["pam_unix.so"]);
-        let found = c.findings(["/lib/security/pam_evil.so"].into_iter(), &[]);
+        let found = c.findings(
+            ["/lib/security/pam_evil.so"].into_iter(),
+            &GhostFiles::default(),
+        );
         assert_eq!(
             found,
             vec![("pam-unauthorized-module", "pam_evil.so".to_string())]
@@ -167,7 +172,7 @@ mod tests {
         let c = checker(&["pam_unix.so"]);
         let found = c.findings(
             ["/usr/lib/security/pam_unix.so"].into_iter(),
-            &["/usr/lib/security/pam_unix.so"],
+            &GhostFiles::from(vec!["/usr/lib/security/pam_unix.so".to_string()]),
         );
         assert_eq!(
             found,
@@ -181,14 +186,17 @@ mod tests {
     #[test]
     fn non_pam_paths_are_skipped() {
         let c = checker(&[]);
-        let found = c.findings(["/usr/bin/tool"].into_iter(), &[]);
+        let found = c.findings(["/usr/bin/tool"].into_iter(), &GhostFiles::default());
         assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]
     fn empty_authorized_list_flags_everything() {
         let c = checker(&[]);
-        let found = c.findings(["/lib64/security/pam_unix.so"].into_iter(), &[]);
+        let found = c.findings(
+            ["/lib64/security/pam_unix.so"].into_iter(),
+            &GhostFiles::default(),
+        );
         assert_eq!(
             found,
             vec![("pam-unauthorized-module", "pam_unix.so".to_string())]
@@ -206,7 +214,7 @@ mod tests {
             name: "/lib/security/pam_evil.so".to_string(),
             ..Default::default()
         }];
-        pkg.ghost_files = vec![];
+        pkg.ghost_files = vec![].into();
         let mut check = checker(&["pam_unix.so"]);
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -277,7 +285,10 @@ mod tests {
             &[],
             vec![group("pam", &["glob:*/security/pam_krb5.so"], &[])],
         );
-        let found = c.findings(["/usr/lib64/security/pam_krb5.so"].into_iter(), &[]);
+        let found = c.findings(
+            ["/usr/lib64/security/pam_krb5.so"].into_iter(),
+            &GhostFiles::default(),
+        );
         assert!(found.is_empty(), "{found:?}");
     }
 
@@ -287,7 +298,10 @@ mod tests {
             &[],
             vec![group("pam", &[], &["/usr/lib64/security/pam_winbind.so"])],
         );
-        let found = c.findings(["/usr/lib64/security/pam_winbind.so"].into_iter(), &[]);
+        let found = c.findings(
+            ["/usr/lib64/security/pam_winbind.so"].into_iter(),
+            &GhostFiles::default(),
+        );
         assert!(found.is_empty(), "{found:?}");
     }
 
@@ -297,7 +311,10 @@ mod tests {
             &[],
             vec![group("dbus", &["glob:*/security/pam_evil.so"], &[])],
         );
-        let found = c.findings(["/lib/security/pam_evil.so"].into_iter(), &[]);
+        let found = c.findings(
+            ["/lib/security/pam_evil.so"].into_iter(),
+            &GhostFiles::default(),
+        );
         assert_eq!(
             found,
             vec![("pam-unauthorized-module", "pam_evil.so".to_string())]
@@ -316,7 +333,10 @@ mod tests {
                 &["/etc/pam.d/login"],
             )],
         );
-        let found = c.findings(["/usr/lib/security/pam_unix.so"].into_iter(), &[]);
+        let found = c.findings(
+            ["/usr/lib/security/pam_unix.so"].into_iter(),
+            &GhostFiles::default(),
+        );
         assert_eq!(
             found,
             vec![("pam-unauthorized-module", "pam_unix.so".to_string())]
@@ -336,7 +356,7 @@ mod tests {
                 "/usr/lib64/security/pam_evil.so",
             ]
             .into_iter(),
-            &[],
+            &GhostFiles::default(),
         );
         assert_eq!(
             found,
@@ -355,7 +375,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        pkg.ghost_files = vec![];
+        pkg.ghost_files = vec![].into();
         pkg
     }
 

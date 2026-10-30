@@ -453,7 +453,7 @@ impl Check for DuplicatesCheck {
             &files,
             self.min_size,
             |n| pkg.config_files.contains(&n.to_string()),
-            |n| pkg.ghost_files.contains(&n.to_string()),
+            |n| pkg.ghost_files.contains(n),
             |a, b| self.whitelist_pairs.iter().any(|pair| pair.matches(a, b)),
         );
         if is_mingw_package(&pkg.name) {

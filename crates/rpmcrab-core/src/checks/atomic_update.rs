@@ -2021,7 +2021,8 @@ fi
         pkg.ghost_files = vec![
             "/srv/www/app/state".to_string(),
             "/var/cache/state".to_string(),
-        ];
+        ]
+        .into();
         let mut check = check_with(
             &[
                 "/etc/",
@@ -2277,7 +2278,7 @@ fi
             flags: RPMFILE_GHOST,
             ..Default::default()
         }];
-        pkg.ghost_files = vec!["/var/cache/state".to_string()];
+        pkg.ghost_files = vec!["/var/cache/state".to_string()].into();
         let mut check = check_with(&["/usr", "/etc"], &[], true);
         let results = run(&mut check, &pkg);
         assert_eq!(results.len(), 1);
@@ -2291,7 +2292,7 @@ fi
             flags: RPMFILE_GHOST,
             ..Default::default()
         }];
-        pkg.ghost_files = vec!["/var/cache/state".to_string()];
+        pkg.ghost_files = vec!["/var/cache/state".to_string()].into();
         let mut check = check_with(&["/usr", "/etc"], &[], false);
         assert!(run(&mut check, &pkg).is_empty());
     }
@@ -2300,7 +2301,7 @@ fi
     fn ghost_outside_snapshot_is_warning_when_enabled() {
         let mut pkg = fixture_pkg();
         pkg.files = vec![regular("/usr/bin/ok"), ghost("/var/cache/state")];
-        pkg.ghost_files = vec!["/var/cache/state".to_string()];
+        pkg.ghost_files = vec!["/var/cache/state".to_string()].into();
         let mut check = check_with(&["/usr", "/etc"], &[], true);
         let results = run(&mut check, &pkg);
         assert_eq!(results.len(), 1);
@@ -2317,7 +2318,7 @@ fi
     fn ghosts_ignored_when_disabled() {
         let mut pkg = fixture_pkg();
         pkg.files = vec![regular("/usr/bin/ok"), ghost("/var/cache/state")];
-        pkg.ghost_files = vec!["/var/cache/state".to_string()];
+        pkg.ghost_files = vec!["/var/cache/state".to_string()].into();
         let mut check = check_with(&["/usr", "/etc"], &[], false);
         assert!(run(&mut check, &pkg).is_empty());
     }
@@ -2326,7 +2327,7 @@ fi
     fn ghost_inside_snapshot_is_quiet() {
         let mut pkg = fixture_pkg();
         pkg.files = vec![regular("/usr/bin/ok"), ghost("/etc/ghost.conf")];
-        pkg.ghost_files = vec!["/etc/ghost.conf".to_string()];
+        pkg.ghost_files = vec!["/etc/ghost.conf".to_string()].into();
         let mut check = check_with(&["/usr", "/etc"], &[], true);
         assert!(run(&mut check, &pkg).is_empty());
     }
@@ -2837,7 +2838,7 @@ fi
     #[test]
     fn scriptlet_write_to_own_ghost_is_exempt() {
         let mut pkg = fixture_pkg_named("atomic-scriptlet-fires-1.0-1.noarch.rpm");
-        pkg.ghost_files = vec!["/var/lib/atomic-fixture/state".to_string()];
+        pkg.ghost_files = vec!["/var/lib/atomic-fixture/state".to_string()].into();
         let mut check = shipped_check();
         let results = run(&mut check, &pkg);
         // The %postun removal of the declared ghost no longer fires;
@@ -2879,7 +2880,8 @@ fi
         pkg.ghost_files = vec![
             "/var/lib/other-fixture/state".to_string(),
             "/srv/other-fixture/seed.conf".to_string(),
-        ];
+        ]
+        .into();
         let mut check = shipped_check();
         let results = run(&mut check, &pkg);
         assert_eq!(results.len(), 6, "results: {results:?}");

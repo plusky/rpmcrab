@@ -5044,7 +5044,7 @@ fn pkg_ships_daemon_units(pkg: &Pkg) -> bool {
         UNIT_DIRS.iter().any(|dir| f.name.starts_with(dir))
             && (f.name.ends_with(".service") || f.name.ends_with(".socket"))
             && !f.is_ghost()
-            && !pkg.ghost_files.iter().any(|g| g == &f.name)
+            && !pkg.ghost_files.contains(&f.name)
             && !(is_symlink(f.mode) && f.linkto == "/dev/null")
     })
 }

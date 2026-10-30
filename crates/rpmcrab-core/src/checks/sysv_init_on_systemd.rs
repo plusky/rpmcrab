@@ -10,7 +10,7 @@ use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
-use crate::pkg::Pkg;
+use crate::pkg::{GhostFiles, Pkg};
 
 pub struct SysVInitOnSystemdCheck;
 
@@ -26,13 +26,13 @@ impl SysVInitOnSystemdCheck {
     /// for deterministic output.
     fn find_services_and_scripts<'a>(
         files: impl Iterator<Item = &'a str>,
-        ghost_files: &[String],
+        ghost_files: &GhostFiles,
     ) -> (Vec<String>, Vec<String>, Vec<String>) {
         let mut initscripts = Vec::new();
         let mut bootscripts = Vec::new();
         let mut systemdscripts = Vec::new();
         for name in files {
-            if ghost_files.iter().any(|g| g == name) {
+            if ghost_files.contains(name) {
                 continue;
             }
             if name.starts_with("/usr/lib/systemd/system/") {
@@ -136,7 +136,10 @@ mod tests {
     use crate::pkg::pkgfile::PkgFile;
 
     fn classify(names: &[&str]) -> (Vec<String>, Vec<String>, Vec<String>) {
-        SysVInitOnSystemdCheck::find_services_and_scripts(names.iter().copied(), &[])
+        SysVInitOnSystemdCheck::find_services_and_scripts(
+            names.iter().copied(),
+            &GhostFiles::default(),
+        )
     }
 
     #[test]
@@ -190,7 +193,7 @@ mod tests {
         let ghosts = vec!["/etc/init.d/foo".to_string()];
         let (init, _, _) = SysVInitOnSystemdCheck::find_services_and_scripts(
             ["/etc/init.d/foo"].into_iter(),
-            &ghosts,
+            &GhostFiles::from(ghosts),
         );
         assert!(init.is_empty());
     }

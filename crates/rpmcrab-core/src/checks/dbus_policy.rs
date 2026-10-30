@@ -410,7 +410,7 @@ impl Check for DBusPolicyCheck {
             if !Self::is_policy_file(fname) {
                 continue;
             }
-            if pkg.ghost_files.iter().any(|g| g == fname) {
+            if pkg.ghost_files.contains(fname) {
                 continue;
             }
             let content = match std::fs::read_to_string(&file.path) {

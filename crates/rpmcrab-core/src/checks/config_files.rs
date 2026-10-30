@@ -223,7 +223,7 @@ mod tests {
         let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
         pkg.config_files = vec!["/etc/ghost.conf".to_string(), "/etc/real.conf".to_string()];
         pkg.noreplace_files = vec![];
-        pkg.ghost_files = vec!["/etc/ghost.conf".to_string()];
+        pkg.ghost_files = vec!["/etc/ghost.conf".to_string()].into();
         pkg.files = vec![];
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -254,7 +254,7 @@ mod tests {
         let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
         pkg.config_files = vec!["/etc/link.conf".to_string(), "/etc/real.conf".to_string()];
         pkg.noreplace_files = vec![];
-        pkg.ghost_files = vec![];
+        pkg.ghost_files = vec![].into();
         pkg.files = vec![
             PkgFile {
                 name: "/etc/link.conf".to_string(),
