@@ -33,8 +33,20 @@ impl TmpFilesCheck {
         &["f", "F", "w", "d", "D", "p", "L", "c", "b"]
     }
 
+    /// Compare tmpfiles.d paths ignoring trailing slashes: a declared
+    /// `/run/foo/` and a shipped `/run/foo` denote the same path, and so
+    /// do a declared `/run/foo` and a shipped `/run/foo/`. The root path
+    /// itself is never emptied by the strip.
+    fn normalize_path(path: &str) -> &str {
+        let stripped = path.trim_end_matches('/');
+        if stripped.is_empty() { "/" } else { stripped }
+    }
+
     /// Paths referenced by a tmpfiles.d config that are not in the file list.
+    /// Membership is tested on normalized paths; a finding keeps the
+    /// declared form in its detail.
     fn missing_paths(content: &str, files: &[String]) -> Vec<String> {
+        let normalized_files: Vec<&str> = files.iter().map(|f| Self::normalize_path(f)).collect();
         let mut missing = Vec::new();
         for line in content.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
@@ -53,7 +65,10 @@ impl TmpFilesCheck {
                 continue;
             }
             let path = parts[1];
-            if !files.iter().any(|f| f == path) {
+            if !normalized_files
+                .iter()
+                .any(|f| *f == Self::normalize_path(path))
+            {
                 missing.push(path.to_string());
             }
         }
@@ -165,6 +180,43 @@ mod tests {
         let content = "d! /run/foo 0755 root root -\n";
         let missing = TmpFilesCheck::missing_paths(content, &[]);
         assert_eq!(missing, vec!["/run/foo".to_string()]);
+    }
+
+    #[test]
+    fn trailing_slash_declared_is_quiet() {
+        let content = "d /run/foo/ 0755 root root -\n";
+        let missing = TmpFilesCheck::missing_paths(content, &["/run/foo".to_string()]);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn trailing_slash_on_filelist_side_is_quiet() {
+        let content = "d /run/foo 0755 root root -\n";
+        let missing = TmpFilesCheck::missing_paths(content, &["/run/foo/".to_string()]);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn multiple_trailing_slashes_are_quiet() {
+        let content = "d /run/foo/// 0755 root root -\n";
+        let missing = TmpFilesCheck::missing_paths(content, &["/run/foo".to_string()]);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn declared_form_is_kept_when_still_missing() {
+        let content = "d /run/foo/ 0755 root root -\n";
+        let missing = TmpFilesCheck::missing_paths(content, &[]);
+        assert_eq!(missing, vec!["/run/foo/".to_string()]);
+    }
+
+    #[test]
+    fn root_path_is_not_emptied() {
+        let content = "d / 0755 root root -\n";
+        let missing = TmpFilesCheck::missing_paths(content, &[]);
+        assert_eq!(missing, vec!["/".to_string()]);
+        let missing = TmpFilesCheck::missing_paths(content, &["/".to_string()]);
+        assert!(missing.is_empty());
     }
 
     #[test]

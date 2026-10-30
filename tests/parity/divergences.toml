@@ -4406,6 +4406,13 @@ upstream = "https://github.com/rpm-software-management/rpmlint/issues/1374"
 
 [[divergence]]
 case = "global"
+check = "tmpfile-not-in-filelist"
+kind = "behaviour"
+reason = "The port compares tmpfiles.d paths ignoring trailing slashes: a declared `/run/foo/` matches a shipped `/run/foo`, and a declared `/run/foo` matches a shipped `/run/foo/`. The reference compares exactly, so it fires on a trailing-slash mismatch the port treats as the same path."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "world-writable-mismatched-attrs"
 kind = "behaviour"
 reason = "The reference test test_world_writable.py::test_device_files_simple asserts has: drwxr-xr-t for a file created with mode 0o41777, but stat.filemode(0o41777) is drwxrwxrwt, so the reference code itself reports has: drwxrwxrwt and its own test cannot pass. The port follows the code."
