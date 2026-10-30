@@ -450,3 +450,17 @@ check = "unreasonable-epoch"
 kind = "behaviour"
 reason = "Reference _check_no_epoch_tag fires unreasonable-epoch for any Epoch over 99 regardless of configuration. The port fires it only when the configuration uses Epoch (UseEpoch=true): under UseEpoch=false, the default, any Epoch tag already fires E epoch-tag, so the warning would only ever ride along on the same package as a weaker second finding. Pinned by unreasonable_epoch_emits and unreasonable_epoch_gated_when_use_epoch_false in tags.rs."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "summary-not-capitalized"
+kind = "behaviour"
+reason = "The ignore list for lowercase summary initials carries four entries beyond the reference CAPITALIZED_IGNORE_LIST: xSGE, oneAPI, libreport's and the article the. The reference fires on summaries starting with these words; the port stays silent on them. Measured on the Factory corpus: 35 findings removed (xSGE 12, oneAPI 8, libreport's 10, the 5), zero added."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "summary-not-capitalized"
+kind = "behaviour"
+reason = "Before the ignore-list lookup, a trailing possessive ('s) is stripped from the summary's first word, so a possessive of a listed brand (wxWidgets's) matches its list entry and stays silent. The reference tests the raw first word only, so it fires on such possessives. The raw form is tried as well, so a listed possessive (libreport's) still matches. Measured on the Factory corpus: 6 findings removed (wxWidgets's), zero added."
+since = "0.4.1"

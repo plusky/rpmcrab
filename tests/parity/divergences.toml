@@ -4517,6 +4517,20 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "summary-not-capitalized"
+kind = "behaviour"
+reason = "The ignore list for lowercase summary initials carries four entries beyond the reference CAPITALIZED_IGNORE_LIST: xSGE, oneAPI, libreport's and the article the. The reference fires on summaries starting with these words; the port stays silent on them. Measured on the Factory corpus: 35 findings removed (xSGE 12, oneAPI 8, libreport's 10, the 5), zero added."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "summary-not-capitalized"
+kind = "behaviour"
+reason = "Before the ignore-list lookup, a trailing possessive ('s) is stripped from the summary's first word, so a possessive of a listed brand (wxWidgets's) matches its list entry and stays silent. The reference tests the raw first word only, so it fires on such possessives. The raw form is tried as well, so a listed possessive (libreport's) still matches. Measured on the Factory corpus: 6 findings removed (wxWidgets's), zero added."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
 reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."
