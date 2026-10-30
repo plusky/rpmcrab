@@ -638,6 +638,14 @@ mod tests {
     }
 
     #[test]
+    fn postun_quoted_bare_stem_is_credited() {
+        let postun = "systemd-update-helper mark-restart-system-units \"pmcd\" || :";
+        let missing =
+            SystemdInstallCheck::check_unit("pmcd.service", true, "", "", "", postun, false);
+        assert!(!missing.contains(&"systemd-service-without-service_del_postun"));
+    }
+
+    #[test]
     fn postun_bare_instantiated_template_stem_is_accepted() {
         let postun = "systemd-update-helper mark-restart-system-units foo@bar";
         let missing =
