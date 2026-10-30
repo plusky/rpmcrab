@@ -682,3 +682,10 @@ check = "optflags-not-applied"
 kind = "behaviour"
 reason = "Fix-and-diverge: optflags-not-applied no longer judges GCC Go frontend output (defined `__go_` FUNC symbols): a gated language's own symbols are not the C instrumentation the OPTFLAGS tag asks for, so a gccgo file contributes to no arm of the rollup. Measured over the full Factory corpus (51,586 binary RPMs): 5 findings removed (libgo11, libgo22, libgo23, libgo24, libgo25, each holding only a gccgo file) and the gcc7-go detail recomputed over the 2 still-judged C++ files (gccgo-7, go1) after the gccgo-built tools (go-7, gofmt-7) and libgo.so left the population; zero findings added. Pinned by optflags_not_applied_gccgo_file_judges_nothing in binaries.rs."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "no-binary"
+kind = "behaviour"
+reason = "Deliberate fix: the port exempts patterns-* packages from no-binary. A patterns package is text-only by construction: its spec %files ships only the pattern marker .txt under /usr/share/doc/packages/patterns (verified on the workspace spec and on published binaries: patterns-devel-vulkan-devel_vulkan, patterns-devel-tcl-devel_tcl, patterns-yast-devel_yast, patterns-base-basesystem, patterns-gnome-gnome_basis, patterns-media-rest_cd_core and patterns-server-mail_server-32bit each ship exactly the patterns directory plus one .txt), so an arch patterns package with no binaries is the expected shape, not a forgotten noarch. The finding's remedy does not apply to this class: a noarch patterns package would silently bake any later %ifarch branch into every architecture, so the arch marking is deliberate. The reference fires E on the same packages. The exemption is the `patterns-` prefix only: names merely containing the word still fire. Pinned by no_binary_quiet_for_patterns_package and no_binary_still_fires_when_patterns_is_not_the_prefix in binaries.rs."
+since = "0.4.1"
