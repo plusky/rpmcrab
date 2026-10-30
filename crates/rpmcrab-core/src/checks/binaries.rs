@@ -5654,11 +5654,42 @@ fn systemd_first_token(cmd: &str) -> Option<String> {
     if any { Some(out) } else { None }
 }
 
+/// Follow an in-package symlink chain from a normalized path.
+/// Returns the resolved path, or None on a loop or a dangling
+/// link (no recorded target).
+fn follow_symlink_chain(
+    path: &str,
+    symlink_names: &HashSet<String>,
+    symlink_targets: &HashMap<String, String>,
+) -> Option<String> {
+    let mut path = path.to_string();
+    let mut seen = HashSet::new();
+    loop {
+        if symlink_names.contains(&path) {
+            let target = symlink_targets.get(&path)?;
+            if !seen.insert(path.clone()) {
+                return None;
+            }
+            let next = if target.starts_with('/') {
+                target.clone()
+            } else {
+                let dir = path.rsplit_once('/').map_or("/", |(d, _)| d);
+                format!("{dir}/{target}")
+            };
+            path = normalize_lexical(&normalize_usrmerge(&next));
+        } else {
+            break;
+        }
+    }
+    Some(path)
+}
+
 /// Resolve one ExecStart executable token to shipped binary paths.
 /// Returns the paths plus whether the token resolved. An absolute
 /// path resolves to itself (symlinks in the package followed); a
-/// bare name resolves only to a unique executable file with that
-/// basename, and resolves to nothing when the package ships no such
+/// bare name resolves to the unique file with that basename, an
+/// in-package symlink followed to its target like an absolute
+/// path, and resolves to nothing when the package ships no such
 /// file. An ambiguous bare name, a specifier, a placeholder, a
 /// variable or an empty token is unresolvable.
 fn resolve_exec_token(
@@ -5679,38 +5710,31 @@ fn resolve_exec_token(
         return (vec![], false);
     }
     if tok.starts_with('/') {
-        let mut path = normalize_lexical(&normalize_usrmerge(tok));
-        let mut seen = HashSet::new();
-        loop {
-            if symlink_names.contains(&path) {
-                let Some(target) = symlink_targets.get(&path) else {
-                    return (vec![], false);
-                };
-                if !seen.insert(path.clone()) {
-                    return (vec![], false);
-                }
-                let next = if target.starts_with('/') {
-                    target.clone()
-                } else {
-                    let dir = path.rsplit_once('/').map_or("/", |(d, _)| d);
-                    format!("{dir}/{target}")
-                };
-                path = normalize_lexical(&normalize_usrmerge(&next));
-            } else {
-                break;
-            }
-        }
-        return (vec![path], true);
+        let path = normalize_lexical(&normalize_usrmerge(tok));
+        return match follow_symlink_chain(&path, symlink_names, symlink_targets) {
+            Some(path) => (vec![path], true),
+            None => (vec![], false),
+        };
     }
     let matches: Vec<&PkgFile> = pkg
         .files
         .iter()
-        .filter(|f| {
-            !is_symlink(f.mode) && f.mode & 0o111 != 0 && f.name.rsplit('/').next() == Some(tok)
-        })
+        .filter(|f| f.mode & 0o111 != 0 && f.name.rsplit('/').next() == Some(tok))
         .collect();
     if matches.len() == 1 {
-        (vec![normalize_usrmerge(&matches[0].name)], true)
+        if is_symlink(matches[0].mode) {
+            // A bare name that resolves only via an in-package
+            // symlink follows it like an absolute path, so the
+            // real daemon target enters the set instead of the
+            // unit contributing nothing.
+            let start = normalize_lexical(&normalize_usrmerge(&matches[0].name));
+            match follow_symlink_chain(&start, symlink_names, symlink_targets) {
+                Some(path) => (vec![path], true),
+                None => (vec![], false),
+            }
+        } else {
+            (vec![normalize_usrmerge(&matches[0].name)], true)
+        }
     } else if matches.is_empty() {
         (vec![], true)
     } else {
@@ -5719,16 +5743,23 @@ fn resolve_exec_token(
 }
 
 /// ExecStart binaries of one service unit file. The content is read
-/// through the unit's extracted path; an unreadable unit, an
-/// unparsable token or an unresolvable token makes the whole unit
-/// unresolvable. An empty ExecStart resets the list and contributes
-/// nothing; a service with no ExecStart starts no binary.
+/// through the unit's extracted path; an unreadable unit, a
+/// symlinked unit, an unparsable token or an unresolvable token
+/// makes the whole unit unresolvable. A symlinked unit is an
+/// alias, not content: reading it would follow the link off the
+/// extraction path onto the host filesystem, so it is skipped and
+/// reported unresolvable (fail-open, preserving the package arm).
+/// An empty ExecStart resets the list and contributes nothing; a
+/// service with no ExecStart starts no binary.
 fn service_exec_binaries(
     pkg: &Pkg,
     unit: &PkgFile,
     symlink_names: &HashSet<String>,
     symlink_targets: &HashMap<String, String>,
 ) -> (Vec<String>, bool) {
+    if is_symlink(unit.mode) {
+        return (vec![], false);
+    }
     let Ok(content) = std::fs::read_to_string(&unit.path) else {
         return (vec![], false);
     };
@@ -5783,6 +5814,12 @@ fn socket_exec_binaries(
         "/usr/lib/systemd/system/",
         "/lib/systemd/system/",
     ];
+    if is_symlink(unit.mode) {
+        // As in service_exec_binaries: a symlinked socket is an
+        // alias, and reading it would follow the link onto the
+        // host filesystem. Skip it as unresolvable (fail-open).
+        return (vec![], false);
+    }
     let Ok(content) = std::fs::read_to_string(&unit.path) else {
         return (vec![], false);
     };
@@ -23868,6 +23905,58 @@ description = "explicit priority string bypasses the system crypto policy"
         );
         let wrap_pkg = synthetic_pkg("testpkg", "x86_64", vec![wrap_unit]);
         assert_eq!(count(&wrap_pkg, &helper, &["rand"], &["rand"]), 0);
+
+        // Bare name resolving only via an in-package symlink
+        // follows it to the real binary: before, the symlink
+        // exclusion left such a unit contributing nothing, so
+        // the real daemon target stayed silent.
+        let link_unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/linked.service",
+            "[Service]\nExecStart=toold\n",
+        );
+        let mut link_entry = syn_file("/usr/bin/toold", "ELF 64-bit LSB executable");
+        link_entry.mode = 0o120777;
+        link_entry.linkto = "/usr/bin/toold-real".to_string();
+        let real_entry = syn_file("/usr/bin/toold-real", "ELF 64-bit LSB executable");
+        let link_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![link_unit, link_entry, real_entry.clone()],
+        );
+        assert_eq!(count(&link_pkg, &real_entry, &["rand"], &["rand"]), 1);
+
+        // A symlinked service unit is skipped, not read: the
+        // decoy file its path points at names a helper, so a
+        // read-through would leave the real binary silent while
+        // the guard fails open and it fires.
+        let mut alias_unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/alias.service",
+            "[Service]\nExecStart=/usr/bin/foo-helper\n",
+        );
+        alias_unit.mode = 0o120777;
+        alias_unit.linkto = "/usr/bin/real.service".to_string();
+        let alias_pkg = synthetic_pkg("testpkg", "x86_64", vec![alias_unit]);
+        assert_eq!(count(&alias_pkg, &foo, &["rand"], &["rand"]), 1);
+
+        // Same guard on the socket side: the decoy socket names
+        // a helper service, so a read-through would leave the
+        // real binary silent while the guard fails open.
+        let mut alias_sock = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/alias.socket",
+            "[Socket]\nService=helper.service\n",
+        );
+        alias_sock.mode = 0o120777;
+        alias_sock.linkto = "/usr/bin/real.socket".to_string();
+        let helper_svc = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/helper.service",
+            "[Service]\nExecStart=/usr/bin/foo-helper\n",
+        );
+        let alias_sock_pkg = synthetic_pkg("testpkg", "x86_64", vec![alias_sock, helper_svc]);
+        assert_eq!(count(&alias_sock_pkg, &foo, &["rand"], &["rand"]), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
