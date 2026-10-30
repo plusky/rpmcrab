@@ -6461,6 +6461,14 @@ impl FilesCheck {
         if is_dir(pkgfile.mode) {
             return;
         }
+        // Image files and Lisp index files under an info dir are not
+        // info documents either: illustrations are already compressed
+        // and gzipping them breaks info readers' image lookup, and
+        // `.lisp` files are loaded as Lisp by the info system. Both
+        // keep firing in the reference (fix-and-diverge).
+        if fname.ends_with(".png") || fname.ends_with(".jpg") || fname.ends_with(".lisp") {
+            return;
+        }
         if !self.compress_ext.is_empty()
             && is_match(&self.info_re, fname)
             && !fname.ends_with("/info/dir")
@@ -13688,6 +13696,67 @@ print("hi")
         check.check(&pkg, &config, &mut out);
         let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
         assert_has(&names, "infopage-not-compressed");
+    }
+
+    #[test]
+    fn files_check_infopage_image_does_not_fire() {
+        // An illustration under an info dir is not an info document:
+        // already compressed, and gzipping it breaks info readers'
+        // image lookup, so it must stay quiet.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![
+            PkgFile {
+                name: "/usr/share/info/foo.png".to_string(),
+                path: "/usr/share/info/foo.png".to_string(),
+                user: "root".to_string(),
+                group: "root".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/info/bar.jpg".to_string(),
+                path: "/usr/share/info/bar.jpg".to_string(),
+                user: "root".to_string(),
+                group: "root".to_string(),
+                ..Default::default()
+            },
+        ];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert!(
+            !names.contains(&"infopage-not-compressed".to_string()),
+            "got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn files_check_infopage_lisp_does_not_fire() {
+        // A `.lisp` index file under an info dir is loaded as Lisp by
+        // the info system, not read as an info document, so it must
+        // stay quiet.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/usr/share/info/maxima-index.lisp".to_string(),
+            path: "/usr/share/info/maxima-index.lisp".to_string(),
+            user: "root".to_string(),
+            group: "root".to_string(),
+            ..Default::default()
+        }];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert!(
+            !names.contains(&"infopage-not-compressed".to_string()),
+            "got: {names:?}"
+        );
     }
 
     #[test]
