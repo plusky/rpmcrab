@@ -4481,19 +4481,35 @@ mod rich_dep_emission_tests {
         // An Obsoletes entry carrying macros emits one finding per macro:
         // the entry is probed for unexpanded macros in exactly one place.
         let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
-        pkg.obsoletes = vec![DepInfo {
-            name: "foo".to_string(),
-            flags: RPMSENSE_LESS,
-            epoch: None,
-            version: Some("%{version}".to_string()),
-            release: Some("%{release}".to_string()),
-        }];
+        // A second entry proves per-entry probing survived the dedup:
+        // each entry's macros still emit, exactly once each.
+        pkg.obsoletes = vec![
+            DepInfo {
+                name: "foo".to_string(),
+                flags: RPMSENSE_LESS,
+                epoch: None,
+                version: Some("%{version}".to_string()),
+                release: Some("%{release}".to_string()),
+            },
+            DepInfo {
+                name: "bar".to_string(),
+                flags: RPMSENSE_LESS,
+                epoch: None,
+                version: Some("%{version}".to_string()),
+                release: None,
+            },
+        ];
         let results = run(&pkg, &rich_test_config(&[], false));
         let obs: Vec<_> = named(&results, "unexpanded-macro")
             .into_iter()
             .filter(|(_, line)| line.contains("Obsoletes foo <"))
             .collect();
         assert_eq!(obs.len(), 2, "all: {results:?}");
+        let bar: Vec<_> = named(&results, "unexpanded-macro")
+            .into_iter()
+            .filter(|(_, line)| line.contains("Obsoletes bar <"))
+            .collect();
+        assert_eq!(bar.len(), 1, "all: {results:?}");
     }
 
     #[test]

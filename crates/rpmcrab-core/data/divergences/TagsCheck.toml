@@ -464,3 +464,10 @@ check = "summary-not-capitalized"
 kind = "behaviour"
 reason = "Before the ignore-list lookup, a trailing possessive ('s) is stripped from the summary's first word, so a possessive of any listed brand (wxWidgets's) matches its list entry and stays silent. The reference tests the raw first word only, so it fires on such possessives. The stripped lookup is skipped when the base is an article (a/an/the), so a's, an's and the's still warn as the reference does. Measured on the Factory corpus: 6 findings removed (wxWidgets's), zero added."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "unexpanded-macro"
+kind = "behaviour"
+reason = "Fix-and-diverge: an Obsoletes entry carrying macros is probed for unexpanded macros once, in check_forbidden_controlchar, where the probe loops all seven dep kinds with the byte-identical tagname. The reference probes Obsoletes twice — TagsCheck.py:134 in check() and :714 in _check_forbidden_controlchar — with add_info appending unconditionally, so upstream emits each Obsoletes macro finding twice. Measured on the five firing packages (postgresql14-18-pgvector): Obsoletes findings 20 -> 10, nothing else moves. Pinned by obsoletes_macro_emitted_once in tags.rs."
+since = "0.4.1"
