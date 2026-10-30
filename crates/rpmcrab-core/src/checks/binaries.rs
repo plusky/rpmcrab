@@ -6051,10 +6051,18 @@ impl BinariesCheck {
         // design even without binaries (boo#1110020). Compressed
         // kernel modules reach the accounting through
         // `is_compressed_kernel_module` in the per-file loop.
+        // A patterns package is text-only by construction: its spec
+        // %files ships only the pattern marker .txt under
+        // /usr/share/doc/packages/patterns, so an arch patterns package
+        // with no binaries is the expected shape, not a forgotten noarch.
+        // The finding's remedy does not apply to this class: a noarch
+        // patterns package would silently bake any later %ifarch branch
+        // into every architecture, so the arch marking is deliberate.
         if !has_binary
             && !has_file_in_libdir
             && pkg.arch != "noarch"
             && !pkg.name.ends_with("-debugsource")
+            && !pkg.name.starts_with("patterns-")
             && !pkg_has_arch_format_data(pkg)
         {
             add_info(out, Level::Warning, pkg, "no-binary", &[]);
@@ -16361,6 +16369,62 @@ description = "explicit priority string bypasses the system crypto policy"
                 name,
                 "x86_64",
                 vec![syn_file("/usr/share/doc/x/README", "ASCII text")],
+            );
+            let results = driver_results(&pkg, &config);
+            let lines = lines_for(&results, "no-binary");
+            assert_eq!(
+                lines.len(),
+                1,
+                "{name} must still fire no-binary: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_binary_quiet_for_patterns_package() {
+        // Patterns packages are text-only by construction: the spec %files
+        // ships only the pattern marker .txt, so no binaries is the expected
+        // shape. Covers the single-pattern shape, a second source package,
+        // and the -32bit variant.
+        let config = test_config();
+        for (name, txt) in [
+            (
+                "patterns-devel-vulkan-devel_vulkan",
+                "/usr/share/doc/packages/patterns/devel_vulkan.txt",
+            ),
+            (
+                "patterns-yast-devel_yast",
+                "/usr/share/doc/packages/patterns/devel_yast.txt",
+            ),
+            (
+                "patterns-server-mail_server-32bit",
+                "/usr/share/doc/packages/patterns/mail_server-32bit.txt",
+            ),
+        ] {
+            let pkg = synthetic_pkg(name, "x86_64", vec![syn_file(txt, "ASCII text")]);
+            let results = driver_results(&pkg, &config);
+            let lines = lines_for(&results, "no-binary");
+            assert!(
+                lines.is_empty(),
+                "no-binary must stay quiet for a patterns package {name}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_binary_still_fires_when_patterns_is_not_the_prefix() {
+        // The exemption is the `patterns-` prefix only: a name that merely
+        // contains the word, or carries it without the trailing dash, is an
+        // ordinary package and still fires.
+        let config = test_config();
+        for name in ["mypatterns", "foo-patterns-bar", "patterns"] {
+            let pkg = synthetic_pkg(
+                name,
+                "x86_64",
+                vec![syn_file(
+                    "/usr/share/doc/packages/patterns/foo.txt",
+                    "ASCII text",
+                )],
             );
             let results = driver_results(&pkg, &config);
             let lines = lines_for(&results, "no-binary");
