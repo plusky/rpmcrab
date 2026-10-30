@@ -4015,6 +4015,16 @@ fn is_binary_container(path: &Path) -> bool {
     )
 }
 
+/// Whether `name` is the yudit bidirectional demonstration page, whose
+/// controls are deliberate demo content rather than a trojan-source
+/// risk. Both shipped copies share the `/doc/TestPage.txt` suffix; a
+/// general test-path rule would not match these paths (they contain no
+/// test or demo directory), and a doc-directory exemption would silence
+/// genuine content, so the credit is scoped to this file.
+fn is_bidi_demo_page(name: &str) -> bool {
+    name.ends_with("/doc/TestPage.txt")
+}
+
 fn strip_quotes(re: &Regex, s: &str) -> String {
     re.replace_all(s, "").to_string()
 }
@@ -4234,6 +4244,8 @@ impl FilesCheck {
     /// whose description echoes a package name containing "text" both carry
     /// control-looking triples in compressed or binary data; such files are
     /// skipped on their content signature (see `is_binary_container`).
+    /// The yudit demonstration page is likewise out of scope: its controls
+    /// are deliberate demo content (see `is_bidi_demo_page`).
     fn check_bidi_controls(&self, pkg: &Pkg, out: &mut Filter) {
         for pkgfile in &pkg.files {
             if !is_reg(pkgfile.mode) {
@@ -4247,6 +4259,9 @@ impl FilesCheck {
                 continue;
             }
             if is_binary_container(path) {
+                continue;
+            }
+            if is_bidi_demo_page(&pkgfile.name) {
                 continue;
             }
             if let Some(found) = first_bidi_control_in_file(path) {
@@ -11895,6 +11910,9 @@ print("hi")
             .into_iter()
             .map(|(name, magic, content)| {
                 let path = dir.path().join(name.trim_start_matches('/'));
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("create parent");
+                }
                 std::fs::write(&path, &content).expect("write temp file");
                 PkgFile {
                     name: name.to_string(),
@@ -13120,6 +13138,72 @@ print("hi")
             bidi_findings(&out).is_empty(),
             "compiled catalogs out of scope"
         );
+    }
+
+    #[test]
+    fn bidi_demo_test_page_not_scanned() {
+        // Yudit's demonstration page carries deliberate bidi controls
+        // (Arabic demo text); both shipped copies share the
+        // /doc/TestPage.txt suffix and stay silent.
+        let content =
+            "Arabic - \u{202B}\u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}\u{202C}\n"
+                .as_bytes()
+                .to_vec();
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(
+            &dir,
+            vec![
+                (
+                    "/usr/share/yudit/doc/TestPage.txt",
+                    "UTF-8 Unicode text",
+                    content.clone(),
+                ),
+                (
+                    "/usr/share/doc/packages/yudit/doc/TestPage.txt",
+                    "UTF-8 Unicode text",
+                    content,
+                ),
+            ],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        assert!(
+            bidi_findings(&out).is_empty(),
+            "demo test page out of scope"
+        );
+    }
+
+    #[test]
+    fn bidi_genuine_rtl_and_non_demo_doc_still_fire() {
+        // The credit is file-specific: a .po translation, a .desktop
+        // RTL name, and a non-TestPage doc file with controls all fire.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = bidi_pkg(
+            &dir,
+            vec![
+                (
+                    "/usr/share/locale/ar/LC_MESSAGES/foo.po",
+                    "UTF-8 Unicode text",
+                    "msgstr \"\u{202B}text\u{202C}\"\n".as_bytes().to_vec(),
+                ),
+                (
+                    "/usr/share/applications/foo.desktop",
+                    "UTF-8 Unicode text",
+                    "Name=\u{202E}foo\u{202C}\n".as_bytes().to_vec(),
+                ),
+                (
+                    "/usr/share/doc/packages/foo/HOWTO-bidi.txt",
+                    "UTF-8 Unicode text",
+                    "bidi \u{202A}demo\u{202C}\n".as_bytes().to_vec(),
+                ),
+            ],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        FilesCheck::new(&config).check_bidi_controls(&pkg, &mut out);
+        let findings = bidi_findings(&out);
+        assert_eq!(findings.len(), 3, "genuine content fires: {findings:?}");
     }
 
     #[test]
