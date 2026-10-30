@@ -3363,15 +3363,30 @@ fn compiled_cache_of_shipped_source(pkg: &Pkg, pkgfile: &PkgFile) -> bool {
         .any(|f| f.name == stem && !f.is_ghost() && is_reg(f.mode))
 }
 
+/// Strip at most one balanced quote pair from both ends: `"foo"` and
+/// `'foo'` unquote, but unbalanced (`"foo`) and mixed (`'"foo"'`)
+/// spellings keep their quotes, so broken-shell input never credits a
+/// basename it does not name.
+fn strip_one_balanced_quote_pair(s: &str) -> &str {
+    if s.len() >= 2 {
+        let (first, last) = (s.as_bytes()[0], s.as_bytes()[s.len() - 1]);
+        if (first == b'"' || first == b'\'') && first == last {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
 /// Whether a non-executable file in a bin dir is dot-sourced by another
 /// payload file in the same package: a helper library the package own
 /// entry points source at runtime, not an entry point itself. The
 /// sourcing line must start (after ASCII whitespace) with a dot or source
 /// followed by ASCII whitespace, and the sourced path must be exactly the
 /// candidate basename or end with /<basename>, so comments, strings
-/// and execute forms (./name) do not credit. Quotes around the sourced
-/// path are trimmed from both ends. Each sibling is read only up to the
-/// fragment-proof limit: a sourcing line past it is not proven.
+/// and execute forms (./name) do not credit. At most one balanced quote
+/// pair is stripped from both ends of the sourced path. Each sibling is
+/// read only up to the fragment-proof limit: a sourcing line past it is
+/// not proven.
 fn sourced_by_sibling_script(pkg: &Pkg, fname: &str) -> bool {
     let Some(basename) = fname.rsplit("/").next() else {
         return false;
@@ -3384,15 +3399,12 @@ fn sourced_by_sibling_script(pkg: &Pkg, fname: &str) -> bool {
         if f.name == fname || f.is_ghost() || !is_reg(f.mode) {
             return false;
         }
-        let Ok(file) = std::fs::File::open(&f.path) else {
+        let Ok(bytes) = pkg.read_prefix(&f.name, FRAGMENT_PROOF_SCAN_LIMIT) else {
             return false;
         };
-        let Ok(bytes) = read_prefix(file, FRAGMENT_PROOF_SCAN_LIMIT) else {
-            return false;
-        };
-        let Ok(content) = String::from_utf8(bytes) else {
-            return false;
-        };
+        // Lossy decode: a multi-byte sequence cut by the prefix limit
+        // must not discard the whole prefix (and its sourcing lines).
+        let content = String::from_utf8_lossy(&bytes);
         content.lines().any(|line| {
             let trimmed = line.trim_ascii_start();
             let rest = if trimmed.starts_with("source")
@@ -3407,7 +3419,7 @@ fn sourced_by_sibling_script(pkg: &Pkg, fname: &str) -> bool {
                 return false;
             };
             let rest = rest.trim_ascii();
-            let rest = rest.trim_matches(|c: char| c as u32 == 34 || c as u32 == 39);
+            let rest = strip_one_balanced_quote_pair(rest);
             rest == basename || rest.ends_with(&suffix)
         })
     })
@@ -3422,15 +3434,13 @@ fn is_bin_data_file(fname: &str) -> bool {
     let Some(basename) = fname.rsplit("/").next() else {
         return false;
     };
-    // A leading dot is not an extension separator: a dotfile has no
-    // extension, so `.conf` is not a conf data file.
-    if basename.starts_with('.') {
-        return false;
-    }
-    let Some(ext) = basename.rsplit(".").next() else {
+    // A leading dot is not an extension separator on its own: `.conf`
+    // has no extension, but `.foo.conf` takes `conf` from its later dot.
+    let without_leading_dot = basename.strip_prefix('.').unwrap_or(basename);
+    let Some(ext) = without_leading_dot.rsplit(".").next() else {
         return false;
     };
-    if ext == basename {
+    if ext == without_leading_dot {
         return false;
     }
     matches!(
@@ -4328,7 +4338,20 @@ impl FilesCheck {
                     &[exe, &list_repr],
                 );
             }
-            if !st.man_basenames.contains(exe)
+            // A lone %ghost executable installs nothing, so it draws no
+            // man-page demand. Its duplicate bookkeeping is unchanged:
+            // a ghost entry still registers, so a ghost+real pair still
+            // fires duplicate-executable (pinned by
+            // non_executable_in_bin_ghost_executable_registers_for_duplicates).
+            let all_ghost = !paths.is_empty()
+                && paths.iter().all(|path| {
+                    pkg.files
+                        .iter()
+                        .find(|f| &f.name == path)
+                        .is_some_and(|f| f.is_ghost())
+                });
+            if !all_ghost
+                && !st.man_basenames.contains(exe)
                 && !self.documented_alias(exe, paths, st)
                 && !self.version_affix_documented(exe, st)
             {
@@ -10452,6 +10475,86 @@ mod tests {
     }
 
     #[test]
+    fn bin_data_file_dotfile_takes_later_dot_extension() {
+        assert!(is_bin_data_file("/usr/bin/.foo.conf"));
+        assert!(!is_bin_data_file("/usr/bin/.conf"));
+        assert!(is_bin_data_file("/usr/bin/foo.conf"));
+        assert!(!is_bin_data_file("/usr/bin/foo"));
+    }
+
+    #[test]
+    fn sourced_quote_edges_do_not_credit_broken_shell() {
+        // Unbalanced quotes never credit.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[
+                ("/usr/bin/helper", "# helper\n"),
+                ("/usr/bin/tool", "#!/bin/sh\nsource \"helper\n"),
+            ],
+        );
+        let details = nonexec_details(&pkg);
+        assert!(
+            details.iter().any(|d| d.contains("helper")),
+            "unbalanced quote must still fire: {details:?}"
+        );
+        // Mixed quotes never credit: the sourced name is `"helper"`,
+        // not `helper`.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[
+                ("/usr/bin/helper", "# helper\n"),
+                ("/usr/bin/tool", "#!/bin/sh\n. '\"helper\"'\n"),
+            ],
+        );
+        let details = nonexec_details(&pkg);
+        assert!(
+            details.iter().any(|d| d.contains("helper")),
+            "mixed quotes must still fire: {details:?}"
+        );
+        // One balanced pair still credits.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[
+                ("/usr/bin/helper", "# helper\n"),
+                ("/usr/bin/tool", "#!/bin/sh\nsource \"helper\"\n"),
+            ],
+        );
+        let details = nonexec_details(&pkg);
+        assert!(
+            !details.iter().any(|d| d.contains("helper")),
+            "balanced quotes must stay silent: {details:?}"
+        );
+    }
+
+    #[test]
+    fn sourced_prefix_truncated_multibyte_still_scans() {
+        // Sourcing line first, then padding, then a two-byte char
+        // straddling the 1 MiB prefix limit: strict UTF-8 decoding
+        // used to drop the whole prefix and miss the sourcing line.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut sourcer = String::from("#!/bin/sh\n. helper\n");
+        let pad = FRAGMENT_PROOF_SCAN_LIMIT as usize - sourcer.len() - 1;
+        sourcer.push_str(&"#".repeat(pad));
+        sourcer.push('\u{e9}');
+        sourcer.push_str("\n# trailing\n");
+        let pkg = content_pkg(
+            &dir,
+            &[
+                ("/usr/bin/helper", "# helper\n"),
+                ("/usr/bin/tool", &sourcer),
+            ],
+        );
+        let details = nonexec_details(&pkg);
+        assert!(
+            !details.iter().any(|d| d.contains("helper")),
+            "truncated prefix must still scan: {details:?}"
+        );
+    }
+
+    #[test]
     fn non_executable_in_bin_data_files_are_silent() {
         // Compiler data, FIPS sidecar and host-loaded source are silent.
         for (path, content) in [
@@ -16129,6 +16232,28 @@ print("hi")
             tails,
             ["zzz", "aaa", "mmm"],
             "insertion order, not sorted order"
+        );
+    }
+
+    #[test]
+    fn ghost_executable_draws_no_manual_page_demand() {
+        // A lone %ghost executable installs nothing, so it draws
+        // neither the duplicate nor the man-page finding.
+        let mut ghost = mkfile("/usr/bin/ghosttool", 0o100755, 41);
+        ghost.flags = RPMFILE_GHOST;
+        let (pkg, _dir) = pkg_with_files(vec![ghost]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("ghosttool")),
+            "ghost exe must draw no man-page demand: {results:?}"
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "duplicate-executable" && d.contains("ghosttool")),
+            "ghost exe must draw no duplicate: {results:?}"
         );
     }
 
