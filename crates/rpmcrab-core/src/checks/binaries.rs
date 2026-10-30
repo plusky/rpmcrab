@@ -389,7 +389,7 @@ static GETHOSTBYNAME_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static MD5_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static DES_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static RC4_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
-static WEAK_PRNG_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static WEAK_PRNG_GENERATOR_REGEX: OnceLock<Regex> = OnceLock::new();
 static UNBOUNDED_COPY_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static LEGACY_NETWORK_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
@@ -4398,7 +4398,7 @@ pub struct BinariesCheck {
     md5_call_regex: Regex,
     des_call_regex: Regex,
     rc4_call_regex: Regex,
-    weak_prng_call_regex: Regex,
+    weak_prng_generator_regex: Regex,
     unbounded_copy_call_regex: Regex,
     legacy_network_call_regex: Regex,
 
@@ -5608,6 +5608,336 @@ fn pkg_ships_daemon_units(pkg: &Pkg) -> bool {
     })
 }
 
+/// The binaries a package's own daemon units actually start, plus
+/// whether any daemon unit could not be resolved. An unresolvable
+/// unit preserves the old package-level arm for the whole package:
+/// the unit's binary is unknown, so no file can be proven not
+/// started. Only `.service`/`.socket` units under the systemd unit
+/// directories count, with the same ghost/masked/doc-substring
+/// exclusions as `pkg_ships_daemon_units`; a socket contributes
+/// through its `Service=` target, else its same-stem service, else
+/// its `@`-template for Accept=yes sockets.
+struct DaemonExec {
+    binaries: HashSet<String>,
+    has_unresolvable: bool,
+}
+
+/// Normalize a shipped path for usrmerge: /bin, /sbin, /lib and
+/// /lib64 spell the same file as their /usr counterparts.
+fn normalize_usrmerge(path: &str) -> String {
+    for (old, new) in [
+        ("/bin/", "/usr/bin/"),
+        ("/sbin/", "/usr/sbin/"),
+        ("/lib64/", "/usr/lib64/"),
+        ("/lib/", "/usr/lib/"),
+    ] {
+        if let Some(rest) = path.strip_prefix(old) {
+            return format!("{new}{rest}");
+        }
+    }
+    path.to_string()
+}
+
+/// Lexically normalize an absolute path (`.` and `..` resolved
+/// without touching the filesystem).
+fn normalize_lexical(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
+
+/// First whitespace-separated token of a systemd command line,
+/// honouring single/double quotes and backslash escapes. An
+/// unterminated quote or an empty line yields nothing.
+fn systemd_first_token(cmd: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = cmd.chars();
+    let mut any = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                any = true;
+                let mut closed = false;
+                for nc in chars.by_ref() {
+                    if nc == c {
+                        closed = true;
+                        break;
+                    }
+                    out.push(nc);
+                }
+                if !closed {
+                    return None;
+                }
+            }
+            '\\' => {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                    any = true;
+                }
+            }
+            c if c.is_whitespace() => {
+                if any {
+                    break;
+                }
+            }
+            c => {
+                out.push(c);
+                any = true;
+            }
+        }
+    }
+    if any { Some(out) } else { None }
+}
+
+/// Resolve one ExecStart executable token to shipped binary paths.
+/// Returns the paths plus whether the token resolved. An absolute
+/// path resolves to itself (symlinks in the package followed); a
+/// bare name resolves only to a unique executable file with that
+/// basename, and resolves to nothing when the package ships no such
+/// file. An ambiguous bare name, a specifier, a placeholder, a
+/// variable or an empty token is unresolvable.
+fn resolve_exec_token(
+    token: &str,
+    pkg: &Pkg,
+    symlink_names: &HashSet<String>,
+    symlink_targets: &HashMap<String, String>,
+) -> (Vec<String>, bool) {
+    let mut tok = token;
+    while let Some(rest) = tok.strip_prefix(['-', '+', ':', '!']) {
+        tok = rest;
+    }
+    if let Some(rest) = tok.strip_prefix('@') {
+        // The @-attached token is the executable; the next token is argv[0].
+        tok = rest;
+    }
+    if tok.is_empty() || tok.contains(['%', '@', '$']) {
+        return (vec![], false);
+    }
+    if tok.starts_with('/') {
+        let mut path = normalize_lexical(&normalize_usrmerge(tok));
+        let mut seen = HashSet::new();
+        loop {
+            if symlink_names.contains(&path) {
+                let Some(target) = symlink_targets.get(&path) else {
+                    return (vec![], false);
+                };
+                if !seen.insert(path.clone()) {
+                    return (vec![], false);
+                }
+                let next = if target.starts_with('/') {
+                    target.clone()
+                } else {
+                    let dir = path.rsplit_once('/').map_or("/", |(d, _)| d);
+                    format!("{dir}/{target}")
+                };
+                path = normalize_lexical(&normalize_usrmerge(&next));
+            } else {
+                break;
+            }
+        }
+        return (vec![path], true);
+    }
+    let matches: Vec<&PkgFile> = pkg
+        .files
+        .iter()
+        .filter(|f| {
+            !is_symlink(f.mode) && f.mode & 0o111 != 0 && f.name.rsplit('/').next() == Some(tok)
+        })
+        .collect();
+    if matches.len() == 1 {
+        (vec![normalize_usrmerge(&matches[0].name)], true)
+    } else if matches.is_empty() {
+        (vec![], true)
+    } else {
+        (vec![], false)
+    }
+}
+
+/// ExecStart binaries of one service unit file. The content is read
+/// through the unit's extracted path; an unreadable unit, an
+/// unparsable token or an unresolvable token makes the whole unit
+/// unresolvable. An empty ExecStart resets the list and contributes
+/// nothing; a service with no ExecStart starts no binary.
+fn service_exec_binaries(
+    pkg: &Pkg,
+    unit: &PkgFile,
+    symlink_names: &HashSet<String>,
+    symlink_targets: &HashMap<String, String>,
+) -> (Vec<String>, bool) {
+    let Ok(content) = std::fs::read_to_string(&unit.path) else {
+        return (vec![], false);
+    };
+    let mut binaries = Vec::new();
+    let mut in_service = false;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_service = line == "[Service]";
+            continue;
+        }
+        if line.starts_with('#') || line.starts_with(';') || !in_service {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "ExecStart" {
+            continue;
+        }
+        let cmd = value.trim();
+        if cmd.is_empty() {
+            continue;
+        }
+        let Some(token) = systemd_first_token(cmd) else {
+            return (vec![], false);
+        };
+        let (mut bins, ok) = resolve_exec_token(&token, pkg, symlink_names, symlink_targets);
+        if !ok {
+            return (vec![], false);
+        }
+        binaries.append(&mut bins);
+    }
+    (binaries, true)
+}
+
+/// ExecStart binaries of one socket unit file, through its service:
+/// the `Service=` target when present, else the same-stem service,
+/// else the `@`-template for Accept=yes sockets. A service that is
+/// not shipped by the package, or is a ghost entry, is
+/// unresolvable; a masked service starts nothing.
+fn socket_exec_binaries(
+    pkg: &Pkg,
+    unit: &PkgFile,
+    symlink_names: &HashSet<String>,
+    symlink_targets: &HashMap<String, String>,
+) -> (Vec<String>, bool) {
+    const UNIT_PRECEDENCE: [&str; 5] = [
+        "/etc/systemd/system/",
+        "/run/systemd/system/",
+        "/usr/local/lib/systemd/system/",
+        "/usr/lib/systemd/system/",
+        "/lib/systemd/system/",
+    ];
+    let Ok(content) = std::fs::read_to_string(&unit.path) else {
+        return (vec![], false);
+    };
+    let stem = unit.name.strip_suffix(".socket").unwrap_or(&unit.name);
+    let stem_base = stem.rsplit('/').next().unwrap_or(stem);
+    let mut service_name: Option<String> = None;
+    let mut accept_yes = false;
+    let mut in_socket = false;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_socket = line == "[Socket]";
+            continue;
+        }
+        if line.starts_with('#') || line.starts_with(';') || !in_socket {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "Service" => service_name = Some(value.trim().to_string()),
+            "Accept" => accept_yes = matches!(value.trim(), "yes" | "true" | "1"),
+            _ => {}
+        }
+    }
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(svc) = service_name {
+        let mut name = svc;
+        if !name.ends_with(".service") {
+            name.push_str(".service");
+        }
+        candidates.push(name);
+    } else {
+        candidates.push(format!("{stem_base}.service"));
+        if accept_yes {
+            candidates.push(format!("{stem_base}@.service"));
+        }
+    }
+    for name in candidates {
+        let mut found = None;
+        for dir in UNIT_PRECEDENCE {
+            let path = format!("{dir}{name}");
+            if let Some(f) = pkg.files.iter().find(|f| f.name == path) {
+                found = Some(f);
+                break;
+            }
+        }
+        let Some(svc) = found else { continue };
+        if svc.is_ghost() || pkg.ghost_files.iter().any(|g| g == &svc.name) {
+            return (vec![], false);
+        }
+        if is_symlink(svc.mode) && svc.linkto == "/dev/null" {
+            return (vec![], true);
+        }
+        return service_exec_binaries(pkg, svc, symlink_names, symlink_targets);
+    }
+    (vec![], false)
+}
+
+fn daemon_exec_binaries(pkg: &Pkg) -> DaemonExec {
+    const UNIT_DIRS: [&str; 5] = [
+        "/usr/lib/systemd/system/",
+        "/lib/systemd/system/",
+        "/etc/systemd/system/",
+        "/run/systemd/system/",
+        "/usr/local/lib/systemd/system/",
+    ];
+    let mut binaries = HashSet::new();
+    let mut has_unresolvable = false;
+    let mut symlink_targets: HashMap<String, String> = HashMap::new();
+    let mut symlink_names: HashSet<String> = HashSet::new();
+    for f in &pkg.files {
+        if is_symlink(f.mode) {
+            symlink_names.insert(normalize_usrmerge(&f.name));
+            if !f.linkto.is_empty() {
+                symlink_targets.insert(normalize_usrmerge(&f.name), f.linkto.clone());
+            }
+        }
+    }
+    let is_daemon_unit = |f: &PkgFile| {
+        UNIT_DIRS.iter().any(|dir| f.name.starts_with(dir))
+            && (f.name.ends_with(".service") || f.name.ends_with(".socket"))
+            && !f.is_ghost()
+            && !pkg.ghost_files.iter().any(|g| g == &f.name)
+            && !(is_symlink(f.mode) && f.linkto == "/dev/null")
+    };
+    for unit in pkg.files.iter().filter(|f| is_daemon_unit(f)) {
+        let (bins, ok) = if unit.name.ends_with(".service") {
+            service_exec_binaries(pkg, unit, &symlink_names, &symlink_targets)
+        } else {
+            socket_exec_binaries(pkg, unit, &symlink_names, &symlink_targets)
+        };
+        if !ok {
+            has_unresolvable = true;
+        }
+        binaries.extend(bins);
+    }
+    DaemonExec {
+        binaries,
+        has_unresolvable,
+    }
+}
+
+/// Daemon arm of the weak-prng gate after narrowing: the file is a
+/// binary a daemon unit actually starts, or the package has an
+/// unresolvable daemon unit (fail-open, reported not guessed).
+fn file_is_daemon_exec(pkg: &Pkg, pkgfile: &PkgFile) -> bool {
+    let exec = daemon_exec_binaries(pkg);
+    exec.has_unresolvable || exec.binaries.contains(&normalize_usrmerge(&pkgfile.name))
+}
+
 impl BinariesCheck {
     pub fn new(config: &Config) -> Self {
         Self::with_tool_source(config, ToolSource::Path)
@@ -5708,10 +6038,10 @@ impl BinariesCheck {
                     .expect("static regex")
                 })
                 .clone(),
-            weak_prng_call_regex: WEAK_PRNG_CALL_REGEX
+            weak_prng_generator_regex: WEAK_PRNG_GENERATOR_REGEX
                 .get_or_init(|| {
                     Regex::new(
-                        r"^((drand48_r|drand48|erand48_r|erand48|lrand48_r|lrand48|nrand48_r|nrand48|mrand48_r|mrand48|jrand48_r|jrand48|seed48_r|seed48|lcong48_r|lcong48|srand48_r|srand48|initstate_r|setstate_r|initstate|setstate|srandom_r|srandom|random_r|random|srand|rand_r|rand)(?:@GLIBC\S+)?)(?:\s|$)",
+                        r"^((drand48_r|drand48|erand48_r|erand48|lrand48_r|lrand48|nrand48_r|nrand48|mrand48_r|mrand48|jrand48_r|jrand48|random_r|random|rand_r|rand)(?:@GLIBC\S+)?)(?:\s|$)",
                     )
                     .expect("static regex")
                 })
@@ -7540,8 +7870,16 @@ impl BinariesCheck {
         // jitter, and the gated corpus population is dominated by
         // the benign uses. The regex is anchored: arc4random and
         // getrandom are strong sources, not this pattern.
-        let weak_prng = info.has_undefined_function_matching(&self.weak_prng_call_regex)
-            && (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg));
+        // Two narrowings (fix-and-diverge): the daemon arm counts
+        // only the binary a unit actually starts (ExecStart), not
+        // every file in a daemon-shipping package, and a seeder
+        // symbol (srand, srandom, initstate, setstate, seed48,
+        // lcong48, srand48 and their _r forms) fires only alongside
+        // a generator -- generator-only files already fire, so the
+        // net predicate is generator presence and seeder-only files
+        // stay silent. The privileged arm is unchanged.
+        let weak_prng = info.has_undefined_function_matching(&self.weak_prng_generator_regex)
+            && (file_is_privileged(pkgfile) || file_is_daemon_exec(pkg, pkgfile));
         // An undefined reference charges the call (#972 candidate 4):
         // the definition site -- glibc itself, or a library shipping
         // its own variant -- makes no call and stays silent, unlike
@@ -23539,6 +23877,126 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn weak_prng_execstart_narrowing() {
+        // Unit files live in a temp dir; the synthetic unit entries
+        // point at them through PkgFile.path while keeping their
+        // package names, so the parser reads real content.
+        fn unit_file(dir: &std::path::Path, pkg_path: &str, content: &str) -> PkgFile {
+            let path = dir.join(pkg_path.trim_start_matches('/'));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, content).unwrap();
+            let mut f = syn_file(pkg_path, "ASCII text");
+            f.path = path.to_string_lossy().into_owned();
+            f
+        }
+
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let count = |pkg: &Pkg, pkgfile: &PkgFile, functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-weak-prng").len()
+        };
+
+        let dir = std::env::temp_dir().join(format!("rpmcrab-weakprng-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let foo = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let helper = syn_file("/usr/bin/foo-helper", "ELF 64-bit LSB executable");
+        let lib = syn_file("/usr/lib64/libfoo.so.1", "ELF 64-bit LSB shared object");
+        let mut suid = syn_file("/usr/bin/suidfoo", "ELF 64-bit LSB executable");
+        suid.mode = 0o104755;
+
+        // ExecStart binary fires; helper and library in the same
+        // daemon package stay silent.
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/foo.service",
+            "[Service]\nExecStart=/usr/bin/foo --daemon\n",
+        );
+        let svc_pkg = synthetic_pkg("testpkg", "x86_64", vec![unit]);
+        assert_eq!(count(&svc_pkg, &foo, &["rand"], &["rand"]), 1);
+        assert_eq!(count(&svc_pkg, &helper, &["rand"], &["rand"]), 0);
+        assert_eq!(count(&svc_pkg, &lib, &["rand"], &["rand"]), 0);
+
+        // Seeder-only stays silent; seeder plus generator fires.
+        assert_eq!(count(&svc_pkg, &foo, &["srand"], &["srand"]), 0);
+        assert_eq!(
+            count(&svc_pkg, &foo, &["srand", "rand"], &["srand", "rand"]),
+            1
+        );
+
+        // Privileged arm is unchanged except for the seeder rule:
+        // a setuid file calling only a seeder stays silent.
+        assert_eq!(count(&svc_pkg, &suid, &["srand"], &["srand"]), 0);
+        assert_eq!(count(&svc_pkg, &suid, &["rand"], &["rand"]), 1);
+
+        // Bare name resolves to the unique executable with that
+        // basename in the package.
+        let bare_unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/bar.service",
+            "[Service]\nExecStart=bar\n",
+        );
+        let mut bar_entry = syn_file("/usr/bin/bar", "ELF 64-bit LSB executable");
+        bar_entry.mode = 0o100755;
+        let bar = syn_file("/usr/bin/bar", "ELF 64-bit LSB executable");
+        let bare_pkg = synthetic_pkg("testpkg", "x86_64", vec![bare_unit, bar_entry]);
+        assert_eq!(count(&bare_pkg, &bar, &["rand"], &["rand"]), 1);
+
+        // Specifier in the path makes the unit unresolvable, so the
+        // package-level arm survives (fail-open).
+        let spec_unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/spec.service",
+            "[Service]\nExecStart=/usr/bin/%i\n",
+        );
+        let spec_pkg = synthetic_pkg("testpkg", "x86_64", vec![spec_unit]);
+        assert_eq!(count(&spec_pkg, &helper, &["rand"], &["rand"]), 1);
+
+        // Socket through Service= reaches the service's ExecStart.
+        let sock = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/foosock.socket",
+            "[Socket]\nService=foo.service\n",
+        );
+        let sock_svc = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/foo.service",
+            "[Service]\nExecStart=/usr/bin/foo\n",
+        );
+        let sock_pkg = synthetic_pkg("testpkg", "x86_64", vec![sock, sock_svc]);
+        assert_eq!(count(&sock_pkg, &foo, &["rand"], &["rand"]), 1);
+
+        // @-prefix: the @-attached token is the executable.
+        let at_unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/at.service",
+            "[Service]\nExecStart=@/usr/bin/foo foo --daemon\n",
+        );
+        let at_pkg = synthetic_pkg("testpkg", "x86_64", vec![at_unit]);
+        assert_eq!(count(&at_pkg, &foo, &["rand"], &["rand"]), 1);
+
+        // Wrapper: the shell is the started program, so a helper
+        // stays silent even though the payload names it.
+        let wrap_unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/wrap.service",
+            "[Service]\nExecStart=/bin/sh -c /usr/bin/foo\n",
+        );
+        let wrap_pkg = synthetic_pkg("testpkg", "x86_64", vec![wrap_unit]);
+        assert_eq!(count(&wrap_pkg, &helper, &["rand"], &["rand"]), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn weak_prng_gated_findings() {
         // #972 candidate 7: an undefined reference to the rand family
         // reports at Warning only inside the privilege-or-exposure
@@ -23580,7 +24038,7 @@ description = "explicit priority string bypasses the system crypto policy"
         // Setgid and capability-carrying firing files -> fire.
         let mut sgid = plain.clone();
         sgid.mode = 0o102755;
-        assert_eq!(count(&bare_pkg, &sgid, &["srand48"], &["srand48"]), 1);
+        assert_eq!(count(&bare_pkg, &sgid, &["random"], &["random"]), 1);
         let mut caps = plain.clone();
         caps.filecaps = Some("cap_net_raw+ep".to_string());
         assert_eq!(count(&bare_pkg, &caps, &["random"], &["random"]), 1);
@@ -23650,8 +24108,9 @@ description = "explicit priority string bypasses the system crypto policy"
         // Definition-only (an implementing library's shape) stays silent
         // even in a gated package.
         assert_eq!(count(&svc_pkg, &plain, &["rand"], &[]), 0);
-        // Reentrant forms fire inside the gate.
-        assert_eq!(count(&bare_pkg, &suid, &["srandom_r"], &["srandom_r"]), 1);
+        // Reentrant generator forms fire inside the gate; a
+        // reentrant seeder alone stays silent without a generator.
+        assert_eq!(count(&bare_pkg, &suid, &["srandom_r"], &["srandom_r"]), 0);
         assert_eq!(count(&svc_pkg, &plain, &["drand48_r"], &["drand48_r"]), 1);
         // The strong generators are not this pattern, even setuid.
         assert_eq!(count(&bare_pkg, &suid, &["arc4random"], &["arc4random"]), 0);
