@@ -443,3 +443,10 @@ check = "epoch-tag"
 kind = "behaviour"
 reason = "Deliberate enforcement in both directions: when the configuration does not use Epoch (UseEpoch=false, the default), a package carrying an Epoch tag gets E epoch-tag, mirroring no-epoch-tag for a missing tag when UseEpoch holds. The reference _check_no_epoch_tag emits only no-epoch-tag and unreasonable-epoch and stays silent for a present Epoch under UseEpoch=false, so this is a port-only finding: an Epoch tag under a no-Epoch configuration would otherwise silently dominate version comparison, and the port surfaces it instead of passing it. Pinned by epoch_tag_emits_when_use_epoch_false, epoch_tag_silent_when_use_epoch_true and epoch_tag_silent_without_epoch in tags.rs."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "unreasonable-epoch"
+kind = "behaviour"
+reason = "Reference _check_no_epoch_tag fires unreasonable-epoch for any Epoch over 99 regardless of configuration. The port fires it only when the configuration uses Epoch (UseEpoch=true): under UseEpoch=false, the default, any Epoch tag already fires E epoch-tag, so the warning would only ever ride along on the same package as a weaker second finding. Pinned by unreasonable_epoch_emits and unreasonable_epoch_gated_when_use_epoch_false in tags.rs."
+since = "0.4.1"

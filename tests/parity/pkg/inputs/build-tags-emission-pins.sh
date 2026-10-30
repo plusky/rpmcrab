@@ -13,7 +13,7 @@
 #   RPMTAG_HEADERI18NTABLE=["C"], which TagsCheck (like the reference)
 #   requires before running Summary/Description content checks.
 # tags-badversion:   Version 0pre -> invalid-version.
-# tags-highepoch:    Epoch 100   -> unreasonable-epoch.
+# tags-highepoch:    Epoch 100   -> unreasonable-epoch (UseEpoch=true only; under the default UseEpoch=false it fires epoch-tag instead).
 # tags-badchangelog: control character in %changelog ->
 #   forbidden-controlchar-found (built from a spec with a literal \x01).
 #
