@@ -136,7 +136,7 @@ fn pkg_to_json(pkg: &Pkg) -> Value {
         "files": files,
         "doc_files": pkg.doc_files,
         "config_files": pkg.config_files,
-        "ghost_files": pkg.ghost_files,
+        "ghost_files": pkg.ghost_files.iter().collect::<Vec<_>>(),
         "noreplace_files": pkg.noreplace_files,
         "missingok_files": pkg.missingok_files,
         "scriptlets": scriptlets,

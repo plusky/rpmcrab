@@ -142,7 +142,7 @@ impl Check for BashismsCheck {
             // The reference counts every non-ghost file (files_re is `.*`) and
             // drops ghosts from the dispatch list (AbstractCheck.py:45), so a
             // ghost script is never handed to the tools.
-            if pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+            if pkg.ghost_files.contains(&pkgfile.name) {
                 continue;
             }
             self.checked_files += 1;

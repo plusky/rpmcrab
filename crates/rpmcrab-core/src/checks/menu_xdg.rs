@@ -510,7 +510,7 @@ impl Check for MenuXDGCheck {
             // AbstractCheck.py:45 drops ghosts from the dispatch list. A ghost
             // desktop file has no payload, so the validator reports it missing
             // and the port would raise invalid-desktopfile for it.
-            if pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+            if pkg.ghost_files.contains(&pkgfile.name) {
                 continue;
             }
             self.checked_files += 1;

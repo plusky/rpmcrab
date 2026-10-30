@@ -148,7 +148,7 @@ fn tmpfiles_created_dirs(pkg: &Pkg) -> std::collections::HashSet<String> {
     let mut created = std::collections::HashSet::new();
     for file in &pkg.files {
         let fname = file.name.as_str();
-        if pkg.ghost_files.iter().any(|g| g == fname) {
+        if pkg.ghost_files.contains(fname) {
             continue;
         }
         if !fname.ends_with(".conf") {
@@ -229,7 +229,7 @@ impl Check for LogrotateCheck {
         let mut dirs: IndexMap<String, Option<(String, String)>> = IndexMap::new();
         for file in &pkg.files {
             let fname = file.name.as_str();
-            if pkg.ghost_files.iter().any(|g| g == fname) {
+            if pkg.ghost_files.contains(fname) {
                 continue;
             }
             if !fname.starts_with("/etc/logrotate.d/")

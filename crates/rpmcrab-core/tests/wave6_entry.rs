@@ -58,7 +58,7 @@ fn run_check_with_ghost_no_payload(
         .find(|f| f.name == ghost)
         .unwrap_or_else(|| panic!("{ghost} is not in {rpm}"));
     std::fs::remove_file(&entry.path).ok();
-    pkg.ghost_files = vec![ghost.to_string()];
+    pkg.ghost_files = vec![ghost.to_string()].into();
     let config = Config::default();
     let mut filter = Filter::new(&config, Color::for_tty(false)).unwrap();
     check.check_binary(&pkg, &config, &mut filter);
@@ -83,7 +83,7 @@ fn run_check_with_ghost(check: &mut impl Check, rpm: &str, ghost: &str) -> Vec<(
         pkg.files.iter().any(|f| f.name == ghost),
         "{ghost} is not in {rpm}, so this test would pass vacuously"
     );
-    pkg.ghost_files = vec![ghost.to_string()];
+    pkg.ghost_files = vec![ghost.to_string()].into();
     let config = Config::default();
     let mut filter = Filter::new(&config, Color::for_tty(false)).unwrap();
     check.check_binary(&pkg, &config, &mut filter);

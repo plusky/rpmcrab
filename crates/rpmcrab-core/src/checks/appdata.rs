@@ -450,7 +450,7 @@ impl Check for AppDataCheck {
             // AbstractCheck.py:45 filters ghosts out of the dispatch list, so
             // check_file never runs for one and a ghost appdata file draws no
             // finding.
-            if pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+            if pkg.ghost_files.contains(&pkgfile.name) {
                 continue;
             }
             self.checked_files += 1;

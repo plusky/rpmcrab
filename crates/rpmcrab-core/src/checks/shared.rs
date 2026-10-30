@@ -42,7 +42,7 @@ pub(crate) fn source_package_keys(pkg: &Pkg) -> Vec<String> {
 /// the entry and the package's ghost list are two spellings of the
 /// same fact, and either marks the entry as not shipped content.
 pub(crate) fn is_ghost_file(pkg: &Pkg, file: &PkgFile) -> bool {
-    file.is_ghost() || pkg.ghost_files.iter().any(|g| g == &file.name)
+    file.is_ghost() || pkg.ghost_files.contains(&file.name)
 }
 
 /// Lexically normalise an absolute path: `.` components drop out,

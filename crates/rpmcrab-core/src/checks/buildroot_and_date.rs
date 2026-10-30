@@ -153,7 +153,7 @@ impl BuildRootAndDateCheck {
                 continue;
             }
             // AbstractCheck.py:45 drops ghosts before check_file dispatches.
-            if pkg.ghost_files.iter().any(|g| g == filename) {
+            if pkg.ghost_files.contains(filename) {
                 continue;
             }
             let data = pkg.read_file(filename);

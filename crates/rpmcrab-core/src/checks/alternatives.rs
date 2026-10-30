@@ -615,7 +615,7 @@ impl Check for AlternativesCheck {
                 let named_alt = format!("/etc/alternatives/{name}");
                 let shipped_under_name = name != link_base
                     && file_names.contains(&named_alt.as_str())
-                    && pkg.ghost_files.iter().any(|g| g == &named_alt);
+                    && pkg.ghost_files.contains(&named_alt);
                 if !shipped_under_name {
                     add_info(
                         out,
@@ -625,7 +625,7 @@ impl Check for AlternativesCheck {
                         &[&etc_alt],
                     );
                 }
-            } else if !pkg.ghost_files.iter().any(|g| g == &etc_alt) {
+            } else if !pkg.ghost_files.contains(&etc_alt) {
                 add_info(
                     out,
                     Level::Error,

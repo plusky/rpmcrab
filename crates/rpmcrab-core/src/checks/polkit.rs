@@ -285,7 +285,7 @@ impl Check for PolkitCheck {
             if !f.starts_with(PREFIX) {
                 continue;
             }
-            if pkg.ghost_files.iter().any(|g| g == f) {
+            if pkg.ghost_files.contains(f) {
                 add_info(out, Level::Error, pkg, "polkit-ghost-file", &[f]);
                 continue;
             }
@@ -673,7 +673,7 @@ mod tests {
             path: name.to_string(),
             ..Default::default()
         }];
-        pkg.ghost_files = vec![name.to_string()];
+        pkg.ghost_files = vec![name.to_string()].into();
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = check();

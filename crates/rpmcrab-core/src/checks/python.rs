@@ -1170,7 +1170,7 @@ impl Check for PythonCheck {
             // AbstractCheck.py:45 drops ghosts from the dispatch list, and
             // files_re is `.*` here, so this is the only filter: a ghost
             // site-packages tests/ or doc/ directory is never inspected.
-            if pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+            if pkg.ghost_files.contains(&pkgfile.name) {
                 continue;
             }
             self.checked_files += 1;
@@ -2755,7 +2755,7 @@ impl PythonCheck {
         });
         let mut out: Vec<String> = Vec::new();
         for pkgfile in &pkg.files {
-            if pkg.ghost_files.iter().any(|g| g == &pkgfile.name) {
+            if pkg.ghost_files.contains(&pkgfile.name) {
                 continue;
             }
             let Some(caps) = sitelib_re.captures(&pkgfile.name).ok().flatten() else {
@@ -2777,7 +2777,7 @@ impl PythonCheck {
     /// with none of these is a metadata-only metapackage (#481c).
     fn package_has_code(pkg: &Pkg) -> bool {
         pkg.files.iter().any(|f| {
-            !pkg.ghost_files.iter().any(|g| g == &f.name)
+            !pkg.ghost_files.contains(&f.name)
                 && (f.name.ends_with(".py") || f.name.ends_with(".pyc") || f.name.ends_with(".so"))
         })
     }
@@ -2795,7 +2795,7 @@ impl PythonCheck {
         let mut out = HashSet::new();
         for pkgfile in &pkg.files {
             if !pkgfile.name.ends_with(".py")
-                || pkg.ghost_files.iter().any(|g| g == &pkgfile.name)
+                || pkg.ghost_files.contains(&pkgfile.name)
                 || pkgfile.name.starts_with("/usr/share/doc/")
             {
                 continue;
