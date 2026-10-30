@@ -12007,6 +12007,82 @@ mod tests {
         assert!(lines[0].contains("-O2"), "detail: {}", lines[0]);
     }
 
+    /// The shipped ForbiddenOptflags list, read from the bundled defaults
+    /// rather than duplicated here, so the tests pin the shipped policy.
+    fn shipped_forbidden_optflags() -> Vec<String> {
+        let config = test_config();
+        config.configuration["ForbiddenOptflags"]
+            .as_array()
+            .expect("shipped ForbiddenOptflags is a list")
+            .iter()
+            .map(|v| v.as_str().expect("flag is a string").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn optflags_shipped_list_is_the_rice_set() {
+        let mut shipped = shipped_forbidden_optflags();
+        shipped.sort();
+        let mut expected = vec![
+            "-march=native",
+            "-mtune=native",
+            "-Ofast",
+            "-ffast-math",
+            "-funsafe-math-optimizations",
+            "-ffinite-math-only",
+            "-fno-signed-zeros",
+            "-fno-trapping-math",
+            "-fassociative-math",
+            "-freciprocal-math",
+            "-fno-rounding-math",
+            "-fno-signaling-nans",
+            "-fcx-limited-range",
+            "-fexcess-precision=fast",
+            "-funroll-loops",
+            "-funroll-all-loops",
+        ];
+        expected.sort();
+        assert_eq!(shipped, expected, "shipped ForbiddenOptflags drifted");
+    }
+
+    #[test]
+    fn optflags_every_shipped_flag_fires() {
+        let pkg_dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = optflags_test_pkg(&pkg_dir);
+        let flags = shipped_forbidden_optflags();
+        let producer = format!("GNU C17 12.3.1 -O2 {}", flags.join(" "));
+        let elf_dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = write_dwarf_elf(&elf_dir, "prog", &[(producer.as_str(), false)]);
+        let results = run_optflags(&pkg, &path, &test_config());
+        let lines = lines_for(&results, "forbidden-optflags");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        for flag in &flags {
+            assert!(
+                lines[0].contains(flag.as_str()),
+                "detail lists {flag}: {}",
+                lines[0]
+            );
+        }
+    }
+
+    #[test]
+    fn optflags_distro_standard_producer_stays_silent() {
+        let pkg_dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = optflags_test_pkg(&pkg_dir);
+        let elf_dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = write_dwarf_elf(
+            &elf_dir,
+            "prog",
+            &[(
+                "GNU C17 12.3.1 -O2 -g -m64 -fmessage-length=0 -D_FORTIFY_SOURCE=2 -fstack-protector -funwind-tables -fasynchronous-unwind-tables -O3 -flto",
+                false,
+            )],
+        );
+        let results = run_optflags(&pkg, &path, &test_config());
+        assert_lacks(&results, "forbidden-optflags");
+        assert!(results.is_empty(), "results: {results:?}");
+    }
+
     fn warn_on_function_config() -> Config {
         // Mirrors the reference test.config WarnOnFunction entries: the
         // finding names are config-driven, so the port pins them the same way.
