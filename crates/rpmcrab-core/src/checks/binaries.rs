@@ -1496,19 +1496,23 @@ impl ReadelfInfo {
     }
 
     /// Free Pascal toolchain output carries a `.fpcdata` section
-    /// (the compiler's own data section, present in every
-    /// FPC-produced binary). FPC emits no IBT/SHSTK property
-    /// record and no ENDBR64 for Pascal code, so the C-compiler
-    /// CF finding would be noise.
+    /// (the compiler's own data section, carried by FPC-produced
+    /// binaries). FPC emits no IBT/SHSTK property record and no
+    /// ENDBR64 for Pascal code, so the C-compiler CF finding
+    /// would be noise. The gate is section-presence, not producer
+    /// proof: a C host linking FPC objects and thereby carrying
+    /// the section is gated whole, since no finer producer signal
+    /// is available in the ELF info.
     fn is_fpc_binary(&self) -> bool {
         self.sections.iter().flatten().any(|s| s.name == ".fpcdata")
     }
 
     /// GCC Go frontend output defines the Go runtime's `__go_`
-    /// symbols; gccgo emits no IBT/SHSTK property record, no
-    /// ENDBR64, no stack-protector instrumentation and no
-    /// `_FORTIFY_SOURCE` instrumentation for Go code, so the
-    /// C-compiler findings would be noise.
+    /// symbols; gccgo emits no stack-protector instrumentation
+    /// and no `_FORTIFY_SOURCE` instrumentation for Go code, so
+    /// the C-compiler fortify and stack-protector findings would
+    /// be noise. The CF finding is not gated here: gccgo files
+    /// are judged for `missing-cf-protection` like C files.
     ///
     /// Only defined symbols count, mirroring the OCaml gate:
     /// `functions` also carries undefined dynsym entries, so an
@@ -4203,7 +4207,7 @@ struct HardeningObservation {
     fortify_applicable: bool,
     has_ssp_symbol: bool,
     has_fortify_symbol: bool,
-    /// The file is a C-judged x86_64 ELF whose `.note.gnu.property`
+    /// The file is a CET-judged x86_64 ELF whose `.note.gnu.property`
     /// state the cf-protection arm reads.
     cet_judged: bool,
     /// The file's property note lacks the full IBT|SHSTK bits. An
@@ -6978,6 +6982,10 @@ impl BinariesCheck {
         let is_mono_aot = (pkgfile.name.starts_with("/usr/lib/mono/")
             || pkgfile.name.starts_with("/usr/lib64/mono/"))
             && (pkgfile.name.ends_with(".dll.so") || pkgfile.name.ends_with(".exe.so"));
+        // The `/vdso/` directory component is required, not just
+        // the filename, and the corpus gate removed only kernel
+        // vdso packages (3 findings, all kernel vdso), so a
+        // collision with real C output is implausible.
         let is_vdso = pkgfile.name.ends_with("/vdso/vdso64.so");
         // Control-flow protection (rpmcrab#667): openSUSE's
         // `%{optflags}` carry `-fcf-protection` on x86_64, which makes
@@ -7007,10 +7015,12 @@ impl BinariesCheck {
         // own code. A truncated property entry is Unreadable, not
         // absent: damage proves nothing either way.
         //
-        // Three populations are gated out of this emission: Free
+        // Three populations are gated out of this finding: Free
         // Pascal output (a `.fpcdata` section), Mono AOT images and
         // the kernel vdso; the fpc, mono and vdso gates are scoped
-        // to this emission only.
+        // to this finding only. They do not quiet missing-fortify
+        // or missing-stack-protector, whose language gate covers
+        // Rust, Haskell, OCaml and gccgo but not FPC, Mono or vdso.
         let cf_unprotected = match info.x86_feature_1_and {
             X86Feature1And::Present(f) => f & X86_FEATURE_1_IBT_SHSTK != X86_FEATURE_1_IBT_SHSTK,
             X86Feature1And::Absent => true,
@@ -7039,13 +7049,19 @@ impl BinariesCheck {
         // C instrumentation the OPTFLAGS tag asks for, so they
         // cannot stand as presence for the package either.
         let language_gated = is_rust || is_haskell || is_ocaml || is_gccgo;
+        // CET is judged over its own population, split from the
+        // stack-protector/fortify gate above: gccgo code is judged
+        // for CF (the CF exemption was dropped), while FPC, Mono
+        // AOT and vdso files stay out of the CET population because
+        // the per-file finding never judges them.
+        let cet_gated = is_rust || is_haskell || is_ocaml || is_fpc || is_mono_aot || is_vdso;
         HardeningObservation {
             in_population: true,
             ssp_applicable: !language_gated && is_stack_protector_applicable(info),
             fortify_applicable: !language_gated && is_fortify_applicable(info),
             has_ssp_symbol: has_ssp_symbol && !language_gated,
             has_fortify_symbol: has_fortify_symbol && !language_gated,
-            cet_judged: info.elf_machine == goblin::elf::header::EM_X86_64 && !language_gated,
+            cet_judged: info.elf_machine == goblin::elf::header::EM_X86_64 && !cet_gated,
             cet_absent: match info.x86_feature_1_and {
                 X86Feature1And::Present(f) => {
                     f & X86_FEATURE_1_IBT_SHSTK != X86_FEATURE_1_IBT_SHSTK
@@ -11122,6 +11138,35 @@ mod tests {
     }
 
     #[test]
+    fn optflags_not_applied_gccgo_symbols_are_not_presence() {
+        // A gccgo binary whose own runtime references the canary
+        // and a fortified wrapper: that is not the C
+        // instrumentation the tag asks for, so it does not quiet
+        // the finding, and the counts cover the C file alone. The
+        // gccgo file still appears among the example paths: it is
+        // CET-judged, so it belongs to the judged population even
+        // though no stack-protector/fortify arm counts it.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut gccgo = flagless_info(FLAGLESS_IMPORTS);
+        gccgo.functions = vec![
+            "__go_construct_map".to_string(),
+            "__stack_chk_fail".to_string(),
+            "__memcpy_chk".to_string(),
+        ];
+        let files: Vec<(&str, ReadelfInfo)> = vec![
+            ("/usr/bin/a", flagless_info(FLAGLESS_IMPORTS)),
+            ("/usr/bin/b", gccgo),
+        ];
+        let check = optflags_rollup_check(&pkg, &files);
+        let detail =
+            check.optflags_not_applied_detail("-fstack-protector-strong -D_FORTIFY_SOURCE=2");
+        assert_eq!(
+            detail.as_deref(),
+            Some("stack-protector,fortify absent from all 1 ELF files (/usr/bin/a, /usr/bin/b)")
+        );
+    }
+
+    #[test]
     fn optflags_not_applied_quiet_when_any_file_carries_a_symbol() {
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         const TAG: &str = "-fstack-protector-strong -D_FORTIFY_SOURCE=3";
@@ -11334,12 +11379,15 @@ mod tests {
     fn hardening_fpc_binary_skips_cf_protection() {
         // Free Pascal output carries a `.fpcdata` section and no
         // CET record of its own; the CF finding would be noise.
-        // The gate is scoped to this emission: RELRO still applies.
+        // The gate is scoped to this finding: RELRO still applies,
+        // and so do fortify and stack-protector — the flagless
+        // imports make those findings applicable, so their firing
+        // is the gate's scoping, not vacuous applicability.
         let config = test_config();
         let check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let pkgfile = syn_file("/usr/bin/probe", "ELF 64-bit LSB pie executable");
-        let mut info = syn_info();
+        let mut info = flagless_info(FLAGLESS_IMPORTS);
         info.sections = vec![vec![sec(".fpcdata")]];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_hardening(&pkg, &pkgfile, &info, &mut out);
@@ -11347,6 +11395,16 @@ mod tests {
         assert!(
             lines_for(&results, "missing-cf-protection").is_empty(),
             "missing-cf-protection must not fire for FPC: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "missing-fortify must still fire for FPC: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must still fire for FPC: {results:?}"
         );
         assert_eq!(
             lines_for(&results, "missing-relro").len(),
@@ -11388,11 +11446,64 @@ mod tests {
     fn hardening_gccgo_import_only_still_fires() {
         // A C program merely linking libgo imports `__go_` symbols
         // with zero defined ones; its own C code stays checked.
-        let results = hardening_results_with(&[], None, &[], &["__go_construct_map"]);
+        // The symbol appears in both lists, mirroring the OCaml
+        // embedder pins: `fill_from_elf` records every STT_FUNC
+        // dynsym entry in `functions`, imports included, so a
+        // defined-only rule must not classify this binary — and
+        // the flagless imports make fortify and stack-protector
+        // applicable, so all three findings must still fire.
+        let results = hardening_results_with(
+            &[],
+            None,
+            &["__go_construct_map", "memcpy", "strcpy", "strcat", "sprintf"],
+            &["__go_construct_map", "memcpy", "strcpy", "strcat", "sprintf"],
+        );
         assert_eq!(
             lines_for(&results, "missing-cf-protection").len(),
             1,
             "missing-cf-protection must still fire for a __go_ import-only binary: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "missing-fortify must still fire for a __go_ import-only binary: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must still fire for a __go_ import-only binary: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_gccgo_prefix_boundary() {
+        // `is_gccgo_binary` keys on `starts_with("__go_")`: "__go"
+        // without the trailing underscore must not classify, while
+        // the bare "__go_" prefix must.
+        let results = hardening_results_with(&[], None, &["__go"], FLAGLESS_IMPORTS);
+        assert_eq!(
+            lines_for(&results, "missing-fortify").len(),
+            1,
+            "missing-fortify must still fire for a __go (no underscore) binary: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must still fire for a __go (no underscore) binary: {results:?}"
+        );
+        let results = hardening_results_with(&[], None, &["__go_"], FLAGLESS_IMPORTS);
+        assert!(
+            lines_for(&results, "missing-fortify").is_empty(),
+            "missing-fortify must not fire for a __go_ binary: {results:?}"
+        );
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire for a __go_ binary: {results:?}"
+        );
+        assert_eq!(
+            lines_for(&results, "missing-cf-protection").len(),
+            1,
+            "missing-cf-protection must still fire for a __go_ binary (gccgo is CET-judged): {results:?}"
         );
     }
 
@@ -11406,6 +11517,7 @@ mod tests {
         for path in [
             "/usr/lib/mono/4.5/mscorlib.dll.so",
             "/usr/lib/mono/4.5/mcs.exe.so",
+            "/usr/lib64/mono/4.5/mscorlib.dll.so",
         ] {
             let pkgfile = syn_file(path, "ELF 64-bit LSB shared object");
             let info = syn_info();
@@ -11415,6 +11527,38 @@ mod tests {
             assert!(
                 lines_for(&results, "missing-cf-protection").is_empty(),
                 "missing-cf-protection must not fire for Mono AOT {path}: {results:?}"
+            );
+            assert_eq!(
+                lines_for(&results, "missing-relro").len(),
+                1,
+                "missing-relro must still fire for Mono AOT {path}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hardening_vdso_near_miss_still_fires() {
+        // The gate needs the `/vdso/` directory component and the
+        // `vdso64.so` name together: a `vdso64.so` outside a
+        // `/vdso/` directory, and a non-`vdso64.so` name under a
+        // `/vdso/` directory, are both ordinary files and stay
+        // judged.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        for path in [
+            "/usr/lib/vdso64.so",
+            "/usr/lib/modules/7.2.9-1-default/vdso/vdso32.so",
+        ] {
+            let pkgfile = syn_file(path, "ELF 64-bit LSB shared object");
+            let info = syn_info();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+            let results = out.results().to_vec();
+            assert_eq!(
+                lines_for(&results, "missing-cf-protection").len(),
+                1,
+                "missing-cf-protection must still fire for vdso near-miss {path}: {results:?}"
             );
         }
     }
@@ -11447,10 +11591,13 @@ mod tests {
     }
 
     #[test]
-    fn optflags_not_applied_gccgo_file_judges_nothing() {
-        // A gccgo file joins the language gates, so a package
-        // holding only it gets no optflags-not-applied detail at
-        // all: no arm of the rollup judges gccgo code.
+    fn optflags_not_applied_gccgo_only_package_stays_quiet() {
+        // A gccgo file joins the CET population but never the
+        // stack-protector/fortify populations, so a package
+        // holding only it gets no optflags-not-applied detail:
+        // the detail needs an applicable file for both the
+        // stack-protector and fortify arms first, and CET is never
+        // required on its own.
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let mut info = flagless_info(FLAGLESS_IMPORTS);
         info.functions = vec!["__go_construct_map".to_string()];
@@ -11463,6 +11610,27 @@ mod tests {
                 )
                 .as_deref(),
             None
+        );
+    }
+
+    #[test]
+    fn optflags_not_applied_single_cf_gated_file_names_no_cf_protection() {
+        // A package holding a single CF-gated (FPC) file with a tag
+        // requesting `-fcf-protection`: the FPC file is outside the
+        // CET population, so the detail names stack-protector and
+        // fortify only, never cf-protection.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut fpc = flagless_info(FLAGLESS_IMPORTS);
+        fpc.sections = vec![vec![sec(".fpcdata")]];
+        let files: Vec<(&str, ReadelfInfo)> = vec![("/usr/bin/a", fpc)];
+        let check = optflags_rollup_check(&pkg, &files);
+        assert_eq!(
+            check
+                .optflags_not_applied_detail(
+                    "-fstack-protector-strong -D_FORTIFY_SOURCE=3 -fcf-protection"
+                )
+                .as_deref(),
+            Some("stack-protector,fortify absent from all 1 ELF files (/usr/bin/a)")
         );
     }
 
