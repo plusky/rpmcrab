@@ -217,6 +217,7 @@ def compute_drift(ref_dir, tip_pins):
         _scoped_log,
         _deduped_log,
         _threshold_log,
+        _changelog_log,
         _added_log,
         _adjudicated_log,
     ) = gen.generate(ref_dir=ref_dir, pins=tip_pins)
