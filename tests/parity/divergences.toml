@@ -256,6 +256,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "forbidden-optflags"
+kind = "behaviour"
+reason = "rpmcrab ships a populated ForbiddenOptflags list (host-dependent -march=native/-mtune=native, the -Ofast/fast-math family, and -funroll-loops/-funroll-all-loops) while the reference default list is empty, so the tag fires where the reference stays silent. Deliberate distribution policy: these flags break portability, IEEE semantics, or bloat code. Measured over the full Factory corpus: 484 findings in 3 packages (clap-zam-plugins 458, yate 23, ocaml-sha 3); reference rpmlint 2.10.0 reports 0 on the same packages."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "missing-call-to-setgroups-before-setuid"
 kind = "behaviour"
 reason = "The reference reports this at Error when the binary is installed setuid and Warning otherwise (BinariesCheck.py: 'E' if is_uid else 'W'); rpmcrab reports Warning unconditionally — the level does not split on the setuid bit. The symbol pattern cannot distinguish an identity switch that neglects setgroups from the safe idiom that drops the effective ids to the real ids, so the split would still leave an Error on proven-bogus findings (fix-and-diverge, plusky/rpmcrab#743)."
