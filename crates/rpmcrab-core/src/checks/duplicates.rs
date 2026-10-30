@@ -18,11 +18,11 @@
 //! package. The port therefore keeps a path heuristic but narrows it to
 //! the top-level directory: only hardlinks spanning genuinely separable
 //! trees (`/usr` vs `/var`) are reported. The `files-duplicate`
-//! cross-directory suppression uses the same narrowed definition, since
-//! it encodes the same "can't be hardlinked anyway" assumption — and
-//! because `files-duplicated-waste` accumulates the same suppressed
-//! `diff`, its total shifts in lockstep: the port reports it with a
-//! larger total where the reference's two-level suppression keeps the
+//! cross-directory suppression shares this narrowed definition — the
+//! same "can't be hardlinked anyway" assumption — and because
+//! `files-duplicated-waste` accumulates the same suppressed `diff`,
+//! its total shifts in lockstep: the port reports it with a larger
+//! total where the reference's two-level suppression keeps the
 //! package under the threshold (ledgered as a `behaviour` divergence).
 //!
 //! One md5 group shape is suppressed outright (issue #518): when every

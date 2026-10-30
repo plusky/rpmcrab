@@ -2213,7 +2213,7 @@ impl Check for PostCheck {
                 if is_icon_theme_cache(f) {
                     continue;
                 }
-                if posttrans.contains(f.as_str()) {
+                if scriptlet_mentions_path(&posttrans, f) {
                     continue;
                 }
                 if tmpfiles.contains(f.as_str()) {
@@ -2225,6 +2225,18 @@ impl Check for PostCheck {
             }
         }
     }
+}
+
+/// Whether a %posttrans scriptlet mentions a path as a whole token.
+/// A pure substring match credits prefixes (`/etc/foobar` for a
+/// `/etc/foo` ghost), so the scriptlet is split on whitespace and
+/// shell separators and each token is compared whole, with
+/// surrounding quotes stripped.
+fn scriptlet_mentions_path(scriptlet: &str, path: &str) -> bool {
+    scriptlet
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '<' | '>'))
+        .map(|tok| tok.trim_matches(|c| c == '"' || c == '\''))
+        .any(|tok| tok == path)
 }
 
 /// The icon-theme cache ghost: `/usr/share/icons/<theme>/icon-theme.cache`,
@@ -2848,6 +2860,25 @@ mod tests {
             .iter()
             .filter(|(name, _)| name == "ghost-files-without-postin")
             .count()
+    }
+
+    #[test]
+    fn scriptlet_mentions_path_is_boundary_aware() {
+        assert!(scriptlet_mentions_path(
+            "ln -sf /etc/foo /etc/bar",
+            "/etc/foo"
+        ));
+        assert!(scriptlet_mentions_path(
+            "ln -sf \"/etc/foo\" /etc/bar",
+            "/etc/foo"
+        ));
+        assert!(scriptlet_mentions_path("test -f /etc/foo", "/etc/foo"));
+        assert!(!scriptlet_mentions_path(
+            "ln -sf /etc/foobar /etc/bar",
+            "/etc/foo"
+        ));
+        assert!(!scriptlet_mentions_path("test -f /etc/foobar", "/etc/foo"));
+        assert!(!scriptlet_mentions_path("", "/etc/foo"));
     }
 
     #[test]

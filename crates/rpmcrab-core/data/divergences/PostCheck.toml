@@ -282,6 +282,7 @@ check = "ghost-files-without-postin"
 kind = "behaviour"
 reason = "Fixed behaviour: a %ghost mentioned in the package's %posttrans scriptlet, or declared by a same-package tmpfiles.d creation line (d/D/f/F/w/L/c/C/b/p/P, exact path field only; glob and %-specifier lines never match), does not count toward the finding -- both are creation mechanisms outside %postin/%prein."
 since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1330"
 
 [[divergence]]
 case = "global"
