@@ -21764,6 +21764,47 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(findings.opt.is_none(), "opt stays silent: {findings:?}");
         assert_eq!(findings.usr.as_ref().unwrap().1, "/usr/lib64/libc.so.6");
 
+        // Common system-binary case: /usr/bin/foo linking libc
+        // resolves under /usr/lib64, and neither arm applies.
+        let findings = linked_against_findings(
+            &LinkedAgainstInput {
+                file_name: "/usr/bin/foo",
+                dependencies: &["libc.so.6".to_string()],
+                is_64: Some(true),
+                rpath: &[],
+                runpath: &[],
+                has_runpath: false,
+            },
+            &providers,
+            &system,
+            &owner,
+        );
+        assert!(
+            findings.opt.is_none() && findings.usr.is_none(),
+            "/usr/bin/foo + libc stays silent: {findings:?}"
+        );
+
+        // An /opt/ consumer linking system libc stays silent too:
+        // it is not a usr consumer, and libc resolves under /usr,
+        // not /opt/.
+        let findings = linked_against_findings(
+            &LinkedAgainstInput {
+                file_name: "/opt/foo/bar",
+                dependencies: &["libc.so.6".to_string()],
+                is_64: Some(true),
+                rpath: &[],
+                runpath: &[],
+                has_runpath: false,
+            },
+            &providers,
+            &system,
+            &owner,
+        );
+        assert!(
+            findings.opt.is_none() && findings.usr.is_none(),
+            "/opt/foo/bar + libc stays silent: {findings:?}"
+        );
+
         // Unresolvable stays silent; slash entries are the
         // emission check's business, not the resolver's.
         let findings = linked_against_findings(
