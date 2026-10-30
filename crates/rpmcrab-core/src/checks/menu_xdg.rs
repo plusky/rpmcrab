@@ -40,13 +40,31 @@ const ICON_EXTENSIONS: [&str; 4] = ["png", "svg", "svgz", "xpm"];
 /// Bare Exec tokens accepted as base-system binaries: they are
 /// guaranteed by the base system even when no package in the run
 /// ships them, so they never fire. Deliberate fixed list, scoped
-/// to this check (see the ledger entry).
-const SYSTEM_BINARIES_BARE: [&str; 5] = ["env", "sh", "bash", "python", "false"];
+/// to this check (see the ledger entry). `python` is deliberately
+/// absent: Tumbleweed ships no bare `python` binary, only
+/// `python3` (absolute, below).
+const SYSTEM_BINARIES_BARE: [&str; 5] = ["env", "sh", "bash", "true", "false"];
 
-/// Absolute Exec paths accepted as base-system binaries, same
-/// reasoning as `SYSTEM_BINARIES_BARE`.
-const SYSTEM_BINARIES_ABS: [&str; 4] =
-    ["/bin/sh", "/bin/true", "/usr/bin/false", "/usr/bin/python3"];
+/// Absolute Exec paths accepted as base-system binaries: the
+/// `/bin` and `/usr/bin` spellings of every bare entry above, plus
+/// `python3` in both spellings. The two lists are kept in mirror
+/// by the `system_binary_lists_mirror` test: a bare entry added
+/// without both absolute spellings, or an absolute entry with no
+/// bare counterpart other than `python3`, fails the test.
+const SYSTEM_BINARIES_ABS: [&str; 12] = [
+    "/bin/env",
+    "/usr/bin/env",
+    "/bin/sh",
+    "/usr/bin/sh",
+    "/bin/bash",
+    "/usr/bin/bash",
+    "/bin/true",
+    "/usr/bin/true",
+    "/bin/false",
+    "/usr/bin/false",
+    "/bin/python3",
+    "/usr/bin/python3",
+];
 
 /// Parsed desktop file: section -> (key -> value).
 type DesktopSections = HashMap<String, HashMap<String, String>>;
@@ -61,6 +79,12 @@ struct DesktopBinaryCandidate {
     arch: String,
     filename: String,
     binary: String,
+    /// Hard dependency edges of the candidate's package: its
+    /// `Requires` plus `Requires(pre)` names. Only these gate the
+    /// sibling credit in `after_checks`: a `Recommends` or
+    /// `Suggests` edge does not guarantee the sibling is installed
+    /// alongside the frontend, so it never silences a launcher.
+    requires: Vec<String>,
 }
 
 /// Everything one build contributes to the run-scoped
@@ -72,6 +96,14 @@ struct DesktopBuild {
     regular: HashSet<String>,
     symlinks: HashMap<String, String>,
     candidates: Vec<DesktopBinaryCandidate>,
+    /// Regular file path -> packages shipping it. A symlink chain
+    /// resolves to a regular file; this names its owner(s) so the
+    /// sibling credit can check the dependency edge to them.
+    file_owners: HashMap<String, HashSet<String>>,
+    /// Package name or `Provides` name -> packages answering to it.
+    /// A frontend `Requires` on any of these names is an edge to
+    /// the owner.
+    dep_owners: HashMap<String, HashSet<String>>,
 }
 
 /// Cross-package state, exported per package and merged before
@@ -286,6 +318,136 @@ impl MenuXDGCheck {
         }
     }
 
+    /// Whether a token is an `env` assignment (`NAME=value`): the
+    /// name is a shell identifier, so it is skipped when resolving
+    /// the real program behind `env`.
+    fn is_env_assignment(token: &str) -> bool {
+        let Some((name, _)) = token.split_once('=') else {
+            return false;
+        };
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    /// The program an Exec line actually launches, unwrapping
+    /// `env` and `sh`/`bash -c` wrappers. The check judges this
+    /// token, never the wrapper name: `Exec=env FOO=1 missing`
+    /// and `Exec=sh -c 'missing'` previously went silent because
+    /// the wrapper itself is a base-system binary, hiding a broken
+    /// launcher. For `env`, flags (`-i`, `-u NAME`, `--`) and
+    /// `NAME=value` assignments are skipped and the next token is
+    /// the program; with no program left, `env` itself is returned.
+    /// For `sh`/`bash`, a `-c` payload's first word is the program;
+    /// without `-c` the shell itself is the program and is returned
+    /// unchanged. Wrapper names are matched by basename, so
+    /// absolute spellings (`/usr/bin/env`, `/bin/sh`) unwrap the
+    /// same way. One wrapper layer past `env` is followed, so
+    /// `env sh -c 'prog'` resolves to `prog`.
+    fn effective_exec_binary(exec: &str) -> String {
+        let tokens: Vec<&str> = exec.split_whitespace().collect();
+        let mut start = 0usize;
+        for _ in 0..3 {
+            let Some(first) = tokens.get(start) else {
+                return String::new();
+            };
+            let first = Self::unquote_exec_token(first);
+            let base = first.rsplit('/').next().unwrap_or(first);
+            match base {
+                "env" => {
+                    let mut idx = start + 1;
+                    let mut program_idx = None;
+                    while idx < tokens.len() {
+                        let tok = tokens[idx];
+                        if tok == "--" {
+                            idx += 1;
+                            program_idx = if idx < tokens.len() { Some(idx) } else { None };
+                            break;
+                        }
+                        if tok.starts_with('-') && tok.len() > 1 {
+                            // `-u`/`--unset` consume their argument.
+                            idx += if tok == "-u" || tok == "--unset" {
+                                2
+                            } else {
+                                1
+                            };
+                            continue;
+                        }
+                        if Self::is_env_assignment(tok) {
+                            idx += 1;
+                            continue;
+                        }
+                        program_idx = Some(idx);
+                        break;
+                    }
+                    match program_idx {
+                        Some(p) => {
+                            start = p;
+                            continue;
+                        }
+                        None => return first.to_string(),
+                    }
+                }
+                "sh" | "bash" => {
+                    let mut j = start + 1;
+                    let mut payload: Option<String> = None;
+                    while j < tokens.len() {
+                        let tok = tokens[j];
+                        if tok == "-c" {
+                            payload = Some(tokens[j + 1..].join(" "));
+                            break;
+                        }
+                        if tok.starts_with('-') && !tok.starts_with("--") {
+                            // Combined flags ending in `c` (`-ec`,
+                            // `-cfoo`): the payload is the rest of
+                            // this token plus what follows it.
+                            if let Some(cpos) = tok.find('c') {
+                                let rest = &tok[cpos + 1..];
+                                payload = if rest.is_empty() {
+                                    Some(tokens[j + 1..].join(" "))
+                                } else {
+                                    let mut p = rest.to_string();
+                                    if j + 1 < tokens.len() {
+                                        p.push(' ');
+                                        p.push_str(&tokens[j + 1..].join(" "));
+                                    }
+                                    Some(p)
+                                };
+                                break;
+                            }
+                            j += 1;
+                            continue;
+                        }
+                        // A non-flag argument is a script file, not
+                        // a `-c` payload: the shell itself is the
+                        // program.
+                        break;
+                    }
+                    return match payload {
+                        Some(p) => {
+                            let word = p
+                                .trim_start_matches(['\'', '"'])
+                                .split_whitespace()
+                                .next()
+                                .unwrap_or("")
+                                .trim_end_matches(['\'', '"']);
+                            Self::unquote_exec_token(word).to_string()
+                        }
+                        None => first.to_string(),
+                    };
+                }
+                _ => return first.to_string(),
+            }
+        }
+        tokens
+            .first()
+            .map(|t| Self::unquote_exec_token(t).to_string())
+            .unwrap_or_default()
+    }
+
     /// Whether the Exec binary resolves (in the package or on the live root).
     fn binary_exists(pkg: &Pkg, binary: &str) -> bool {
         if binary.starts_with('/') {
@@ -373,21 +535,19 @@ impl MenuXDGCheck {
         }
     }
 
-    /// Whether one path resolves to a regular file through the
-    /// build's shipped entries, following symlink chains inside
-    /// the build. A chain leaving the build or looping stays
-    /// unresolved: the target is not a file this build ships.
-    fn resolve_in_build(build: &DesktopBuild, start: &str) -> bool {
+    /// The regular file one path resolves to through the build's
+    /// shipped entries, following symlink chains inside the build.
+    /// A chain leaving the build or looping stays unresolved: the
+    /// target is not a file this build ships.
+    fn resolve_in_build(build: &DesktopBuild, start: &str) -> Option<String> {
         let mut current = start.to_string();
         for _ in 0..10 {
             if build.regular.contains(&current) {
-                return true;
+                return Some(current);
             }
-            let Some(linkto) = build.symlinks.get(&current) else {
-                return false;
-            };
+            let linkto = build.symlinks.get(&current)?;
             if linkto.is_empty() {
-                return false;
+                return None;
             }
             current = if linkto.starts_with('/') {
                 linkto.clone()
@@ -400,17 +560,50 @@ impl MenuXDGCheck {
                 }
             };
         }
-        false
+        None
     }
 
-    /// Whether the Exec token resolves through a sibling's files:
-    /// any candidate path resolving to a regular file in the
-    /// build's inventory, directly or through a symlink chain
-    /// inside the build.
-    fn resolves_via_build(build: &DesktopBuild, binary: &str) -> bool {
-        Self::candidate_paths(binary)
-            .iter()
-            .any(|path| Self::resolve_in_build(build, path))
+    /// Whether the Exec token is credited through the build: it
+    /// resolves to a regular file the build ships, and the
+    /// candidate's package is guaranteed to install alongside the
+    /// file's owner. The guarantee is a hard dependency edge: the
+    /// candidate's package `Requires` (or `Requires(pre)`) the
+    /// owning package by name, by one of its `Provides`, or by the
+    /// resolved file path itself (a file dependency). A package
+    /// that only `Recommends` or `Suggests` the sibling, or has no
+    /// edge to it at all, is not credited: installing just the
+    /// frontend would leave a dead launcher. A file the
+    /// candidate's own package ships is always credited: it is a
+    /// resolution, not sibling credit.
+    fn credited_via_build(build: &DesktopBuild, cand: &DesktopBinaryCandidate) -> bool {
+        for path in Self::candidate_paths(&cand.binary) {
+            let Some(final_path) = Self::resolve_in_build(build, &path) else {
+                continue;
+            };
+            let Some(owners) = build.file_owners.get(&final_path) else {
+                continue;
+            };
+            if owners.contains(&cand.pkg_name) {
+                return true;
+            }
+            if cand.requires.iter().any(|req| {
+                req == &final_path
+                    || Self::candidate_paths(&cand.binary)
+                        .iter()
+                        .any(|candidate| candidate == req)
+            }) {
+                return true;
+            }
+            if cand.requires.iter().any(|req| {
+                build
+                    .dep_owners
+                    .get(req)
+                    .is_some_and(|providers| providers.iter().any(|owner| owners.contains(owner)))
+            }) {
+                return true;
+            }
+        }
+        false
     }
 
     fn build_mut(&mut self, key: &str) -> &mut DesktopBuild {
@@ -437,11 +630,30 @@ impl MenuXDGCheck {
             }
             if is_reg(file.mode) {
                 build.regular.insert(file.name.clone());
+                build
+                    .file_owners
+                    .entry(file.name.clone())
+                    .or_default()
+                    .insert(pkg.name.clone());
             } else if is_symlink(file.mode) {
                 build
                     .symlinks
                     .insert(file.name.clone(), file.linkto.clone());
             }
+        }
+        // Dependency edges are judged by name: the package's own
+        // name and every name it provides resolve to this owner.
+        build
+            .dep_owners
+            .entry(pkg.name.clone())
+            .or_default()
+            .insert(pkg.name.clone());
+        for provide in &pkg.provides {
+            build
+                .dep_owners
+                .entry(provide.name.clone())
+                .or_default()
+                .insert(pkg.name.clone());
         }
     }
 
@@ -763,10 +975,12 @@ impl Check for MenuXDGCheck {
                     if let Some(entry) = sections.get("Desktop Entry")
                         && let Some(exec) = entry.get("exec")
                     {
-                        // The reference uses `partition(' ')`, which splits
-                        // on the first ASCII space only.
-                        let binary = exec.split(' ').next().unwrap_or("");
-                        let binary = Self::unquote_exec_token(binary);
+                        // Judge the program the entry actually
+                        // launches, unwrapping `env` and `sh -c`
+                        // wrappers: judging the wrapper name would
+                        // silence a broken launcher behind a
+                        // base-system binary.
+                        let binary = Self::effective_exec_binary(exec);
                         // Base-system binaries never fire. Anything
                         // else the package itself does not resolve
                         // is held for `after_checks`, where the
@@ -774,14 +988,20 @@ impl Check for MenuXDGCheck {
                         // emitting here would fire before the
                         // sibling's inventory is known.
                         if !binary.is_empty()
-                            && !Self::binary_exists(pkg, binary)
-                            && !Self::is_system_binary(binary)
+                            && !Self::binary_exists(pkg, &binary)
+                            && !Self::is_system_binary(&binary)
                         {
                             let candidate = DesktopBinaryCandidate {
                                 pkg_name: pkg.name.clone(),
                                 arch: pkg.arch.clone(),
                                 filename: filename.to_string(),
                                 binary: binary.to_string(),
+                                requires: pkg
+                                    .requires
+                                    .iter()
+                                    .chain(pkg.prereq.iter())
+                                    .map(|dep| dep.name.clone())
+                                    .collect(),
                             };
                             match binary_source_key(pkg) {
                                 Some(key) => {
@@ -803,10 +1023,11 @@ impl Check for MenuXDGCheck {
     /// The deferred `desktopfile-without-binary` verdict: a
     /// candidate is credited only when its build is
     /// source-complete in this run -- the run holds the build's
-    /// source package -- and its token resolves through a
-    /// sibling's shipped files. Every other candidate fires, so
-    /// source-absent (partial) and single-package runs report
-    /// exactly the per-package verdict.
+    /// source package -- and its token is credited through the
+    /// build under `credited_via_build` (resolves to a shipped
+    /// file whose owner the candidate's package hard-Requires).
+    /// Every other candidate fires, so source-absent (partial) and
+    /// single-package runs report exactly the per-package verdict.
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
         for cand in &self.unkeyed {
             Self::emit_without_binary(out, cand);
@@ -815,7 +1036,7 @@ impl Check for MenuXDGCheck {
             let build = &self.builds[key];
             let complete = self.sources.contains(key);
             for cand in &build.candidates {
-                if complete && Self::resolves_via_build(build, &cand.binary) {
+                if complete && Self::credited_via_build(build, cand) {
                     continue;
                 }
                 Self::emit_without_binary(out, cand);
@@ -853,6 +1074,12 @@ impl Check for MenuXDGCheck {
                         mine.regular.extend(data.regular);
                         mine.symlinks.extend(data.symlinks);
                         mine.candidates.extend(data.candidates);
+                        for (path, owners) in data.file_owners {
+                            mine.file_owners.entry(path).or_default().extend(owners);
+                        }
+                        for (name, owners) in data.dep_owners {
+                            mine.dep_owners.entry(name).or_default().extend(owners);
+                        }
                     }
                     None => {
                         self.order.push(key.clone());
@@ -1718,6 +1945,38 @@ mod tests {
         pkg
     }
 
+    fn dep_named(name: &str) -> crate::pkg::dep::DepInfo {
+        crate::pkg::dep::DepInfo {
+            name: name.to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }
+    }
+
+    /// Like `menu_pkg`, with hard `Requires` edges set: the
+    /// sibling credit now requires one (see `credited_via_build`).
+    fn menu_pkg_with_requires(
+        dir: &tempfile::TempDir,
+        name: &str,
+        files: Vec<PkgFile>,
+        requires: &[&str],
+    ) -> Pkg {
+        let mut pkg = menu_pkg(dir, name, files);
+        pkg.requires = requires.iter().map(|r| dep_named(r)).collect();
+        pkg
+    }
+
+    fn ghost_entry(name: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            mode: 0o100644,
+            flags: crate::pkg::pkgfile::RPMFILE_GHOST,
+            ..Default::default()
+        }
+    }
+
     /// The run's source package for the fcprobe build: the header
     /// identity it derives (`fcprobe-1-1.src.rpm`) is the `SOURCERPM`
     /// every fixture member carries, so its presence makes the
@@ -1783,7 +2042,7 @@ mod tests {
         let d0 = tempfile::tempdir().unwrap();
         let d1 = tempfile::tempdir().unwrap();
         let d2 = tempfile::tempdir().unwrap();
-        let desktop = menu_pkg(
+        let desktop = menu_pkg_with_requires(
             &d0,
             "git-gui",
             vec![desktop_entry(
@@ -1791,6 +2050,7 @@ mod tests {
                 "/usr/share/applications/git-gui.desktop",
                 "git gui",
             )],
+            &["git-core"],
         );
         let sibling = menu_pkg(&d1, "git-core", vec![reg_entry("/usr/bin/git")]);
         let src = menu_src_pkg(&d2);
@@ -1889,7 +2149,7 @@ mod tests {
         let d0 = tempfile::tempdir().unwrap();
         let d1 = tempfile::tempdir().unwrap();
         let d2 = tempfile::tempdir().unwrap();
-        let desktop = menu_pkg(
+        let desktop = menu_pkg_with_requires(
             &d0,
             "tool-frontend",
             vec![desktop_entry(
@@ -1897,6 +2157,7 @@ mod tests {
                 "/usr/share/applications/tool.desktop",
                 "/sbin/tool",
             )],
+            &["tool"],
         );
         let sibling = menu_pkg(&d1, "tool", vec![reg_entry("/usr/sbin/tool")]);
         let src = menu_src_pkg(&d2);
@@ -1936,7 +2197,7 @@ mod tests {
         let d0 = tempfile::tempdir().unwrap();
         let d1 = tempfile::tempdir().unwrap();
         let d2 = tempfile::tempdir().unwrap();
-        let desktop = menu_pkg(
+        let desktop = menu_pkg_with_requires(
             &d0,
             "cosmic-applet-audio",
             vec![
@@ -1947,6 +2208,7 @@ mod tests {
                 ),
                 link_entry("/usr/bin/cosmic-applet-audio", "cosmic-applets"),
             ],
+            &["cosmic-applets"],
         );
         let sibling = menu_pkg(
             &d1,
@@ -2022,11 +2284,19 @@ mod tests {
             "env",
             "sh",
             "bash",
-            "python",
+            "true",
             "false",
+            "/bin/env",
+            "/usr/bin/env",
             "/bin/sh",
+            "/usr/bin/sh",
+            "/bin/bash",
+            "/usr/bin/bash",
             "/bin/true",
+            "/usr/bin/true",
+            "/bin/false",
             "/usr/bin/false",
+            "/bin/python3",
             "/usr/bin/python3",
         ] {
             let d0 = tempfile::tempdir().unwrap();
@@ -2045,5 +2315,347 @@ mod tests {
                 "{token} should stay silent: {results:?}"
             );
         }
+    }
+
+    #[test]
+    fn system_binary_lists_mirror() {
+        // The absolute list is the /bin + /usr/bin expansion of
+        // the bare list, plus python3 (whose bare spelling is not
+        // a base-system binary). A drift here reopens the
+        // asymmetry the review caught.
+        for bare in SYSTEM_BINARIES_BARE {
+            let bin = format!("/bin/{bare}");
+            assert!(
+                SYSTEM_BINARIES_ABS.contains(&bin.as_str()),
+                "/bin spelling missing for {bare}"
+            );
+            let usrbin = format!("/usr/bin/{bare}");
+            assert!(
+                SYSTEM_BINARIES_ABS.contains(&usrbin.as_str()),
+                "/usr/bin spelling missing for {bare}"
+            );
+        }
+        for abs in SYSTEM_BINARIES_ABS {
+            let bare = abs.rsplit('/').next().unwrap();
+            assert!(
+                SYSTEM_BINARIES_BARE.contains(&bare) || bare == "python3",
+                "{abs} has no bare counterpart"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_python_fires() {
+        // Bare `python` is not a base-system binary on
+        // Tumbleweed; only `python3` is accepted, absolutely.
+        for token in ["python", "/usr/bin/python"] {
+            let results =
+                run_desktop_seeded(&format!("[Desktop Entry]\nName=Foo\nExec={token}\n"), &[]);
+            let lines = without_binary(&results);
+            assert_eq!(lines.len(), 1, "{token}: unexpected: {results:?}");
+            assert!(
+                lines[0].contains(token),
+                "detail names the token: {}",
+                lines[0]
+            );
+        }
+    }
+
+    #[test]
+    fn env_wrapper_judges_program_not_wrapper() {
+        // `env FOO=1 missing-prog` fires on the program, never
+        // silently on `env`.
+        let results = run_desktop_seeded(
+            "[Desktop Entry]\nName=Foo\nExec=env FOO=1 missing-prog\n",
+            &[],
+        );
+        let lines = without_binary(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("missing-prog"),
+            "detail names the program: {}",
+            lines[0]
+        );
+        // The same shape with a present program stays silent.
+        let results = run_desktop_seeded(
+            "[Desktop Entry]\nName=Foo\nExec=env FOO=1 present-prog\n",
+            &["usr/bin/present-prog"],
+        );
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn env_wrapper_skips_flags() {
+        for exec in ["env -i FOO=1 missing-prog", "env -u FOO missing-prog"] {
+            let results =
+                run_desktop_seeded(&format!("[Desktop Entry]\nName=Foo\nExec={exec}\n"), &[]);
+            let lines = without_binary(&results);
+            assert_eq!(lines.len(), 1, "{exec}: unexpected: {results:?}");
+            assert!(
+                lines[0].contains("missing-prog"),
+                "{exec}: detail names the program: {}",
+                lines[0]
+            );
+        }
+    }
+
+    #[test]
+    fn sh_c_wrapper_judges_payload() {
+        for exec in [
+            "sh -c 'missing-prog'",
+            "sh -c missing-prog",
+            "bash -c 'missing-prog --flag'",
+            "/bin/sh -c 'missing-prog'",
+        ] {
+            let results =
+                run_desktop_seeded(&format!("[Desktop Entry]\nName=Foo\nExec={exec}\n"), &[]);
+            let lines = without_binary(&results);
+            assert_eq!(lines.len(), 1, "{exec}: unexpected: {results:?}");
+            assert!(
+                lines[0].contains("missing-prog"),
+                "{exec}: detail names the payload program: {}",
+                lines[0]
+            );
+        }
+        // A present payload program stays silent, and a bare `sh`
+        // (no `-c`) still resolves to the shell itself.
+        let results = run_desktop_seeded(
+            "[Desktop Entry]\nName=Foo\nExec=sh -c 'present-prog'\n",
+            &["usr/bin/present-prog"],
+        );
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+        let results = run_desktop_seeded("[Desktop Entry]\nName=Foo\nExec=sh\n", &[]);
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn absolute_env_wrapper_judges_program() {
+        let results = run_desktop_seeded(
+            "[Desktop Entry]\nName=Foo\nExec=/usr/bin/env FOO=1 missing-prog\n",
+            &[],
+        );
+        let lines = without_binary(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("missing-prog"),
+            "detail names the program: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn env_sh_c_nesting_resolves() {
+        let results = run_desktop_seeded(
+            "[Desktop Entry]\nName=Foo\nExec=env FOO=1 sh -c 'missing-prog'\n",
+            &[],
+        );
+        let lines = without_binary(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("missing-prog"),
+            "detail names the payload program: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn sibling_credit_requires_hard_edge() {
+        // Same shape as the credited test, but the frontend has
+        // no edge to the sibling at all: installing just the
+        // frontend leaves a dead launcher, so it fires.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "git-gui",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/git-gui.desktop",
+                "git gui",
+            )],
+        );
+        let sibling = menu_pkg(&d1, "git-core", vec![reg_entry("/usr/bin/git")]);
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn sibling_credit_recommends_does_not_count() {
+        // A frontend that only `Recommends` the sibling is not
+        // credited: the sibling is not guaranteed installed.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let mut desktop = menu_pkg(
+            &d0,
+            "git-gui",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/git-gui.desktop",
+                "git gui",
+            )],
+        );
+        desktop.recommends = vec![dep_named("git-core")];
+        let sibling = menu_pkg(&d1, "git-core", vec![reg_entry("/usr/bin/git")]);
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn sibling_credit_via_provides() {
+        // A `Requires` on a name the sibling provides is an edge
+        // to the sibling, even when it is not the package name.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg_with_requires(
+            &d0,
+            "git-gui",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/git-gui.desktop",
+                "git gui",
+            )],
+            &["git-binary"],
+        );
+        let mut sibling = menu_pkg(&d1, "git-core", vec![reg_entry("/usr/bin/git")]);
+        sibling.provides = vec![dep_named("git-binary")];
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn sibling_credit_via_file_dependency() {
+        // A `Requires` on the resolved file path itself is an
+        // edge to whoever ships that file.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg_with_requires(
+            &d0,
+            "git-gui",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/git-gui.desktop",
+                "git gui",
+            )],
+            &["/usr/bin/git"],
+        );
+        let sibling = menu_pkg(&d1, "git-core", vec![reg_entry("/usr/bin/git")]);
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn sibling_symlink_loop_fires_on_complete_build() {
+        // A symlink chain that loops never resolves to a regular
+        // file, so the candidate fires even on a complete build
+        // with a hard edge to the sibling.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg_with_requires(
+            &d0,
+            "loop-frontend",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/loop.desktop",
+                "/usr/bin/loopapp",
+            )],
+            &["loopapp"],
+        );
+        let sibling = menu_pkg(
+            &d1,
+            "loopapp",
+            vec![
+                link_entry("/usr/bin/loopapp", "loop2"),
+                link_entry("/usr/bin/loop2", "loopapp"),
+            ],
+        );
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn sibling_ghost_token_fires_on_complete_build() {
+        // A token the sibling ships only as a `%ghost` entry is
+        // not shipped content: the candidate fires even on a
+        // complete build with a hard edge to the sibling.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg_with_requires(
+            &d0,
+            "ghost-frontend",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/ghost.desktop",
+                "ghostprog",
+            )],
+            &["ghost-pkg"],
+        );
+        let sibling = menu_pkg(&d1, "ghost-pkg", vec![ghost_entry("/usr/bin/ghostprog")]);
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn sibling_credit_survives_state_export_import() {
+        // The run merges per-package check states: the sibling's
+        // inventory (and its dep-name owners) arrive through
+        // `import_state`, and the deferred verdict must still
+        // credit the candidate that arrived the other way.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg_with_requires(
+            &d0,
+            "git-gui",
+            vec![desktop_entry(
+                d0.path(),
+                "/usr/share/applications/git-gui.desktop",
+                "git gui",
+            )],
+            &["git-core"],
+        );
+        let sibling = menu_pkg(&d1, "git-core", vec![reg_entry("/usr/bin/git")]);
+        let src = menu_src_pkg(&d2);
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut first = MenuXDGCheck::new(&config);
+        first.check(&src, &config, &mut out);
+        first.check(&sibling, &config, &mut out);
+        let state = first.export_state().expect("exported state");
+        let mut second = MenuXDGCheck::new(&config);
+        second.check(&desktop, &config, &mut out);
+        second.import_state(state);
+        second.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
     }
 }
