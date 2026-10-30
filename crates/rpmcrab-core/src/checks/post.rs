@@ -486,7 +486,10 @@ impl PostCheck {
     /// (`/etc/${i}.rpmsave`) match their rotated form literally.
     /// Exactly two operands are required: a restore to the live
     /// path, a backup to `.rpmsave`, a multi-operand move, or any
-    /// other verb still fires. An unescaped newline ends the
+    /// other verb still fires. A glob operand keeps firing too: a
+    /// `*`, `?`, or `[` in either operand moves a set of files, not
+    /// one rpm leftover, so it is not operand-exact (the same rule
+    /// the `rm` state credit applies). An unescaped newline ends the
     /// command, so words on later lines are never operands.
     fn first_dangerous_command_is_rotation(scan_text: &str, verb: &str, verb_end: usize) -> bool {
         if verb != "mv" && verb != "cp" {
@@ -622,6 +625,12 @@ impl PostCheck {
         }
         let source = strip_quotes(&operands[0]);
         let dest = strip_quotes(&operands[1]);
+        // A glob operand is not operand-exact: `mv /etc/*.rpmsave
+        // /etc/*.rpmsave.old` moves a set of files, not one rpm
+        // leftover, so it keeps firing.
+        if source.contains(['*', '?', '[']) || dest.contains(['*', '?', '[']) {
+            return false;
+        }
         source.ends_with(".rpmsave") && dest == format!("{source}.old")
     }
 
@@ -3380,6 +3389,27 @@ mod tests {
                     && f == "dangerous-command-in-%pre"
                     && d == &vec![verb.to_string()]),
                 "shape went silent: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_save_rotation_glob_still_fires() {
+        // A glob operand is not operand-exact: each of these matched
+        // the rotation shape before the glob guard and stayed silent.
+        for (script, verb) in [
+            ("mv /etc/*.rpmsave /etc/*.rpmsave.old\n", "mv"),
+            ("mv \"/etc/*.rpmsave\" \"/etc/*.rpmsave.old\"\n", "mv"),
+            ("mv /etc/?.rpmsave /etc/?.rpmsave.old\n", "mv"),
+            ("mv /etc/[a].rpmsave /etc/[a].rpmsave.old\n", "mv"),
+            ("cp /etc/*.rpmsave /etc/*.rpmsave.old\n", "cp"),
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%pre", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%pre"
+                    && d == &vec![verb.to_string()]),
+                "glob rotation went silent: {script}"
             );
         }
     }
