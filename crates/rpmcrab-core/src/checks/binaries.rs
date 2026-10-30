@@ -2389,16 +2389,28 @@ fn go_toolchain_below_floor(version: GoVersion, floor: &[(GoVersion, GoVersion)]
 }
 
 /// Whether one recorded toolchain version belongs to a versioned
-/// Go toolchain package own tools: the package name is exactly
-/// `go<line>`, the file lives under that line own tree
-/// (`/usr/lib/go/<line>/` or `/usr/lib64/go/<line>/`), and the
-/// version belongs to that same line. The credit is decidable
-/// from facts about the package and the file, never a package
-/// list.
-fn go_toolchain_self_version(pkg_name: &str, file_name: &str, version: GoVersion) -> bool {
+/// Go toolchain package own tools on a line the floor table does
+/// not list: the package name is exactly `go<line>`, the file
+/// lives under that line own tree (`/usr/lib/go/<line>/` or
+/// `/usr/lib64/go/<line>/`), and the version belongs to that same
+/// line. The credit is gated to unlisted lines: on a listed line
+/// the own tools fire when below the minimum, since a rebuild
+/// with a fixed release is the remedy; on an unlisted line no
+/// release carries the fixes, so the own tools stay quiet. The
+/// credit is decidable from facts about the package, the file
+/// and the floor table, never a package list.
+fn go_toolchain_self_version(
+    pkg_name: &str,
+    file_name: &str,
+    version: GoVersion,
+    floor: &[(GoVersion, GoVersion)],
+) -> bool {
     let Some(tree_line) = go_toolchain_tree_line(file_name) else {
         return false;
     };
+    if floor.iter().any(|(listed, _)| *listed == tree_line) {
+        return false;
+    }
     pkg_name == format!("go{}.{}", tree_line.major, tree_line.minor) && version.line() == tree_line
 }
 
@@ -7290,17 +7302,19 @@ impl BinariesCheck {
         if below_floor.is_empty() {
             return;
         }
-        // A versioned toolchain package own tools do not fire (see
-        // `go_toolchain_self_version`): the rebuild remedy cannot
-        // apply to a package whose purpose is shipping that
-        // toolchain line. When a file records several toolchains,
-        // the finding reports the oldest version outside the own
-        // line; a file whose every below-floor version is the
-        // toolchain own stays quiet.
+        // A versioned toolchain package own tools on a line the
+        // floor table does not list do not fire (see
+        // `go_toolchain_self_version`): no release on such a line
+        // carries the fixes. On a listed line the own tools fire
+        // when below the minimum, since a rebuild with a fixed
+        // release is the remedy. When a file records several
+        // toolchains, the finding reports the oldest version
+        // outside the credited own line; a file whose every
+        // below-floor version is credited own stays quiet.
         let Some(version) = below_floor
             .iter()
             .copied()
-            .filter(|version| !go_toolchain_self_version(&pkg.name, &pkgfile.name, *version))
+            .filter(|version| !go_toolchain_self_version(&pkg.name, &pkgfile.name, *version, floor))
             .min()
         else {
             return;
@@ -23380,6 +23394,48 @@ description = "explicit priority string bypasses the system crypto policy"
                 "{pkg} {file} must stay quiet: {results:?}"
             );
         }
+    }
+
+    #[test]
+    fn go_toolchain_listed_line_own_tools_still_fire() {
+        // A listed line own tools fire when below the minimum:
+        // go1.23 own tools recording go1.23.0 against the go1.23.8
+        // floor, and go1.24 own tools recording go1.24.1 against
+        // the go1.24.2 floor, are actionable staleness — a rebuild
+        // with a fixed release is the remedy. At the minimum the
+        // own tools stay quiet.
+        let v = |major, minor, patch| GoVersion {
+            major,
+            minor,
+            patch,
+        };
+        for (pkg, file, version) in [
+            ("go1.23", "/usr/lib64/go/1.23/bin/go", v(1, 23, 0)),
+            (
+                "go1.24",
+                "/usr/lib64/go/1.24/pkg/tool/linux_amd64/link",
+                v(1, 24, 1),
+            ),
+        ] {
+            let results = go_toolchain_results(pkg, file, vec![version]);
+            let firing = lines_for(&results, "go-toolchain-outdated");
+            assert_eq!(
+                firing.len(),
+                1,
+                "{pkg} {file} must fire exactly once: {results:?}"
+            );
+            assert!(
+                firing[0].contains(&version.to_string()),
+                "the detail names the recorded version: {}",
+                firing[0]
+            );
+        }
+        let results =
+            go_toolchain_results("go1.23", "/usr/lib64/go/1.23/bin/go", vec![v(1, 23, 8)]);
+        assert!(
+            lines_for(&results, "go-toolchain-outdated").is_empty(),
+            "go1.23 own tools at the floor must stay quiet: {results:?}"
+        );
     }
 
     #[test]
