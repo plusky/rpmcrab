@@ -243,8 +243,9 @@ linked-against-opt-library="""
 This executable is linked against a shared library in /opt folder.
 """
 linked-against-usr-library="""
-Libraries and executables under /bin, /sbin, /lib and /lib64 may not link
-against a shared library in /usr folder.
+A consumer listed under /bin, /sbin, /lib or /lib64 links a shared
+library under /usr. On merged-/usr systems a consumer that resolves
+into /usr stays silent.
 """
 static-library-without-symtab="""
 The static library doesn't contain any symbols and therefore can't be linked
