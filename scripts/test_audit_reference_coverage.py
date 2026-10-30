@@ -1035,6 +1035,7 @@ def test_stale_check_catches_name_keyed_entry():
         "spurious-bracket-in-%verifyscript",
         "summary-use-invalid-word",
         "symlink-crontab-file",
+        "symlink-should-be-absolute",
         "uncompressed-zip",
         "unversioned-explicit-obsoletes",
         "unversioned-explicit-provides",

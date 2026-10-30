@@ -349,11 +349,6 @@ fn absolute_regex() -> &'static Regex {
     ABSOLUTE_REGEX.get_or_init(|| Regex::new(r"^/([^/]+)").expect("static regex"))
 }
 
-static ABSOLUTE2_REGEX: OnceLock<Regex> = OnceLock::new();
-fn absolute2_regex() -> &'static Regex {
-    ABSOLUTE2_REGEX.get_or_init(|| Regex::new(r"^/?([^/]+)").expect("static regex"))
-}
-
 static POINTS_REGEX: OnceLock<Regex> = OnceLock::new();
 fn points_regex() -> &'static Regex {
     POINTS_REGEX.get_or_init(|| Regex::new(r"^\.\./(.*)").expect("static regex"))
@@ -2333,7 +2328,6 @@ pub struct FilesCheck {
     meta_package_re: Regex,
     compr_re: Regex,
     absolute_re: Regex,
-    absolute2_re: Regex,
     points_re: Regex,
     doc_re: Regex,
     bin_re: Regex,
@@ -2487,7 +2481,6 @@ impl FilesCheck {
                 .unwrap_or_else(|_| Regex::new("$^").expect("static")),
             compr_re: compr_regex().clone(),
             absolute_re: absolute_regex().clone(),
-            absolute2_re: absolute2_regex().clone(),
             points_re: points_regex().clone(),
             doc_re: doc_regex().clone(),
             bin_re: bin_regex().clone(),
@@ -7323,7 +7316,6 @@ impl FilesCheck {
         let parts: Vec<&str> = fname.split('/').skip(1).collect();
         let mut pathcomponents: &[&str] = &parts;
         let mut mylink: Option<&str> = None;
-        let mut lastpop: Option<&str> = None;
         let mut r = self.points_re.captures(link.as_str()).ok().flatten();
         while let Some(caps) = r {
             let rest = caps.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -7338,25 +7330,10 @@ impl FilesCheck {
                 );
                 break;
             }
-            lastpop = Some(pathcomponents[0]);
             pathcomponents = &pathcomponents[1..];
             r = self.points_re.captures(rest).ok().flatten();
         }
-        if let (Some(mylink), Some(lastpop)) = (mylink, lastpop) {
-            if let Ok(Some(caps)) = self.absolute2_re.captures(mylink) {
-                let linktop = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-                // have we reached the root directory?
-                if pathcomponents.is_empty() && linktop != lastpop && !self.use_relative_symlinks {
-                    // relative link into other toplevel directory
-                    add_info(
-                        out,
-                        Level::Warning,
-                        pkg,
-                        "symlink-should-be-absolute",
-                        &[fname, link],
-                    );
-                }
-            }
+        if let Some(mylink) = mylink {
             // A .. left in the target after the leading run means the
             // link goes up and then back down, e.g. ../foo/../bar.
             // A target made only of .. segments never goes back down:
@@ -14238,10 +14215,10 @@ print("hi")
     }
 
     #[test]
-    fn files_check_symlink_absolute_with_config() {
-        // With UseRelativeSymlinks=false, a relative symlink into another
-        // toplevel dir emits symlink-should-be-absolute instead of
-        // symlink-should-be-relative.
+    fn files_check_symlink_absolute_tag_dropped() {
+        // The symlink-should-be-absolute check was removed: under
+        // UseRelativeSymlinks=false a relative symlink into another
+        // toplevel dir now emits neither tag.
         let mut config = test_config();
         config.configuration.insert(
             "UseRelativeSymlinks".to_string(),
@@ -14251,8 +14228,38 @@ print("hi")
             &fixture_path("filescheck-scripts-1.0-1.noarch.rpm"),
             &config,
         );
-        assert_has(&names, "symlink-should-be-absolute");
+        assert_lacks(&names, "symlink-should-be-absolute");
         assert_lacks(&names, "symlink-should-be-relative");
+    }
+
+    #[test]
+    fn symlink_relative_still_fires_for_dev_null_mask() {
+        // The absolute-tag drop leaves the relative tag untouched: a
+        // udev rule mask (/etc/udev/rules.d/*.rules -> /dev/null) still
+        // fires symlink-should-be-relative under the default config.
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut pkg = Pkg::open(
+            std::path::Path::new(&fixture_path("fcprobe-1-1.noarch.rpm")),
+            dir.path(),
+            true,
+        )
+        .expect("open fixture");
+        // Silence the dangling arm so only the relative tag is asserted.
+        pkg.req_names.push("/dev/null".to_string());
+        let fname = "/etc/udev/rules.d/99-test.rules";
+        let pkgfile = crate::pkg::pkgfile::PkgFile {
+            name: fname.to_string(),
+            linkto: "/dev/null".to_string(),
+            ..Default::default()
+        };
+        let st = PkgState::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_link_absolute(&pkg, fname, &pkgfile, &st, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "symlink-should-be-relative");
+        assert_lacks(&names, "symlink-should-be-absolute");
     }
 
     #[test]
