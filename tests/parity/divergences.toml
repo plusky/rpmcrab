@@ -3121,6 +3121,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1172"
 
 [[divergence]]
 case = "global"
+check = "ghost-files-without-postin"
+kind = "behaviour"
+reason = "Fixed behaviour: a %ghost mentioned in the package's %posttrans scriptlet, or declared by a same-package tmpfiles.d creation line (d/D/f/F/w/L/c/C/b/p/P, exact path field only; glob and %-specifier lines never match), does not count toward the finding -- both are creation mechanisms outside %postin/%prein."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "percent-in"
 kind = "behaviour"
 reason = "Fix-and-diverge: `percent-in-<scriptlet>` no longer fires on `%{TAG}` sequences inside an rpm `--qf` / `--queryformat` argument: that argument IS a queryformat string, so the percent sequence is format syntax, never macro fallout. The corpus's only %pre firing is openblas-common-devel's `%pre` (`rpm -q --qf '%{NAME}'`), where the queryformat tag reads the owning package's name for a directory-ownership comparison; the scrub applies to the percent check only (sibling findings on the same scriptlet, e.g. dangerous-command-in, still fire), leaves every other percent sequence firing, including a bare `%macro` elsewhere in the same scriptlet, and fails closed on an unterminated quote or a missing argument. Measured over the full Factory corpus (51,589 RPMs, PostCheck-only pass): percent-in-%pre goes 1 to 0 with no sibling tag moved on the firing package. Pinned by unit tests in post.rs."

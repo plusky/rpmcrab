@@ -4,6 +4,7 @@
 //! ported natively; the `sh -n` / `perl -wc` syntax checks shell out when
 //! the interpreter exists and are skipped otherwise.
 
+use std::collections::HashSet;
 use std::process::Command;
 
 use fancy_regex::Regex;
@@ -1712,11 +1713,19 @@ impl Check for PostCheck {
         if !pkg.ghost_files.is_empty() {
             let postin = pkg.tag_str(Tag::POSTIN).unwrap_or_default();
             let prein = pkg.tag_str(Tag::PREIN).unwrap_or_default();
+            let posttrans = pkg.tag_str(Tag::POSTTRANS).unwrap_or_default();
+            let tmpfiles = tmpfiles_declared_paths(pkg);
             for f in &pkg.ghost_files {
                 if pkg.missingok_files.iter().any(|m| m == f) {
                     continue;
                 }
                 if is_icon_theme_cache(f) {
+                    continue;
+                }
+                if posttrans.contains(f.as_str()) {
+                    continue;
+                }
+                if tmpfiles.contains(f.as_str()) {
                     continue;
                 }
                 if postin.is_empty() && prein.is_empty() {
@@ -1743,6 +1752,54 @@ fn is_icon_theme_cache(path: &str) -> bool {
         return false;
     };
     !theme.is_empty() && !theme.contains('/')
+}
+
+/// The path a tmpfiles.d creation line declares, if the line is an exact
+/// literal path: comment and empty lines, non-creation lines (`x`, `r`,
+/// `z`, `t`, `h`, `a` and friends), glob patterns, and %-specifier
+/// paths never declare a path. A trailing slash on a directory line is
+/// stripped so `d /run/foo/` declares the ghost `/run/foo`.
+fn tmpfiles_line_path(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let mut fields = line.split_whitespace();
+    let kind = fields.next()?.trim_end_matches(['!', '+']);
+    if !matches!(
+        kind,
+        "d" | "D" | "f" | "F" | "w" | "L" | "c" | "C" | "b" | "p" | "P"
+    ) {
+        return None;
+    }
+    let path = fields.next()?;
+    if path.contains(['*', '?', '[', '%']) {
+        return None;
+    }
+    let path = path.strip_suffix('/').unwrap_or(path);
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
+}
+
+/// Paths declared by same-package tmpfiles.d creation lines: a %ghost
+/// created by systemd-tmpfiles at boot is created, not missing.
+/// Unreadable fragments declare nothing, so packages without extraction
+/// never gain the credit.
+fn tmpfiles_declared_paths(pkg: &Pkg) -> HashSet<String> {
+    let mut declared = HashSet::new();
+    for file in &pkg.files {
+        if !file.name.contains("/tmpfiles.d/") || !file.name.ends_with(".conf") {
+            continue;
+        }
+        for line in pkg.read_file(&file.name).lines() {
+            if let Some(path) = tmpfiles_line_path(line) {
+                declared.insert(path);
+            }
+        }
+    }
+    declared
 }
 
 #[cfg(test)]
@@ -2278,6 +2335,129 @@ mod tests {
         assert_eq!(
             check_fixture_names("postcheck-pretrans-lua-1.0-1.noarch.rpm"),
             Vec::<String>::new()
+        );
+    }
+
+    /// Run the check over a fixture RPM and count
+    /// `ghost-files-without-postin` findings, optionally with the
+    /// fixture's ghost set replaced by `ghosts`.
+    fn ghost_count(rpm: &str, ghosts: Option<&[&str]>) -> usize {
+        let rpm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs")
+            .join(rpm);
+        let mut pkg = Pkg::open(&rpm_path, &std::env::temp_dir(), true).expect("open fixture pkg");
+        if let Some(g) = ghosts {
+            pkg.ghost_files = g.iter().map(|s| s.to_string()).collect();
+        }
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = PostCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .filter(|(name, _)| name == "ghost-files-without-postin")
+            .count()
+    }
+
+    #[test]
+    fn posttrans_created_ghost_is_quiet() {
+        // %posttrans creates one ghost (ln -sf) and never mentions the
+        // other; only the unmentioned ghost carries the finding.
+        assert_eq!(
+            ghost_count("postcheck-ghost-posttrans-1.0-1.noarch.rpm", None),
+            1
+        );
+        assert_eq!(
+            ghost_count(
+                "postcheck-ghost-posttrans-1.0-1.noarch.rpm",
+                Some(&["/etc/postcheck-ghost-posttrans-created"])
+            ),
+            0
+        );
+        assert_eq!(
+            ghost_count(
+                "postcheck-ghost-posttrans-1.0-1.noarch.rpm",
+                Some(&["/etc/postcheck-ghost-posttrans-unmentioned"])
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn tmpfiles_declared_ghosts_are_quiet() {
+        // The shipped fragment declares the directory ghost (through a
+        // trailing-slash line) and the state file; the glob line never
+        // matches, and the unmentioned ghost is untouched.
+        assert_eq!(
+            ghost_count("postcheck-ghost-tmpfiles-1.0-1.noarch.rpm", None),
+            2
+        );
+        assert_eq!(
+            ghost_count(
+                "postcheck-ghost-tmpfiles-1.0-1.noarch.rpm",
+                Some(&["/run/postcheck-tmpfiles"])
+            ),
+            0
+        );
+        assert_eq!(
+            ghost_count(
+                "postcheck-ghost-tmpfiles-1.0-1.noarch.rpm",
+                Some(&["/var/lib/postcheck-tmpfiles/state"])
+            ),
+            0
+        );
+        assert_eq!(
+            ghost_count(
+                "postcheck-ghost-tmpfiles-1.0-1.noarch.rpm",
+                Some(&["/var/lib/postcheck-tmpfiles/globfile"])
+            ),
+            1
+        );
+        assert_eq!(
+            ghost_count(
+                "postcheck-ghost-tmpfiles-1.0-1.noarch.rpm",
+                Some(&["/var/lib/postcheck-tmpfiles/unmentioned"])
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn tmpfiles_line_path_shapes() {
+        assert_eq!(
+            tmpfiles_line_path("d /run/foo 0755 root root -"),
+            Some("/run/foo".to_string())
+        );
+        assert_eq!(
+            tmpfiles_line_path("d /run/foo/ 0755 root root -"),
+            Some("/run/foo".to_string())
+        );
+        assert_eq!(
+            tmpfiles_line_path("L /var/lib/link - - - - /target"),
+            Some("/var/lib/link".to_string())
+        );
+        assert_eq!(tmpfiles_line_path("# comment"), None);
+        assert_eq!(tmpfiles_line_path(""), None);
+        assert_eq!(
+            tmpfiles_line_path("d /var/lib/glob* 0755 root root -"),
+            None
+        );
+        assert_eq!(
+            tmpfiles_line_path("d /var/lib/%m/foo 0755 root root -"),
+            None
+        );
+        assert_eq!(tmpfiles_line_path("d"), None);
+        assert_eq!(
+            tmpfiles_line_path("x /var/lib/excluded 0755 root root -"),
+            None
+        );
+        assert_eq!(
+            tmpfiles_line_path("r /var/lib/removed 0755 root root -"),
+            None
+        );
+        assert_eq!(
+            tmpfiles_line_path("d! /run/foo 0755 root root -"),
+            Some("/run/foo".to_string())
         );
     }
 
