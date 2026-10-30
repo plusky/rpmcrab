@@ -233,6 +233,20 @@ class LoadTableTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _mod.load_table(path)
 
+    def test_non_list_version_rejected(self):
+        # A non-list top-level `version` must fail as a ValueError
+        # (exit 2 in main), not a TypeError traceback from iterating
+        # it: a number is not iterable at all, and a string or table
+        # yields entries that are not tables.
+        for text in (
+            'version = "3.8"\n',
+            "version = 3413\n",
+            '[version]\nversion = "3.8"\nmagics = [3413]\n',
+        ):
+            path = write_table(text)
+            with self.assertRaises(ValueError):
+                _mod.load_table(path)
+
     def test_bad_version_format_rejected(self):
         path = write_table('[[version]]\nversion = "3"\nmagics = [3413]\n')
         with self.assertRaises(ValueError):

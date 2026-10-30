@@ -1919,8 +1919,10 @@ fn zero_perms_ghost_credit(pkg: &Pkg, fname: &str) -> bool {
         // elsewhere.
         if base == "icon-theme.cache" {
             if let Some(rest) = fname.strip_prefix("/usr/share/icons/") {
-                if rest.contains('/') && rest.split('/').next().is_some_and(|t| !t.is_empty()) {
-                    return true;
+                if let Some(theme) = rest.strip_suffix("/icon-theme.cache") {
+                    if !theme.is_empty() && !theme.contains('/') {
+                        return true;
+                    }
                 }
             }
         }
@@ -1980,9 +1982,10 @@ fn find_shell_keyword(text: &str, word: &str) -> Option<usize> {
 }
 
 /// The text with shell comment tails removed: a `#` starts a comment
-/// only at the start of a line or after whitespace, so a `#` inside a
-/// word (a path, a quoted string) survives. Line endings are kept, so
-/// stripping never joins two commands onto one line.
+/// only at the start of a line or after whitespace or a shell operator,
+/// and never inside quotes, so a `#` inside a word (a path) or a quoted
+/// string survives. Line endings are kept, so stripping never joins two
+/// commands onto one line.
 fn strip_comment_tails(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
@@ -1991,16 +1994,102 @@ fn strip_comment_tails(text: &str) -> String {
             None => (line, ""),
         };
         let mut cut = body.len();
+        let mut quote: Option<char> = None;
+        let mut skip_next = false;
+        let mut prev_starts_comment = true;
         for (index, ch) in body.char_indices() {
-            if ch == '#' && (index == 0 || body.as_bytes()[index - 1].is_ascii_whitespace()) {
-                cut = index;
-                break;
+            if skip_next {
+                skip_next = false;
+                prev_starts_comment = false;
+                continue;
+            }
+            if let Some(q) = quote {
+                if q == '"' && ch == '\\' {
+                    skip_next = true;
+                } else if ch == q {
+                    quote = None;
+                }
+                prev_starts_comment = false;
+                continue;
+            }
+            match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    prev_starts_comment = false;
+                }
+                '#' if prev_starts_comment => {
+                    cut = index;
+                    break;
+                }
+                c if c.is_ascii_whitespace()
+                    || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') =>
+                {
+                    prev_starts_comment = true;
+                }
+                _ => {
+                    prev_starts_comment = false;
+                }
             }
         }
         out.push_str(&body[..cut]);
         out.push_str(newline);
     }
     out
+}
+
+/// The part of a whitespace token before the first unquoted `>`/`<`,
+/// or `None` when the token is a redirection with a glued target
+/// (`>/dev/null`, `2>&1`). A bare operator (`>`, `2>`) is kept
+/// whole: the caller's operator scan drops it together with its
+/// separate target token. A path token glued to its redirection
+/// (`/b>/dev/null`) keeps the path; the redirection target never
+/// becomes an argument.
+fn split_glued_redirection(tok: &str) -> Option<&str> {
+    let mut quote: Option<char> = None;
+    let mut skip_next = false;
+    for (index, ch) in tok.char_indices() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\\' => {
+                skip_next = true;
+            }
+            '\'' | '"' => {
+                quote = Some(ch);
+            }
+            '>' | '<' => {
+                let head = &tok[..index];
+                if head.is_empty() || head.chars().all(|d| d.is_ascii_digit()) {
+                    // A bare operator (`>`, `2>`) carries no target of
+                    // its own: keep it, so the caller's operator scan
+                    // drops it together with its separate target token.
+                    // Only an operator with a glued target (`>/dev/null`,
+                    // `2>&1`) is dropped here.
+                    let rest = &tok[index..];
+                    let op_len: usize = rest
+                        .chars()
+                        .take_while(|c| matches!(c, '>' | '<' | '&'))
+                        .map(char::len_utf8)
+                        .sum();
+                    if rest.len() == op_len {
+                        return Some(tok);
+                    }
+                    return None;
+                }
+                return Some(head);
+            }
+            _ => {}
+        }
+    }
+    Some(tok)
 }
 
 /// Whether `tok` is a redirection operator whose target is the next
@@ -2069,6 +2158,7 @@ fn ln_links_in(text: &str) -> Vec<String> {
         from = at + 2 + cmd_end;
         let tokens: Vec<String> = cmd
             .split_whitespace()
+            .filter_map(split_glued_redirection)
             .map(|t| {
                 let t = t.strip_prefix(['\'', '"']).unwrap_or(t);
                 let t = t.strip_suffix(['\'', '"']).unwrap_or(t);
@@ -19147,6 +19237,35 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
         assert!(scriptlet_creates_symlink("ln -s /a /b 2>/dev/null\n", "/b"));
         assert!(scriptlet_creates_symlink("ln -s /a /b > /tmp/x\n", "/b"));
         assert!(scriptlet_creates_symlink("ln -s /a /b 2> /tmp/x\n", "/b"));
+        // Glued redirections: the path before the operator counts,
+        // the target never becomes an argument.
+        assert!(scriptlet_creates_symlink("ln -s /a /b>/dev/null\n", "/b"));
+        assert!(!scriptlet_creates_symlink(
+            "ln -s /a /b>/dev/null\n",
+            "/dev/null"
+        ));
+        assert!(scriptlet_creates_symlink("ln -s /a /b 2>&1\n", "/b"));
+        // A spaced bare operator drops its separate target the same
+        // way: the target never becomes the link.
+        assert!(scriptlet_creates_symlink("ln -s /a /b 2> /tmp/x\n", "/b"));
+        assert!(!scriptlet_creates_symlink(
+            "ln -s /a /b 2> /tmp/x\n",
+            "/tmp/x"
+        ));
+        // A comment after an operator drops the rest of the line, and a
+        // `#` inside quotes starts no comment.
+        assert!(scriptlet_creates_symlink(
+            "ln -s /a /b;# ln -s /x /y\n",
+            "/b"
+        ));
+        assert!(!scriptlet_creates_symlink(
+            "ln -s /a /b;# ln -s /x /y\n",
+            "/y"
+        ));
+        assert!(scriptlet_creates_symlink(
+            "foo=\"a # b\"; ln -s /x /y\n",
+            "/y"
+        ));
         // The long form must be exactly --symbolic: a hard link with
         // another long option containing `s` does not credit.
         assert!(scriptlet_creates_symlink("ln --symbolic /a /b\n", "/b"));
@@ -19221,6 +19340,11 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
         assert!(!zero_perms_ghost_credit(
             &pkg,
             "/usr/share/icons/icon-theme.cache"
+        ));
+        // Deeper nesting is an ordinary ghost, not a theme cache.
+        assert!(!zero_perms_ghost_credit(
+            &pkg,
+            "/usr/share/icons/hicolor/48x48/icon-theme.cache"
         ));
         // The policy store needs a non-empty policy, `active`, and a
         // file below it.

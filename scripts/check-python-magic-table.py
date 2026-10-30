@@ -142,7 +142,10 @@ def load_table(path):
     with open(path, "rb") as fh:
         parsed = tomllib.load(fh)
     table = {}
-    for entry in parsed.get("version", []):
+    versions = parsed.get("version", [])
+    if not isinstance(versions, list):
+        raise ValueError(f"table version entry is not a list: {versions!r}")
+    for entry in versions:
         if not isinstance(entry, dict):
             raise ValueError(f"table entry is not a table: {entry!r}")
         version = entry.get("version")
