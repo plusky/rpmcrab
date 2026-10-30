@@ -182,8 +182,8 @@ impl PostCheck {
         "/var/yp/",
     ];
 
-    /// Whether the first `rm` invocation on this line is credited:
-    /// every operand sits under a state prefix.
+    /// Whether this `rm` invocation is credited: every operand
+    /// sits under a state prefix.
     ///
     /// `rest` is the text after the `rm` verb on the matched line.
     /// Flags (`-rf`, `--one-file-system`, `--`) are skipped; parsing
@@ -265,6 +265,11 @@ impl PostCheck {
             }
             // A `..` component escapes the prefix, so it keeps firing.
             if t.split('/').any(|c| c == "..") {
+                return false;
+            }
+            // A glob operand is not operand-exact: `/var/lib/*` wipes
+            // shared state, so it keeps firing.
+            if t.contains('*') || t.contains('?') || t.contains('[') {
                 return false;
             }
             if !Self::VAR_STATE_PREFIXES.iter().any(|p| t.starts_with(p)) {
@@ -1459,23 +1464,28 @@ impl PostCheck {
             // appears later, so a false opener cannot hide genuine
             // invocations.
             let scan_text = Self::without_heredoc_bodies(script);
-            if let Some(caps) = Self::dangerous_regex().captures(&scan_text).ok().flatten()
-                && let Some(m) = caps.get(2)
-            {
-                // The first dangerous command is the finding; a
-                // credited `rm` of package state is not one.
+            // Every dangerous-command match is examined: the finding
+            // fires on the first match that is not a credited `rm` of
+            // package state, so a credited `rm` cannot hide a later
+            // genuinely-dangerous command on the same line or a later
+            // line. No match, or every match credited, stays quiet.
+            let mut offending: Option<String> = None;
+            for caps in Self::dangerous_regex().captures_iter(&scan_text).flatten() {
+                let Some(m) = caps.get(2) else {
+                    continue;
+                };
                 let line_end = scan_text[m.end()..]
                     .find('\n')
                     .map(|i| m.end() + i)
                     .unwrap_or(scan_text.len());
                 let rest = &scan_text[m.end()..line_end];
                 if !Self::rm_var_state_credit(tag, m.as_str(), rest) {
-                    out.push((
-                        Level::Warning,
-                        finding("dangerous-command-in"),
-                        vec![m.as_str().to_string()],
-                    ));
+                    offending = Some(m.as_str().to_string());
+                    break;
                 }
+            }
+            if let Some(verb) = offending {
+                out.push((Level::Warning, finding("dangerous-command-in"), vec![verb]));
             }
             if let Some(m) = Self::selinux_regex()
                 .captures(script)
@@ -2812,6 +2822,57 @@ mod tests {
                     .iter()
                     .any(|(_, f, _)| f == "dangerous-command-in-%post"),
                 "{script} should be credited"
+            );
+        }
+        // Glob operands are not operand-exact: they wipe shared state.
+        for script in [
+            "rm -rf /var/lib/*",
+            "rm -rf /var/cache/*",
+            "rm -rf /var/lib/foo?",
+            "rm -rf /var/lib/foo[12]",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "{script} should still fire"
+            );
+        }
+        // Multi-command scriptlets: the finding stays quiet only when
+        // every dangerous-command match is a credited `rm`, in both
+        // directions and across separators.
+        for script in [
+            "rm -rf /var/lib/foo && rm -rf /var/lib/bar",
+            "rm -rf /var/lib/foo ; rm -rf /var/log/bar",
+            "rm -rf /var/lib/foo\nrm -rf /var/cache/bar",
+            "rm -rf /var/lib/foo && rm -rf /var/lib/bar && rm -rf /var/log/baz",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "{script} should be credited"
+            );
+        }
+        // ... and any non-credited match in the chain keeps it firing,
+        // whether it comes first, last, or is a non-`rm` verb or a glob.
+        for script in [
+            "rm -rf /var/lib/foo && rm -rf /etc/passwd",
+            "rm -rf /var/lib/foo ; rm -rf /etc/passwd",
+            "rm -rf /var/lib/foo\nrm -rf /etc/passwd",
+            "rm -rf /var/lib/foo;rm -rf /etc/passwd",
+            "rm -rf /etc/passwd && rm -rf /var/lib/foo",
+            "rm -rf /var/lib/foo && cp -f /var/lib/a /etc/b",
+            "rm -rf /var/lib/foo && rm -rf /var/lib/*",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "{script} should still fire"
             );
         }
         // A continued line is never credited: its operands are not all visible.
