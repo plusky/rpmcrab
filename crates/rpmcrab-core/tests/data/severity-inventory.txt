@@ -414,11 +414,13 @@ zero-perms = W
 zero-perms-ghost = W
 
 [unresolved-sites]
-# count = 46
+# count = 48
 alternatives.rs: add_info( out, level, pkg, "li
 atomic_update.rs: add_info( out, level, pkg, "dir-or-file-outsid
 binaries.rs: add_info( out, info_type, pkg, "unused-direct-
+binaries.rs: add_info(make_finding( &package.pkg_name, &package.pkg
 binaries.rs: add_info(out, Level::Warning, pkg, r_name, &[&pkgfile.name, f_name])
+binaries.rs: make_finding( &package.pkg_name, &package.pkg_arch,
 check.rs: add_info(Finding { level: *level, check: (*check).to_string(),
 check.rs: add_info(make_finding( &pkg.name, "", level, check, details.iter().map
 check.rs: add_info(make_finding( &pkg.name, &pkg.arch, level, check, details.ite

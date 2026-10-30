@@ -2391,6 +2391,11 @@ fn go_toolchain_below_floor(version: GoVersion, floor: &[(GoVersion, GoVersion)]
 struct LddInfo {
     dependencies: Vec<String>,
     unused_dependencies: Vec<String>,
+    /// Names this file copies out of its providers through COPY
+    /// relocations (see `copy_reloc_type`): a dependency providing
+    /// one of these counts as used even though no undefined symbol
+    /// of this file names it.
+    copy_symbols: Vec<String>,
     undefined_symbols: Vec<String>,
     /// Symbols this file defines in `.dynsym`; the provider side of
     /// the DT_NEEDED closure resolution in `resolve_undefined_symbols`.
@@ -2417,6 +2422,7 @@ impl LddInfo {
         let mut info = LddInfo {
             dependencies: Vec::new(),
             unused_dependencies: Vec::new(),
+            copy_symbols: Vec::new(),
             undefined_symbols: Vec::new(),
             defined_symbols: Vec::new(),
             is_64: None,
@@ -2519,9 +2525,34 @@ impl LddInfo {
             }
         }
 
-        // Unused dependencies: ldd -u does linker-based analysis which
-        // goblin cannot replicate. Left empty; ledgered as a divergence.
-        // (The reference's ldd -u requires full symbol resolution.)
+        // COPY relocations: the loader copies the named data object
+        // out of its provider into this file at load time, so a
+        // dependency referenced only through a copied symbol is used
+        // even though no undefined symbol of this file names it.
+        // Capture the copied names; the unused-dependency producer
+        // (`dep_is_unused`) credits a provider that defines one.
+        // `unused_dependencies` itself is filled by the producer in
+        // `resolve_undefined_symbols` (installed packages) and in
+        // `after_checks` (extracted packages); it is never filled
+        // here.
+        if let Some(copy_type) = copy_reloc_type(elf.header.e_machine) {
+            let dynsym_names: Vec<Option<&str>> = elf
+                .dynsyms
+                .iter()
+                .map(|sym| elf.dynstrtab.get_at(sym.st_name))
+                .collect();
+            for reloc in elf.dynrelas.iter().chain(elf.dynrels.iter()) {
+                if reloc.r_type != copy_type {
+                    continue;
+                }
+                let Some(Some(name)) = dynsym_names.get(reloc.r_sym) else {
+                    continue;
+                };
+                if !name.is_empty() && !info.copy_symbols.iter().any(|c| c == name) {
+                    info.copy_symbols.push(name.to_string());
+                }
+            }
+        }
 
         info
     }
@@ -3079,6 +3110,13 @@ struct ConsumerFile {
     runpath: Vec<String>,
     /// A DT_RUNPATH tag is present at all (see `LddInfo`).
     has_runpath: bool,
+    /// Whether the file is a shared library: the finding's
+    /// severity (Error for libraries, Warning otherwise).
+    is_shlib: bool,
+    /// Names this file copies out of its providers through COPY
+    /// relocations: the unused-dependency producer credits a
+    /// provider that defines one of these.
+    copy_symbols: Vec<String>,
 }
 
 /// One checked package's captured consumers, in file order.
@@ -3099,6 +3137,11 @@ struct BinariesState {
     provider_sets: Vec<PackageProviders>,
     /// Captured consumers, in package check order.
     packages: Vec<PackageConsumers>,
+    /// Captured unused-dependency candidates, in package check
+    /// order. Kept apart from `packages` so an executable-only
+    /// package (captured here, never in `packages`) does not
+    /// become an invocation contributor.
+    unused_packages: Vec<PackageConsumers>,
     /// `(name, arch, filename)` of every package that carried
     /// ELF content (a provider or a consumer), in check order.
     /// The filename keeps two distinct packages that share a name
@@ -3116,18 +3159,94 @@ impl BinariesState {
             .iter()
             .all(|set| set.providers.is_empty())
             && self.packages.is_empty()
+            && self.unused_packages.is_empty()
             && self.contributors.is_empty()
     }
 
     fn merge(&mut self, other: BinariesState) {
         self.provider_sets.extend(other.provider_sets);
         self.packages.extend(other.packages);
+        self.unused_packages.extend(other.unused_packages);
         for contributor in other.contributors {
             if !self.contributors.contains(&contributor) {
                 self.contributors.push(contributor);
             }
         }
     }
+}
+
+/// The COPY relocation type for an ELF machine, from the system
+/// ELF header's `R_*_COPY` table: the relocation the loader turns
+/// into a runtime copy of a data object out of its provider.
+/// Machines with no COPY relocation (RISC-V, LoongArch) yield
+/// `None`, so no COPY credit is captured for them.
+fn copy_reloc_type(e_machine: u16) -> Option<u32> {
+    match e_machine {
+        2 | 4 | 20 | 21 => Some(19), // SPARC, 68K, PPC, PPC64
+        3 | 62 => Some(5),           // 386, X86_64
+        8 => Some(126),              // MIPS
+        15 => Some(128),             // PARISC
+        22 => Some(9),               // S390
+        40 => Some(20),              // ARM
+        50 => Some(0x84),            // IA_64
+        183 => Some(1024),           // AARCH64
+        0x9026 => Some(24),          // ALPHA
+        _ => None,
+    }
+}
+
+/// A versioned dynamic symbol name with its `@VERSION` suffix
+/// removed: a version mismatch is a load error, not an unused
+/// dependency, so the producer compares bare names on both sides.
+fn strip_symbol_version(name: &str) -> &str {
+    name.split('@').next().unwrap_or(name)
+}
+
+/// The set-difference producer for one direct dependency: the
+/// dependency is unused iff no non-weak undefined symbol of the
+/// consumer names a symbol the provider defines, and no symbol
+/// the consumer copies out of a provider is defined by this one.
+/// The provider must already be located; a dependency whose
+/// provider cannot be located never reaches this function and
+/// stays silent.
+fn dep_is_unused(
+    undefined_symbols: &[String],
+    copy_symbols: &[String],
+    provider_defined: &HashSet<String>,
+) -> bool {
+    let defined: HashSet<&str> = provider_defined
+        .iter()
+        .map(|sym| strip_symbol_version(sym))
+        .collect();
+    !undefined_symbols
+        .iter()
+        .any(|sym| defined.contains(strip_symbol_version(sym)))
+        && !copy_symbols
+            .iter()
+            .any(|sym| defined.contains(strip_symbol_version(sym)))
+}
+
+/// Locate one direct dependency the way the loader does: the
+/// invocation's provider index first, then the needing object's
+/// RPATH chain and RUNPATH directories on the filesystem rpmcrab
+/// runs on, then the system libraries. `None` means the provider
+/// cannot be located, and the caller stays silent.
+fn direct_provider(
+    providers: &ProviderIndex,
+    system: &SystemLibraries,
+    soname: &str,
+    is_64: Option<bool>,
+    ctx: &SearchContext,
+    owner: &PackageId,
+) -> Option<Arc<SymbolProvider>> {
+    if let Some((_id, provider)) = providers.lookup(soname, owner) {
+        return Some(provider);
+    }
+    let chain_dirs: Vec<PathBuf> = ctx.rpath_chain.iter().flatten().cloned().collect();
+    system
+        .provider_in_dirs(soname, is_64, &chain_dirs)
+        .or_else(|| system.provider_in_dirs(soname, is_64, &ctx.runpath_dirs))
+        .or_else(|| system.provider(soname, is_64))
 }
 
 /// The set of symbols one file's DT_NEEDED closure provides: walk
@@ -3266,7 +3385,43 @@ fn resolve_undefined_symbols(
         let Some(ldd) = &mut analysis.ldd else {
             continue;
         };
-        if ldd.failed.is_some() || ldd.undefined_symbols.is_empty() {
+        if ldd.failed.is_some() {
+            continue;
+        }
+        // Unused direct dependencies run before the undefined
+        // resolution below: the producer reads the original
+        // undefined list, which the retain() would otherwise
+        // shrink to the residue (every symbol a located provider
+        // defines is subtracted there, which would make every
+        // locatable dependency look unused). A file with
+        // DT_NEEDED entries but no undefined symbols has every
+        // dependency unused unless COPY-credited.
+        if !ldd.dependencies.is_empty() {
+            let root_ctx = SearchContext::for_object(
+                &ldd.rpath,
+                &ldd.runpath,
+                ldd.has_runpath,
+                &installed_dir(&pkgfile.name),
+                &[],
+            );
+            let mut unused = Vec::new();
+            for dep in &ldd.dependencies {
+                if unused.iter().any(|u| u == dep) {
+                    continue;
+                }
+                let Some(provider) =
+                    direct_provider(&providers, system, dep, ldd.is_64, &root_ctx, owner)
+                else {
+                    // Unlocatable: silent, never reported.
+                    continue;
+                };
+                if dep_is_unused(&ldd.undefined_symbols, &ldd.copy_symbols, &provider.defined) {
+                    unused.push(dep.clone());
+                }
+            }
+            ldd.unused_dependencies = unused;
+        }
+        if ldd.undefined_symbols.is_empty() {
             continue;
         }
         let direct = ldd.dependencies.clone();
@@ -6603,6 +6758,8 @@ impl BinariesCheck {
                             rpath: ldd.rpath.clone(),
                             runpath: ldd.runpath.clone(),
                             has_runpath: ldd.has_runpath,
+                            is_shlib: info.is_shlib,
+                            copy_symbols: ldd.copy_symbols.clone(),
                         });
                     }
                 }
@@ -6615,6 +6772,52 @@ impl BinariesCheck {
                     "undefined-non-weak-symbol",
                     &[&pkgfile.name, &detail],
                 );
+            }
+        }
+        // Unused-dependency capture (deferred): every dynamically
+        // linked file with DT_NEEDED entries is a candidate,
+        // executables and plugin libraries included. It must not
+        // sit inside the `is_shlib` gate above: that test is
+        // filename-based, and a Haskell library nested under a
+        // libdir subdirectory or a qml plugin file is no shlib by
+        // it but still carries DT_NEEDED, as the reference's
+        // ldd -u covers them. Kept in a separate list so an
+        // executable-only package does not become an invocation
+        // contributor (that registration reads `packages` alone).
+        if self.defer_undefined && !ldd.dependencies.is_empty() {
+            let state = self
+                .pending_state
+                .get_or_insert_with(BinariesState::default);
+            if !matches!(
+                state.unused_packages.last(),
+                Some(record) if record.pkg_name == pkg.name
+                    && record.pkg_arch == pkg.arch
+                    && record.pkg_filename == pkg.filename
+            ) {
+                state.unused_packages.push(PackageConsumers {
+                    pkg_name: pkg.name.clone(),
+                    pkg_arch: pkg.arch.clone(),
+                    pkg_filename: pkg.filename.clone(),
+                    files: Vec::new(),
+                });
+            }
+            if let Some(record) = state.unused_packages.last_mut() {
+                record.files.push(ConsumerFile {
+                    file_name: pkgfile.name.clone(),
+                    undefined_symbols: ldd.undefined_symbols.clone(),
+                    // The unused resolution intersects
+                    // undefined symbols with the provider's
+                    // defined set only; the consumer's own
+                    // defined symbols are never consulted.
+                    defined_symbols: HashSet::new(),
+                    dependencies: ldd.dependencies.clone(),
+                    is_64: ldd.is_64,
+                    rpath: ldd.rpath.clone(),
+                    runpath: ldd.runpath.clone(),
+                    has_runpath: ldd.has_runpath,
+                    is_shlib: info.is_shlib,
+                    copy_symbols: ldd.copy_symbols.clone(),
+                });
             }
         }
         let info_type = if info.is_shlib {
@@ -7830,6 +8033,57 @@ impl Check for BinariesCheck {
                         ],
                         None,
                     ));
+                }
+            }
+        }
+        // Unused direct dependencies, resolved against the same
+        // provider index and system fallback as the undefined
+        // symbols above, under the same mode switch: a dependency
+        // whose provider cannot be located stays silent.
+        for package in &state.unused_packages {
+            let owner: PackageId = (
+                package.pkg_name.clone(),
+                package.pkg_arch.clone(),
+                package.pkg_filename.clone(),
+            );
+            for consumer in &package.files {
+                let root_ctx = SearchContext::for_object(
+                    &consumer.rpath,
+                    &consumer.runpath,
+                    consumer.has_runpath,
+                    &installed_dir(&consumer.file_name),
+                    &[],
+                );
+                let level = if consumer.is_shlib {
+                    Level::Error
+                } else {
+                    Level::Warning
+                };
+                let mut seen: Vec<&str> = Vec::new();
+                for dep in &consumer.dependencies {
+                    if seen.iter().any(|d| d == dep) {
+                        continue;
+                    }
+                    seen.push(dep);
+                    let Some(provider) =
+                        direct_provider(&providers, system, dep, consumer.is_64, &root_ctx, &owner)
+                    else {
+                        continue;
+                    };
+                    if dep_is_unused(
+                        &consumer.undefined_symbols,
+                        &consumer.copy_symbols,
+                        &provider.defined,
+                    ) {
+                        out.add_info(make_finding(
+                            &package.pkg_name,
+                            &package.pkg_arch,
+                            level,
+                            "unused-direct-shlib-dependency",
+                            vec![consumer.file_name.clone(), dep.clone()],
+                            None,
+                        ));
+                    }
                 }
             }
         }
@@ -12292,6 +12546,7 @@ description = "explicit priority string bypasses the system crypto policy"
         LddInfo {
             dependencies: Vec::new(),
             unused_dependencies: Vec::new(),
+            copy_symbols: Vec::new(),
             undefined_symbols: Vec::new(),
             defined_symbols: Vec::new(),
             is_64: None,
@@ -12300,6 +12555,179 @@ description = "explicit priority string bypasses the system crypto policy"
             has_runpath: false,
             failed: None,
         }
+    }
+
+    #[test]
+    fn copy_reloc_type_matches_elf_header_table() {
+        assert_eq!(copy_reloc_type(62), Some(5)); // X86_64
+        assert_eq!(copy_reloc_type(3), Some(5)); // 386
+        assert_eq!(copy_reloc_type(183), Some(1024)); // AARCH64
+        assert_eq!(copy_reloc_type(21), Some(19)); // PPC64
+        assert_eq!(copy_reloc_type(22), Some(9)); // S390
+        assert_eq!(copy_reloc_type(243), None); // RISC-V: no COPY relocation
+        assert_eq!(copy_reloc_type(0), None);
+    }
+
+    #[test]
+    fn strip_symbol_version_strips_suffix() {
+        assert_eq!(strip_symbol_version("foo@VERSION"), "foo");
+        assert_eq!(strip_symbol_version("foo@@VERSION"), "foo");
+        assert_eq!(strip_symbol_version("foo"), "foo");
+    }
+
+    #[test]
+    fn dep_is_unused_set_difference_with_copy_credit() {
+        let defined: HashSet<String> = ["bar_sym".to_string()].into_iter().collect();
+        // Used: an undefined symbol names a defined one.
+        assert!(!dep_is_unused(&["bar_sym".to_string()], &[], &defined));
+        // Unused: no undefined symbol names a defined one.
+        assert!(dep_is_unused(&["other_sym".to_string()], &[], &defined));
+        // COPY-only: credited, not fired.
+        assert!(!dep_is_unused(&[], &["bar_sym".to_string()], &defined));
+        // A versioned spelling on either side still matches.
+        assert!(!dep_is_unused(
+            &["bar_sym@VERSION".to_string()],
+            &[],
+            &defined
+        ));
+        // A provider defining nothing leaves the dep unused.
+        assert!(dep_is_unused(
+            &["bar_sym".to_string()],
+            &[],
+            &HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn after_checks_emits_unused_direct_dependencies() {
+        let config = test_config();
+        let mut check = BinariesCheck::new(&config);
+        let pkg_id = (
+            "testpkg".to_string(),
+            "x86_64".to_string(),
+            "testpkg-1.0-1.x86_64.rpm".to_string(),
+        );
+        let mut providers = HashMap::new();
+        providers.insert(
+            "libfoo.so.1".to_string(),
+            SymbolProvider {
+                defined: ["other_sym".to_string()].into_iter().collect(),
+                needs: Vec::new(),
+                origin: PathBuf::from("/usr/lib64"),
+                rpath: Vec::new(),
+                runpath: Vec::new(),
+                has_runpath: false,
+            },
+        );
+        providers.insert(
+            "libbar.so.1".to_string(),
+            SymbolProvider {
+                defined: ["bar_sym".to_string()].into_iter().collect(),
+                needs: Vec::new(),
+                origin: PathBuf::from("/usr/lib64"),
+                rpath: Vec::new(),
+                runpath: Vec::new(),
+                has_runpath: false,
+            },
+        );
+        let state = BinariesState {
+            provider_sets: vec![PackageProviders {
+                pkg_name: pkg_id.0.clone(),
+                pkg_arch: pkg_id.1.clone(),
+                pkg_filename: pkg_id.2.clone(),
+                providers,
+            }],
+            packages: Vec::new(),
+            unused_packages: vec![PackageConsumers {
+                pkg_name: pkg_id.0.clone(),
+                pkg_arch: pkg_id.1.clone(),
+                pkg_filename: pkg_id.2.clone(),
+                files: vec![ConsumerFile {
+                    file_name: "/usr/bin/tool".to_string(),
+                    undefined_symbols: vec!["bar_sym".to_string()],
+                    defined_symbols: HashSet::new(),
+                    dependencies: vec!["libfoo.so.1".to_string(), "libbar.so.1".to_string()],
+                    is_64: Some(true),
+                    rpath: Vec::new(),
+                    runpath: Vec::new(),
+                    has_runpath: false,
+                    is_shlib: false,
+                    copy_symbols: Vec::new(),
+                }],
+            }],
+            contributors: vec![pkg_id],
+        };
+        check.import_state(Box::new(state));
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        let unused = lines_for(&results, "unused-direct-shlib-dependency");
+        assert_eq!(
+            unused.len(),
+            1,
+            "only the genuinely unused dep fires: {results:?}"
+        );
+        assert!(
+            unused[0].contains("libfoo.so.1"),
+            "firing dep is libfoo: {}",
+            unused[0]
+        );
+        assert!(
+            unused[0].contains(" W: "),
+            "executable unused dep is Warning: {}",
+            unused[0]
+        );
+    }
+
+    #[test]
+    fn check_dependency_emits_precomputed_unused_dependencies() {
+        let config = test_config();
+        let mut check = BinariesCheck::new(&config);
+        check.is_dynamically_linked = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.so.1", "ELF 64-bit LSB shared object");
+        let mut ldd = syn_ldd();
+        ldd.unused_dependencies = vec!["libbar.so.1".to_string()];
+        let mut info = syn_info();
+        info.is_shlib = true;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, &pkgfile, &info, &ldd, &mut out);
+        let results = out.results().to_vec();
+        let unused = lines_for(&results, "unused-direct-shlib-dependency");
+        assert_eq!(unused.len(), 1, "precomputed unused dep emits: {results:?}");
+        assert!(
+            unused[0].contains(" E: "),
+            "library unused dep is Error: {}",
+            unused[0]
+        );
+    }
+
+    #[test]
+    fn check_dependency_captures_unused_for_non_shlib() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_dynamically_linked = true;
+        check.defer_undefined = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/tool", "ELF 64-bit LSB executable");
+        let mut ldd = syn_ldd();
+        ldd.dependencies = vec!["libfoo.so.1".to_string()];
+        ldd.undefined_symbols = vec!["foo_sym".to_string()];
+        let mut info = syn_info();
+        info.is_shlib = false;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, &pkgfile, &info, &ldd, &mut out);
+        // The undefined-symbol capture skips non-libraries, but the
+        // unused capture must not: executables carry DT_NEEDED too.
+        let state = check.pending_state.as_ref().expect("capture recorded");
+        assert!(state.packages.is_empty(), "no undefined capture for exe");
+        assert_eq!(state.unused_packages.len(), 1);
+        assert_eq!(state.unused_packages[0].files[0].file_name, "/usr/bin/tool");
+        assert!(!state.unused_packages[0].files[0].is_shlib);
+        assert!(
+            out.results().to_vec().is_empty(),
+            "capture emits nothing yet"
+        );
     }
 
     fn config_with(snippet: &str) -> Config {
