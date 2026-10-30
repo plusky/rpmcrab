@@ -4531,6 +4531,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "unexpanded-macro"
+kind = "behaviour"
+reason = "Fix-and-diverge: an Obsoletes entry carrying macros is probed for unexpanded macros once, in check_forbidden_controlchar, where the probe loops all seven dep kinds with the byte-identical tagname. The reference probes Obsoletes twice — TagsCheck.py:134 in check() and :714 in _check_forbidden_controlchar — with add_info appending unconditionally, so upstream emits each Obsoletes macro finding twice. Measured on the five firing packages (postgresql14-18-pgvector): Obsoletes findings 20 -> 10, nothing else moves. Pinned by obsoletes_macro_emitted_once in tags.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
 reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."
