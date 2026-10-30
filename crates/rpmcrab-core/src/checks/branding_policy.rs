@@ -357,7 +357,15 @@ impl Check for BrandingPolicyCheck {
                 &[&r.name],
             );
         }
+        // A Suggests on the package's own documentation subpackage is
+        // self-documentation, not a dependency on other software: it
+        // pulls in nothing but the package's own docs, and a Suggests
+        // is not installed by default. Any other Suggests still fires.
+        let own_doc = format!("{}-doc", pkg.name);
         for r in &pkg.suggests {
+            if r.name == own_doc {
+                continue;
+            }
             add_info(
                 out,
                 Level::Warning,
@@ -999,6 +1007,13 @@ mod tests {
             .collect()
     }
 
+    fn excessive_suggests(pkg: &Pkg) -> Vec<String> {
+        has(&run(pkg), "branding-excessive-suggests")
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
     fn enhances_pkg(enhances: Vec<DepInfo>) -> Pkg {
         let mut pkg = fixture_pkg();
         pkg.name = "bla-theme-openSUSE".to_string();
@@ -1043,5 +1058,40 @@ mod tests {
             dep("(bla and bla-common)", 0),
         ]);
         assert_eq!(excessive_enhances(&pkg).len(), 5, "{:?}", run(&pkg));
+    }
+
+    // The corpus shape: a TeX beamer theme whose name matches the
+    // theme pattern suggests its own documentation subpackage, the
+    // universal TeX pattern of suggesting the -doc companion. The
+    // Suggests names nothing but the package's own docs, so it is
+    // not an excessive dependency; a version on it changes nothing.
+    #[test]
+    fn own_doc_suggests_is_quiet() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.suggests = vec![
+            dep("bla-theme-openSUSE-doc", 0),
+            dep_ev(
+                "bla-theme-openSUSE-doc",
+                RPMSENSE_GREATER | RPMSENSE_EQUAL,
+                "1.0",
+            ),
+        ];
+        assert!(excessive_suggests(&pkg).is_empty(), "{:?}", run(&pkg));
+    }
+
+    // Near misses: a Suggests on a documentation package that is not
+    // exactly the package's own -doc companion, and a Suggests on the
+    // package itself, still fire.
+    #[test]
+    fn non_own_doc_suggests_still_fire() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.suggests = vec![
+            dep("bla-theme-openSUSE-doc-extra", 0),
+            dep("other-theme-doc", 0),
+            dep("bla-theme-openSUSE", 0),
+        ];
+        assert_eq!(excessive_suggests(&pkg).len(), 3, "{:?}", run(&pkg));
     }
 }
