@@ -19275,11 +19275,11 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
         ));
         // Equals-joined and clustered -t forms disqualify like -t.
         assert!(!scriptlet_creates_symlink(
-            "ln -s --target-directory=/dir /a\n",
-            "/a"
+            "ln -s --target-directory=/dir /a /b\n",
+            "/b"
         ));
         assert!(!scriptlet_creates_symlink("ln -s -st /dir /a\n", "/a"));
-        assert!(!scriptlet_creates_symlink("ln -s -t/dir /a\n", "/a"));
+        assert!(!scriptlet_creates_symlink("ln -s -t/dir /a /b\n", "/b"));
         // Comment tails are skipped, including a commented-out command.
         assert!(scriptlet_creates_symlink("ln -s /a /b # comment\n", "/b"));
         assert!(!scriptlet_creates_symlink("# ln -s /x /y\n", "/y"));
@@ -19322,6 +19322,10 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
         ));
         assert!(scriptlet_creates_symlink(
             "for i in a b; do echo /opt/done/file; ln -sf /t /d/${i}; done\n",
+            "/d/a"
+        ));
+        assert!(!scriptlet_creates_symlink(
+            "cp /opt/for i in a b; do ln -sf /t /d/${i}; done\n",
             "/d/a"
         ));
         // The scan resumes past each parsed command, so a command's

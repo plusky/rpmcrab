@@ -156,8 +156,8 @@ impl DocCheck {
     /// Translated help, man pages and manuals belong in the language
     /// split, not in a -doc subpackage, so translated man/info/help
     /// payload no longer vetoes the exemption. A package with no
-    /// non-doc regular files is not a translations package (it is a
-    /// pure documentation package, which keeps firing).
+    /// non-doc regular files outside man/info/help is not a translations
+    /// package (it is a pure documentation package, which keeps firing).
     fn is_translations_package(files: &[PkgFile], doc_files: &[&str]) -> bool {
         let mut any = false;
         for f in files {
