@@ -1347,8 +1347,14 @@ impl PostCheck {
             if is_match(Self::percent_regex(), &Self::scrub_queryformat_args(script)) {
                 out.push((Level::Warning, finding("percent-in"), vec![]));
             }
+            // Heredoc bodies are written out, not executed, so a command
+            // named inside one is not an invocation in the scriptlet.
+            // The blanking only applies to a body whose terminator
+            // appears later, so a false opener cannot hide genuine
+            // invocations.
+            let scan_text = Self::without_heredoc_bodies(script);
             if let Some(m) = Self::dangerous_regex()
-                .captures(script)
+                .captures(&scan_text)
                 .ok()
                 .flatten()
                 .and_then(|c| c.get(2))
@@ -2621,6 +2627,48 @@ mod tests {
         assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
             && f == "dangerous-command-in-%post"
             && d == &vec!["rm".to_string()]));
+    }
+
+    #[test]
+    fn dangerous_command_in_heredoc_body_is_silent() {
+        let script = "cat > /var/run/texlive/scriptlets/x << 'EOF'\n/usr/bin/perl /usr/share/texmf/tlpkg/tlpostcode/x.pl install /usr/share/texmf\nEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post")
+        );
+    }
+
+    #[test]
+    fn dangerous_command_after_heredoc_still_fires() {
+        let script = "cat > /tmp/note << 'EOF'\nln -s a b\nEOF\nrm -rf /bar\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "dangerous-command-in-%post"
+            && d == &vec!["rm".to_string()]));
+    }
+
+    #[test]
+    fn dangerous_command_in_unclosed_heredoc_still_fires() {
+        // No terminator later in the scriptlet, so the body is not
+        // blanked and the command still fires.
+        let script = "cat > /tmp/note << 'EOF'\nrm -rf /foo\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "dangerous-command-in-%post"
+            && d == &vec!["rm".to_string()]));
+    }
+
+    #[test]
+    fn dangerous_command_in_dash_heredoc_body_is_silent() {
+        let script = "cat <<- 'EOF'\n\trm -rf /foo\n\tEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post")
+        );
     }
 
     #[test]
