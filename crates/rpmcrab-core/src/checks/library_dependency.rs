@@ -46,6 +46,14 @@
 //! the file to a single package and credits only a direct requirement
 //! on that package. A finding that still fires names the last
 //! non-devel shipper, the owner the single-value map would have held.
+//!
+//! The ownerless branch applies the verdict's shipper-side arms:
+//! when no owner exists, a link the devel package ships itself, or
+//! requires a shipper of by name, is present on install, so
+//! `no-library-dependency-for` stays silent for it; the reference
+//! fires for every link absent from its non-devel-only map. Only
+//! the shipper-side arms can credit here — the provides and anchor
+//! arms are owners-only, and owners are empty by construction.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -544,7 +552,11 @@ impl Check for LibraryDependencyCheck {
                 // does not classify as devel packages — the side the
                 // reference's file map records; a file with no owner
                 // takes the `no-library-dependency-for` branch below,
-                // exactly as a file absent from that map does.
+                // exactly as a file absent from that map does, but
+                // the branch still applies the verdict's shipper-side
+                // arms there: a link the devel ships itself, or
+                // requires a shipper of by name, is present on
+                // install, so it stays silent.
                 let empty: Vec<(String, String)> = Vec::new();
                 let shippers = self.package_so_shippers.get(link).unwrap_or(&empty);
                 let owners: Vec<&(String, String)> = shippers
@@ -563,7 +575,8 @@ impl Check for LibraryDependencyCheck {
                         ));
                         break;
                     }
-                } else {
+                } else if !self.link_credited(&key, &requires, shippers, &owners, &snapshots_by_key)
+                {
                     out.add_info(make_finding(
                         &pkgname,
                         &arch,
@@ -1568,6 +1581,99 @@ mod tests {
             &[],
         );
         assert!(run_pkgs(&[&owner, &devel]).is_empty());
+    }
+
+    #[test]
+    fn self_shipped_target_credits_for_no_library_dependency_for() {
+        // The ownerless branch applies the self-ship arm: a devel
+        // package shipping the real file its own `.so` chain
+        // resolves to needs no dependency on it — installing the
+        // devel provides the file. The efl/cross/ipmiutil shape of
+        // the FP-trim audit (16 rows): debug and sys-root payloads
+        // that live in the devel package itself.
+        let devel = bare_pkg(
+            "foo-devel",
+            vec![
+                symlink("/usr/lib64/libfoo.so", "libfoo.so.1"),
+                regular("/usr/lib64/libfoo.so.1"),
+            ],
+            &["unrelated".to_string()],
+            &[],
+        );
+        assert!(run_pkgs(&[&devel]).is_empty());
+    }
+
+    #[test]
+    fn required_devel_shipper_credits_for_no_library_dependency_for() {
+        // The ownerless branch applies the direct arm: the only
+        // shipper is another devel package, but the devel requires
+        // it by name, so installing the devel pulls the file in.
+        // The libmono-2_0 shape of the FP-trim audit.
+        let shipper = bare_pkg(
+            "libfoo-devel",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &[],
+        );
+        let devel = foo_devel(&["libfoo-devel".to_string()]);
+        assert!(run_pkgs(&[&shipper, &devel]).is_empty());
+    }
+
+    #[test]
+    fn unrequired_devel_shipper_still_fires_for() {
+        // Near miss of the required-shipper credit: the only
+        // shipper is a devel package the devel does not require,
+        // so the link still dangles without it. The libpng-compat
+        // and mumps shapes of the FP-trim audit.
+        let shipper = bare_pkg(
+            "libfoo-devel",
+            vec![regular("/usr/lib64/libfoo.so.1")],
+            &[],
+            &[],
+        );
+        let devel = foo_devel(&["unrelated".to_string()]);
+        let results = run_pkgs(&[&shipper, &devel]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-for");
+        assert!(
+            results[0].1.contains("/usr/lib64/libfoo.so.1"),
+            "link: {}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn ownerless_link_still_fires_for() {
+        // Baseline pin: a link nobody ships still fires.
+        let devel = foo_devel(&["unrelated".to_string()]);
+        let results = run_pkgs(&[&devel]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-for");
+    }
+
+    #[test]
+    fn credited_first_link_names_later_ownerless_link() {
+        // One finding per devel, first non-credited link wins: a
+        // self-shipped first link stays silent and the later
+        // ownerless link is the one reported.
+        let devel = bare_pkg(
+            "foo-devel",
+            vec![
+                symlink("/usr/lib64/libfoo.so", "libfoo.so.1"),
+                regular("/usr/lib64/libfoo.so.1"),
+                symlink("/usr/lib64/libbar.so", "libbar.so.1"),
+            ],
+            &["unrelated".to_string()],
+            &[],
+        );
+        let results = run_pkgs(&[&devel]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "no-library-dependency-for");
+        assert!(
+            results[0].1.contains("/usr/lib64/libbar.so.1"),
+            "link: {}",
+            results[0].1
+        );
     }
 
     #[test]
