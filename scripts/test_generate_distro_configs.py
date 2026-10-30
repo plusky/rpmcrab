@@ -1859,6 +1859,23 @@ def test_strip_badness_threshold_is_idempotent():
     assert once == twice == "Version = 3\n", (once, twice)
 
 
+def test_strip_use_version_in_changelog_drops_only_the_key_line():
+    """The UseVersionInChangelog line goes; every other line survives
+    byte-exact, and the removal is logged for the provenance."""
+    text = "Version = 3\nUseVersionInChangelog = false\nFlavor = \"opensuse\"\n"
+    log = []
+    out = gen.strip_use_version_in_changelog(text, "opensuse", log)
+    assert out == "Version = 3\nFlavor = \"opensuse\"\n", out
+    assert len(log) == 1 and "false" in log[0] and "opensuse" in log[0], log
+
+
+def test_strip_use_version_in_changelog_is_idempotent():
+    text = "UseVersionInChangelog = false\nVersion = 3\n"
+    once = gen.strip_use_version_in_changelog(text, "opensuse", [])
+    twice = gen.strip_use_version_in_changelog(once, "opensuse", [])
+    assert once == twice == "Version = 3\n", (once, twice)
+
+
 def test_scoring_is_not_vendored():
     """No [Scoring] table ships (issue #699): neither upstream's
     scoring.toml nor the rpmlint-strict layer is in the bundle, so no
@@ -2244,7 +2261,7 @@ def _generate_return(provenance):
         provenance,
         empty, empty, empty,
         list(gen.FILES["opensuse"]),
-        empty, empty, empty, empty, empty, empty, empty,
+        empty, empty, empty, empty, empty, empty, empty, empty,
     )
 
 

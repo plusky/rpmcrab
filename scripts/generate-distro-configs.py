@@ -2460,6 +2460,26 @@ def strip_badness_threshold(text, flavor, threshold_log):
     return "".join(out)
 
 
+def strip_use_version_in_changelog(text, flavor, changelog_log):
+    """Drop the ``UseVersionInChangelog`` line from a vendored flavor config.
+
+    The port does not implement the changelog-version check, so the
+    option is not carried: shipped flavour configs contain only
+    options the port reads.
+    Only the key line is removed; every other line survives byte-exact.
+    Idempotent.
+    """
+    out = []
+    for line in text.splitlines(keepends=True):
+        if re.match(r"^UseVersionInChangelog\s*=", line):
+            changelog_log.append(
+                f"UseVersionInChangelog: dropped {line.strip()!r} from {flavor}/opensuse.toml"
+            )
+            continue
+        out.append(line)
+    return "".join(out)
+
+
 def assert_kept_filters(text):
     """Verify every KEEP_FILTERS pattern survives in a generated config.
 
@@ -2555,6 +2575,7 @@ def generate(ref_dir=None, pins=None):
     scoped_log = []
     deduped_filters_log = []
     threshold_log = []
+    changelog_log = []
     added_log = []
     adjudicated_log = []
     for flavor, data in result.items():
@@ -2575,6 +2596,7 @@ def generate(ref_dir=None, pins=None):
                 text = prune_pie_paths(text, pie_pruned_log)
             if filename == "opensuse.toml":
                 text = strip_badness_threshold(text, flavor, threshold_log)
+                text = strip_use_version_in_changelog(text, flavor, changelog_log)
                 text = append_systemd_preset_packages(
                     text, SYSTEMD_PRESET_PACKAGES
                 )
@@ -2741,6 +2763,15 @@ def generate(ref_dir=None, pins=None):
             if entry not in seen_threshold:
                 seen_threshold.add(entry)
                 provenance.append(f"#   {entry}")
+    if changelog_log:
+        provenance.append("#")
+        provenance.append("# Removed UseVersionInChangelog lines (the port does not")
+        provenance.append("# implement the changelog-version check):")
+        seen_changelog = set()
+        for entry in changelog_log:
+            if entry not in seen_changelog:
+                seen_changelog.add(entry)
+                provenance.append(f"#   {entry}")
     if adjudicated_log:
         provenance.append("#")
         provenance.append("# Adjudicated digest records (Factory content decides;")
@@ -2768,6 +2799,7 @@ def generate(ref_dir=None, pins=None):
         scoped_log,
         deduped_filters_log,
         threshold_log,
+        changelog_log,
         added_log,
         adjudicated_log,
     )
@@ -2916,7 +2948,7 @@ def main():
 
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
     try:
-        result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, files_out, dropped_log, retargeted_log, scoped_log, deduped_filters_log, threshold_log, added_log, adjudicated_log = generate(
+        result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, files_out, dropped_log, retargeted_log, scoped_log, deduped_filters_log, threshold_log, changelog_log, added_log, adjudicated_log = generate(
             ref_dir=ref_dir, pins=pins
         )
     except FetchExhausted as e:
@@ -3035,6 +3067,8 @@ def main():
         print(f"deduped: {entry}")
     for entry in threshold_log:
         print(f"threshold: {entry}")
+    for entry in changelog_log:
+        print(f"changelog: {entry}")
     print(f"wrote {sum(len(d['files']) for d in result.values())} files + PROVENANCE")
     return 0
 

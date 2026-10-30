@@ -70,17 +70,13 @@ pub struct TagsCheck {
     /// Upstream rpmlint#180: bot/invalid changelog authors, from the
     /// `InvalidChangelogAuthors` config regex list.
     invalid_changelog_authors: Vec<Regex>,
-    use_version_in_changelog: bool,
     invalid_url_regex: Option<Regex>,
-    forbidden_words_regex: Option<Regex>,
     use_epoch: bool,
     max_line_len: usize,
     valid_license_exceptions: Vec<String>,
     macro_re: Regex,
     devel_re: Regex,
     lib_package_re: Regex,
-    changelog_version_re: Regex,
-    changelog_text_version_re: Regex,
     leading_space_re: Regex,
     license_exception_re: Regex,
     pkg_config_re: Regex,
@@ -148,7 +144,6 @@ impl TagsCheck {
         let get_bool = |k: &str| tbl.get(k).and_then(toml::Value::as_bool).unwrap_or(false);
 
         let invalid_url = get_str("InvalidURL");
-        let forbidden_words = get_str("ForbiddenWords");
 
         Self {
             valid_licenses: get_strings("ValidLicenses"),
@@ -160,12 +155,8 @@ impl TagsCheck {
                 .iter()
                 .filter_map(|p| Regex::new(p).ok())
                 .collect(),
-            use_version_in_changelog: get_bool("UseVersionInChangelog"),
             invalid_url_regex: (!invalid_url.is_empty())
                 .then(|| Regex::new(&format!("(?i){invalid_url}")).ok())
-                .flatten(),
-            forbidden_words_regex: (!forbidden_words.is_empty())
-                .then(|| Regex::new(&format!("(?i)({forbidden_words})")).ok())
                 .flatten(),
             use_epoch: get_bool("UseEpoch"),
             max_line_len: tbl
@@ -176,8 +167,6 @@ impl TagsCheck {
             macro_re: macro_regex().clone(),
             devel_re: devel_regex().clone(),
             lib_package_re: explicit_lib_package_regex().clone(),
-            changelog_version_re: Regex::new(r"[^>]([^ >]+)\s*$").expect("static regex"),
-            changelog_text_version_re: Regex::new(r"^\s*-\s*((\d+:)?[\w\.]+-[\w\.]+)").expect("static regex"),
             leading_space_re: Regex::new(r"^\s+").expect("static regex"),
             license_exception_re: Regex::new(r"([^(\s]+)\s(?:WITH|with)\s([^)\s]+)").expect("static regex"),
             pkg_config_re: Regex::new(r"^/usr/(?:lib\d*|share)/pkgconfig/").expect("static regex"),
@@ -342,6 +331,9 @@ impl TagsCheck {
                 }
             }
             Some(e) => {
+                if !self.use_epoch {
+                    add_info(out, Level::Error, pkg, "epoch-tag", &[&e.to_string()]);
+                }
                 if e > 99 {
                     add_info(
                         out,
@@ -1155,16 +1147,6 @@ impl TagsCheck {
             d.push(summary);
             add_info(out, Level::Error, pkg, "summary-has-leading-spaces", &d);
         }
-        if let Some(re) = &self.forbidden_words_regex
-            && let Ok(Some(m)) = re.find(summary)
-        {
-            let mut d: Vec<&str> = Vec::new();
-            if let Some(l) = lang_err {
-                d.push(l);
-            }
-            d.push(m.as_str());
-            add_info(out, Level::Warning, pkg, "summary-use-invalid-word", &d);
-        }
         if !pkg.name.is_empty() {
             let sepchars = format!(r"[\s{PUNCT}]");
             let pat = format!(r"(?:^|\s)({})(?:{sepchars}|$)", regex_escape(&pkg.name));
@@ -1253,16 +1235,6 @@ impl TagsCheck {
                 d.push(line);
                 add_info(out, Level::Warning, pkg, "description-line-too-long", &d);
             }
-            if let Some(re) = &self.forbidden_words_regex
-                && let Ok(Some(m)) = re.find(line)
-            {
-                let mut d: Vec<&str> = Vec::new();
-                if let Some(l) = lang_err {
-                    d.push(l);
-                }
-                d.push(m.as_str());
-                add_info(out, Level::Warning, pkg, "description-use-invalid-word", &d);
-            }
             if let Ok(Some(caps)) = self.tag_re.captures(line)
                 && let Some(m) = caps.get(1)
             {
@@ -1322,25 +1294,6 @@ impl TagsCheck {
         }
         self.check_changelog_authors(pkg, out, changelog);
         let clt: Vec<String> = pkg.tag_str_array(Tag::CHANGELOGTEXT);
-        if self.use_version_in_changelog {
-            let mut found: Option<String> = None;
-            if let Ok(Some(caps)) = self.changelog_version_re.captures(&changelog[0]) {
-                found = caps.get(1).map(|m| m.as_str().to_string());
-            } else if !clt.is_empty()
-                && let Ok(Some(caps)) = self.changelog_text_version_re.captures(&clt[0])
-            {
-                found = caps.get(1).map(|m| m.as_str().to_string());
-            }
-            if found.is_none() {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "no-version-in-last-changelog",
-                    &[],
-                );
-            }
-        }
         let mut combined: Vec<String> = changelog.to_vec();
         combined.extend(clt.iter().cloned());
         for entry in &combined {
@@ -1963,10 +1916,6 @@ mod tests {
         // Minimal config with the keys TagsCheck reads.
         let mut config = Config::default();
         let tbl = &mut config.configuration;
-        tbl.insert(
-            "UseVersionInChangelog".to_string(),
-            toml::Value::Boolean(true),
-        );
         tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(false));
         tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(79));
         tbl.insert("ValidLicenses".to_string(), toml::Value::Array(vec![]));
@@ -2582,10 +2531,6 @@ mod tests {
         // Like test_config but with populated license lists.
         let mut config = Config::default();
         let tbl = &mut config.configuration;
-        tbl.insert(
-            "UseVersionInChangelog".to_string(),
-            toml::Value::Boolean(true),
-        );
         tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(false));
         tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(79));
         tbl.insert(
@@ -3489,6 +3434,48 @@ mod tests {
             "must stay silent: {results:?}"
         );
     }
+
+    fn test_config_with_epoch(use_epoch: bool) -> Config {
+        // Same minimal keys as test_config_with, with an explicit UseEpoch.
+        let mut config = Config::default();
+        let tbl = &mut config.configuration;
+        tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(use_epoch));
+        tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(79));
+        tbl.insert("ValidLicenses".to_string(), toml::Value::Array(vec![]));
+        tbl.insert(
+            "ValidLicenseExceptions".to_string(),
+            toml::Value::Array(vec![]),
+        );
+        tbl.insert("InvalidRequires".to_string(), toml::Value::Array(vec![]));
+        config.finalize().expect("fixture config");
+        config
+    }
+
+    #[test]
+    fn epoch_tag_emits_when_use_epoch_false() {
+        let (_tmp, pkg) = fixture_pkg("tags-highepoch-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "epoch-tag");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert_eq!(hits[0].1, "tags-highepoch.noarch: E: epoch-tag 100");
+    }
+
+    #[test]
+    fn epoch_tag_silent_when_use_epoch_true() {
+        let (_tmp, pkg) = fixture_pkg("tags-highepoch-1.0-1.noarch.rpm");
+        let config = test_config_with_epoch(true);
+        let results = run_check_with(&config, &pkg);
+        let hits = tag_hits(&results, "epoch-tag");
+        assert_eq!(hits.len(), 0, "all: {results:?}");
+    }
+
+    #[test]
+    fn epoch_tag_silent_without_epoch() {
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-1.0-1.noarch.rpm");
+        let results = run_check(&pkg);
+        let hits = tag_hits(&results, "epoch-tag");
+        assert_eq!(hits.len(), 0, "all: {results:?}");
+    }
 }
 
 #[cfg(test)]
@@ -3514,10 +3501,6 @@ mod rich_dep_emission_tests {
     fn rich_test_config(invalid_requires: &[&str], use_epoch: bool) -> Config {
         let mut config = Config::default();
         let tbl = &mut config.configuration;
-        tbl.insert(
-            "UseVersionInChangelog".to_string(),
-            toml::Value::Boolean(true),
-        );
         tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(use_epoch));
         tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(79));
         tbl.insert("ValidLicenses".to_string(), toml::Value::Array(vec![]));

@@ -78,8 +78,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ),
     ("shared_library_policy.rs", "re_soname_pkg", "ctor-once"),
     ("files.rs", "ldconfig_re", "ctor-once"),
-    ("tags.rs", "changelog_text_version_re", "ctor-once"),
-    ("tags.rs", "changelog_version_re", "ctor-once"),
     // Fallback "never matches" pattern for config-driven regexes.
     ("files.rs", "Regex::new(\"$^\")", "fallback"),
     // Constant patterns in struct fields (compile once per instance).
@@ -108,7 +106,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("branding_policy.rs", "re_icon_theme", "ctor-once"),
     // Config-driven with format!.
     ("tags.rs", "invalid_url", "config"),
-    ("tags.rs", "forbidden_words", "config"),
     // buildroot_and_date.rs (landed on main after this branch): the buildroot
     // pattern embeds the runtime `%{?buildroot}` macro value and `istoday`
     // embeds today's date, so neither can be a static; both are compiled once
