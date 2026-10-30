@@ -90,3 +90,10 @@ check = "shlib-fixed-dependency"
 kind = "behaviour"
 reason = "Fix-and-diverge: shlib-fixed-dependency skips `=` dependencies whose name is a virtual capability rather than a package reference: RPM package names never contain `(`, so a parenthesised name is a capability (`python(abi)`, `typelib(GIRepository)`) unless it matches the reference's `name(arch-bits)` shape (`libdnf5_2(x86-64)`), which still names a package and keeps firing. The reference fires on all of them: its loop charges every `=` dependency without distinguishing capabilities from packages. A virtual capability names no package and cannot break parallel installation of libraries, which is what the finding exists to report. Measured on the Factory corpus (51,586 RPMs): 207 findings before the credit, 203 after; the removed set is exactly the four capability rows (`python(abi)` in libSavitar0 and libstorage-ng-python3, `typelib(GIRepository)` in libcjs0 and libgjs0), no other finding movement. Pinned by unit tests in shared_library_policy.rs."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "shlib-fixed-dependency"
+kind = "behaviour"
+reason = "shlib-fixed-dependency is deferred to after_checks for same-source lockstep: a pinned `=` dependency that resolves within the run to a package built from the same source RPM (exact name, then provides — covering arch-qualified names like `libdnf5_2(x86-64)` and virtuals like `gio-branding`) is version lockstep by construction and stays silent; providers for the requiring package's architecture are preferred, and the requiring package itself never satisfies its own pin. The reference has no run-scope view and would fire. Measured on the Factory corpus (51,586 RPMs): 207 -> 25, the 182 silenced rows being exactly the 178 same-source and 4 virtual-same-source rows; a dep with no provider in the run, or no same-source provider, still fires, so single-package runs are unchanged. Pinned by unit tests in shared_library_policy.rs."
+since = "0.4.1"

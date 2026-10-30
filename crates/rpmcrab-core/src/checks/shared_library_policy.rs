@@ -38,6 +38,16 @@
 //! (`-devel`, group), naming the group's canonical base name.
 //! Rich (boolean) requires are read through their leaves: a leaf naming the
 //! sibling with a version relation satisfies the rule, a bare leaf does not.
+//!
+//! `shlib-fixed-dependency` is likewise deferred: a versioned library
+//! package pinning a dependency at `=` is version lockstep, not a policy
+//! violation, when the pinned name resolves within the run to a package
+//! built from the same source RPM. `check_binary` captures each candidate
+//! and `after_checks` resolves it against the run's provider index (exact
+//! name, then provides — which also covers arch-qualified names like
+//! `libdnf5_2(x86-64)` and virtuals like `gio-branding`); a candidate with
+//! no provider in the run, or no same-source provider, still fires, so
+//! single-package runs are unchanged.
 
 use std::collections::{HashMap, HashSet};
 
@@ -71,6 +81,9 @@ pub struct SharedLibraryPolicyCheck {
     /// Index of `seen` by (name, arch, source), for the dedup in
     /// `record_seen`.
     seen_index: HashMap<(String, String, Option<String>), usize>,
+    /// `shlib-fixed-dependency` candidates awaiting lockstep resolution
+    /// in `after_checks`, in capture order.
+    fixed_dep_candidates: Vec<FixedDepCandidate>,
 }
 
 /// One binary package of the run, recorded for the cross-package `-devel`
@@ -84,10 +97,25 @@ struct SeenPkg {
     has_versioned_so: bool,
 }
 
+/// One `shlib-fixed-dependency` candidate, captured during `check_binary`
+/// and resolved in `after_checks`: the finding's package, the pinned
+/// dependency name, and the already-formatted detail. Emission is deferred
+/// (not decided at check time) because same-source lockstep is only visible
+/// once the whole run's packages are seen.
+struct FixedDepCandidate {
+    pkg_name: String,
+    pkg_arch: String,
+    source_rpm: Option<String>,
+    dep_name: String,
+    detail: String,
+}
+
 /// Cross-package state, exported per package and merged before
-/// `after_checks`.
+/// `after_checks`: the `-devel` pairing records plus the fixed-dependency
+/// candidates awaiting lockstep resolution.
 struct DevelPairingState {
     seen: Vec<SeenPkg>,
+    fixed_dep_candidates: Vec<FixedDepCandidate>,
 }
 
 /// Whether a dependency name is a virtual capability rather than a
@@ -141,17 +169,18 @@ impl SharedLibraryPolicyCheck {
             .expect("static regex"),
             seen: Vec::new(),
             seen_index: HashMap::new(),
+            fixed_dep_candidates: Vec::new(),
         }
     }
 
     fn record(&mut self, pkg: &Pkg) {
-        // The pairing reads the dependency lists of only two record
-        // shapes: a `-devel` package's requires (it is the package the
-        // finding judges) and a scheme-named sibling's provides (the
-        // names a require may satisfy the pairing through). No other
-        // package's lists are ever read, so they are not cloned.
+        // The cross-package reads are: a `-devel` package's requires (the
+        // `-devel` pairing judges it) and every package's provides (the
+        // fixed-dependency lockstep resolution matches a pinned name
+        // against the run's providers, including virtuals and
+        // arch-qualified names). No other package's lists are ever read,
+        // so they are not cloned.
         let is_devel = self.is_devel_package(&pkg.name);
-        let is_scheme_named = self.sibling_group(&pkg.name).is_some();
         self.record_seen(SeenPkg {
             name: pkg.name.clone(),
             arch: pkg.arch.clone(),
@@ -165,11 +194,7 @@ impl SharedLibraryPolicyCheck {
             } else {
                 Vec::new()
             },
-            provides: if is_scheme_named {
-                pkg.provides.iter().map(|d| d.name.clone()).collect()
-            } else {
-                Vec::new()
-            },
+            provides: pkg.provides.iter().map(|d| d.name.clone()).collect(),
             has_versioned_so: pkg
                 .files
                 .iter()
@@ -819,14 +844,18 @@ impl Check for SharedLibraryPolicyCheck {
                     if dep.flags & RPMSENSE_EQUAL != 0 {
                         op.push('=');
                     }
+                    // Deferred, not emitted: same-source lockstep is only
+                    // visible once the whole run's packages are seen, so
+                    // `after_checks` resolves the candidate against the
+                    // run's provider index and emits only the survivors.
                     let detail = format!("{} {op} {}", dep.name, dep.evr_string());
-                    add_info(
-                        out,
-                        Level::Warning,
-                        pkg,
-                        "shlib-fixed-dependency",
-                        &[&detail],
-                    );
+                    self.fixed_dep_candidates.push(FixedDepCandidate {
+                        pkg_name: pkg.name.clone(),
+                        pkg_arch: pkg.arch.clone(),
+                        source_rpm: pkg.source_rpm.clone(),
+                        dep_name: dep.name.clone(),
+                        detail,
+                    });
                 }
             }
         }
@@ -898,15 +927,18 @@ impl Check for SharedLibraryPolicyCheck {
     fn reset(&mut self) {
         self.seen.clear();
         self.seen_index.clear();
+        self.fixed_dep_candidates.clear();
     }
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
         // The export-clears contract: the index goes with the records,
         // or a reuse without an intervening `reset()` would make
-        // `record_seen` index into the drained vector.
+        // `record_seen` index into the drained vector. Candidates drain
+        // with the records, for the same reason.
         self.seen_index.clear();
         Some(Box::new(DevelPairingState {
             seen: std::mem::take(&mut self.seen),
+            fixed_dep_candidates: std::mem::take(&mut self.fixed_dep_candidates),
         }))
     }
 
@@ -915,6 +947,7 @@ impl Check for SharedLibraryPolicyCheck {
             for entry in state.seen {
                 self.record_seen(entry);
             }
+            self.fixed_dep_candidates.extend(state.fixed_dep_candidates);
         }
     }
 
@@ -979,6 +1012,67 @@ impl Check for SharedLibraryPolicyCheck {
                     Level::Warning,
                     "shlib-devel-unversioned-requires",
                     vec![base],
+                    None,
+                ));
+            }
+        }
+        // Fixed-dependency lockstep: a pinned `=` dependency that resolves
+        // within the run to a package built from the same source RPM moves
+        // with the requiring package by construction, so it is not a policy
+        // violation. Candidates captured during `check_binary` resolve
+        // against the run's provider index — exact name first, then
+        // provides (which also covers arch-qualified names like
+        // `libdnf5_2(x86-64)`, whose headers provide the qualified name,
+        // and virtuals like `gio-branding`). Providers for the requiring
+        // package's architecture (noarch satisfies any arch) are preferred;
+        // only when none exist do providers of other architectures count.
+        // A candidate with no provider in the run, a requirer with no known
+        // source, or a provider set with no same-source member still fires:
+        // single-package runs are unchanged, and the requiring package
+        // itself never satisfies its own pin (its own entry is excluded).
+        let mut by_name: HashMap<&str, Vec<&SeenPkg>> = HashMap::new();
+        let mut by_provide: HashMap<&str, Vec<&SeenPkg>> = HashMap::new();
+        for entry in &self.seen {
+            by_name.entry(entry.name.as_str()).or_default().push(entry);
+            for provide in &entry.provides {
+                by_provide.entry(provide.as_str()).or_default().push(entry);
+            }
+        }
+        for candidate in std::mem::take(&mut self.fixed_dep_candidates) {
+            let silenced = match candidate.source_rpm.as_deref() {
+                None => false,
+                Some(source_rpm) => {
+                    let mut providers: Vec<&SeenPkg> = Vec::new();
+                    if let Some(v) = by_name.get(candidate.dep_name.as_str()) {
+                        providers.extend(v.iter().copied());
+                    } else if let Some(v) = by_provide.get(candidate.dep_name.as_str()) {
+                        providers.extend(v.iter().copied());
+                    }
+                    providers.retain(|p| {
+                        !(p.name == candidate.pkg_name && p.arch == candidate.pkg_arch)
+                    });
+                    let arch_matched: Vec<&SeenPkg> = providers
+                        .iter()
+                        .copied()
+                        .filter(|p| p.arch == candidate.pkg_arch || p.arch == "noarch")
+                        .collect();
+                    let selected = if arch_matched.is_empty() {
+                        providers
+                    } else {
+                        arch_matched
+                    };
+                    selected
+                        .iter()
+                        .any(|p| p.source_rpm.as_deref() == Some(source_rpm))
+                }
+            };
+            if !silenced {
+                out.add_info(make_finding(
+                    &candidate.pkg_name,
+                    &candidate.pkg_arch,
+                    Level::Warning,
+                    "shlib-fixed-dependency",
+                    vec![candidate.detail],
                     None,
                 ));
             }
@@ -2613,6 +2707,7 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = checker();
         check.check_binary(&pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
         let results = out.results().to_vec();
         let lines: Vec<&str> = results
             .iter()
@@ -2660,6 +2755,7 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = checker();
         check.check_binary(&pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
         let results = out.results().to_vec();
         assert!(
             results.iter().all(|(n, _)| n != "shlib-fixed-dependency"),
@@ -2699,6 +2795,7 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = checker();
         check.check_binary(&pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
         let results = out.results().to_vec();
         let lines: Vec<&str> = results
             .iter()
@@ -2755,6 +2852,7 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = checker();
         check.check_binary(&pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
         let results = out.results().to_vec();
         assert!(
             results.iter().all(|(n, _)| n != "shlib-fixed-dependency"),
@@ -2794,6 +2892,7 @@ mod tests {
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = checker();
         check.check_binary(&pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
         let results = out.results().to_vec();
         let lines: Vec<&str> = results
             .iter()
@@ -2805,6 +2904,187 @@ mod tests {
             lines[0].contains("barbaz(x86-64) = 1.0-1"),
             "detail names the pinned dependency: {}",
             lines[0]
+        );
+    }
+
+    fn fixed_dep_results(pkgs: &[&Pkg]) -> Vec<(String, String)> {
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = checker();
+        for pkg in pkgs {
+            check.check_binary(pkg, &config, &mut out);
+        }
+        check.after_checks(&config, &mut out);
+        out.results()
+            .iter()
+            .filter(|(n, _)| n == "shlib-fixed-dependency")
+            .cloned()
+            .collect()
+    }
+
+    fn fixed_dep_requirer(dir: &tempfile::TempDir, dep: &str, source_rpm: &str) -> Pkg {
+        // A versioned library package pinning `dep` at `=`, built the
+        // same way as the single-package fixed-dependency tests: a real
+        // minimal ELF so the check's own library walk succeeds.
+        let so_path = dir.path().join("libfoo.so");
+        std::fs::write(&so_path, minimal_elf("libfoo.so")).expect("write elf");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture header");
+        pkg.name = "libfoo1".to_string();
+        pkg.arch = "x86_64".to_string();
+        pkg.source_rpm = Some(source_rpm.to_string());
+        pkg.files = vec![PkgFile {
+            name: "/usr/lib64/libfoo.so".to_string(),
+            path: so_path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            magic: "ELF 64-bit LSB shared object".to_string(),
+            ..Default::default()
+        }];
+        pkg.requires = vec![dep_versioned(dep, RPMSENSE_EQUAL)];
+        pkg.provides = vec![];
+        pkg
+    }
+
+    #[test]
+    fn fixed_dependency_same_source_lockstep_is_silent() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let requirer = fixed_dep_requirer(&dir, "barbaz", "foo-1-1.src.rpm");
+        let provider = set_pkg("barbaz", "foo-1-1.src.rpm", vec![], vec![], None);
+        let results = fixed_dep_results(&[&requirer, &provider]);
+        assert!(
+            results.is_empty(),
+            "same-source pin must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_dependency_different_source_still_warns() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let requirer = fixed_dep_requirer(&dir, "barbaz", "foo-1-1.src.rpm");
+        let provider = set_pkg("barbaz", "other-1-1.src.rpm", vec![], vec![], None);
+        let results = fixed_dep_results(&[&requirer, &provider]);
+        assert_eq!(results.len(), 1, "cross-source pin must fire: {results:?}");
+        assert!(
+            results[0].1.contains("barbaz = 1.0-1"),
+            "detail names the pinned dependency: {}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn fixed_dependency_same_source_virtual_is_silent() {
+        // ANY-provider rule: two providers of `gio-branding`, one from a
+        // different source, one from the requirer's source — the pin is
+        // lockstep and stays quiet.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let requirer = fixed_dep_requirer(&dir, "gio-branding", "libgio-1-1.src.rpm");
+        let other = set_pkg(
+            "gio-branding-openSUSE",
+            "other-1-1.src.rpm",
+            vec![],
+            vec![dep("gio-branding")],
+            None,
+        );
+        let same = set_pkg(
+            "gio-branding-upstream",
+            "libgio-1-1.src.rpm",
+            vec![],
+            vec![dep("gio-branding")],
+            None,
+        );
+        let results = fixed_dep_results(&[&requirer, &other, &same]);
+        assert!(
+            results.is_empty(),
+            "same-source virtual pin must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_dependency_different_source_virtual_still_warns() {
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let requirer = fixed_dep_requirer(&dir, "gio-branding", "libgio-1-1.src.rpm");
+        let provider = set_pkg(
+            "gio-branding-openSUSE",
+            "other-1-1.src.rpm",
+            vec![],
+            vec![dep("gio-branding")],
+            None,
+        );
+        let results = fixed_dep_results(&[&requirer, &provider]);
+        assert_eq!(
+            results.len(),
+            1,
+            "different-source virtual pin must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_dependency_without_provider_still_warns() {
+        // Single-package shape: no provider in the run, the finding stands.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let requirer = fixed_dep_requirer(&dir, "barbaz", "foo-1-1.src.rpm");
+        let results = fixed_dep_results(&[&requirer]);
+        assert_eq!(results.len(), 1, "provider-less pin must fire: {results:?}");
+    }
+
+    #[test]
+    fn fixed_dependency_without_source_still_warns() {
+        // Fail closed: a requirer with no known source cannot be shown
+        // to be lockstep, so the finding stands even with a same-named
+        // provider in the run.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut requirer = fixed_dep_requirer(&dir, "barbaz", "foo-1-1.src.rpm");
+        requirer.source_rpm = None;
+        let provider = set_pkg("barbaz", "foo-1-1.src.rpm", vec![], vec![], None);
+        let results = fixed_dep_results(&[&requirer, &provider]);
+        assert_eq!(results.len(), 1, "sourceless pin must fire: {results:?}");
+    }
+
+    #[test]
+    fn fixed_dependency_arch_qualified_same_source_is_silent() {
+        // The pinned name resolves through the provider's provides:
+        // headers provide the arch-qualified self-name.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let requirer = fixed_dep_requirer(&dir, "libdnf5_2(x86-64)", "dnf5-1-1.src.rpm");
+        let provider = set_pkg(
+            "libdnf5_2",
+            "dnf5-1-1.src.rpm",
+            vec![],
+            vec![dep("libdnf5_2(x86-64)")],
+            Some("/usr/lib64/libdnf5.so.2"),
+        );
+        let results = fixed_dep_results(&[&requirer, &provider]);
+        assert!(
+            results.is_empty(),
+            "arch-qualified same-source pin must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_dependency_own_provide_does_not_silence() {
+        // The requiring package itself never satisfies its own pin.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let mut requirer = fixed_dep_requirer(&dir, "barbaz", "foo-1-1.src.rpm");
+        requirer.provides = vec![dep("barbaz")];
+        let results = fixed_dep_results(&[&requirer]);
+        assert_eq!(results.len(), 1, "self-provided pin must fire: {results:?}");
+    }
+
+    #[test]
+    fn fixed_dependency_arch_tier_prefers_same_arch() {
+        // Same-arch providers decide: a different-source provider for the
+        // requirer's arch beats a same-source provider for another arch.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let requirer = fixed_dep_requirer(&dir, "barbaz", "foo-1-1.src.rpm");
+        let same_arch = set_pkg("barbaz", "other-1-1.src.rpm", vec![], vec![], None);
+        let mut other_arch = set_pkg("barbaz", "foo-1-1.src.rpm", vec![], vec![], None);
+        other_arch.arch = "aarch64".to_string();
+        let results = fixed_dep_results(&[&requirer, &same_arch, &other_arch]);
+        assert_eq!(
+            results.len(),
+            1,
+            "same-arch different-source pin must fire: {results:?}"
         );
     }
 

@@ -3506,6 +3506,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "shlib-fixed-dependency"
+kind = "behaviour"
+reason = "shlib-fixed-dependency is deferred to after_checks for same-source lockstep: a pinned `=` dependency that resolves within the run to a package built from the same source RPM (exact name, then provides — covering arch-qualified names like `libdnf5_2(x86-64)` and virtuals like `gio-branding`) is version lockstep by construction and stays silent; providers for the requiring package's architecture are preferred, and the requiring package itself never satisfies its own pin. The reference has no run-scope view and would fire. Measured on the Factory corpus (51,586 RPMs): 207 -> 25, the 182 silenced rows being exactly the 178 same-source and 4 virtual-same-source rows; a dep with no provider in the run, or no same-source provider, still fires, so single-package runs are unchanged. Pinned by unit tests in shared_library_policy.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "SignatureCheck"
 kind = "behaviour"
 reason = "Signature verification runs in-process through librpm (a verified `PackageHeader::from_file` read against the rpmdb keyring, with the verification flags masking the digest checks \u2014 a deliberate flag difference from `rpm -Kv`, whose default flag set verifies the digests as well) where the reference shells out to `rpm -Kv` and scrapes its output (SignatureCheck.py; pkg.py). Verdicts come from the structured result; the `unknown-key` key ID is read from the signature packet's issuer subpacket, falling back to the issuer-fingerprint subpacket when the packet carries no issuer subpacket (the key ID is that fingerprint's low 64 bits), and is formatted as the low 32 bits, as `rpm -Kv` prints it; a verification failure is reported as `invalid-signature` only when a signature packet is itself unparsable \u2014 a parseable signature that fails verification, and digest failures, stay silent, matching the reference's text patterns. The library and keyring configuration are the same ones `rpm -Kv` uses, so findings agree; parity is pinned by the fixture pin matrix (the unsigned, signed, corrupt-packet, bad-math, broken-payload and bad-digest fixture RPMs, each generation-checked against empty and key-holding rpmdb states, together with the v6 OPENPGP-container fixtures (container-only, classic-tag control, mixed classic+container and dual-signature forms, generation-checked the same way against an rpm 6 `rpm -Kv`) and a Factory-corpus before/after diff (plusky/rpmcrab#704))."
