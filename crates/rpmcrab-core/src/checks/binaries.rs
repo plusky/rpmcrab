@@ -2578,6 +2578,12 @@ impl LddInfo {
 /// entries. Providers come from the checked package first and from
 /// the system the check runs on (`SystemLibraries`) second.
 struct SymbolProvider {
+    /// The located path of the providing object: the package
+    /// file's installed path for invocation providers, the located
+    /// candidate for system providers. The linked-against arms test
+    /// this path's prefix; merged duplicates keep the first file's
+    /// path, like its search paths.
+    path: PathBuf,
     defined: HashSet<String>,
     needs: Vec<String>,
     /// The directory the providing object is installed in: the
@@ -2704,6 +2710,7 @@ impl SystemLibraries {
             return None;
         }
         Some(Arc::new(SymbolProvider {
+            path: path.to_path_buf(),
             defined: ldd.defined_symbols.iter().cloned().collect(),
             needs: ldd.dependencies.clone(),
             origin: path
@@ -3000,6 +3007,7 @@ fn package_providers(
         }
         for key in keys {
             let entry = providers.entry(key).or_insert_with(|| SymbolProvider {
+                path: PathBuf::from(&pkgfile.name),
                 defined: HashSet::new(),
                 needs: Vec::new(),
                 origin: installed_dir(&pkgfile.name),
@@ -3161,6 +3169,14 @@ struct BinariesState {
     /// package (captured here, never in `packages`) does not
     /// become an invocation contributor.
     unused_packages: Vec<PackageConsumers>,
+    /// Linked-against capture, in package check order: every
+    /// non-archive, non-debug file with DT_NEEDED, regardless of
+    /// shlib/executable or Python-module status — the
+    /// linked-against arms read DT_NEEDED paths, not undefined
+    /// symbols, so the undefined capture's gates do not apply.
+    /// Undefined/defined symbol lists stay empty; only the dependency
+    /// lists and search contexts are read.
+    linked_packages: Vec<PackageConsumers>,
     /// `(name, arch, filename)` of every package that carried
     /// ELF content (a provider or a consumer), in check order.
     /// The filename keeps two distinct packages that share a name
@@ -3179,6 +3195,7 @@ impl BinariesState {
             .all(|set| set.providers.is_empty())
             && self.packages.is_empty()
             && self.unused_packages.is_empty()
+            && self.linked_packages.is_empty()
             && self.contributors.is_empty()
     }
 
@@ -3186,6 +3203,7 @@ impl BinariesState {
         self.provider_sets.extend(other.provider_sets);
         self.packages.extend(other.packages);
         self.unused_packages.extend(other.unused_packages);
+        self.linked_packages.extend(other.linked_packages);
         for contributor in other.contributors {
             if !self.contributors.contains(&contributor) {
                 self.contributors.push(contributor);
@@ -3351,6 +3369,137 @@ fn provided_by_closure(
             Rc::new(provided)
         })
         .clone()
+}
+
+/// The merged-/usr view of an installed path: on merged-/usr
+/// systems /bin, /sbin, /lib and /lib64 are symlinks into /usr, so
+/// a consumer listed under one of them is a /usr consumer at
+/// install time. Only the first path component maps: a longer
+/// first component (/libfoo) is a different directory, not the
+/// merged one.
+fn merged_usr_path(name: &str) -> String {
+    let (slash, rest) = match name.strip_prefix('/') {
+        Some(rest) => ("/", rest),
+        None => ("", name),
+    };
+    let mut parts = rest.splitn(2, '/');
+    let first = parts.next().unwrap_or("");
+    let mapped = match first {
+        "bin" => "usr/bin",
+        "sbin" => "usr/sbin",
+        "lib" => "usr/lib",
+        "lib64" => "usr/lib64",
+        _ => return name.to_string(),
+    };
+    match parts.next() {
+        Some(tail) => format!("{}{}/{}", slash, mapped, tail),
+        None => format!("{}{}", slash, mapped),
+    }
+}
+
+/// Resolve one direct DT_NEEDED entry the way the closure walk
+/// does, but return the located path instead of the provided
+/// symbol set: the invocation provider index first, then the
+/// needing object's RPATH chain directories, then its RUNPATH
+/// directories, then the system (ldconfig cache, then the
+/// standard directories). A slash-containing entry is a direct
+/// path for the loader and resolves to itself with no lookup.
+/// `None` means unresolvable: the caller stays silent.
+fn resolve_dependency_path(
+    providers: &ProviderIndex,
+    system: &SystemLibraries,
+    soname: &str,
+    is_64: Option<bool>,
+    root_ctx: &SearchContext,
+    root_owner: &PackageId,
+) -> Option<PathBuf> {
+    if soname.contains('/') {
+        return Some(PathBuf::from(soname));
+    }
+    if let Some((_, provider)) = providers.lookup(soname, root_owner) {
+        return Some(provider.path.clone());
+    }
+    let chain_dirs: Vec<PathBuf> = root_ctx.rpath_chain.iter().flatten().cloned().collect();
+    if let Some(provider) = system.provider_in_dirs(soname, is_64, &chain_dirs) {
+        return Some(provider.path.clone());
+    }
+    if let Some(provider) = system.provider_in_dirs(soname, is_64, &root_ctx.runpath_dirs) {
+        return Some(provider.path.clone());
+    }
+    system
+        .provider(soname, is_64)
+        .map(|provider| provider.path.clone())
+}
+
+/// The linked-against verdicts for one file: at most one
+/// offending (file, path) pair per arm, in dependency order.
+/// The opt arm fires
+/// on any resolved path under /opt/. The usr arm fires only for a
+/// consumer the merged-/usr map still leaves under /bin, /sbin,
+/// /lib or /lib64 — a consumer the map moves under /usr/ is a /usr
+/// consumer at install time, so its /usr linkage is moot — whose
+/// resolved path is under /usr/. Slash-containing entries are
+/// skipped: the emission-time check already reports those, and
+/// reporting them again here would double-fire.
+/// One file's linked-against resolution inputs: the file's
+/// identity, its direct dependencies, and its search context.
+struct LinkedAgainstInput<'a> {
+    file_name: &'a str,
+    dependencies: &'a [String],
+    is_64: Option<bool>,
+    rpath: &'a [String],
+    runpath: &'a [String],
+    has_runpath: bool,
+}
+
+#[derive(Debug)]
+struct LinkedAgainstVerdict {
+    opt: Option<(String, String)>,
+    usr: Option<(String, String)>,
+}
+
+fn linked_against_findings(
+    input: &LinkedAgainstInput,
+    providers: &ProviderIndex,
+    system: &SystemLibraries,
+    owner: &PackageId,
+) -> LinkedAgainstVerdict {
+    let root_ctx = SearchContext::for_object(
+        input.rpath,
+        input.runpath,
+        input.has_runpath,
+        &installed_dir(input.file_name),
+        &[],
+    );
+    let usr_consumer = ["/bin", "/lib", "/sbin"]
+        .iter()
+        .any(|p| merged_usr_path(input.file_name).starts_with(p));
+    let mut verdict = LinkedAgainstVerdict {
+        opt: None,
+        usr: None,
+    };
+    for dep in input.dependencies {
+        if dep.contains('/') {
+            continue;
+        }
+        let path =
+            match resolve_dependency_path(providers, system, dep, input.is_64, &root_ctx, owner) {
+                Some(path) => path.to_string_lossy().into_owned(),
+                None => continue,
+            };
+        let under_opt = path.starts_with("/opt/");
+        let under_usr = path.starts_with("/usr/");
+        if verdict.opt.is_none() && under_opt {
+            verdict.opt = Some((input.file_name.to_string(), path.clone()));
+        }
+        if verdict.usr.is_none() && usr_consumer && under_usr {
+            verdict.usr = Some((input.file_name.to_string(), path));
+        }
+        if verdict.opt.is_some() && verdict.usr.is_some() {
+            break;
+        }
+    }
+    verdict
 }
 
 /// The detail of the aggregated `undefined-non-weak-symbol` finding:
@@ -4049,6 +4198,11 @@ pub struct BinariesCheck {
     pending_state: Option<BinariesState>,
     deferred_state: BinariesState,
     defer_undefined: bool,
+    /// The current installed package's provider index, built once
+    /// by `check_binary` for the in-place linked-against
+    /// resolution of installed packages (extracted packages
+    /// resolve deferred in `after_checks` instead).
+    installed_providers: Option<ProviderIndex>,
     // The current package's `optflags-not-applied` rollup
     // (rpmcrab#1025): reset by `check_binary`, fed by
     // `run_elf_checks` from `check_hardening`'s return value.
@@ -5382,6 +5536,7 @@ impl BinariesCheck {
             pending_state: None,
             deferred_state: BinariesState::default(),
             defer_undefined: false,
+            installed_providers: None,
             hardening_rollup: HardeningRollup::default(),
             ldconf_dirs: HashSet::new(),
         }
@@ -6722,6 +6877,78 @@ impl BinariesCheck {
         if !self.is_dynamically_linked {
             return;
         }
+        // Linked-against capture / immediate resolution (Design A):
+        // every non-archive, non-debug file with DT_NEEDED feeds
+        // the arms, regardless of shlib/executable or Python-module
+        // status — those gates belong to the undefined-symbol
+        // finding, not to DT_NEEDED paths. Extracted packages
+        // capture for `after_checks`; installed packages resolve
+        // in place against their own index plus the system.
+        if !ldd.dependencies.is_empty() && !self.is_archive && !info.is_debug {
+            if self.defer_undefined {
+                let state = self
+                    .pending_state
+                    .get_or_insert_with(BinariesState::default);
+                if !matches!(
+                    state.linked_packages.last(),
+                    Some(record) if record.pkg_name == pkg.name
+                        && record.pkg_arch == pkg.arch
+                        && record.pkg_filename == pkg.filename
+                ) {
+                    state.linked_packages.push(PackageConsumers {
+                        pkg_name: pkg.name.clone(),
+                        pkg_arch: pkg.arch.clone(),
+                        pkg_filename: pkg.filename.clone(),
+                        files: Vec::new(),
+                    });
+                }
+                if let Some(record) = state.linked_packages.last_mut() {
+                    record.files.push(ConsumerFile {
+                        file_name: pkgfile.name.clone(),
+                        undefined_symbols: Vec::new(),
+                        weak_undefined_symbols: ldd.weak_undefined_symbols.clone(),
+                        defined_symbols: HashSet::new(),
+                        dependencies: ldd.dependencies.clone(),
+                        is_64: ldd.is_64,
+                        rpath: ldd.rpath.clone(),
+                        runpath: ldd.runpath.clone(),
+                        has_runpath: ldd.has_runpath,
+                        is_shlib: info.is_shlib,
+                        copy_symbols: ldd.copy_symbols.clone(),
+                    });
+                }
+            } else if let Some(providers) = &self.installed_providers {
+                let owner: PackageId = (pkg.name.clone(), pkg.arch.clone(), pkg.filename.clone());
+                let input = LinkedAgainstInput {
+                    file_name: &pkgfile.name,
+                    dependencies: &ldd.dependencies,
+                    is_64: ldd.is_64,
+                    rpath: &ldd.rpath,
+                    runpath: &ldd.runpath,
+                    has_runpath: ldd.has_runpath,
+                };
+                let verdict =
+                    linked_against_findings(&input, providers, &self.system_libraries, &owner);
+                if let Some((file, path)) = verdict.opt {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "linked-against-opt-library",
+                        &[&file, &path],
+                    );
+                }
+                if let Some((file, path)) = verdict.usr {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "linked-against-usr-library",
+                        &[&file, &path],
+                    );
+                }
+            }
+        }
         if python_module_regex()
             .is_match(&pkgfile.name)
             .unwrap_or(false)
@@ -6889,8 +7116,15 @@ impl BinariesCheck {
                 }
             }
         }
+        // Merged-/usr: a consumer listed under /bin, /sbin, /lib
+        // or /lib64 is a /usr consumer at install time, so the
+        // prefix test runs on the mapped path — the arm stays live
+        // only for consumers the map leaves outside /usr.
         let nonusr = ["/bin", "/lib", "/sbin"];
-        if nonusr.iter().any(|p| pkgfile.name.starts_with(p)) {
+        if nonusr
+            .iter()
+            .any(|p| merged_usr_path(&pkgfile.name).starts_with(p))
+        {
             for dep in &ldd.dependencies {
                 if dep.starts_with("/usr/") {
                     add_info(
@@ -7777,6 +8011,7 @@ impl Check for BinariesCheck {
         // alone cannot see the sibling packages a multi-package
         // invocation installs side by side.
         self.defer_undefined = !pkg.is_installed();
+        self.installed_providers = None;
         if self.defer_undefined {
             let state = BinariesState {
                 provider_sets: vec![PackageProviders {
@@ -7794,6 +8029,12 @@ impl Check for BinariesCheck {
         } else {
             let owner: PackageId = (pkg.name.clone(), pkg.arch.clone(), pkg.filename.clone());
             resolve_undefined_symbols(&mut analyses, &pkg.files, &self.system_libraries, &owner);
+            self.installed_providers = Some(ProviderIndex::new(vec![PackageProviders {
+                pkg_name: pkg.name.clone(),
+                pkg_arch: pkg.arch.clone(),
+                pkg_filename: pkg.filename.clone(),
+                providers: package_providers(&analyses, &pkg.files),
+            }]));
         }
 
         for (idx, pkgfile) in pkg.files.iter().enumerate() {
@@ -7951,6 +8192,7 @@ impl Check for BinariesCheck {
         self.pending_state = None;
         self.deferred_state = BinariesState::default();
         self.defer_undefined = false;
+        self.installed_providers = None;
     }
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
@@ -8114,6 +8356,50 @@ impl Check for BinariesCheck {
                             None,
                         ));
                     }
+                }
+            }
+        }
+        // Linked-against resolution (Design A): the captured
+        // consumers resolve their direct dependencies through the
+        // same index and mode switch as the undefined symbols
+        // above — single-contributor runs add the system fallback,
+        // wider batches resolve inside the invocation alone — and
+        // fire on the resolved path's prefix.
+        for package in &state.linked_packages {
+            let owner: PackageId = (
+                package.pkg_name.clone(),
+                package.pkg_arch.clone(),
+                package.pkg_filename.clone(),
+            );
+            for consumer in &package.files {
+                let input = LinkedAgainstInput {
+                    file_name: &consumer.file_name,
+                    dependencies: &consumer.dependencies,
+                    is_64: consumer.is_64,
+                    rpath: &consumer.rpath,
+                    runpath: &consumer.runpath,
+                    has_runpath: consumer.has_runpath,
+                };
+                let verdict = linked_against_findings(&input, &providers, system, &owner);
+                if let Some((file, path)) = verdict.opt {
+                    out.add_info(make_finding(
+                        &package.pkg_name,
+                        &package.pkg_arch,
+                        Level::Error,
+                        "linked-against-opt-library",
+                        vec![file, path],
+                        None,
+                    ));
+                }
+                if let Some((file, path)) = verdict.usr {
+                    out.add_info(make_finding(
+                        &package.pkg_name,
+                        &package.pkg_arch,
+                        Level::Warning,
+                        "linked-against-usr-library",
+                        vec![file, path],
+                        None,
+                    ));
                 }
             }
         }
@@ -12665,6 +12951,7 @@ description = "explicit priority string bypasses the system crypto policy"
         providers.insert(
             "libfoo.so.1".to_string(),
             SymbolProvider {
+                path: PathBuf::from("/usr/lib64/libfoo.so.1"),
                 defined: ["other_sym".to_string()].into_iter().collect(),
                 needs: Vec::new(),
                 origin: PathBuf::from("/usr/lib64"),
@@ -12676,6 +12963,7 @@ description = "explicit priority string bypasses the system crypto policy"
         providers.insert(
             "libbar.so.1".to_string(),
             SymbolProvider {
+                path: PathBuf::from("/usr/lib64/libbar.so.1"),
                 defined: ["bar_sym".to_string()].into_iter().collect(),
                 needs: Vec::new(),
                 origin: PathBuf::from("/usr/lib64"),
@@ -12710,6 +12998,7 @@ description = "explicit priority string bypasses the system crypto policy"
                     copy_symbols: Vec::new(),
                 }],
             }],
+            linked_packages: Vec::new(),
             contributors: vec![pkg_id],
         };
         check.import_state(Box::new(state));
@@ -12747,6 +13036,7 @@ description = "explicit priority string bypasses the system crypto policy"
         providers.insert(
             "libfoo.so.1".to_string(),
             SymbolProvider {
+                path: PathBuf::from("/usr/lib64/libfoo.so.1"),
                 defined: ["other_sym".to_string()].into_iter().collect(),
                 needs: Vec::new(),
                 origin: PathBuf::from("/usr/lib64"),
@@ -12758,6 +13048,7 @@ description = "explicit priority string bypasses the system crypto policy"
         providers.insert(
             "libbar.so.1".to_string(),
             SymbolProvider {
+                path: PathBuf::from("/usr/lib64/libbar.so.1"),
                 defined: ["bar_sym".to_string()].into_iter().collect(),
                 needs: Vec::new(),
                 origin: PathBuf::from("/usr/lib64"),
@@ -12792,6 +13083,7 @@ description = "explicit priority string bypasses the system crypto policy"
                     copy_symbols: Vec::new(),
                 }],
             }],
+            linked_packages: Vec::new(),
             contributors: vec![pkg_id],
         };
         check.import_state(Box::new(state));
@@ -21322,7 +21614,10 @@ description = "explicit priority string bypasses the system crypto policy"
     #[test]
     fn linked_against_usr_library() {
         // Reference test_ldd_parser.py:109: a /bin binary linked against
-        // /usr/libfoo.so warns.
+        // /usr/libfoo.so warns — in the reference's file-list view.
+        // rpmcrab models merged-/usr instead: /bin maps to /usr/bin,
+        // so the consumer is a /usr consumer at install time and
+        // the arm does not apply (ledgered divergence).
         let config = test_config();
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         check.is_dynamically_linked = true;
@@ -21332,15 +21627,21 @@ description = "explicit priority string bypasses the system crypto policy"
         ldd.dependencies = vec!["/usr/libfoo.so".to_string()];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_library_dependency_location(&pkg, &pkgfile, &ldd, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "merged-/usr consumer must stay silent: {:?}",
+            out.results()
+        );
+
+        // A consumer the map leaves outside /usr still fires: the
+        // arm stays live for genuinely-outside-/usr consumers.
+        let pkgfile = syn_file("/libfoo/bar", "ELF 64-bit LSB executable");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_library_dependency_location(&pkg, &pkgfile, &ldd, &mut out);
         let results = out.results().to_vec();
         let lines = lines_for(&results, "linked-against-usr-library");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
-        assert!(
-            lines[0].contains("/bin/usr-dependency") && lines[0].contains("/usr/libfoo.so"),
-            "detail names file and dependency: {}",
-            lines[0]
-        );
 
         // A binary outside /bin//lib//sbin is not subject to the check.
         let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
@@ -21350,6 +21651,137 @@ description = "explicit priority string bypasses the system crypto policy"
             out.results().is_empty(),
             "must be quiet: {:?}",
             out.results()
+        );
+    }
+
+    #[test]
+    fn merged_usr_path_maps_root_dirs() {
+        assert_eq!(merged_usr_path("/bin/foo"), "/usr/bin/foo");
+        assert_eq!(merged_usr_path("/sbin/foo"), "/usr/sbin/foo");
+        assert_eq!(merged_usr_path("/lib/foo"), "/usr/lib/foo");
+        assert_eq!(merged_usr_path("/lib64/foo"), "/usr/lib64/foo");
+        assert_eq!(merged_usr_path("/lib"), "/usr/lib");
+        assert_eq!(merged_usr_path("/usr/lib/foo"), "/usr/lib/foo");
+        assert_eq!(merged_usr_path("/opt/foo"), "/opt/foo");
+        assert_eq!(merged_usr_path("/libfoo/bar"), "/libfoo/bar");
+    }
+
+    #[test]
+    fn linked_against_findings_resolves_index_paths() {
+        // Index provider under /opt/: the opt arm fires on the
+        // resolved path, not the soname spelling.
+        let mut providers_map = HashMap::new();
+        providers_map.insert(
+            "libfoo.so.1".to_string(),
+            SymbolProvider {
+                path: PathBuf::from("/opt/lib/libfoo.so.1"),
+                defined: HashSet::new(),
+                needs: Vec::new(),
+                origin: PathBuf::from("/opt/lib"),
+                rpath: Vec::new(),
+                runpath: Vec::new(),
+                has_runpath: false,
+            },
+        );
+        // glibc under /usr/lib64 for the usr cases.
+        providers_map.insert(
+            "libc.so.6".to_string(),
+            SymbolProvider {
+                path: PathBuf::from("/usr/lib64/libc.so.6"),
+                defined: HashSet::new(),
+                needs: Vec::new(),
+                origin: PathBuf::from("/usr/lib64"),
+                rpath: Vec::new(),
+                runpath: Vec::new(),
+                has_runpath: false,
+            },
+        );
+        let providers = ProviderIndex::new(vec![PackageProviders {
+            pkg_name: "testpkg".to_string(),
+            pkg_arch: "x86_64".to_string(),
+            pkg_filename: "testpkg.rpm".to_string(),
+            providers: providers_map,
+        }]);
+        let system = SystemLibraries::empty();
+        let owner: PackageId = (
+            "testpkg".to_string(),
+            "x86_64".to_string(),
+            "testpkg.rpm".to_string(),
+        );
+
+        // Opt arm: any consumer, resolved /opt/ path.
+        let findings = linked_against_findings(
+            &LinkedAgainstInput {
+                file_name: "/usr/bin/foo",
+                dependencies: &["libfoo.so.1".to_string()],
+                is_64: Some(true),
+                rpath: &[],
+                runpath: &[],
+                has_runpath: false,
+            },
+            &providers,
+            &system,
+            &owner,
+        );
+        assert!(findings.opt.is_some(), "opt fires once: {findings:?}");
+        assert!(findings.usr.is_none(), "usr stays silent: {findings:?}");
+        assert_eq!(findings.opt.as_ref().unwrap().1, "/opt/lib/libfoo.so.1");
+
+        // Usr arm moot: /lib64 consumer maps to /usr/lib64.
+        let findings = linked_against_findings(
+            &LinkedAgainstInput {
+                file_name: "/lib64/libbar.so.1",
+                dependencies: &["libc.so.6".to_string()],
+                is_64: Some(true),
+                rpath: &[],
+                runpath: &[],
+                has_runpath: false,
+            },
+            &providers,
+            &system,
+            &owner,
+        );
+        assert!(
+            findings.opt.is_none() && findings.usr.is_none(),
+            "merged-/usr consumer: {findings:?}"
+        );
+
+        // Usr arm live: consumer the map leaves outside /usr.
+        let findings = linked_against_findings(
+            &LinkedAgainstInput {
+                file_name: "/libfoo/bar",
+                dependencies: &["libc.so.6".to_string()],
+                is_64: Some(true),
+                rpath: &[],
+                runpath: &[],
+                has_runpath: false,
+            },
+            &providers,
+            &system,
+            &owner,
+        );
+        assert!(findings.usr.is_some(), "usr fires once: {findings:?}");
+        assert!(findings.opt.is_none(), "opt stays silent: {findings:?}");
+        assert_eq!(findings.usr.as_ref().unwrap().1, "/usr/lib64/libc.so.6");
+
+        // Unresolvable stays silent; slash entries are the
+        // emission check's business, not the resolver's.
+        let findings = linked_against_findings(
+            &LinkedAgainstInput {
+                file_name: "/libfoo/bar",
+                dependencies: &["libmissing.so.1".to_string(), "/opt/libfoo.so".to_string()],
+                is_64: Some(true),
+                rpath: &[],
+                runpath: &[],
+                has_runpath: false,
+            },
+            &providers,
+            &system,
+            &owner,
+        );
+        assert!(
+            findings.opt.is_none() && findings.usr.is_none(),
+            "{findings:?}"
         );
     }
 
