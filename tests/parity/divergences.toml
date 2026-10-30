@@ -2667,6 +2667,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "duplicate-executable"
+kind = "behaviour"
+reason = "Fix-and-diverge: duplicate-executable does not fire when every copy carries the same header digest. The finding names a $PATH reorder hazard, and identical bytes cannot cause one: whichever bindir comes first, the same binary runs. The reference fires on every basename with more than one bindir path with no content comparison. A differing digest, and a missing digest, fail closed and still fire. Census (Factory corpus, 51,589 RPMs, isolated config): exactly 2 findings carry the shape, both testsaslauthd -- cyrus-sasl-saslauthd and cyrus-sasl-saslauthd-bdb ship the tool in both /usr/bin and /usr/sbin as separate regular files with identical content (same size and header digest within each package, distinct inodes, not hardlinks), the /usr/bin copy installed explicitly by the saslauthd spec on top of the upstream install's /usr/sbin copy -- and those 2 are the removed set. Pinned by duplicate_executable_quiet_for_identical_copies, duplicate_executable_still_fires_for_differing_copies, duplicate_executable_still_fires_when_digest_missing and duplicate_executable_quiet_for_identical_copies_keeps_man_page_check in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
