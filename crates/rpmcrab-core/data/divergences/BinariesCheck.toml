@@ -619,3 +619,10 @@ check = "ldd-failed"
 kind = "missing"
 reason = "Removed: the port parses ELF with goblin in both ReadelfInfo and LddInfo, so every input that fails the ldd parse already fails the readelf parse and emits readelf-failed first; ldd-failed is unreachable. The reference runs the ldd tool, whose distinct failure modes the goblin port has no equivalent for. The emission, its description entry, and its pinning test are removed."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "linked-against-usr-library"
+kind = "behaviour"
+reason = "Merged-/usr model: the reference fires file-list-based whenever a consumer listed under /bin, /sbin, /lib or /lib64 links a library under /usr. On merged-/usr Tumbleweed those directories are symlinks into /usr, so such a consumer is a /usr consumer at install time and its /usr linkage is moot; rpmcrab resolves the consumer path through the /bin to /usr/bin, /sbin to /usr/sbin, /lib to /usr/lib, /lib64 to /usr/lib64 map before the prefix test and stays silent there. The arm stays live for consumers the map leaves outside /usr. Measured over the full Factory corpus: the only such firings are four /lib64 consumers resolving to glibc under /usr (libgcc_s1-gcc7, libpasswdqc0, nss-pam-ldapd twice), all moot under the model, so the arm fires zero times on Factory."
+since = "0.4.1"
