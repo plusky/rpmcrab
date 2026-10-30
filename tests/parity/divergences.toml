@@ -3189,7 +3189,14 @@ since = "0.4.1"
 case = "global"
 check = "dangerous-command-in"
 kind = "behaviour"
-reason = "Fix-and-diverge: `dangerous-command-in-<scriptlet>` no longer fires on a backup-direction operation: `cp`/`mv` writing to a `.rpmsave` or `.rpmtmp` destination, or `rm` removing such a name. A restore (a backup name as the source, live path as the destination) keeps firing, as does a rotation (a backup name moved to a `.old` name, whose destination carries no backup suffix); a backup operation followed by a genuine command in the same scriptlet still fires on the genuine command. Measured over the Factory corpus firing population (1,579 packages firing a dangerous-command finding, old vs new binary over the complete firing set): exactly 12 backup matches go quiet -- 8 findings drop and 4 packages keep firing on a later genuine command (conman, raspberrypi-firmware-config, raspberrypi-firmware-config-camera, smartmontools); 0 added, 0 verb changes, no other phase changes. Pinned by unit tests in post.rs."
+reason = "Fix-and-diverge: `dangerous-command-in-<scriptlet>` no longer fires on a backup-direction operation: `cp`/`mv` writing to a `.rpmsave` or `.rpmtmp` destination, or `rm` removing such a name. A restore (a backup name as the source, live path as the destination) keeps firing, while a rotation (a backup name moved to a `.old` name) is credited separately by the rotation entry below; a backup operation followed by a genuine command in the same scriptlet still fires on the genuine command. Measured over the Factory corpus firing population (1,579 packages firing a dangerous-command finding, old vs new binary over the complete firing set): exactly 12 backup matches go quiet -- 8 findings drop and 4 packages keep firing on a later genuine command (conman, raspberrypi-firmware-config, raspberrypi-firmware-config-camera, smartmontools); 0 added, 0 verb changes, no other phase changes. Pinned by unit tests in post.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "dangerous-command-in"
+kind = "behaviour"
+reason = "Fix-and-diverge: `dangerous-command-in-<scriptlet>` no longer fires on a `.rpmsave` rotation aside-step: `mv`/`cp` of a `.rpmsave` path to the same path with `.old` appended, so rpm's own leftover saved config is set aside for a fresh `.rpmsave` to be created. The credit reads the first dangerous command's operands (option flags skipped, backslash continuations joined, quotes stripped, an unescaped newline ending the command), so variable-carrying paths match their rotated form literally, and it applies to the `mv` form and the `cp` form alike; a restore to the live path, a backup to `.rpmsave`, a multi-operand move, or any other verb still fires. Measured over all 1,976 dangerous-command findings on the Factory corpus: exactly 105 go quiet (103 `mv` in %pre, 1 `cp` in %preun, 1 `mv` in %posttrans with the same rotation template); 0 added, no other check moved."
 since = "0.4.1"
 
 [[divergence]]

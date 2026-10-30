@@ -426,9 +426,11 @@ impl PostCheck {
     /// backup-direction operation: `cp`/`mv` writing to a `.rpmsave`
     /// or `.rpmtmp` destination, or `rm` removing such a name. A
     /// restore (a backup name as the source, live path as the
-    /// destination) is not a backup operation and keeps firing, and
-    /// neither is a rotation (a backup name moved to a `.old` name,
-    /// whose destination carries no backup suffix).
+    /// destination) is not a backup operation and keeps firing.
+    /// A rotation (a backup name moved to a `.old` name, whose
+    /// destination carries no backup suffix) is not a
+    /// backup-direction operation either; it is credited separately
+    /// by first_dangerous_command_is_rotation.
     fn dangerous_match_is_backup(scan_text: &str, operand_at: usize, verb: &str) -> bool {
         if !matches!(verb, "cp" | "mv" | "rm") {
             return false;
@@ -471,6 +473,156 @@ impl PostCheck {
                 dest.is_some_and(Self::is_backup_name)
             }
         }
+    }
+
+    /// Whether the first dangerous command in the heredoc-blanked
+    /// scriptlet text is a `.rpmsave` rotation aside-step: `mv`/`cp`
+    /// of a `.rpmsave` path to the same path with `.old` appended,
+    /// so rpm's own leftover saved config is set aside for a fresh
+    /// `.rpmsave` to be created. The command is read from the end of
+    /// the verb match: backslash-newline continuations are joined,
+    /// option flags are skipped, and the first operands are compared
+    /// with quotes stripped, so variable-carrying paths
+    /// (`/etc/${i}.rpmsave`) match their rotated form literally.
+    /// Exactly two operands are required: a restore to the live
+    /// path, a backup to `.rpmsave`, a multi-operand move, or any
+    /// other verb still fires. An unescaped newline ends the
+    /// command, so words on later lines are never operands.
+    fn first_dangerous_command_is_rotation(scan_text: &str, verb: &str, verb_end: usize) -> bool {
+        if verb != "mv" && verb != "cp" {
+            return false;
+        }
+        let mut tokens: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut in_token = false;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut chars = scan_text[verb_end..].chars().peekable();
+        // Push the pending token, if any. The whitespace arm
+        // resets `in_token` itself because the loop continues there;
+        // the break arms leave it alone (the value is never read
+        // after a break).
+        macro_rules! push_token {
+            () => {
+                if in_token {
+                    tokens.push(std::mem::take(&mut cur));
+                }
+            };
+        }
+        while let Some(c) = chars.next() {
+            if in_single {
+                if c == '\'' {
+                    in_single = false;
+                } else {
+                    cur.push(c);
+                }
+                continue;
+            }
+            if in_double {
+                if c == '"' {
+                    in_double = false;
+                } else if c == '\\' {
+                    match chars.next() {
+                        Some('\n') => {}
+                        Some(other) => cur.push(other),
+                        None => cur.push('\\'),
+                    }
+                } else {
+                    cur.push(c);
+                }
+                continue;
+            }
+            match c {
+                '\\' => match chars.next() {
+                    // Backslash-newline is a continuation: no break.
+                    Some('\n') => {}
+                    Some(other) => {
+                        cur.push(other);
+                        in_token = true;
+                    }
+                    None => {}
+                },
+                '\'' => {
+                    in_single = true;
+                    in_token = true;
+                }
+                '"' => {
+                    in_double = true;
+                    in_token = true;
+                }
+                // A `#` at word start opens a comment: the rest of the
+                // line is not operands.
+                '#' if !in_token => break,
+                ' ' | '\t' => {
+                    push_token!();
+                    in_token = false;
+                }
+                // An unescaped newline ends the command: without
+                // this, words on later lines (a closing `fi`, the
+                // next command) would read as extra operands and a
+                // genuine two-operand rotation would never match.
+                // Backslash-newline continuations never reach here
+                // (they are skipped as continuations above).
+                '\n' => {
+                    push_token!();
+                    in_token = false;
+                    break;
+                }
+                ';' | '|' | '&' | '(' | ')' => {
+                    push_token!();
+                    in_token = false;
+                    break;
+                }
+                // A redirect target is not an operand; a bare fd
+                // (`2>`) is not one either.
+                '<' | '>' => {
+                    if in_token && !cur.chars().all(|d| d.is_ascii_digit()) {
+                        push_token!();
+                    } else {
+                        cur.clear();
+                    }
+                    in_token = false;
+                    break;
+                }
+                _ => {
+                    cur.push(c);
+                    in_token = true;
+                }
+            }
+        }
+        push_token!();
+        // Skip option flags (`-v`, `--backup=numbered`); `--` ends
+        // the flags and is itself skipped. A lone `-` is an operand.
+        let mut operands = tokens.into_iter().peekable();
+        while let Some(t) = operands.peek() {
+            if t == "--" {
+                operands.next();
+                break;
+            }
+            if t.len() > 1 && t.starts_with('-') {
+                operands.next();
+            } else {
+                break;
+            }
+        }
+        let operands: Vec<String> = operands.collect();
+        if operands.len() != 2 {
+            return false;
+        }
+        fn strip_quotes(t: &str) -> &str {
+            let b = t.as_bytes();
+            if b.len() >= 2
+                && ((b[0] == b'\'' && b[b.len() - 1] == b'\'')
+                    || (b[0] == b'"' && b[b.len() - 1] == b'"'))
+            {
+                &t[1..t.len() - 1]
+            } else {
+                t
+            }
+        }
+        let source = strip_quotes(&operands[0]);
+        let dest = strip_quotes(&operands[1]);
+        source.ends_with(".rpmsave") && dest == format!("{source}.old")
     }
 
     fn selinux_regex() -> &'static Regex {
@@ -1658,9 +1810,13 @@ impl PostCheck {
             let scan_text = Self::without_heredoc_bodies(script);
             // Every dangerous-command match is examined: the finding
             // fires on the first match that is neither a credited `rm` of
-            // package state nor a credited backup-direction operation, so a credited match cannot hide a later
-            // genuinely-dangerous command on the same line or a later
-            // line. No match, or every match credited, stays quiet.
+            // package state, nor a credited backup-direction operation,
+            // nor a `.rpmsave` rotation aside-step, so a credited match
+            // cannot hide a later genuinely-dangerous command on the
+            // same line or a later line. No match, or every match
+            // credited, stays quiet. A rotation aside-step is credited
+            // because the moved-aside file is rpm's own leftover, set
+            // aside so a fresh `.rpmsave` can be created.
             let mut offending: Option<String> = None;
             for caps in Self::dangerous_regex().captures_iter(&scan_text).flatten() {
                 let Some(m) = caps.get(2) else {
@@ -1674,7 +1830,10 @@ impl PostCheck {
                 let backup = caps.get(0).is_some_and(|full| {
                     Self::dangerous_match_is_backup(&scan_text, full.end(), m.as_str())
                 });
-                if !Self::rm_var_state_credit(tag, m.as_str(), rest) && !backup {
+                if !Self::rm_var_state_credit(tag, m.as_str(), rest)
+                    && !backup
+                    && !Self::first_dangerous_command_is_rotation(&scan_text, m.as_str(), m.end())
+                {
                     offending = Some(m.as_str().to_string());
                     break;
                 }
@@ -3150,10 +3309,26 @@ mod tests {
     }
 
     #[test]
+    fn dangerous_command_save_rotation_mv_is_silent() {
+        for script in [
+            "test -f /etc/foo.rpmsave && mv -v /etc/foo.rpmsave /etc/foo.rpmsave.old || :",
+            "mv -f \"/etc/modprobe.d/${_f}.rpmsave\" \"/etc/modprobe.d/${_f}.rpmsave.old\" || :",
+            "test -f /etc/${i}.rpmsave && mv -v /etc/${i}.rpmsave /etc/${i}.rpmsave.old || :",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%pre", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%pre"),
+                "rotation fired: {script}"
+            );
+        }
+    }
+
+    #[test]
     fn dangerous_command_restore_and_rotation_still_fire() {
         for (script, verb) in [
             ("cp /etc/foo.rpmsave /etc/foo\n", "cp"),
-            ("mv /etc/foo.rpmsave /etc/foo.rpmsave.old\n", "mv"),
             ("cp -t /etc /etc/foo.rpmsave\n", "cp"),
             ("rm -f /etc/foo\n", "rm"),
         ] {
@@ -3163,6 +3338,48 @@ mod tests {
                     && f == "dangerous-command-in-%post"
                     && d == &vec![verb.to_string()]),
                 "should still fire: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_save_rotation_cp_is_silent() {
+        // The strongswan-ipsec %preun shape: flags, a backslash
+        // continuation, and the destination on the next line.
+        let script = "if test -s /etc/ipsec.secrets.rpmsave ; then\n\tcp -p --backup=numbered /etc/ipsec.secrets.rpmsave \\\n\t                        /etc/ipsec.secrets.rpmsave.old\nfi\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%preun", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%preun")
+        );
+    }
+
+    #[test]
+    fn dangerous_command_save_rotation_other_shapes_still_fire() {
+        for (script, verb) in [
+            // Restore to the live path.
+            ("mv /etc/foo.rpmsave /etc/foo", "mv"),
+            // Backup to `.rpmsave` is credited by the backup-direction
+            // rule, so it is not a still-firing rotation shape here.
+            // Destination is not the source plus `.old`.
+            ("mv /etc/foo.rpmsave /etc/bar.rpmsave.old", "mv"),
+            // A different verb entirely.
+            ("rm -f /etc/foo.rpmsave.old", "rm"),
+            // The rotation is not the first dangerous command.
+            (
+                "rm -rf /foo; mv /etc/foo.rpmsave /etc/foo.rpmsave.old",
+                "rm",
+            ),
+            // Multi-operand move: not a two-operand rotation.
+            ("mv /etc/foo.rpmsave /etc/foo.rpmsave.old /etc/spare/", "mv"),
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%pre", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%pre"
+                    && d == &vec![verb.to_string()]),
+                "shape went silent: {script}"
             );
         }
     }
