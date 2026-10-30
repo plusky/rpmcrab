@@ -2981,6 +2981,17 @@ mod tests {
             tmpfiles_line_path("d! /run/foo 0755 root root -"),
             Some("/run/foo".to_string())
         );
+        // Trailing-slash strip applies to all types, not just
+        // directories: an `f` or `L` line for `/run/foo/` declares
+        // `/run/foo`, so a shipped `/run/foo` matches it.
+        assert_eq!(
+            tmpfiles_line_path("f /run/foo/ 0644 root root -"),
+            Some("/run/foo".to_string())
+        );
+        assert_eq!(
+            tmpfiles_line_path("L /run/foo/ - - - - /target"),
+            Some("/run/foo".to_string())
+        );
     }
 
     #[test]
