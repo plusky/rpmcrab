@@ -83,3 +83,10 @@ kind = "behaviour"
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1028"
 reason = "rpmlint has no equivalent: a <stem>.so.<v> entry shipped beside an ELF whose SONAME is <stem>.so.<w> with w extending v, in a package whose name encodes the whole of w, is not reported. The next SONAME generation ships the same short path and the two co-installable packages conflict on it. Factory corpus (4,566 scheme-named packages): 15 findings in 13 packages, all upstream-created (8 symlinks, 7 regular files installed under the short name), matching the issue census."
+
+[[divergence]]
+case = "global"
+check = "shlib-fixed-dependency"
+kind = "behaviour"
+reason = "Fix-and-diverge: shlib-fixed-dependency skips `=` dependencies whose name is a virtual capability rather than a package reference: RPM package names never contain `(`, so a parenthesised name is a capability (`python(abi)`, `typelib(GIRepository)`) unless it matches the reference's `name(arch-bits)` shape (`libdnf5_2(x86-64)`), which still names a package and keeps firing. The reference fires on all of them: its loop charges every `=` dependency without distinguishing capabilities from packages. A virtual capability names no package and cannot break parallel installation of libraries, which is what the finding exists to report. Measured on the Factory corpus (51,586 RPMs): 207 findings before the credit, 203 after; the removed set is exactly the four capability rows (`python(abi)` in libSavitar0 and libstorage-ng-python3, `typelib(GIRepository)` in libcjs0 and libgjs0), no other finding movement. Pinned by unit tests in shared_library_policy.rs."
+since = "0.4.1"
