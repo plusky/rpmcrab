@@ -80,7 +80,7 @@ struct DesktopBinaryCandidate {
     filename: String,
     binary: String,
     /// Hard dependency edges of the candidate's package: its
-    /// `Requires` plus `Requires(pre)` names. Only these gate the
+    /// `Requires` names in any phase. Only these gate the
     /// sibling credit in `after_checks`: a `Recommends` or
     /// `Suggests` edge does not guarantee the sibling is installed
     /// alongside the frontend, so it never silences a launcher.
@@ -93,7 +93,6 @@ struct DesktopBinaryCandidate {
 /// packages raised.
 #[derive(Default)]
 struct DesktopBuild {
-    regular: HashSet<String>,
     symlinks: HashMap<String, String>,
     candidates: Vec<DesktopBinaryCandidate>,
     /// Regular file path -> packages shipping it. A symlink chain
@@ -338,9 +337,11 @@ impl MenuXDGCheck {
     /// token, never the wrapper name: `Exec=env FOO=1 missing`
     /// and `Exec=sh -c 'missing'` previously went silent because
     /// the wrapper itself is a base-system binary, hiding a broken
-    /// launcher. For `env`, flags (`-i`, `-u NAME`, `--`) and
-    /// `NAME=value` assignments are skipped and the next token is
-    /// the program; with no program left, `env` itself is returned.
+    /// launcher. For `env`, flags (`-i`, `-u NAME`, `-C DIR`,
+    /// `--chdir DIR`, `--`) and `NAME=value` assignments are
+    /// skipped and the next token is the program (assignments are
+    /// skipped after `--` too); with no program left, `env` itself
+    /// is returned.
     /// For `sh`/`bash`, a `-c` payload's first word is the program;
     /// without `-c` the shell itself is the program and is returned
     /// unchanged. Wrapper names are matched by basename, so
@@ -364,12 +365,22 @@ impl MenuXDGCheck {
                         let tok = tokens[idx];
                         if tok == "--" {
                             idx += 1;
+                            while idx < tokens.len() && Self::is_env_assignment(tokens[idx]) {
+                                idx += 1;
+                            }
                             program_idx = if idx < tokens.len() { Some(idx) } else { None };
                             break;
                         }
                         if tok.starts_with('-') && tok.len() > 1 {
-                            // `-u`/`--unset` consume their argument.
-                            idx += if tok == "-u" || tok == "--unset" {
+                            // `-u`/`--unset` and `-C`/`--chdir`
+                            // consume their argument; any other flag
+                            // is standalone (`-CDIR` carries its
+                            // argument attached, so it consumes one).
+                            idx += if tok == "-u"
+                                || tok == "--unset"
+                                || tok == "-C"
+                                || tok == "--chdir"
+                            {
                                 2
                             } else {
                                 1
@@ -400,11 +411,37 @@ impl MenuXDGCheck {
                             payload = Some(tokens[j + 1..].join(" "));
                             break;
                         }
-                        if tok.starts_with('-') && !tok.starts_with("--") {
-                            // Combined flags ending in `c` (`-ec`,
-                            // `-cfoo`): the payload is the rest of
-                            // this token plus what follows it.
-                            if let Some(cpos) = tok.find('c') {
+                        if tok == "--" {
+                            // End of options: a following `-c` is a
+                            // script file, not a flag.
+                            break;
+                        }
+                        if tok.starts_with("--") {
+                            // Long flags are skipped, not terminal:
+                            // `bash --noprofile -c 'prog'` still
+                            // finds its payload.
+                            j += 1;
+                            continue;
+                        }
+                        if tok.starts_with('-') && tok.len() > 1 {
+                            // Short-option cluster, getopt order:
+                            // `c` takes the rest of the token as its
+                            // payload, `o` takes the rest as its own
+                            // argument (so `-noexec` is `-n` plus
+                            // `-o`'s argument, not `-c`); any other
+                            // flag is skipped. A cluster with no `c`
+                            // is skipped whole.
+                            let mut cpos = None;
+                            for (i, ch) in tok.char_indices().skip(1) {
+                                if ch == 'c' {
+                                    cpos = Some(i);
+                                    break;
+                                }
+                                if ch == 'o' {
+                                    break;
+                                }
+                            }
+                            if let Some(cpos) = cpos {
                                 let rest = &tok[cpos + 1..];
                                 payload = if rest.is_empty() {
                                     Some(tokens[j + 1..].join(" "))
@@ -442,8 +479,13 @@ impl MenuXDGCheck {
                 _ => return first.to_string(),
             }
         }
+        // Loop exhaustion (three env layers unwrapped exactly as
+        // the program is reached) returns the current token, not
+        // the outermost wrapper: returning the first token would
+        // report `env` for `env env env myprog`, hiding the
+        // program behind a base-system binary.
         tokens
-            .first()
+            .get(start)
             .map(|t| Self::unquote_exec_token(t).to_string())
             .unwrap_or_default()
     }
@@ -512,14 +554,27 @@ impl MenuXDGCheck {
     /// The merged-/usr counterpart of a legacy-directory absolute
     /// path, mirroring `binary_exists`: `/sbin/x` to `/usr/sbin/x`
     /// and `/bin/x` to `/usr/bin/x`. `None` for any other path.
+    /// Sanitized like `binary_exists`, plus the normalization the
+    /// filesystem applies: the counterpart is a string key into
+    /// `file_owners`, so `//` and `/.` segments must collapse the
+    /// way the filesystem collapses them for `binary_exists`, and
+    /// a `..` segment or an empty remainder resolves to nothing.
     fn usrmerge_counterpart(path: &str) -> Option<String> {
-        if let Some(rest) = path.strip_prefix("/sbin/") {
-            return Some(format!("/usr/sbin/{rest}"));
+        if path.split('/').any(|seg| seg == "..") {
+            return None;
         }
-        if let Some(rest) = path.strip_prefix("/bin/") {
-            return Some(format!("/usr/bin/{rest}"));
+        let (base, rest) = path
+            .strip_prefix("/sbin/")
+            .map(|r| ("/usr/sbin", r))
+            .or_else(|| path.strip_prefix("/bin/").map(|r| ("/usr/bin", r)))?;
+        let segments: Vec<&str> = rest
+            .split('/')
+            .filter(|seg| !seg.is_empty() && *seg != ".")
+            .collect();
+        if segments.is_empty() {
+            return None;
         }
-        None
+        Some(format!("{}/{}", base, segments.join("/")))
     }
 
     /// Paths an Exec token can resolve through: the token itself
@@ -549,7 +604,7 @@ impl MenuXDGCheck {
     fn resolve_in_build(build: &DesktopBuild, start: &str) -> Option<String> {
         let mut current = start.to_string();
         for _ in 0..10 {
-            if build.regular.contains(&current) {
+            if build.file_owners.contains_key(&current) {
                 return Some(current);
             }
             let linkto = build.symlinks.get(&current)?;
@@ -574,9 +629,9 @@ impl MenuXDGCheck {
     /// resolves to a regular file the build ships, and the
     /// candidate's package is guaranteed to install alongside the
     /// file's owner. The guarantee is a hard dependency edge: the
-    /// candidate's package `Requires` (or `Requires(pre)`) the
-    /// owning package by name, by one of its `Provides`, or by the
-    /// resolved file path itself (a file dependency). A package
+    /// candidate's package `Requires` the owning package in any
+    /// phase by name, by one of its `Provides`, or by the resolved
+    /// file path itself (a file dependency). A package
     /// that only `Recommends` or `Suggests` the sibling, or has no
     /// edge to it at all, is not credited: installing just the
     /// frontend would leave a dead launcher. A file the
@@ -593,12 +648,11 @@ impl MenuXDGCheck {
             if owners.contains(&cand.pkg_name) {
                 return true;
             }
-            if cand.requires.iter().any(|req| {
-                req == &final_path
-                    || Self::candidate_paths(&cand.binary)
-                        .iter()
-                        .any(|candidate| candidate == req)
-            }) {
+            // RPM file dependencies are exact-path: a Requires
+            // matching any other candidate spelling (a bare token
+            // spelling, a merged-/usr counterpart) is not an edge
+            // to this file.
+            if cand.requires.iter().any(|req| req == &final_path) {
                 return true;
             }
             if cand.requires.iter().any(|req| {
@@ -636,7 +690,6 @@ impl MenuXDGCheck {
                 continue;
             }
             if is_reg(file.mode) {
-                build.regular.insert(file.name.clone());
                 build
                     .file_owners
                     .entry(file.name.clone())
@@ -1078,7 +1131,6 @@ impl Check for MenuXDGCheck {
                 };
                 match self.builds.get_mut(&key) {
                     Some(mine) => {
-                        mine.regular.extend(data.regular);
                         mine.symlinks.extend(data.symlinks);
                         mine.candidates.extend(data.candidates);
                         for (path, owners) in data.file_owners {
@@ -2581,6 +2633,85 @@ mod tests {
     }
 
     #[test]
+    fn effective_exec_binary_env_flags_and_dashdash() {
+        // -C/--chdir consume their directory argument.
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("env -C /opt/foo myprog"),
+            "myprog"
+        );
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("env --chdir /opt/foo myprog"),
+            "myprog"
+        );
+        // Assignments after -- are still skipped.
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("env -- FOO=1 myprog"),
+            "myprog"
+        );
+        assert_eq!(MenuXDGCheck::effective_exec_binary("env -- FOO=1"), "env");
+    }
+
+    #[test]
+    fn effective_exec_binary_sh_long_flags_and_clusters() {
+        // Long flags are skipped, not terminal.
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("bash --noprofile -c 'myprog'"),
+            "myprog"
+        );
+        // -noexec is -n plus -o's argument, not -c.
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("bash -noexec myprog"),
+            "bash"
+        );
+        // Combined flags ending in c still find -c.
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("bash -ec 'myprog'"),
+            "myprog"
+        );
+        // -c with attached payload.
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("bash -cmyprog"),
+            "myprog"
+        );
+        // End of options: a following -c is a script file.
+        assert_eq!(MenuXDGCheck::effective_exec_binary("bash -- -c"), "bash");
+    }
+
+    #[test]
+    fn effective_exec_binary_deep_env_chain_reaches_program() {
+        // Three env layers exhaust the unwrap depth exactly as the
+        // program is reached: the program, not the outermost env.
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("env env env myprog"),
+            "myprog"
+        );
+    }
+
+    #[test]
+    fn usrmerge_counterpart_sanitizes() {
+        assert_eq!(
+            MenuXDGCheck::usrmerge_counterpart("/bin/x"),
+            Some("/usr/bin/x".to_string())
+        );
+        assert_eq!(
+            MenuXDGCheck::usrmerge_counterpart("/sbin/x"),
+            Some("/usr/sbin/x".to_string())
+        );
+        assert_eq!(
+            MenuXDGCheck::usrmerge_counterpart("/bin//x"),
+            Some("/usr/bin/x".to_string())
+        );
+        assert_eq!(
+            MenuXDGCheck::usrmerge_counterpart("/bin/./x"),
+            Some("/usr/bin/x".to_string())
+        );
+        assert_eq!(MenuXDGCheck::usrmerge_counterpart("/bin/../x"), None);
+        assert_eq!(MenuXDGCheck::usrmerge_counterpart("/bin/"), None);
+        assert_eq!(MenuXDGCheck::usrmerge_counterpart("/usr/bin/x"), None);
+        assert_eq!(MenuXDGCheck::usrmerge_counterpart("x"), None);
+    }
+
+    #[test]
     fn resolve_in_build_cycle_returns_none() {
         // A->B->A never resolves to a regular file: the iteration
         // cap returns None instead of hanging, so the candidate
@@ -2595,11 +2726,17 @@ mod tests {
         };
         assert_eq!(MenuXDGCheck::resolve_in_build(&build, "/usr/bin/a"), None);
         // Positive control: a chain ending at a regular file resolves.
-        let build = DesktopBuild {
-            regular: HashSet::from(["/usr/bin/real".to_string()]),
+        let mut build = DesktopBuild {
             symlinks: HashMap::from([("/usr/bin/c".to_string(), "/usr/bin/real".to_string())]),
             ..Default::default()
         };
+        // The positive control's target is a regular file: record
+        // it as a file owner, since `regular` no longer exists as
+        // a separate set.
+        build.file_owners.insert(
+            "/usr/bin/real".to_string(),
+            HashSet::from(["owner".to_string()]),
+        );
         assert_eq!(
             MenuXDGCheck::resolve_in_build(&build, "/usr/bin/c"),
             Some("/usr/bin/real".to_string())
