@@ -1003,6 +1003,13 @@ upstream = "https://github.com/rpm-software-management/rpmlint/blob/main/rpmlint
 
 [[divergence]]
 case = "global"
+check = "branding-excessive-enhances"
+kind = "behaviour"
+reason = "Fix-and-diverge: branding-excessive-enhances is not charged on an Enhances whose rich-boolean tree is a plain conjunction carrying a branding-<flavor> marker atom \u2014 unversioned, unqualified \u2014 as a direct or nested conjunct. The reference charges every Enhances on a branding- or theme-shaped package. Such an Enhances is the flavour-selection gate, not an excessive dependency: it suggests the package only when the base package and the flavour marker are both present, the same gate the supplement doctrine credits for Supplements. A bare marker atom is not a conjunction and still fires, as does a marker under or, if, unless, with or without, a versioned marker, a conjunction with no marker atom, and the zypp packageand() spelling (a Simple, not a conjunction; deliberately not credited, per the settled packageand doctrine \u2014 the finding stands until the spelling is converted to the native rich form). Measured on the Factory corpus (51,589 binary RPMs, scoped re-run): the tag moves 2 findings to 1; the removed finding is exactly pagure-theme-default-openSUSE enhancing (pagure and branding-openSUSE), the tie-breaker that selects the openSUSE theme variant over the upstream variant (which carries no Enhances) when the flavour marker is present, the base package requiring the generic pagure-theme-default name; the remaining finding is alpine-branding-openSUSE enhancing packageand(alpine:branding-openSUSE). Pinned by flavour_gated_enhances_is_quiet, packageand_enhances_still_fires and non_gated_enhances_still_fire in branding_policy.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "BuildRootAndDateCheck"
 kind = "behaviour"
 reason = "The run day derives from UTC (OffsetDateTime::now_utc(), rendered by format_date()), while the reference's time.strftime('%b %e %Y') uses local time. Near midnight the two disagree on the civil date, which moves which files trigger file-contains-current-date and file-contains-date-and-time. The port takes UTC so the findings do not depend on the lint host's timezone."
