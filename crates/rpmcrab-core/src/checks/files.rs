@@ -4583,7 +4583,7 @@ impl FilesCheck {
         }
         self.check_file_manpage(pkg, fname, pkgfile, st, out);
         self.check_file_class(pkg, fname, pkgfile, out);
-        self.check_file_infopage_compressed(pkg, fname, out);
+        self.check_file_infopage_compressed(pkg, fname, pkgfile, out);
         self.check_file_unexpanded_macro(pkg, fname, out);
         self.check_file_non_standard_uid(pkg, fname, pkgfile);
         self.check_file_non_standard_gid(pkg, fname, pkgfile);
@@ -6448,7 +6448,19 @@ impl FilesCheck {
         }
     }
 
-    fn check_file_infopage_compressed(&self, pkg: &Pkg, fname: &str, out: &mut Filter) {
+    fn check_file_infopage_compressed(
+        &self,
+        pkg: &Pkg,
+        fname: &str,
+        pkgfile: &PkgFile,
+        out: &mut Filter,
+    ) {
+        // A directory under an info dir is not an info page: there is
+        // nothing to compress, so it never fires here. Symlinks keep
+        // the reference behaviour (they still fire).
+        if is_dir(pkgfile.mode) {
+            return;
+        }
         if !self.compress_ext.is_empty()
             && is_match(&self.info_re, fname)
             && !fname.ends_with("/info/dir")
@@ -13619,6 +13631,55 @@ print("hi")
             path: "/usr/share/info/foo.info".to_string(),
             user: "root".to_string(),
             group: "root".to_string(),
+            ..Default::default()
+        }];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert_has(&names, "infopage-not-compressed");
+    }
+
+    #[test]
+    fn files_check_infopage_directory_does_not_fire() {
+        // A directory under an info dir is not a page and cannot be
+        // compressed, so it must stay quiet even uncompressed.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/usr/share/info/figures".to_string(),
+            path: "/usr/share/info/figures".to_string(),
+            user: "root".to_string(),
+            group: "root".to_string(),
+            mode: 0o040755,
+            ..Default::default()
+        }];
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let names: Vec<String> = out.results().iter().map(|(n, _)| n.clone()).collect();
+        assert!(
+            !names.contains(&"infopage-not-compressed".to_string()),
+            "got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn files_check_infopage_symlink_still_fires() {
+        // The directory skip is minimal on purpose: a symlink under an
+        // info dir keeps the reference behaviour and still fires.
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/usr/share/info/foo.info".to_string(),
+            path: "/usr/share/info/foo.info".to_string(),
+            user: "root".to_string(),
+            group: "root".to_string(),
+            mode: 0o120777,
             ..Default::default()
         }];
         let config = test_config();
