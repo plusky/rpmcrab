@@ -1191,6 +1191,34 @@ mod tests {
     }
 
     #[test]
+    fn manual_remote_machine_flag_value_forms_do_not_credit() {
+        // Separate-word long-form values scope away like the
+        // attached forms: the flag, not its spelling, moves the
+        // operation to the remote machine.
+        for post in [
+            "systemctl --host remote preset foo.service",
+            "systemctl --machine container enable foo.service",
+        ] {
+            let missing =
+                SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+            assert!(
+                missing.contains(&"systemd-service-without-service_add_post"),
+                "{post} must not credit: {missing:?}"
+            );
+        }
+        // A remote-machine flag in a trailing comment denies
+        // nothing: the operation itself runs in system scope.
+        let post = "systemctl preset foo.service # --host=remote";
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert!(!missing.contains(&"systemd-service-without-service_add_post"));
+        // A quoted remote-machine flag still scopes away: the
+        // shell strips the quotes before systemctl sees the flag.
+        let post = "systemctl preset '--host=remote' foo.service";
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert!(missing.contains(&"systemd-service-without-service_add_post"));
+    }
+
+    #[test]
     fn manual_is_enabled_does_not_credit() {
         let post = "systemctl --quiet is-enabled foo.service";
         let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);

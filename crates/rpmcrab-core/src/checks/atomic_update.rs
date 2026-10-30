@@ -2704,11 +2704,13 @@ fi
             "/var/adm/update-scripts/saslpwd",
             // `..` segments are judged after lexical normalisation:
             // an allowed or transient prefix on the raw literal does
-            // not carry over the `..`.
+            // not carry over the `..`. Each case below fails if the
+            // normalisation is dropped: the raw literal's verdict
+            // differs from the normalised one.
             "/usr/../var/lib/evil",
             "/run/../var/lib/x",
             "/etc/../var/lib/x",
-            "/usr/local/../../var/lib/x",
+            "/bin/../var/lib/x",
             "/var/tmp/../../var/lib/x",
         ] {
             assert!(
@@ -2741,11 +2743,11 @@ fi
             // transient prefix) stay quiet: the normalised form is
             // judged, not the literal.
             "/var/../usr/share/x",
-            "/usr/lib/../share/x",
+            "/srv/../etc/x",
             "/var/lib/../../etc/x",
-            "/run/../run/x",
+            "/srv/../run/x",
             "/var/../var/run/x",
-            "/usr/../usr/local/../share/x",
+            "/var/lib/../../usr/share/x",
         ] {
             assert!(
                 !check.scriptlet_target_outside(inside),

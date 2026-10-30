@@ -4381,8 +4381,9 @@ impl FilesCheck {
                     &[exe, &list_repr],
                 );
             }
-            // A lone %ghost executable installs nothing, so it draws no
-            // man-page demand -- unless a symlink of the same name
+            // A bindir name whose every bindir path is %ghost installs
+            // nothing, so it draws no man-page demand -- unless a symlink
+            // of the same name
             // installs: the symlink still owes a man page, so the
             // suppression is gated on the symlink paths too. Its
             // duplicate bookkeeping is unchanged: a ghost entry
@@ -16674,6 +16675,30 @@ print("hi")
                 .iter()
                 .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("ghosttool")),
             "symlink exe with only a ghost regular must still owe a man page: {results:?}"
+        );
+    }
+
+    #[test]
+    fn ghost_plus_ghost_draws_no_manual_page_demand_but_still_duplicates() {
+        // Every bindir path for the name is %ghost: no man-page
+        // demand, but the pair still registers for duplicates.
+        let mut ghost1 = mkfile("/usr/bin/ghosttool", 0o100755, 41);
+        ghost1.flags = RPMFILE_GHOST;
+        let mut ghost2 = mkfile("/bin/ghosttool", 0o100755, 42);
+        ghost2.flags = RPMFILE_GHOST;
+        let (pkg, _dir) = pkg_with_files(vec![ghost1, ghost2]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("ghosttool")),
+            "all-ghost exe must draw no man-page demand: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "duplicate-executable" && d.contains("ghosttool")),
+            "ghost+ghost pair must still register for duplicates: {results:?}"
         );
     }
 
