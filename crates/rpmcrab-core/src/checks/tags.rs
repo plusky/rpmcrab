@@ -49,8 +49,6 @@ const CAPITALIZED_IGNORE_LIST: &[&str] = &[
     "uWSGI",
     "xSGE",
     "oneAPI",
-    "libreport's",
-    "the",
 ];
 
 /// Sentence-ending punctuation for `name-repeated-in-summary`.
@@ -1114,10 +1112,13 @@ impl TagsCheck {
             add_info(out, Level::Error, pkg, "summary-on-multiple-lines", &d);
         }
         let first_word = summary.split(' ').next().unwrap_or("");
-        // A trailing possessive matches the listed brand ("wxWidgets's"
-        // -> "wxWidgets"); the raw form is tried as well, so a listed
-        // possessive ("libreport's") still matches.
+        // A trailing possessive matches a listed brand ("wxWidgets's"
+        // -> "wxWidgets"). The stripped form is not consulted for
+        // article bases (a/an/the), so "a's"/"an's"/"the's" still warn
+        // as the reference does.
         let first_word_base = first_word.strip_suffix("'s").unwrap_or(first_word);
+        let stripped_exempt = !matches!(first_word_base, "a" | "an" | "the")
+            && CAPITALIZED_IGNORE_LIST.contains(&first_word_base);
         // Reference parity: `summary[0] != summary[0].upper()` warns only
         // when the first char is actually lowercase; digits and other
         // non-letters never warn. Unicode titlecase letters (e.g. U+01C5)
@@ -1128,10 +1129,7 @@ impl TagsCheck {
             .next()
             .map(|c| c.to_uppercase().next() != Some(c))
             .unwrap_or(false);
-        if lowercase_first
-            && !CAPITALIZED_IGNORE_LIST.contains(&first_word)
-            && !CAPITALIZED_IGNORE_LIST.contains(&first_word_base)
-        {
+        if lowercase_first && !CAPITALIZED_IGNORE_LIST.contains(&first_word) && !stripped_exempt {
             let mut d: Vec<&str> = Vec::new();
             if let Some(l) = lang_err {
                 d.push(l);
@@ -2958,12 +2956,7 @@ mod tests {
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let check = TagsCheck::new(&config);
-        for summary in [
-            "xSGE display manager",
-            "oneAPI Level Zero loader",
-            "libreport's plugin",
-            "the quick brown fox",
-        ] {
+        for summary in ["xSGE display manager", "oneAPI Level Zero loader"] {
             check.check_summary(&pkg, &mut out, summary, "C", &[]);
         }
         let results = out.results().to_vec();
@@ -3004,6 +2997,38 @@ mod tests {
             hits[0].1,
             "tags-emission-pins-badsummary.noarch: W: summary-not-capitalized foo's bar"
         );
+    }
+
+    #[test]
+    fn summary_not_capitalized_dropped_and_article_possessives_still_warn() {
+        // Dropped list entries ("the", "libreport's") and article
+        // possessives ("a's"/"an's"/"the's") must warn as the reference does.
+        for summary in [
+            "the quick brown fox",
+            "the's book",
+            "a's book",
+            "an's book",
+            "libreport's plugin",
+            "libreport plugin",
+        ] {
+            let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
+            let config = test_config();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            let check = TagsCheck::new(&config);
+            check.check_summary(&pkg, &mut out, summary, "C", &[]);
+            let results = out.results().to_vec();
+            let hits: Vec<_> = results
+                .iter()
+                .filter(|(n, _)| n == "summary-not-capitalized")
+                .collect();
+            assert_eq!(hits.len(), 1, "summary {summary:?}: {results:?}");
+            assert_eq!(
+                hits[0].1,
+                format!(
+                    "tags-emission-pins-badsummary.noarch: W: summary-not-capitalized {summary}"
+                )
+            );
+        }
     }
 
     #[test]
