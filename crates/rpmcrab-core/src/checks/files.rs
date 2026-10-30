@@ -6505,9 +6505,19 @@ impl FilesCheck {
         // Image files and Lisp index files under an info dir are not
         // info documents either: illustrations are already compressed
         // and gzipping them breaks info readers' image lookup, and
-        // `.lisp` files are loaded as Lisp by the info system. Both
-        // keep firing in the reference (fix-and-diverge).
-        if fname.ends_with(".png") || fname.ends_with(".jpg") || fname.ends_with(".lisp") {
+        // `.lisp` files are program data loaded by their application,
+        // not info documents. Both keep firing in the reference
+        // (fix-and-diverge). The image set is texinfo `@image`
+        // support minus pdf/eps (png, jpg, jpeg, gif, svg), matched
+        // case-insensitively.
+        let lower = fname.to_ascii_lowercase();
+        if lower.ends_with(".png")
+            || lower.ends_with(".jpg")
+            || lower.ends_with(".jpeg")
+            || lower.ends_with(".gif")
+            || lower.ends_with(".svg")
+            || lower.ends_with(".lisp")
+        {
             return;
         }
         if !self.compress_ext.is_empty()
@@ -13875,6 +13885,41 @@ print("hi")
                 group: "root".to_string(),
                 ..Default::default()
             },
+            PkgFile {
+                name: "/usr/share/info/baz.jpeg".to_string(),
+                path: "/usr/share/info/baz.jpeg".to_string(),
+                user: "root".to_string(),
+                group: "root".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/info/qux.gif".to_string(),
+                path: "/usr/share/info/qux.gif".to_string(),
+                user: "root".to_string(),
+                group: "root".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/info/fig.svg".to_string(),
+                path: "/usr/share/info/fig.svg".to_string(),
+                user: "root".to_string(),
+                group: "root".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/info/UPPER.PNG".to_string(),
+                path: "/usr/share/info/UPPER.PNG".to_string(),
+                user: "root".to_string(),
+                group: "root".to_string(),
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/share/info/mixed.JPG".to_string(),
+                path: "/usr/share/info/mixed.JPG".to_string(),
+                user: "root".to_string(),
+                group: "root".to_string(),
+                ..Default::default()
+            },
         ];
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -13889,9 +13934,9 @@ print("hi")
 
     #[test]
     fn files_check_infopage_lisp_does_not_fire() {
-        // A `.lisp` index file under an info dir is loaded as Lisp by
-        // the info system, not read as an info document, so it must
-        // stay quiet.
+        // A `.lisp` index file under an info dir is program data
+        // loaded by its application (Maxima itself, in the fixture
+        // case), not read as an info document, so it must stay quiet.
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
