@@ -3086,23 +3086,58 @@ impl ProviderIndex {
     /// by `owner`, together with the identity of the package that
     /// ships it: the walk continues from that package's point of
     /// view for the provider's own DT_NEEDED entries.
-    fn lookup(&self, soname: &str, owner: &PackageId) -> Option<(PackageId, Arc<SymbolProvider>)> {
+    /// The set a lookup consults, in lookup order: the owner's own
+    /// set first, then same-base-arch sets in check order.
+    fn find_set(
+        &self,
+        soname: &str,
+        owner: &PackageId,
+    ) -> Option<(&PackageId, &HashMap<String, Arc<SymbolProvider>>)> {
         let base = basename(soname);
         for (id, map) in &self.sets {
-            if id == owner {
-                if let Some(provider) = map.get(soname).or_else(|| map.get(base)) {
-                    return Some((id.clone(), provider.clone()));
-                }
+            if id == owner && (map.contains_key(soname) || map.contains_key(base)) {
+                return Some((id, map));
             }
         }
         for (id, map) in &self.sets {
-            if id != owner && base_arch(&id.1) == base_arch(&owner.1) {
-                if let Some(provider) = map.get(soname).or_else(|| map.get(base)) {
-                    return Some((id.clone(), provider.clone()));
-                }
+            if id != owner
+                && base_arch(&id.1) == base_arch(&owner.1)
+                && (map.contains_key(soname) || map.contains_key(base))
+            {
+                return Some((id, map));
             }
         }
         None
+    }
+
+    fn lookup(&self, soname: &str, owner: &PackageId) -> Option<(PackageId, Arc<SymbolProvider>)> {
+        let base = basename(soname);
+        let (id, map) = self.find_set(soname, owner)?;
+        let provider = map.get(soname).or_else(|| map.get(base))?;
+        Some((id.clone(), provider.clone()))
+    }
+
+    /// Like `lookup` but without the provider package's identity:
+    /// callers that only need the provider itself (the linked-against
+    /// path) must not pay a `PackageId` clone per hit.
+    fn lookup_provider(&self, soname: &str, owner: &PackageId) -> Option<Arc<SymbolProvider>> {
+        let base = basename(soname);
+        let (_, map) = self.find_set(soname, owner)?;
+        Some(map.get(soname).or_else(|| map.get(base))?.clone())
+    }
+
+    /// A view over a subset of this index's sets, sharing the
+    /// provider Arcs: only the maps and ids are cloned, no symbol
+    /// data is copied.
+    fn subset(&self, keep: impl Fn(&PackageId) -> bool) -> Self {
+        ProviderIndex {
+            sets: self
+                .sets
+                .iter()
+                .filter(|(id, _)| keep(id))
+                .map(|(id, map)| (id.clone(), map.clone()))
+                .collect(),
+        }
     }
 }
 
@@ -3397,6 +3432,35 @@ fn merged_usr_path(name: &str) -> String {
     }
 }
 
+/// Whether a merged-/usr-mapped consumer path is still under a root
+/// directory, component-aware: /libfoo is a different directory from
+/// /lib, so a bare-prefix match must not count it. Genuine root
+/// consumers map into /usr and never match; a bare root directory
+/// itself counts (a package owning the directory entry).
+fn is_root_dir_consumer(mapped: &str) -> bool {
+    ["/bin", "/sbin", "/lib", "/lib64"].iter().any(|p| {
+        mapped.len() >= p.len()
+            && mapped.starts_with(p)
+            && (mapped.len() == p.len() || mapped.as_bytes()[p.len()] == b'/')
+    })
+}
+
+/// Whether a resolved provider path counts as under /usr: the
+/// merged-/usr map runs before the prefix test, so a /lib64 (or
+/// /lib, /bin, /sbin) provider is a /usr path at install time.
+/// Computed on the raw bytes without materializing the mapped path:
+/// the mapped path is under /usr exactly when the raw path already
+/// is, or its first component is one the map moves.
+fn mapped_under_usr(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.starts_with(b"/usr/") {
+        return true;
+    }
+    let rest = bytes.strip_prefix(b"/").unwrap_or(bytes);
+    let first = rest.split(|b| *b == b'/').next().unwrap_or(rest);
+    matches!(first, b"bin" | b"sbin" | b"lib" | b"lib64")
+}
+
 /// Resolve one direct DT_NEEDED entry the way the closure walk
 /// does, but return the located path instead of the provided
 /// symbol set: the invocation provider index first, then the
@@ -3411,16 +3475,16 @@ fn resolve_dependency_path(
     soname: &str,
     is_64: Option<bool>,
     root_ctx: &SearchContext,
+    rpath_chain_dirs: &[PathBuf],
     root_owner: &PackageId,
 ) -> Option<PathBuf> {
     if soname.contains('/') {
         return Some(PathBuf::from(soname));
     }
-    if let Some((_, provider)) = providers.lookup(soname, root_owner) {
+    if let Some(provider) = providers.lookup_provider(soname, root_owner) {
         return Some(provider.path.clone());
     }
-    let chain_dirs: Vec<PathBuf> = root_ctx.rpath_chain.iter().flatten().cloned().collect();
-    if let Some(provider) = system.provider_in_dirs(soname, is_64, &chain_dirs) {
+    if let Some(provider) = system.provider_in_dirs(soname, is_64, rpath_chain_dirs) {
         return Some(provider.path.clone());
     }
     if let Some(provider) = system.provider_in_dirs(soname, is_64, &root_ctx.runpath_dirs) {
@@ -3435,10 +3499,13 @@ fn resolve_dependency_path(
 /// offending (file, path) pair per arm, in dependency order.
 /// The opt arm fires
 /// on any resolved path under /opt/. The usr arm fires only for a
-/// consumer the merged-/usr map still leaves under /bin, /sbin,
-/// /lib or /lib64 — a consumer the map moves under /usr/ is a /usr
-/// consumer at install time, so its /usr linkage is moot — whose
-/// resolved path is under /usr/. Slash-containing entries are
+/// consumer whose merged-/usr-mapped path is still under /bin,
+/// /sbin, /lib or /lib64 (component-aware: /libfoo is not /lib) and
+/// whose resolved provider path, mapped the same way, is under
+/// /usr/. A consumer the map moves under /usr/ is a /usr consumer
+/// at install time, so its /usr linkage is moot — on merged-/usr
+/// Factory no consumer satisfies the gate, and the arm fires zero
+/// times there. Slash-containing entries are
 /// skipped: the emission-time check already reports those, and
 /// reporting them again here would double-fire.
 /// One file's linked-against resolution inputs: the file's
@@ -3471,9 +3538,11 @@ fn linked_against_findings(
         &installed_dir(input.file_name),
         &[],
     );
-    let usr_consumer = ["/bin", "/lib", "/sbin"]
-        .iter()
-        .any(|p| merged_usr_path(input.file_name).starts_with(p));
+    // The RPATH chain is flattened once per consumer, not once per
+    // dependency; the mapped consumer path is computed once, not
+    // once per prefix.
+    let rpath_chain_dirs: Vec<PathBuf> = root_ctx.rpath_chain.iter().flatten().cloned().collect();
+    let usr_consumer = is_root_dir_consumer(&merged_usr_path(input.file_name));
     let mut verdict = LinkedAgainstVerdict {
         opt: None,
         usr: None,
@@ -3482,18 +3551,32 @@ fn linked_against_findings(
         if dep.contains('/') {
             continue;
         }
-        let path =
-            match resolve_dependency_path(providers, system, dep, input.is_64, &root_ctx, owner) {
-                Some(path) => path.to_string_lossy().into_owned(),
-                None => continue,
-            };
-        let under_opt = path.starts_with("/opt/");
-        let under_usr = path.starts_with("/usr/");
+        let Some(path) = resolve_dependency_path(
+            providers,
+            system,
+            dep,
+            input.is_64,
+            &root_ctx,
+            &rpath_chain_dirs,
+            owner,
+        ) else {
+            continue;
+        };
+        // Prefix tests run on the raw bytes; the lossy String is
+        // materialized only for a finding that actually fires.
+        let under_opt = path.as_os_str().as_encoded_bytes().starts_with(b"/opt/");
+        let under_usr = mapped_under_usr(&path);
         if verdict.opt.is_none() && under_opt {
-            verdict.opt = Some((input.file_name.to_string(), path.clone()));
+            verdict.opt = Some((
+                input.file_name.to_string(),
+                path.to_string_lossy().into_owned(),
+            ));
         }
         if verdict.usr.is_none() && usr_consumer && under_usr {
-            verdict.usr = Some((input.file_name.to_string(), path));
+            verdict.usr = Some((
+                input.file_name.to_string(),
+                path.to_string_lossy().into_owned(),
+            ));
         }
         if verdict.opt.is_some() && verdict.usr.is_some() {
             break;
@@ -3538,10 +3621,12 @@ fn resolve_undefined_symbols(
     files: &[PkgFile],
     system: &SystemLibraries,
     owner: &PackageId,
-) {
+) -> ProviderIndex {
     let providers = package_providers(analyses, files);
     if providers.is_empty() && system.is_empty() {
-        return;
+        // Nothing can resolve, but the caller still needs an index
+        // to reuse (installed mode): an empty one is exact here.
+        return ProviderIndex::new(vec![]);
     }
     let providers = ProviderIndex::new(vec![PackageProviders {
         pkg_name: owner.0.clone(),
@@ -3621,6 +3706,7 @@ fn resolve_undefined_symbols(
         ldd.undefined_symbols
             .retain(|sym| !provided.contains(sym) && !ldd.defined_symbols.contains(sym));
     }
+    providers
 }
 
 struct ObjdumpInfo {
@@ -7118,13 +7204,12 @@ impl BinariesCheck {
         }
         // Merged-/usr: a consumer listed under /bin, /sbin, /lib
         // or /lib64 is a /usr consumer at install time, so the
-        // prefix test runs on the mapped path — the arm stays live
-        // only for consumers the map leaves outside /usr.
-        let nonusr = ["/bin", "/lib", "/sbin"];
-        if nonusr
-            .iter()
-            .any(|p| merged_usr_path(&pkgfile.name).starts_with(p))
-        {
+        // prefix test runs on the mapped path (component-aware:
+        // /libfoo is not /lib) — the arm stays live only for
+        // consumers the map leaves under a root directory, which
+        // no merged-/usr Factory package produces.
+        let mapped_consumer = merged_usr_path(&pkgfile.name);
+        if is_root_dir_consumer(&mapped_consumer) {
             for dep in &ldd.dependencies {
                 if dep.starts_with("/usr/") {
                     add_info(
@@ -7963,6 +8048,51 @@ impl BinariesCheck {
         self.check_hash_sections(pkg, pkgfile, info, out);
         self.check_no_patchable_function_entries_in_archive(pkg, pkgfile, info, out);
     }
+
+    /// Register this package as an invocation contributor, once, when
+    /// what it actually contributed is known (plusky/rpmcrab#735
+    /// review): a captured consumer (the records `check_dependency`
+    /// left in the pending state) or a provider library (an
+    /// `ldd`-clean file that is a shared library, carries a SONAME,
+    /// or is named like one). Linked records alone do not count:
+    /// an exe-only package must not flip a batch into
+    /// invocation-wide resolution in `after_checks` (linked-against
+    /// instead resolves against the unfiltered index there, issue
+    /// #1329). A package shipping only executables with no DT_NEEDED
+    /// contributes nothing.
+    fn register_contributor(&mut self, pkg: &Pkg, analyses: &[Option<ElfAnalysis>]) {
+        if !self.defer_undefined {
+            return;
+        }
+        let same_package = |p: &PackageConsumers| {
+            p.pkg_name == pkg.name && p.pkg_arch == pkg.arch && p.pkg_filename == pkg.filename
+        };
+        let captured = self
+            .pending_state
+            .as_ref()
+            .is_some_and(|state| state.packages.iter().any(&same_package));
+        let provides = analyses
+            .iter()
+            .zip(pkg.files.iter())
+            .any(|(analysis, pkgfile)| {
+                let Some(analysis) = analysis else {
+                    return false;
+                };
+                analysis.ldd.as_ref().is_some_and(|l| l.failed.is_none())
+                    && (analysis.info.is_shlib
+                        || analysis.info.soname.is_some()
+                        || basename(&pkgfile.name).contains(".so"))
+            });
+        if captured || provides {
+            let state = self
+                .pending_state
+                .get_or_insert_with(BinariesState::default);
+            let contributor = (pkg.name.clone(), pkg.arch.clone(), pkg.filename.clone());
+            if !state.contributors.contains(&contributor) {
+                state.contributors.push(contributor);
+            }
+        }
+    }
 }
 
 impl Check for BinariesCheck {
@@ -8028,13 +8158,17 @@ impl Check for BinariesCheck {
             }
         } else {
             let owner: PackageId = (pkg.name.clone(), pkg.arch.clone(), pkg.filename.clone());
-            resolve_undefined_symbols(&mut analyses, &pkg.files, &self.system_libraries, &owner);
-            self.installed_providers = Some(ProviderIndex::new(vec![PackageProviders {
-                pkg_name: pkg.name.clone(),
-                pkg_arch: pkg.arch.clone(),
-                pkg_filename: pkg.filename.clone(),
-                providers: package_providers(&analyses, &pkg.files),
-            }]));
+            // The undefined resolution already builds this package's
+            // provider index; reuse it instead of building the same
+            // map a second time (the resolution only shrinks
+            // undefined lists and records unused deps, neither of
+            // which the map reads, so the reused index is exact).
+            self.installed_providers = Some(resolve_undefined_symbols(
+                &mut analyses,
+                &pkg.files,
+                &self.system_libraries,
+                &owner,
+            ));
         }
 
         for (idx, pkgfile) in pkg.files.iter().enumerate() {
@@ -8134,46 +8268,10 @@ impl Check for BinariesCheck {
             }
         }
 
-        // Register this package as an invocation contributor only
-        // now, when what it actually contributed is known
-        // (plusky/rpmcrab#735 review): a captured consumer (the
-        // records `check_dependency` left in the pending state) or a
-        // provider library (an `ldd`-clean file that is a shared
-        // library, carries a SONAME, or is named like one). A package
-        // shipping only executables contributes neither --
-        // executables are never captured as consumers and their
-        // basenames are not library providers -- so it must not flip
-        // a batch into invocation-wide resolution in `after_checks`.
-        if self.defer_undefined {
-            let captured = self.pending_state.as_ref().is_some_and(|state| {
-                state.packages.iter().any(|p| {
-                    p.pkg_name == pkg.name
-                        && p.pkg_arch == pkg.arch
-                        && p.pkg_filename == pkg.filename
-                })
-            });
-            let provides = analyses
-                .iter()
-                .zip(pkg.files.iter())
-                .any(|(analysis, pkgfile)| {
-                    let Some(analysis) = analysis else {
-                        return false;
-                    };
-                    analysis.ldd.as_ref().is_some_and(|l| l.failed.is_none())
-                        && (analysis.info.is_shlib
-                            || analysis.info.soname.is_some()
-                            || basename(&pkgfile.name).contains(".so"))
-                });
-            if captured || provides {
-                let state = self
-                    .pending_state
-                    .get_or_insert_with(BinariesState::default);
-                let contributor = (pkg.name.clone(), pkg.arch.clone(), pkg.filename.clone());
-                if !state.contributors.contains(&contributor) {
-                    state.contributors.push(contributor);
-                }
-            }
-        }
+        // Register this package as an invocation contributor (see
+        // `register_contributor`): only now, when what it actually
+        // contributed is known.
+        self.register_contributor(pkg, &analyses);
 
         self.check_no_binary(pkg, pkg_has_binary, pkg_has_file_in_libdir, out);
         self.check_noarch_with_lib64(pkg, pkg_has_file_in_lib64, out);
@@ -8231,25 +8329,25 @@ impl Check for BinariesCheck {
         // exe-only package's files land in its set under their
         // basenames) must not satisfy the contributor's DT_NEEDED
         // spellings.
-        let provider_sets = if invocation_wide {
-            state.provider_sets
+        // Linked-against resolves against every set the batch ships
+        // (issue #1329): linked-only packages are not contributors,
+        // so filtering to the contributor would leave a linked-only
+        // batch with an empty index although it holds consumers.
+        // Undefined and unused keep the filtered index and the mode
+        // switch; the system fallback below is shared.
+        let linked_providers = ProviderIndex::new(state.provider_sets);
+        let providers = if invocation_wide {
+            linked_providers.subset(|_| true)
         } else {
             // A batch can reach here with no contributor at all
             // (only exe-only or provider-only packages): the filter
-            // then keeps nothing, and the resolution loop below has
-            // no consumers to resolve.
+            // then keeps nothing, and the undefined/unused loops
+            // below have no consumers to resolve — but linked
+            // still uses the unfiltered index above.
             let contributor = state.contributors.first();
-            state
-                .provider_sets
-                .into_iter()
-                .filter(|set| {
-                    contributor.is_some_and(|c| {
-                        set.pkg_name == c.0 && set.pkg_arch == c.1 && set.pkg_filename == c.2
-                    })
-                })
-                .collect()
+            linked_providers
+                .subset(|id| contributor.is_some_and(|c| id.0 == c.0 && id.1 == c.1 && id.2 == c.2))
         };
-        let providers = ProviderIndex::new(provider_sets);
         let empty_system;
         let system = if invocation_wide {
             empty_system = SystemLibraries::empty();
@@ -8361,10 +8459,10 @@ impl Check for BinariesCheck {
         }
         // Linked-against resolution (Design A): the captured
         // consumers resolve their direct dependencies through the
-        // same index and mode switch as the undefined symbols
-        // above — single-contributor runs add the system fallback,
-        // wider batches resolve inside the invocation alone — and
-        // fire on the resolved path's prefix.
+        // unfiltered index above with the same system fallback as
+        // the undefined symbols — single-contributor runs add the
+        // system, wider batches resolve inside the invocation
+        // alone — and fire on the resolved path's prefix.
         for package in &state.linked_packages {
             let owner: PackageId = (
                 package.pkg_name.clone(),
@@ -8380,7 +8478,7 @@ impl Check for BinariesCheck {
                     runpath: &consumer.runpath,
                     has_runpath: consumer.has_runpath,
                 };
-                let verdict = linked_against_findings(&input, &providers, system, &owner);
+                let verdict = linked_against_findings(&input, &linked_providers, system, &owner);
                 if let Some((file, path)) = verdict.opt {
                     out.add_info(make_finding(
                         &package.pkg_name,
@@ -13151,6 +13249,76 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(
             out.results().to_vec().is_empty(),
             "capture emits nothing yet"
+        );
+    }
+
+    #[test]
+    fn after_checks_linked_only_batch_resolves_against_unfiltered_sets() {
+        // Issue #1329: a linked-only batch has no contributors
+        // (exe-only packages must not flip a batch
+        // invocation-wide), so filtering the provider index to the
+        // contributor would leave it empty although it holds
+        // consumers. Linked-against resolves against every set the
+        // batch ships instead.
+        let config = test_config();
+        let mut check = BinariesCheck::new(&config);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "libfoo.so.1".to_string(),
+            SymbolProvider {
+                path: PathBuf::from("/opt/lib/libfoo.so.1"),
+                defined: HashSet::new(),
+                needs: Vec::new(),
+                origin: PathBuf::from("/opt/lib"),
+                rpath: Vec::new(),
+                runpath: Vec::new(),
+                has_runpath: false,
+            },
+        );
+        let state = BinariesState {
+            provider_sets: vec![PackageProviders {
+                pkg_name: "libpkg".to_string(),
+                pkg_arch: "x86_64".to_string(),
+                pkg_filename: "libpkg-1.0-1.x86_64.rpm".to_string(),
+                providers,
+            }],
+            packages: Vec::new(),
+            unused_packages: Vec::new(),
+            linked_packages: vec![PackageConsumers {
+                pkg_name: "exepkg".to_string(),
+                pkg_arch: "x86_64".to_string(),
+                pkg_filename: "exepkg-1.0-1.x86_64.rpm".to_string(),
+                files: vec![ConsumerFile {
+                    file_name: "/usr/bin/tool".to_string(),
+                    undefined_symbols: Vec::new(),
+                    weak_undefined_symbols: Vec::new(),
+                    defined_symbols: HashSet::new(),
+                    dependencies: vec!["libfoo.so.1".to_string()],
+                    is_64: Some(true),
+                    rpath: Vec::new(),
+                    runpath: Vec::new(),
+                    has_runpath: false,
+                    is_shlib: false,
+                    copy_symbols: Vec::new(),
+                }],
+            }],
+            contributors: Vec::new(),
+        };
+        check.import_state(Box::new(state));
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        let opt = lines_for(&results, "linked-against-opt-library");
+        assert_eq!(
+            opt.len(),
+            1,
+            "linked-only batch still fires opt: {results:?}"
+        );
+        assert!(opt[0].contains(" E: "), "opt is Error: {}", opt[0]);
+        assert!(
+            opt[0].contains("/usr/bin/tool") && opt[0].contains("/opt/lib/libfoo.so.1"),
+            "detail names file and provider: {}",
+            opt[0]
         );
     }
 
@@ -21633,15 +21801,16 @@ description = "explicit priority string bypasses the system crypto policy"
             out.results()
         );
 
-        // A consumer the map leaves outside /usr still fires: the
-        // arm stays live for genuinely-outside-/usr consumers.
+        // /libfoo/bar is not under /lib (a different directory, not
+        // the merged one): the component-aware gate stays silent.
         let pkgfile = syn_file("/libfoo/bar", "ELF 64-bit LSB executable");
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_library_dependency_location(&pkg, &pkgfile, &ldd, &mut out);
         let results = out.results().to_vec();
-        let lines = lines_for(&results, "linked-against-usr-library");
-        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            results.is_empty(),
+            "lookalike consumer must stay silent: {results:?}"
+        );
 
         // A binary outside /bin//lib//sbin is not subject to the check.
         let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
@@ -21664,6 +21833,33 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(merged_usr_path("/usr/lib/foo"), "/usr/lib/foo");
         assert_eq!(merged_usr_path("/opt/foo"), "/opt/foo");
         assert_eq!(merged_usr_path("/libfoo/bar"), "/libfoo/bar");
+    }
+
+    #[test]
+    fn root_dir_consumer_gate_is_component_aware() {
+        // Genuine root consumers map into /usr and never match.
+        assert!(!is_root_dir_consumer(&merged_usr_path("/bin/foo")));
+        assert!(!is_root_dir_consumer(&merged_usr_path("/lib64/foo")));
+        // Lookalikes are different directories, not root consumers.
+        assert!(!is_root_dir_consumer(&merged_usr_path("/libfoo/bar")));
+        assert!(!is_root_dir_consumer(&merged_usr_path("/binfoo")));
+        // Non-root consumers never match.
+        assert!(!is_root_dir_consumer(&merged_usr_path("/usr/bin/foo")));
+        assert!(!is_root_dir_consumer(&merged_usr_path("/opt/foo/bar")));
+        // A bare root directory itself counts.
+        assert!(is_root_dir_consumer("/lib"));
+        assert!(is_root_dir_consumer("/lib64"));
+    }
+
+    #[test]
+    fn provider_prefix_uses_mapped_path() {
+        assert!(mapped_under_usr(Path::new("/usr/lib64/libc.so.6")));
+        // A /lib64 provider is a /usr path at install time.
+        assert!(mapped_under_usr(Path::new("/lib64/libc.so.6")));
+        assert!(mapped_under_usr(Path::new("/lib/libc.so.6")));
+        assert!(!mapped_under_usr(Path::new("/opt/lib/libfoo.so.1")));
+        assert!(!mapped_under_usr(Path::new("/libfoo/bar")));
+        assert!(!mapped_under_usr(Path::new("/usr")));
     }
 
     #[test]
@@ -21725,6 +21921,8 @@ description = "explicit priority string bypasses the system crypto policy"
         );
         assert!(findings.opt.is_some(), "opt fires once: {findings:?}");
         assert!(findings.usr.is_none(), "usr stays silent: {findings:?}");
+        // Detail names file and provider path (restored assertion).
+        assert_eq!(findings.opt.as_ref().unwrap().0, "/usr/bin/foo");
         assert_eq!(findings.opt.as_ref().unwrap().1, "/opt/lib/libfoo.so.1");
 
         // Usr arm moot: /lib64 consumer maps to /usr/lib64.
@@ -21746,7 +21944,8 @@ description = "explicit priority string bypasses the system crypto policy"
             "merged-/usr consumer: {findings:?}"
         );
 
-        // Usr arm live: consumer the map leaves outside /usr.
+        // Usr arm silent: /libfoo/bar is not under /lib, so it is
+        // not a root-dir consumer; the gate fix silences it.
         let findings = linked_against_findings(
             &LinkedAgainstInput {
                 file_name: "/libfoo/bar",
@@ -21760,9 +21959,10 @@ description = "explicit priority string bypasses the system crypto policy"
             &system,
             &owner,
         );
-        assert!(findings.usr.is_some(), "usr fires once: {findings:?}");
-        assert!(findings.opt.is_none(), "opt stays silent: {findings:?}");
-        assert_eq!(findings.usr.as_ref().unwrap().1, "/usr/lib64/libc.so.6");
+        assert!(
+            findings.opt.is_none() && findings.usr.is_none(),
+            "/libfoo/bar stays silent: {findings:?}"
+        );
 
         // Common system-binary case: /usr/bin/foo linking libc
         // resolves under /usr/lib64, and neither arm applies.
