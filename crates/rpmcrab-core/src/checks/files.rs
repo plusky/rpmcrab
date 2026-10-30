@@ -4361,8 +4361,29 @@ impl FilesCheck {
             .filter(|f| f.is_ghost())
             .map(|f| f.name.as_str())
             .collect();
+        // Header digests by file path. Copies with identical digests
+        // cannot cause the reorder hazard the finding names: whichever
+        // bindir comes first in $PATH, the same bytes run. Only
+        // differing copies fire; a missing digest fails closed and
+        // still fires.
+        let digests: HashMap<&str, &str> = pkg
+            .files
+            .iter()
+            .filter_map(|f| {
+                f.md5
+                    .as_deref()
+                    .filter(|d| !d.is_empty())
+                    .map(|d| (f.name.as_str(), d))
+            })
+            .collect();
         for (exe, paths) in &st.bindir_exes {
-            if paths.len() > 1 {
+            // Symlink-only entries carry an empty path list; the
+            // length guard short-circuits before any indexing.
+            let identical = paths.len() > 1
+                && digests.get(paths[0].as_str()).is_some_and(|first| {
+                    paths.iter().all(|p| digests.get(p.as_str()) == Some(first))
+                });
+            if paths.len() > 1 && !identical {
                 // Rendered as a Python list repr, matching the reference
                 // passing `paths` (a list) through filter.py's f-string.
                 let list_repr = format!(
@@ -16581,6 +16602,101 @@ print("hi")
         assert!(
             line.contains(": W: duplicate-executable mytool ['/usr/bin/mytool', '/bin/mytool']"),
             "name, level and Python-list detail must match the reference, got: {line}"
+        );
+    }
+
+    #[test]
+    fn duplicate_executable_quiet_for_identical_copies() {
+        // Identical header digests: whichever bindir wins in $PATH,
+        // the same bytes run, so the reorder hazard does not exist.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/bin/mytool", 0o100755, 11)
+            },
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/sbin/mytool", 0o100755, 12)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results.iter().any(|(n, _)| n == "duplicate-executable"),
+            "identical copies must not fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_executable_still_fires_for_differing_copies() {
+        // Differing digests: a $PATH reorder changes which binary
+        // runs, so the finding stands.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/bin/mytool", 0o100755, 21)
+            },
+            PkgFile {
+                md5: Some("63be3e30".to_string()),
+                ..mkfile("/usr/sbin/mytool", 0o100755, 22)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        let line = results
+            .iter()
+            .find(|(n, _)| n == "duplicate-executable")
+            .map(|(_, l)| l.clone())
+            .expect("differing copies must fire");
+        assert!(
+            line.contains(
+                ": W: duplicate-executable mytool ['/usr/bin/mytool', '/usr/sbin/mytool']"
+            ),
+            "name, level and Python-list detail must match the reference, got: {line}"
+        );
+    }
+
+    #[test]
+    fn duplicate_executable_still_fires_when_digest_missing() {
+        // Fail closed: a copy without a header digest cannot be shown
+        // identical, so it fires.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/bin/mytool", 0o100755, 31)
+            },
+            mkfile("/usr/sbin/mytool", 0o100755, 32),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results.iter().any(|(n, _)| n == "duplicate-executable"),
+            "a missing digest must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_executable_quiet_for_identical_copies_keeps_man_page_check() {
+        // The gate silences only duplicate-executable: with a man page
+        // present the man-page check stays quiet too, and without one
+        // it still fires alongside the silenced duplicate.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/bin/mytool", 0o100755, 41)
+            },
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/sbin/mytool", 0o100755, 42)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results.iter().any(|(n, _)| n == "duplicate-executable"),
+            "identical copies must not fire: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("mytool")),
+            "the man-page check is independent of the gate: {results:?}"
         );
     }
 
