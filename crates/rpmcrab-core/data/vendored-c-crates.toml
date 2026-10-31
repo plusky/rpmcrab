@@ -1,9 +1,11 @@
 # Vendored C libraries behind Rust -sys crates, for BinariesCheck's
 # bundled-library-without-provides finding.
 #
-# Each entry names one -sys crate whose C library the openSUSE bundled
-# software policy wants declared as bundled(<srpm>): the crate itself
-# only ever earns a crate-level bundled(rust-crate:...) marker from
+# Each entry names one crate whose C library the openSUSE bundled
+# software policy wants declared as bundled(<srpm>): a -sys crate,
+# or openssl-src, the crate whose OpenSSL build openssl-sys's
+# `vendored` feature uses (always build kind in .dep-v0). The crate
+# itself only ever earns a crate-level bundled(rust-crate:...) marker from
 # cargo-packaging, which the maintenance query for bundled(<srpm>)
 # misses. A library joins this map one at a time, with a measured
 # witness: a byte string the library's code typically leaves in a
@@ -16,27 +18,28 @@
 #
 # The detail's remedies follow the fields below: it prescribes
 # linking the system library only where a system_soname_prefix is
-# recorded (the library has a system shared form to link) and the
+# recorded (the library has a system form the crate can link) and the
 # binary does not already link it, and a version only where a
 # c_version_source is recorded.
 #
 # Fields:
-#   name                  the -sys crate name in .dep-v0
+#   name                  the crate name in .dep-v0
 #   srpm                  the source RPM name the detail prescribes
 #   accepted_names        bundled() names that satisfy the finding
 #   system_soname_prefix  DT_NEEDED prefix of the system library: a
 #                         binary carrying it still fires while the
 #                         witness is present; the prefix only drops
 #                         the link remedy from the detail (absent: the
-#                         library has no system shared form to link)
+#                         library has no system form the crate can link)
 #   link_soname           the soname the detail names for that remedy
 #   witness               byte string proving the C code is linked
 #   c_version_source      where the C version comes from:
 #                         "embedded-version-string" (a dotted
 #                         version string standing alone in the
 #                         binary's data) or
-#                         "crate-build-metadata" (the +<lib>.X.Y.Z
-#                         build metadata of the crate version);
+#                         "crate-build-metadata" (the trailing
+#                         all-numeric dotted run of the crate
+#                         version's +build metadata);
 #                         absent: no version source, and the detail
 #                         prescribes no version
 #   embedded_version_major  for "embedded-version-string": the major
@@ -102,3 +105,22 @@ accepted_names = ["oniguruma", "libonig"]
 system_soname_prefix = "libonig.so."
 link_soname = "libonig.so.5"
 witness = "too big wide-char value"
+
+# openssl-src's `vendored` build compiles OpenSSL from the crate's
+# tarball: the default provider's name string is the witness (its site
+# is openssl/providers/defltprov.c:60 in openssl-src-300.6.1+3.6.3).
+# The public `OpenSSL X.Y.Z` version text is rejected as a witness: it
+# lands in dynamic libcrypto consumers too. The C version is the crate
+# version's build metadata (300.6.1+3.6.3 carries OpenSSL 3.6.3). In
+# the draws behind #1396, 15 of the 18 TW OSS binary packages carrying
+# bundled(rust-crate:openssl-src) have no Requires on the system
+# soname; the entry's own draw holds 8 listing ELFs, all build kind,
+# 4 witnessed without a system link.
+[[crate]]
+name = "openssl-src"
+srpm = "openssl-3"
+accepted_names = ["openssl-3", "openssl"]
+system_soname_prefix = "libcrypto.so."
+link_soname = "libcrypto.so.3"
+witness = "OpenSSL Default Provider"
+c_version_source = "crate-build-metadata"

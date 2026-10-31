@@ -306,7 +306,7 @@ package is rebuilt. Please rebuild the package with a Go toolchain
 at or above its release line's minimum.
 """
 bundled-library-without-provides="""
-The named binary links a vendored C library (the named -sys crate's
+The named binary links a vendored C library (the named crate's
 library) into itself, but the package declares no bundled() provide
 for that library under its source package name. The package's
 only marker, where it has one at all, is the crate-level
