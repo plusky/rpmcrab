@@ -24394,7 +24394,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let unit = unit_file(
             &dir,
             "/usr/lib/systemd/system/env.service",
-            "[Service]\\nExecStart=env FOO=bar /usr/bin/foo\\n",
+            "[Service]\nExecStart=env FOO=bar /usr/bin/foo\n",
         );
         let foo = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit, foo]);
@@ -24405,7 +24405,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let unit = unit_file(
             &dir,
             "/usr/lib/systemd/system/assign.service",
-            "[Service]\\nExecStart=FOO=bar /usr/bin/foo\\n",
+            "[Service]\nExecStart=FOO=bar /usr/bin/foo\n",
         );
         let foo = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit, foo]);
