@@ -1129,6 +1129,16 @@ mod tests {
         assert_eq!(excessive_suggests(&pkg).len(), 1, "{:?}", run(&pkg));
     }
 
+    // A rich Suggests naming another package's docs with a version
+    // is not the plain own-doc name, so it still fires.
+    #[test]
+    fn rich_versioned_other_suggests_still_fires() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.suggests = vec![dep("(third-theme-doc >= 2.0 and bar)", 0)];
+        assert_eq!(excessive_suggests(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
     // Near misses: a Suggests on a documentation package that is not
     // exactly the package's own -doc companion, a Suggests on the
     // package itself, and a versioned Suggests on another package's

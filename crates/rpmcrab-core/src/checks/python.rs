@@ -3663,6 +3663,18 @@ mod tests {
     }
 
     #[test]
+    fn pyc_multiple_versions_doc_first_site_last_ignored() {
+        // Order-neutral: a doc-tree cache first never sets an
+        // expectation, so a site-packages file after it stands
+        // alone and the mixed pair stays silent.
+        let got = pyc_multiple_version_lines(&[
+            "/usr/share/doc/packages/python314-mypy/docs/source/__pycache__/html_builder.cpython-313.pyc",
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/__init__.cpython-314.pyc",
+        ]);
+        assert!(got.is_empty(), "unexpected findings: {got:?}");
+    }
+
+    #[test]
     fn pyc_multiple_versions_doc_only_mixed_ignored() {
         // Doc-tree files alone never set an expectation, so mixed
         // doc-tree versions stay silent with no site file present.

@@ -1653,7 +1653,7 @@ impl PostCheck {
     /// absolute path (relative, a shell variable, a macro) cannot be
     /// proven private and counts as trigger-owned.
     fn cache_target_is_trigger_owned(args: &str) -> bool {
-        let mut tokens = args.split_whitespace().peekable();
+        let mut tokens = args.split_whitespace();
         let mut explicit_dir: Option<String> = None;
         let mut positional: Option<String> = None;
         while let Some(tok) = tokens.next() {
