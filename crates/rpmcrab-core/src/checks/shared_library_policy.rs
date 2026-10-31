@@ -1142,19 +1142,30 @@ impl Check for SharedLibraryPolicyCheck {
         // default), not the same conflict. Bitness is normalised
         // away by `soname_package_parts`, as in the obsoletes-sibling
         // arm, so a cross-bitness generation pair counts. Each
+        // Pairing is same-arch on top of that: the key carries
+        // the package arch, so a cross-arch pair stays quiet.
         // package in the conflicting set gets the finding, in
         // capture order, deduplicated per (package, arch, path).
         let candidates = std::mem::take(&mut self.etc_payload_candidates);
-        let mut numbers_by_stem_path: HashMap<(String, String), HashSet<String>> = HashMap::new();
+        let mut numbers_by_stem_path_arch: HashMap<(String, String, String), HashSet<String>> =
+            HashMap::new();
         for candidate in &candidates {
-            numbers_by_stem_path
-                .entry((candidate.stem.clone(), candidate.path.clone()))
+            numbers_by_stem_path_arch
+                .entry((
+                    candidate.stem.clone(),
+                    candidate.path.clone(),
+                    candidate.pkg_arch.clone(),
+                ))
                 .or_default()
                 .insert(candidate.number.clone());
         }
         let mut emitted: HashSet<(String, String, String)> = HashSet::new();
         for candidate in candidates {
-            let numbers = &numbers_by_stem_path[&(candidate.stem.clone(), candidate.path.clone())];
+            let numbers = &numbers_by_stem_path_arch[&(
+                candidate.stem.clone(),
+                candidate.path.clone(),
+                candidate.pkg_arch.clone(),
+            )];
             if numbers.len() < 2 {
                 continue;
             }
@@ -3250,7 +3261,9 @@ mod tests {
         // The merge path must carry etc-payload candidates, not just
         // seen records: a candidate dropped in export/import would
         // diverge -j runs from sequential runs silently, so the
-        // firing shape is the load-bearing half.
+        // firing shape is the load-bearing half, and the merged
+        // output set must equal the sequential run's (order is not
+        // part of the guarantee).
         let config = Config::default();
         let (_d0, pkg0) = etc_pkg("libfoo1", vec![etc_file("/etc/foo/foo.conf")]);
         let mut w0 = checker();
@@ -3272,6 +3285,22 @@ mod tests {
             etc_lines(&results).len(),
             2,
             "merged candidates must still fire: {results:?}"
+        );
+        // And the merged output set must equal the sequential run's:
+        // order is not part of the guarantee (sharded emission
+        // follows worker import order), so the comparison is on
+        // sorted sets.
+        let seq_results = etc_results_many(vec![
+            ("libfoo1", vec![etc_file("/etc/foo/foo.conf")]),
+            ("libfoo2", vec![etc_file("/etc/foo/foo.conf")]),
+        ]);
+        let mut seq_lines = etc_lines(&seq_results);
+        let mut merged_lines = etc_lines(&results);
+        seq_lines.sort_unstable();
+        merged_lines.sort_unstable();
+        assert_eq!(
+            merged_lines, seq_lines,
+            "merged output must equal sequential output: {results:?} vs {seq_results:?}"
         );
     }
 
@@ -3645,6 +3674,120 @@ mod tests {
         assert!(
             etc_lines(&results).is_empty(),
             "no-library package must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_paired_exclusions_stay_quiet() {
+        // Carried-over exclusions hold for pairs too: the
+        // materialised-only gate pairs generations, so each
+        // exclusion needs its paired pin, not just its single
+        // package one. Every pair below shares one path and stays
+        // quiet.
+        // Directory entries are shared by design.
+        let dir_entry = || PkgFile {
+            name: "/etc/foo/foo.conf".to_string(),
+            mode: 0o40755,
+            ..Default::default()
+        };
+        let results = etc_results_many(vec![
+            ("libfoo1", vec![dir_entry()]),
+            ("libfoo2", vec![dir_entry()]),
+        ]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "paired dir entries must stay quiet: {results:?}"
+        );
+        // Ghost entries are not shipped payload, alone or against a
+        // regular entry on the same path.
+        let ghost = || PkgFile {
+            flags: crate::pkg::pkgfile::RPMFILE_GHOST,
+            ..etc_file("/etc/foo/foo.conf")
+        };
+        let results = etc_results_many(vec![
+            ("libfoo1", vec![ghost()]),
+            ("libfoo2", vec![ghost()]),
+        ]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "paired ghost entries must stay quiet: {results:?}"
+        );
+        let results = etc_results_many(vec![
+            ("libfoo1", vec![ghost()]),
+            ("libfoo2", vec![etc_file("/etc/foo/foo.conf")]),
+        ]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "ghost-vs-regular pair must stay quiet: {results:?}"
+        );
+        // Self-named: libfoo1's own file is excluded, so the pair
+        // has only libfoo2's candidate and cannot fire.
+        let results = etc_results_many(vec![
+            ("libfoo1", vec![etc_file("/etc/ld.so.conf.d/libfoo1.conf")]),
+            ("libfoo2", vec![etc_file("/etc/ld.so.conf.d/libfoo1.conf")]),
+        ]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "self-named side of a pair must stay quiet: {results:?}"
+        );
+        // Name-population exclusions, both sides excluded.
+        for (a, b) in [
+            ("foo-daemon", "bar-daemon"),
+            ("libfoo1-devel", "libfoo2-devel"),
+            ("libfoo1-lang", "libfoo2-lang"),
+            ("libfoo", "libbar"),
+        ] {
+            let results = etc_results_many(vec![
+                (a, vec![etc_file("/etc/foo/foo.conf")]),
+                (b, vec![etc_file("/etc/foo/foo.conf")]),
+            ]);
+            assert!(
+                etc_lines(&results).is_empty(),
+                "paired {a}/{b} must stay quiet: {results:?}"
+            );
+        }
+        // No-library pairs: versioned names shipping no versioned
+        // library are not SONAME generations, even as a pair.
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = checker();
+        for name in ["libfoo1", "libfoo2"] {
+            let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+            let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture header");
+            pkg.name = name.to_string();
+            pkg.files = vec![etc_file("/etc/foo/foo.conf")];
+            pkg.requires = vec![];
+            check.check_binary(&pkg, &config, &mut out);
+        }
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            etc_lines(&results).is_empty(),
+            "paired no-library packages must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_cross_arch_generations_stay_quiet() {
+        // Pairing keys on (stem, path, arch), so generations on
+        // different architectures stay quiet over a shared path.
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = checker();
+        let (_d0, mut pkg0) =
+            etc_pkg("libfoo1", vec![etc_file("/etc/foo/foo.conf")]);
+        pkg0.arch = "x86_64".to_string();
+        check.check_binary(&pkg0, &config, &mut out);
+        let (_d1, mut pkg1) =
+            etc_pkg("libfoo2", vec![etc_file("/etc/foo/foo.conf")]);
+        pkg1.arch = "aarch64".to_string();
+        check.check_binary(&pkg1, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            etc_lines(&results).is_empty(),
+            "cross-arch pair must stay quiet: {results:?}"
         );
     }
 
