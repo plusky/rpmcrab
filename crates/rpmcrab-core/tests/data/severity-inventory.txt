@@ -300,6 +300,7 @@ python-pyc-multiple-versions = W
 python-require-floor-below-metadata = W
 python-require-unversioned-despite-metadata-floor = W
 python-require-upper-bound-contradicts-metadata = I
+python-rust-extension-without-auditable-data = W
 python-setup-install = W
 python-setup-test = W
 python-sitelib-glob-in-files = W

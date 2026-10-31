@@ -8263,6 +8263,53 @@ impl BinariesCheck {
         }
     }
 
+    /// A Rust Python extension module without cargo-auditable
+    /// `.dep-v0` data (plusky/rpmcrab#1395): it defines a `PyInit_*`
+    /// entry point, so it is a module maturin or setuptools-rust
+    /// built with plain `cargo`, and without the section no
+    /// `bundled(rust-crate:...)` provides are generated for the
+    /// crates it vendors. No declared `bundled()` provide silences
+    /// it: without `.dep-v0` there is nothing to check a
+    /// hand-written list against, and hand-written lists go stale.
+    /// The detail is the path only; the remedy lives in the
+    /// description.
+    fn check_python_rust_extension_auditable_data(
+        &self,
+        pkg: &Pkg,
+        pkgfile: &PkgFile,
+        info: &ReadelfInfo,
+        out: &mut Filter,
+    ) {
+        if !info.is_rust_binary() {
+            return;
+        }
+        if info.is_go_binary() || info.go_buildinfo {
+            return;
+        }
+        if info.is_debug {
+            return;
+        }
+        if info.elf_type != goblin::elf::header::ET_DYN {
+            return;
+        }
+        if info.sections.iter().flatten().any(|s| s.name == ".dep-v0") {
+            return;
+        }
+        let defines_pyinit = info.functions.iter().any(|f| {
+            f.starts_with("PyInit_") && !info.undefined_function_refs.iter().any(|u| u == f)
+        });
+        if !defines_pyinit {
+            return;
+        }
+        add_info(
+            out,
+            Level::Warning,
+            pkg,
+            "python-rust-extension-without-auditable-data",
+            &[&pkgfile.name],
+        );
+    }
+
     fn check_rpath(&self, pkg: &Pkg, pkgfile: &PkgFile, info: &ReadelfInfo, out: &mut Filter) {
         for runpaths in info.runpaths.iter().chain(info.rpaths.iter()) {
             // The reference readelf parser only records non-empty
@@ -8629,6 +8676,7 @@ impl BinariesCheck {
         self.check_security_functions(pkg, pkgfile, info, daemon_exec, out);
         self.check_go_toolchain(pkg, pkgfile, info, out);
         self.check_bundled_library_provides(pkg, pkgfile, info, out);
+        self.check_python_rust_extension_auditable_data(pkg, pkgfile, info, out);
         self.check_rpath(pkg, pkgfile, info, out);
         self.check_rpath_runpath(pkg, pkgfile, info, out);
         self.check_library_dependency(pkg, pkgfile, info, out);
@@ -26254,6 +26302,105 @@ description = "explicit priority string bypasses the system crypto policy"
             .into_iter()
             .map(str::to_owned)
             .collect()
+    }
+
+    /// Run `check_python_rust_extension_auditable_data` over a
+    /// synthetic package and file, returning the finding's rendered
+    /// lines.
+    fn py_ext_lines(pkg: &Pkg, info: &ReadelfInfo) -> Vec<String> {
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkgfile = syn_file(
+            "/usr/lib64/python3.14/site-packages/jiter/jiter.cpython-314-x86_64-linux-gnu.so",
+            "ELF 64-bit LSB shared object",
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_python_rust_extension_auditable_data(pkg, &pkgfile, info, &mut out);
+        let results = out.results().to_vec();
+        lines_for(&results, "python-rust-extension-without-auditable-data")
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn py_ext_info() -> ReadelfInfo {
+        // The jiter shape: a Rust shared object defining its
+        // module entry point, with no .dep-v0 section.
+        let mut info = syn_info();
+        info.is_rust = true;
+        info.elf_type = goblin::elf::header::ET_DYN;
+        info.functions = vec!["PyInit_jiter".to_string()];
+        info
+    }
+
+    #[test]
+    fn python_rust_extension_without_auditable_data_fires_once() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let lines = py_ext_lines(&pkg, &py_ext_info());
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: python-rust-extension-without-auditable-data /usr/lib64/python3.14/site-packages/jiter/jiter.cpython-314-x86_64-linux-gnu.so"
+            ],
+            "firing line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn python_rust_extension_quiet_with_dep_v0() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = py_ext_info();
+        info.sections = vec![vec![sec(".dep-v0")]];
+        assert!(py_ext_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn python_rust_extension_fires_despite_bundled_provides() {
+        // Provides never silence it: without .dep-v0 there is
+        // nothing to check a declared list against.
+        for name in ["rust-crate:serde", "crate(serde)", "sqlite3"] {
+            let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            pkg.provides = vec![bundled_provide(name)];
+            assert_eq!(
+                py_ext_lines(&pkg, &py_ext_info()).len(),
+                1,
+                "provide {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_rust_extension_quiet_shapes() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        // A C extension module: not Rust output.
+        let mut info = py_ext_info();
+        info.is_rust = false;
+        assert!(py_ext_lines(&pkg, &info).is_empty(), "C module");
+        // Executables and relocatables are not modules.
+        for e_type in [goblin::elf::header::ET_EXEC, goblin::elf::header::ET_REL] {
+            let mut info = py_ext_info();
+            info.elf_type = e_type;
+            assert!(py_ext_lines(&pkg, &info).is_empty(), "e_type {e_type}");
+        }
+        // PyInit_* only imported, not defined.
+        let mut info = py_ext_info();
+        info.undefined_function_refs = vec!["PyInit_jiter".to_string()];
+        assert!(py_ext_lines(&pkg, &info).is_empty(), "imported only");
+        // A Rust shared object without a module entry point.
+        let mut info = py_ext_info();
+        info.functions = vec!["rust_function".to_string()];
+        assert!(py_ext_lines(&pkg, &info).is_empty(), "no PyInit");
+        // A .debug file.
+        let mut info = py_ext_info();
+        info.is_debug = true;
+        assert!(py_ext_lines(&pkg, &info).is_empty(), "debug file");
+        // Go, by section and by buildinfo magic.
+        let mut info = py_ext_info();
+        info.sections = vec![vec![sec(".gopclntab")]];
+        assert!(py_ext_lines(&pkg, &info).is_empty(), "Go sections");
+        let mut info = py_ext_info();
+        info.go_buildinfo = true;
+        assert!(py_ext_lines(&pkg, &info).is_empty(), "Go buildinfo");
     }
 
     #[test]
