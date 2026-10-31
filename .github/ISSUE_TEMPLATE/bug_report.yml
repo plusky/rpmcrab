@@ -1,6 +1,5 @@
 name: Bug report
 description: Report incorrect rpmcrab behaviour
-title: ""
 labels: [bug]
 body:
   - type: markdown
