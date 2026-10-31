@@ -5621,9 +5621,10 @@ fn normalize_lexical(path: &str) -> String {
 }
 
 /// First whitespace-separated token of a systemd command line,
-/// honouring single/double quotes and backslash escapes. An
-/// unterminated quote or an empty line yields nothing.
-fn systemd_first_token(cmd: &str) -> Option<String> {
+/// honouring single/double quotes and backslash escapes, plus the
+/// remainder after it. An unterminated quote or an empty line
+/// yields nothing.
+fn systemd_next_token(cmd: &str) -> Option<(String, &str)> {
     let mut out = String::new();
     let mut chars = cmd.chars();
     let mut any = false;
@@ -5660,7 +5661,33 @@ fn systemd_first_token(cmd: &str) -> Option<String> {
             }
         }
     }
-    if any { Some(out) } else { None }
+    if any { Some((out, chars.as_str())) } else { None }
+}
+
+/// Program token of a systemd command line: the first token after
+/// leading `env` and `VAR=` assignments are skipped, mirroring the
+/// prefix skipping in PostCheck's line_feeds_shell. A line of only
+/// prefixes yields nothing.
+fn systemd_program_token(cmd: &str) -> Option<String> {
+    let mut rest = cmd;
+    loop {
+        let (tok, next) = systemd_next_token(rest)?;
+        if tok == "env" || is_env_assignment(&tok) {
+            rest = next;
+        } else {
+            return Some(tok);
+        }
+    }
+}
+
+/// An environment assignment word: contains `=` with a leading
+/// ASCII letter or underscore, as in line_feeds_shell.
+fn is_env_assignment(tok: &str) -> bool {
+    tok.contains('=')
+        && tok
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
 }
 
 /// Follow an in-package symlink chain from a normalized path.
@@ -5742,7 +5769,7 @@ fn resolve_exec_token(
                 None => (vec![], false),
             }
         } else {
-            (vec![normalize_usrmerge(&matches[0].name)], true)
+            (vec![normalize_usrmerge(&normalize_lexical(&matches[0].name))], true)
         }
     } else if matches.is_empty() {
         (vec![], true)
@@ -5799,7 +5826,7 @@ fn service_exec_binaries(
             binaries.clear();
             continue;
         }
-        let Some(token) = systemd_first_token(cmd) else {
+        let Some(token) = systemd_program_token(cmd) else {
             return (vec![], false);
         };
         let (mut bins, ok) = resolve_exec_token(&token, pkg, symlink_names, symlink_targets);
@@ -5815,8 +5842,9 @@ fn service_exec_binaries(
 }
 
 /// ExecStart binaries of one socket unit file, through its service:
-/// the `Service=` target when present, else the same-stem service,
-/// else the `@`-template for Accept=yes sockets. A service that is
+/// the `Service=` target when present, else the `@`-template before
+/// the same-stem service for Accept=yes sockets, else the same-stem
+/// service. A service that is
 /// not shipped by the package, or is a ghost entry, is
 /// unresolvable; a masked service starts nothing.
 fn socket_exec_binaries(
@@ -5824,6 +5852,7 @@ fn socket_exec_binaries(
     unit: &PkgFile,
     symlink_names: &HashSet<String>,
     symlink_targets: &HashMap<String, String>,
+    ghost_names: &HashSet<&str>,
 ) -> (Vec<String>, bool) {
     const UNIT_PRECEDENCE: [&str; 5] = [
         "/etc/systemd/system/",
@@ -5892,7 +5921,7 @@ fn socket_exec_binaries(
             }
         }
         let Some(svc) = found else { continue };
-        if svc.is_ghost() || pkg.ghost_files.iter().any(|g| g == &svc.name) {
+        if svc.is_ghost() || ghost_names.contains(svc.name.as_str()) {
             return (vec![], false);
         }
         if is_symlink(svc.mode) && svc.linkto == "/dev/null" {
@@ -5917,24 +5946,28 @@ fn daemon_exec_binaries(pkg: &Pkg) -> DaemonExec {
     let mut symlink_names: HashSet<String> = HashSet::new();
     for f in &pkg.files {
         if is_symlink(f.mode) {
-            symlink_names.insert(normalize_usrmerge(&f.name));
+            symlink_names.insert(normalize_usrmerge(&normalize_lexical(&f.name)));
             if !f.linkto.is_empty() {
-                symlink_targets.insert(normalize_usrmerge(&f.name), f.linkto.clone());
+                symlink_targets.insert(
+                    normalize_usrmerge(&normalize_lexical(&f.name)),
+                    f.linkto.clone(),
+                );
             }
         }
     }
+    let ghost_names: HashSet<&str> = pkg.ghost_files.iter().map(|g| g.as_str()).collect();
     let is_daemon_unit = |f: &PkgFile| {
         UNIT_DIRS.iter().any(|dir| f.name.starts_with(dir))
             && (f.name.ends_with(".service") || f.name.ends_with(".socket"))
             && !f.is_ghost()
-            && !pkg.ghost_files.iter().any(|g| g == &f.name)
+            && !ghost_names.contains(f.name.as_str())
             && !(is_symlink(f.mode) && f.linkto == "/dev/null")
     };
     for unit in pkg.files.iter().filter(|f| is_daemon_unit(f)) {
         let (bins, ok) = if unit.name.ends_with(".service") {
             service_exec_binaries(pkg, unit, &symlink_names, &symlink_targets)
         } else {
-            socket_exec_binaries(pkg, unit, &symlink_names, &symlink_targets)
+            socket_exec_binaries(pkg, unit, &symlink_names, &symlink_targets, &ghost_names)
         };
         if !ok {
             has_unresolvable = true;
@@ -24266,6 +24299,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let empty_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         let empty_targets: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let empty_ghosts: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
         // W1: lexical normalization precedes usrmerge, so
         // /usr/bin/../bin/x resolves to the usrmerged /usr/bin/x,
@@ -24297,6 +24331,30 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit, link, x]);
         let exec = daemon_exec_binaries(&pkg);
         assert!(exec.binaries.contains("/usr/bin/x"), "{exec:?}");
+
+        // Env-prefixed ExecStart: leading `env` and `VAR=`
+        // assignments are skipped, so the real binary is the
+        // started program.
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/env.service",
+            "[Service]\\nExecStart=env FOO=bar /usr/bin/foo\\n",
+        );
+        let foo = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit, foo]);
+        let exec = daemon_exec_binaries(&pkg);
+        assert!(exec.binaries.contains("/usr/bin/foo"), "{exec:?}");
+
+        // Assignment-only prefix, no `env` word.
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/assign.service",
+            "[Service]\\nExecStart=FOO=bar /usr/bin/foo\\n",
+        );
+        let foo = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit, foo]);
+        let exec = daemon_exec_binaries(&pkg);
+        assert!(exec.binaries.contains("/usr/bin/foo"), "{exec:?}");
 
         // W2: a service with no ExecStart line at all is
         // unresolvable (fail-open), not resolved-empty.
@@ -24333,7 +24391,7 @@ description = "explicit priority string bypasses the system crypto policy"
 
         // W5: with Accept=yes (and the wider boolean spellings) the
         // @-template is tried before the same-stem service.
-        for accept in ["yes", "on", "y", "t", "ON"] {
+        for accept in ["yes", "on", "y", "t", "ON", "true", "1"] {
             let svc = unit_file(
                 &dir,
                 "/usr/lib/systemd/system/w5.service",
@@ -24355,7 +24413,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 .iter()
                 .find(|f| f.name.ends_with("w5.socket"))
                 .unwrap();
-            let (bins, ok) = socket_exec_binaries(&pkg, sock, &empty_names, &empty_targets);
+            let (bins, ok) = socket_exec_binaries(&pkg, sock, &empty_names, &empty_targets, &empty_ghosts);
             assert!(ok, "Accept={accept} must resolve");
             assert_eq!(bins, vec!["/usr/bin/foobar".to_string()], "Accept={accept}");
         }
