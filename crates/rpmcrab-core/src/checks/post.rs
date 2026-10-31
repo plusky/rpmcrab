@@ -1413,16 +1413,26 @@ impl PostCheck {
                 None => return false,
             };
             let last = before.split([';', '|', '&', '(']).next_back().unwrap_or("");
-            let mut words = last
-                .split_whitespace()
-                .map(|w| w.trim_matches(|c| c == '"' || c == '\''));
-            let mut word = match words.next() {
+            fn trim(w: &str) -> &str {
+                w.trim_matches(['"', '\''].as_slice())
+            }
+            let mut words: std::collections::VecDeque<&str> =
+                last.split_whitespace().map(trim).collect();
+            let mut word = match words.pop_front() {
                 Some(w) => w,
                 None => return false,
             };
+            // Whether a word is a `VAR=` assignment prefix: an
+            // alphabetic-or-underscore-led word containing `=`.
+            let is_assign = |w: &str| {
+                w.contains('=')
+                    && w.chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            };
             'outer: loop {
                 if matches!(word, "then" | "do" | "else" | "!") {
-                    word = match words.next() {
+                    word = match words.pop_front() {
                         Some(w) => w,
                         None => return false,
                     };
@@ -1432,20 +1442,20 @@ impl PostCheck {
                 // if/elif/while/until condition is executed, so a
                 // heredoc fed to it is shell-fed like an if body.
                 if matches!(word, "if" | "elif" | "while" | "until") {
-                    word = match words.next() {
+                    word = match words.pop_front() {
                         Some(w) => w,
                         None => return false,
                     };
                     continue;
                 }
                 if word == "time" {
-                    word = match words.next() {
+                    word = match words.pop_front() {
                         Some(w) => w,
                         None => return false,
                     };
                     // `time -p` (and other time flags) precede the command.
                     while word.starts_with('-') {
-                        word = match words.next() {
+                        word = match words.pop_front() {
                             Some(w) => w,
                             None => return false,
                         };
@@ -1453,55 +1463,130 @@ impl PostCheck {
                     continue;
                 }
                 if word == "env" {
-                    word = match words.next() {
+                    word = match words.pop_front() {
                         Some(w) => w,
                         None => return false,
                     };
-                    // `env` flags precede the command. Most are one
-                    // word (`-i`, `--opt=value`); `-u`, `-C`, `-S`,
-                    // `--unset`, `--chdir`, `--split-string`,
-                    // `--default-signal` and `--block-signal` take a
-                    // separate argument, which is skipped too; `--`
-                    // ends flag parsing and the next word is the
-                    // command verbatim. A lone `-` is not a flag.
-                    while word.starts_with('-') && word.len() > 1 {
-                        if word == "--" {
-                            word = match words.next() {
+                    // `env` flags precede the command. GNU env
+                    // semantics, verified against the system env:
+                    // `-u`, `-C`, `-a`, `--unset`, `--chdir` and
+                    // `--argv0` take a separate argument, which is
+                    // skipped; the `=value` and attached short
+                    // forms consume nothing further.
+                    // `--default-signal` and `--block-signal` take
+                    // only an attached `=value` argument, so a
+                    // following word is never their argument.
+                    // `-S`/`--split-string` insert their argument's
+                    // words into argv, so a separate-form argument
+                    // flows through the same flag, assignment and
+                    // command logic as the following words, while
+                    // an attached value's words are prepended.
+                    // Bundled short flags parse left-to-right: a
+                    // takes-argument short consumes the rest of the
+                    // bundle as its value, or the next word when
+                    // last in the bundle. `--` and a lone `-` end
+                    // flag parsing; assignments still precede the
+                    // command after them.
+                    while word == "-" || (word.starts_with('-') && word.len() > 1) {
+                        if word == "--" || word == "-" {
+                            word = match words.pop_front() {
                                 Some(w) => w,
                                 None => return false,
                             };
+                            while is_assign(word) {
+                                word = match words.pop_front() {
+                                    Some(w) => w,
+                                    None => return false,
+                                };
+                            }
                             break 'outer;
                         }
-                        let takes_arg = matches!(
-                            word,
-                            "-u" | "-C"
-                                | "-S"
-                                | "--unset"
-                                | "--chdir"
-                                | "--split-string"
-                                | "--default-signal"
-                                | "--block-signal"
-                        );
-                        word = match words.next() {
+                        if word.starts_with("--") {
+                            if let Some((opt, val)) = word.split_once('=') {
+                                if opt == "--split-string" {
+                                    for w in val
+                                        .split_whitespace()
+                                        .map(trim)
+                                        .collect::<Vec<_>>()
+                                        .into_iter()
+                                        .rev()
+                                    {
+                                        words.push_front(w);
+                                    }
+                                }
+                                word = match words.pop_front() {
+                                    Some(w) => w,
+                                    None => return false,
+                                };
+                                continue;
+                            }
+                            match word {
+                                "--unset" | "--chdir" | "--argv0" => {
+                                    if words.pop_front().is_none() {
+                                        return false;
+                                    }
+                                    word = match words.pop_front() {
+                                        Some(w) => w,
+                                        None => return false,
+                                    };
+                                }
+                                // `--split-string` (separate form),
+                                // `--default-signal` and
+                                // `--block-signal` take no separate
+                                // argument; any other long flag is
+                                // skipped permissively.
+                                _ => {
+                                    word = match words.pop_front() {
+                                        Some(w) => w,
+                                        None => return false,
+                                    };
+                                }
+                            }
+                            continue;
+                        }
+                        // Short-option bundle, e.g. `-iu`: parse
+                        // left-to-right. A takes-argument short
+                        // consumes the rest of the bundle, or the
+                        // next word when last in the bundle; `-S`
+                        // prepends its attached value's words.
+                        let bundle = &word[1..];
+                        let chars: Vec<(usize, char)> = bundle.char_indices().collect();
+                        let mut skip_next = false;
+                        let mut prepend: Vec<&str> = Vec::new();
+                        for (ci, (_, c)) in chars.iter().enumerate() {
+                            match c {
+                                'u' | 'C' | 'a' => {
+                                    if ci + 1 >= chars.len() {
+                                        skip_next = true;
+                                    }
+                                    break;
+                                }
+                                'S' => {
+                                    if ci + 1 < chars.len() {
+                                        let byte_idx = chars[ci].0 + c.len_utf8();
+                                        let val = &bundle[byte_idx..];
+                                        prepend = val.split_whitespace().map(trim).collect();
+                                    }
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                        for w in prepend.into_iter().rev() {
+                            words.push_front(w);
+                        }
+                        if skip_next && words.pop_front().is_none() {
+                            return false;
+                        }
+                        word = match words.pop_front() {
                             Some(w) => w,
                             None => return false,
                         };
-                        if takes_arg {
-                            word = match words.next() {
-                                Some(w) => w,
-                                None => return false,
-                            };
-                        }
                     }
                     continue;
                 }
-                if word.contains('=')
-                    && word
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                {
-                    word = match words.next() {
+                if is_assign(word) {
+                    word = match words.pop_front() {
                         Some(w) => w,
                         None => return false,
                     };
@@ -3639,6 +3724,58 @@ mod tests {
                 .any(|(_, f, _)| f == "dangerous-command-in-%post"),
             "piped-to-shell body stays blanked: {found:?}"
         );
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_env_forms() {
+        // GNU env flag forms feeding a shell: separate-argument
+        // `-a`/`--argv0`, bundled takes-argument shorts, `-S` /
+        // `--split-string` (whose words join argv), the
+        // no-separate-argument `--default-signal` /
+        // `--block-signal`, and the `-` / `--` terminators (with
+        // assignments still preceding the command after them).
+        for script in [
+            "env -a MYNAME sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --argv0 MYNAME sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -aNAME sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --argv0=NAME sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -iu FOO sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -uFOO sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -S sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --split-string sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --split-string=sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -S \"sh -c\" <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --default-signal sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --block-signal sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env - sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env - FOO=bar sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -- FOO=bar sh <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "shell-fed body must fire: {script}"
+            );
+        }
+        // The split-string words are argv: their first word is the
+        // command, so a non-shell first word stays blanked, as does
+        // a flag left without any command.
+        for script in [
+            "env -S FOO sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -Sfoo sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -uFOO <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -iu <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "non-shell env body stays blanked: {script}"
+            );
+        }
     }
 
     #[test]

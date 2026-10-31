@@ -525,6 +525,10 @@ impl Check for SystemdInstallCheck {
         // candidate. A link resolving to no shipped regular file (dangling,
         // cyclic, or a mask link to /dev/null) names no evaluable unit and
         // is skipped; the dangling-symlink findings own that defect.
+        // The gate is path match plus type: a candidate that is
+        // neither a regular file nor a symlink -- a directory carrying
+        // a unit suffix, directly or reached through a symlink -- is
+        // not a unit and is skipped.
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut units: Vec<(String, bool)> = Vec::new();
         for file in &pkg.files {
@@ -533,12 +537,16 @@ impl Check for SystemdInstallCheck {
             }
             let candidate = if is_symlink(file.mode) {
                 match pkg.readlink(file) {
-                    Some(target) if is_match(unit_re, &target.name) => target,
+                    Some(target) if is_reg(target.mode) && is_match(unit_re, &target.name) => {
+                        target
+                    }
                     Some(target) if is_reg(target.mode) => file,
                     _ => continue,
                 }
-            } else {
+            } else if is_reg(file.mode) {
                 file
+            } else {
+                continue;
             };
             if !seen.insert(candidate.name.as_str()) {
                 continue;
@@ -561,8 +569,9 @@ impl Check for SystemdInstallCheck {
         // target resolves within the package. A regular file in a
         // wants or requires directory, a link outside the unit
         // directory, a link nested below a wants or requires
-        // directory, and a link resolving to no shipped file earn
-        // no credit. The credit is keyed by the link's basename:
+        // directory, a link in a bare `.wants`/`.requires`
+        // container with no unit stem, and a link resolving to no
+        // shipped file earn no credit. The credit is keyed by the link's basename:
         // systemd enables the name the link carries, so a link
         // for another unit never credits this one. With no units
         // found, there is nothing to credit.
@@ -576,17 +585,30 @@ impl Check for SystemdInstallCheck {
                 }
                 // Parent-directory scope: the link must sit directly in
                 // a `.wants` or `.requires` directory directly under
-                // the unit directory; a `.wants`/`.requires` segment
-                // deeper in the path earns nothing.
+                // the unit directory, with a non-empty unit stem
+                // before the suffix; a `.wants`/`.requires` segment
+                // deeper in the path earns nothing, and neither does
+                // a bare `.wants`/`.requires` container or an empty
+                // link basename.
                 let Some((parent, link_basename)) = file.name.rsplit_once('/') else {
                     continue;
                 };
+                if link_basename.is_empty() {
+                    continue;
+                }
                 let Some(wants_dir) = parent.strip_prefix(&unit_prefix) else {
                     continue;
                 };
-                if wants_dir.contains('/')
-                    || !(wants_dir.ends_with(".wants") || wants_dir.ends_with(".requires"))
-                {
+                if wants_dir.contains('/') {
+                    continue;
+                }
+                let Some(stem) = wants_dir
+                    .strip_suffix(".wants")
+                    .or_else(|| wants_dir.strip_suffix(".requires"))
+                else {
+                    continue;
+                };
+                if stem.is_empty() {
                     continue;
                 }
                 if pkg.readlink(file).is_some() {
@@ -1556,6 +1578,85 @@ mod tests {
             link(
                 &format!("{UNIT}/multi-user.target.wants/sub/want720.service"),
                 "../../want720.service",
+            ),
+        ]));
+        let results = run(&pkg);
+        assert_eq!(results.len(), 4, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "want720.service"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn unit_suffixed_directory_is_not_a_unit() {
+        // The candidate gate is path match plus type: a directory
+        // carrying a unit suffix directly under the unit directory
+        // is not a unit and earns no findings.
+        let pkg = alias_pkg(Some(vec![PkgFile {
+            name: format!("{UNIT}/dirunit.service"),
+            mode: 0o040755,
+            ..Default::default()
+        }]));
+        let results = run(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(_, line)| line.contains("dirunit.service")),
+            "directory candidate must earn nothing: {results:?}"
+        );
+    }
+
+    #[test]
+    fn symlink_to_unit_suffixed_directory_is_not_a_unit() {
+        // The first alias arm needs a regular target: a symlink to
+        // a unit-named directory earns nothing for either name. The
+        // control arm proves same-dir relative resolution works in
+        // this harness, so the directory arm's silence is the type
+        // check, not a failed resolution.
+        let control = alias_pkg(Some(vec![
+            link(&format!("{UNIT}/alias.service"), "target.service"),
+            reg(&format!("{UNIT}/target.service")),
+        ]));
+        let control_results = run(&control);
+        assert!(
+            control_results
+                .iter()
+                .any(|(_, line)| line.contains("target.service")),
+            "control alias must evaluate its target: {control_results:?}"
+        );
+        let pkg = alias_pkg(Some(vec![
+            link(&format!("{UNIT}/alias.service"), "dirtarget.service"),
+            PkgFile {
+                name: format!("{UNIT}/dirtarget.service"),
+                mode: 0o040755,
+                ..Default::default()
+            },
+        ]));
+        let results = run(&pkg);
+        assert!(
+            !results
+                .iter()
+                .any(|(_, line)| line.contains("alias.service")
+                    || line.contains("dirtarget.service")),
+            "symlink-to-directory candidate must earn nothing: {results:?}"
+        );
+    }
+
+    #[test]
+    fn bare_wants_container_does_not_credit() {
+        // A link in a bare `.wants` container -- no unit stem before
+        // the suffix -- is not directly in a unit's wants directory,
+        // so it earns no credit even though its target is shipped.
+        let pkg = alias_pkg(Some(vec![
+            reg(&format!("{UNIT}/want720.service")),
+            link(
+                &format!("{UNIT}/.wants/want720.service"),
+                "../want720.service",
             ),
         ]));
         let results = run(&pkg);
