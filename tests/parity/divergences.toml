@@ -1375,6 +1375,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/582"
 
 [[divergence]]
 case = "global"
+check = "non-standard-dir-in-var"
+kind = "behaviour"
+reason = "FHSCheck's standard /var list additionally treats adm as standard: /var/adm is the OS's own admin directory, shipped by the filesystem package itself and hosting SUSE's fillup templates (/var/adm/fillup-templates), so no package-side remedy exists for shipping it. The reference emits the warning for /var/adm. Measured on the 2026-10-29 TW-oss snapshot (52,988 packages): the audited row collapses from 15 findings in 15 packages to 1 (samba-client's /var/samba, the only clearly package-side case)."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "FileDigestCheck"
 kind = "detail"
 reason = "File digest finding details are byte-identical to the reference except `{type}-file-parse-error`, which renders the Rust `std::io::Error` text where the reference interpolates its own OS-error wording, and the `file-digest-mismatch` group-sibling case (issue #755), which has its own behaviour divergence entry; `whitelisted-file-missing` matches in detail (its severity is the FileDigestCheck severity divergence)."
