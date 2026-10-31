@@ -39,10 +39,10 @@ impl KMPPolicyCheck {
     /// Whether the kernel flavor appears as a non-first member of a
     /// conjunction supplement: `(a and kernel-flavor ...)` or
     /// `packageand(a:kernel-flavor ...)`. Conjunctions commute, so the
-    /// flavor counts in any position; the flavor-first forms keep
-    /// their existing prefix credit at the call site. Members compare
-    /// exactly, so lookalikes such as `(kernel-flavorfoo and a)` do
-    /// not credit.
+    /// flavor counts in any position. Members compare exactly, so
+    /// lookalikes such as `(kernel-flavorfoo and a)` do not credit.
+    /// First-member forms are handled by
+    /// `has_kernel_flavor_first_member`.
     fn has_kernel_flavor_later_member(supplement: &str, kernel_flavor: &str) -> bool {
         if let Some(inner) = supplement.strip_prefix('(') {
             let inner = inner.strip_suffix(')').unwrap_or(inner);
@@ -55,6 +55,33 @@ impl KMPPolicyCheck {
             let inner = inner.strip_suffix(')').unwrap_or(inner);
             let members: Vec<&str> = inner.split(':').map(str::trim).collect();
             if members.len() > 1 && members[1..].contains(&kernel_flavor) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether the kernel flavor is the first member of a conjunction
+    /// supplement: `(kernel-flavor and ...)` or
+    /// `packageand(kernel-flavor:...)`. The first member compares
+    /// exactly, so prefix lookalikes such as
+    /// `packageand(kernel-flavorfoo:...)` or `(kernel-flavor andfoo)`
+    /// do not credit. The parenthesised form still requires a
+    /// conjunction (more than one member), matching the previous
+    /// prefix arm; the `packageand` form keeps crediting an exact
+    /// single member, as the previous prefix arm did.
+    fn has_kernel_flavor_first_member(supplement: &str, kernel_flavor: &str) -> bool {
+        if let Some(inner) = supplement.strip_prefix('(') {
+            let inner = inner.strip_suffix(')').unwrap_or(inner);
+            let members: Vec<&str> = inner.split(" and ").map(str::trim).collect();
+            if members.len() > 1 && members[0] == kernel_flavor {
+                return true;
+            }
+        }
+        if let Some(inner) = supplement.strip_prefix("packageand(") {
+            let inner = inner.strip_suffix(')').unwrap_or(inner);
+            let members: Vec<&str> = inner.split(':').map(str::trim).collect();
+            if !members.is_empty() && members[0] == kernel_flavor {
                 return true;
             }
         }
@@ -133,8 +160,7 @@ impl Check for KMPPolicyCheck {
                 have_modalias = true;
                 continue;
             }
-            if s.name.starts_with(&format!("packageand({kernel_flavor}"))
-                || s.name.starts_with(&format!("({kernel_flavor} and"))
+            if Self::has_kernel_flavor_first_member(&s.name, &kernel_flavor)
                 || Self::has_kernel_flavor_later_member(&s.name, &kernel_flavor)
             {
                 have_proper_suppl = true;
@@ -413,6 +439,44 @@ mod tests {
         assert_eq!(
             has(&results, "kmp-excessive-supplements").len(),
             2,
+            "{results:?}"
+        );
+    }
+
+    // The flavor-first arms used to match by prefix:
+    // `packageand(kernel-defaultfoo:...)` starts with
+    // `packageand(kernel-default`, and `(kernel-default andfoo)`
+    // starts with `(kernel-default and`. First members now compare
+    // exactly, so both fire.
+    #[test]
+    fn kmp_flavor_prefix_lookalike_first_member_still_fires() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "supplements-kmp-default".to_string();
+        pkg.requires = vec![dep("kernel-default")];
+        pkg.enhances = vec![dep("kernel-default")];
+        pkg.supplements = vec![
+            dep("packageand(kernel-defaultfoo:bar)"),
+            dep("(kernel-default andfoo)"),
+        ];
+        let results = run(&pkg);
+        assert_eq!(
+            has(&results, "kmp-excessive-supplements").len(),
+            2,
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn kmp_flavor_prefix_lookalike_longterm_still_fires() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "supplements-kmp-longterm".to_string();
+        pkg.requires = vec![dep("kernel-longterm")];
+        pkg.enhances = vec![dep("kernel-longterm")];
+        pkg.supplements = vec![dep("packageand(kernel-longtermfoo:bar)")];
+        let results = run(&pkg);
+        assert_eq!(
+            has(&results, "kmp-excessive-supplements").len(),
+            1,
             "{results:?}"
         );
     }
