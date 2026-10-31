@@ -66,3 +66,10 @@ check = "DocCheck"
 kind = "behaviour"
 reason = "package-with-huge-docs is skipped for fourteen individual pure-documentation packages: books, c-intro-and-ref-pdf, docbook-tdg, fhs, grub2, gtk2-engines, myspell-de, myspell-en, openmpi4-testsuite, php8-test, release-notes-openSUSE, tuxpaint-stamps, xemacs-info, xemacs-packages-info. Each package's RPM header shows zero non-doc regular files: books carries twelve %doc PDFs; c-intro-and-ref-pdf a single PDF; docbook-tdg the guide HTML tree and PDFs; fhs the specification document; grub2 and gtk2-engines only changelog and readme docs with their functional payload in subpackages; myspell-de and myspell-en only licence and readme docs with dictionaries in per-locale subpackages; openmpi4-testsuite and php8-test only test logs; release-notes-openSUSE the release-notes tree; tuxpaint-stamps only changelog and licence docs with stamps in per-category subpackages; xemacs-info and xemacs-packages-info only GNU info files. A -doc split would move the package's entire payload, so the remedy does not apply. The exemption applies only when the package carries no non-doc regular file: a functional package sharing an exact name keeps firing. Measured on the Factory corpus: exempting the fourteen removes 14 of the 271 remaining findings, 0 added."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "doc-file-dependency"
+kind = "behaviour"
+reason = "doc-file-dependency fires for a dependency of a doc file that the requires side does not cover by exact name. The requires side is the package Provides, every shipped file path, the explicit package-level Requires chained with Prereq (find-requires-generated entries excluded, like the reference get_core_reqs), plus the requires of every non-doc file. Requires and Prereq cover identically: the chain makes no distinction between them. Coverage is by exact name only: a lookalike core entry, a dot-less core entry for a dotted dep, and a dotted core entry for a dot-less dep all leave the dep reported. Pinned by doc_file_dependencies_requires_side_lookalikes_do_not_cover in doc.rs."
+since = "0.4.1"

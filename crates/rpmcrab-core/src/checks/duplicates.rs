@@ -778,6 +778,29 @@ mod tests {
     }
 
     #[test]
+    fn digest_less_hardlink_pair_stays_quiet() {
+        // The digest-less skip runs before inode grouping, so a
+        // hardlink pair with unknown digests earns neither a
+        // duplicate nor a hardlink finding, even though inode
+        // equality alone proves the same content. Disclosed in the
+        // DuplicatesCheck ledger entry; narrowing the skip to
+        // content grouping would report hardlinks the reference
+        // (md5-first grouping) does not.
+        let mut a = pkgfile("/usr/bin/a", "aaa", 100, 1);
+        let mut b = pkgfile("/opt/bin/b", "aaa", 100, 1);
+        a.md5 = None;
+        b.md5 = Some(String::new());
+        let files = [a, b];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        let findings =
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist);
+        assert!(
+            findings.is_empty(),
+            "digest-less hardlink pair must stay quiet: {findings:?}"
+        );
+    }
+
+    #[test]
     fn get_topdir_cases() {
         assert_eq!(DuplicatesCheck::get_topdir("/usr/bin/foo"), "/usr");
         assert_eq!(

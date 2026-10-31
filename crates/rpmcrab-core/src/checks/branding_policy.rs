@@ -360,14 +360,20 @@ impl Check for BrandingPolicyCheck {
         // A Suggests on the package's own documentation subpackage is
         // self-documentation, not a dependency on other software: it
         // pulls in nothing but the package's own docs, and a Suggests
-        // is not installed by default. The exemption is
-        // plain-exact-name-only: the Suggests name must equal
-        // `<pkg>-doc` exactly, and a version on it changes nothing;
-        // a rich Suggests naming own-doc plus anything else still
-        // fires. Any other Suggests still fires.
+        // is not installed by default. The exemption covers every
+        // form whose leaves are exactly `<pkg>-doc`: the plain name,
+        // a versioned plain name, and a rich Suggests naming only
+        // own-doc in any versioned form. A rich Suggests naming
+        // own-doc plus anything else still fires, as does any other
+        // Suggests.
         let own_doc = format!("{}-doc", pkg.name);
         for r in &pkg.suggests {
-            if r.name == own_doc {
+            // Parsed leaves, not `DepInfo::leaves`: a single-term
+            // parenthesis collapses to a `Simple` whose
+            // `DepInfo::leaves` reports the raw parenthesised string,
+            // while the parsed tree names the term itself.
+            let leaves = parse_dep_expr(&r.name).leaves();
+            if !leaves.is_empty() && leaves.iter().all(|l| l.name == own_doc) {
                 continue;
             }
             add_info(
@@ -1129,15 +1135,15 @@ mod tests {
         assert_eq!(excessive_suggests(&pkg).len(), 1, "{:?}", run(&pkg));
     }
 
-    // A rich Suggests naming only own-doc, with a version, is not
-    // the plain own-doc name either: the exemption is
-    // plain-exact-name-only, so it still fires.
+    // A rich Suggests naming only own-doc, with a version, pulls
+    // in nothing but the package's own docs, so it is quiet like
+    // the plain and versioned plain forms.
     #[test]
-    fn rich_versioned_own_doc_suggests_still_fires() {
+    fn rich_versioned_own_doc_suggests_is_quiet() {
         let mut pkg = fixture_pkg();
         pkg.name = "bla-theme-openSUSE".to_string();
         pkg.suggests = vec![dep("(bla-theme-openSUSE-doc >= 1.0)", 0)];
-        assert_eq!(excessive_suggests(&pkg).len(), 1, "{:?}", run(&pkg));
+        assert!(excessive_suggests(&pkg).is_empty(), "{:?}", run(&pkg));
     }
 
     // A rich Suggests naming another package's docs with a version

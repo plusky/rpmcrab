@@ -370,6 +370,49 @@ impl Check for DocCheck {
 mod tests {
     use super::*;
 
+    #[test]
+    fn doc_file_dependencies_requires_side_lookalikes_do_not_cover() {
+        // The requires side (package Requires/Prereq plus non-doc
+        // requires, seeded as core_provides) covers a doc-file dep
+        // by exact name only: a lookalike core entry, a dot-less
+        // core entry for a dotted doc dep, and a dotted core entry
+        // for a dot-less doc dep all leave the doc dep reported.
+        let doc_files = ["/usr/share/doc/pkg/README"];
+        let all_files = ["/usr/share/doc/pkg/README"];
+        let requires_of = |n: &str| match n {
+            "/usr/share/doc/pkg/README" => vec!["foo".to_string(), "foo.so.1".to_string()],
+            _ => vec![],
+        };
+        // Lookalike core entries cover neither dep.
+        let core: BTreeSet<String> = ["foo-doc", "libfoo"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let found = DocCheck::doc_file_dependencies(&doc_files, &all_files, &requires_of, &core);
+        assert_eq!(found.len(), 2, "{found:?}");
+        // A dot-less core entry covers the dot-less dep only, not
+        // the dotted doc dep.
+        let core: BTreeSet<String> = ["foo"].iter().map(|s| s.to_string()).collect();
+        let found = DocCheck::doc_file_dependencies(&doc_files, &all_files, &requires_of, &core);
+        assert_eq!(
+            found,
+            vec![(
+                "/usr/share/doc/pkg/README".to_string(),
+                "foo.so.1".to_string()
+            )],
+            "{found:?}"
+        );
+        // A dotted core entry covers neither dep: it is neither
+        // the dot-less dep nor the dotted one.
+        let core: BTreeSet<String> = ["foo.so"].iter().map(|s| s.to_string()).collect();
+        let found = DocCheck::doc_file_dependencies(&doc_files, &all_files, &requires_of, &core);
+        assert_eq!(found.len(), 2, "{found:?}");
+        // Control: exact core entries cover both deps.
+        let core: BTreeSet<String> = ["foo", "foo.so.1"].iter().map(|s| s.to_string()).collect();
+        let found = DocCheck::doc_file_dependencies(&doc_files, &all_files, &requires_of, &core);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
     fn mode_of(reg_exec: bool) -> u32 {
         if reg_exec { 0o100755 } else { 0o100644 }
     }
