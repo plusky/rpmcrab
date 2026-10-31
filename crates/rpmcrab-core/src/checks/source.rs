@@ -17,17 +17,212 @@
 
 use fancy_regex::Regex;
 
-use crate::check::{Check, add_info};
+use crate::check::{Check, add_info, make_finding};
 use crate::checks::is_match;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
 use crate::pkg::Pkg;
+use crate::pkg::pkgfile::{PkgFile, is_reg};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+
+use crate::checks::shared::{binary_source_key, is_ghost_file, source_package_keys};
 
 pub struct SourceCheck {
     compress_ext: String,
     valid_src_perms: Vec<u128>,
     ext_magic: Vec<(String, String, Regex)>,
+    shipped: ShippedState,
+}
+
+/// One source copy behind a digest: what the shipped file is, where it
+/// comes from, and whether every directory in its path chain is a test
+/// directory (the test-data quieting judges copies, not digests).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceRecord {
+    kind: String,
+    display: String,
+    test: bool,
+}
+
+/// One binary payload file that could match a source record: its digest
+/// (the header digest when FILEDIGESTALGO is 8, else a sha256 computed
+/// over the file), its payload path, and the package and arch that ship
+/// it, so `after_checks` can name the reporting package.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BinaryRecord {
+    digest: String,
+    path: String,
+    pkg_name: String,
+    arch: String,
+}
+
+/// Run-scoped state for `prebuilt-binary-shipped`: source records keyed
+/// by source-package spelling and digest, and binary records in lint
+/// order. Moved whole by `export_state` / `import_state` like
+/// `CMakeConfigCheck`'s state.
+#[derive(Default)]
+struct ShippedState {
+    sources: HashMap<String, HashMap<String, Vec<SourceRecord>>>,
+    binaries: Vec<(String, BinaryRecord)>,
+}
+
+/// Whether any directory component of a display path chain is a test
+/// directory: the chain joins members with `": "`, so it is split on
+/// both separators, and only non-final components count -- a file named
+/// `test` is not a test directory.
+fn is_test_path(path: &str) -> bool {
+    let flat = path.replace(": ", "/");
+    let parts: Vec<&str> = flat.split('/').collect();
+    parts[..parts.len().saturating_sub(1)]
+        .iter()
+        .any(|c| matches!(*c, "test" | "tests" | "testdata"))
+}
+
+/// The kind string of an archive record: the archive holds `n` hits.
+fn archive_kind(n: usize) -> String {
+    if n == 1 {
+        "archive with 1 hit".to_string()
+    } else {
+        format!("archive with {n} hits")
+    }
+}
+
+/// Hex sha256 of `data`.
+fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+}
+
+/// Hex sha256 of a file's bytes, or `None` when it cannot be read.
+fn sha256_file(path: &str) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+    )
+}
+
+/// The digest a binary payload file joins on: the header digest when
+/// FILEDIGESTALGO is 8, else a sha256 computed over the file (a header
+/// digest under any other algorithm cannot join with sha256 source
+/// records). `None` when the file cannot be hashed.
+fn binary_digest(algo_is_8: bool, md5: &str, path: &str) -> Option<String> {
+    if algo_is_8 {
+        return Some(md5.to_string());
+    }
+    sha256_file(path)
+}
+
+/// Whether a payload file's first 512 bytes could match a source
+/// record: a hit-kind header, a `.pyc`/`.pyo` name, or a compression
+/// or ustar header the source walk opens. The bytes are read from the
+/// file itself, never trusted from the header: rpmcrab clears the
+/// magic of compressed files.
+fn payload_could_match(name: &str, head: &[u8]) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".pyc") || lower.ends_with(".pyo") {
+        return true;
+    }
+    if head.starts_with(b"\x7fELF")
+        || head.starts_with(b"\xca\xfe\xba\xbe")
+        || head.starts_with(b"PK\x03\x04")
+        || head.starts_with(b"!<arch>\n")
+        || head.starts_with(b"!<thin>\n")
+        || head.starts_with(b"MZ")
+        || head.starts_with(b"\0asm")
+        || head.starts_with(b"\xfe\xed\xfa\xce")
+        || head.starts_with(b"\xfe\xed\xfa\xcf")
+        || head.starts_with(b"\xce\xfa\xed\xfe")
+        || head.starts_with(b"\xcf\xfa\xed\xfe")
+        || head.starts_with(b"\xed\xab\xee\xdb")
+        || head.starts_with(b"\x1f\x8b")
+        || head.starts_with(b"\xfd7zXZ\x00")
+        || head.starts_with(b"\x28\xb5\x2f\xfd")
+        || head.starts_with(b"BZh")
+    {
+        return true;
+    }
+    head.len() >= 262 && &head[257..262] == b"ustar"
+}
+
+/// Record one source file's walk for the run-scoped join: every hit
+/// member, every nested archive holding hits, and the top-level Source
+/// itself when it holds hits without being a hit itself (a bare binary
+/// Source needs no second record: the hit already covers its bytes).
+/// Records land under every spelling of the source package, so a
+/// binary's `SOURCERPM` joins whichever spelling it carries.
+fn record_shipped_source(
+    state: &mut ShippedState,
+    pkg: &Pkg,
+    f: &PkgFile,
+    data: &[u8],
+    hits: &[prebuilt::Hit],
+    archives: &[prebuilt::ArchiveHits],
+) {
+    if hits.is_empty() {
+        return;
+    }
+    let self_hit = hits.iter().any(|h| h.path == f.name);
+    let mut by_digest: HashMap<String, Vec<SourceRecord>> = HashMap::new();
+    for h in hits {
+        by_digest
+            .entry(h.sha256.clone())
+            .or_default()
+            .push(SourceRecord {
+                kind: h.kind.as_str().to_string(),
+                display: h.path.clone(),
+                test: is_test_path(&h.path),
+            });
+    }
+    for a in archives {
+        by_digest
+            .entry(a.sha256.clone())
+            .or_default()
+            .push(SourceRecord {
+                kind: archive_kind(a.hits),
+                display: a.path.clone(),
+                test: is_test_path(&a.path),
+            });
+    }
+    if !self_hit {
+        let digest = match (pkg.tag_i64(librpm::Tag::FILEDIGESTALGO), f.md5.as_ref()) {
+            (Some(8), Some(md5)) if !md5.is_empty() => md5.clone(),
+            _ => sha256_hex(data),
+        };
+        by_digest.entry(digest).or_default().push(SourceRecord {
+            kind: archive_kind(hits.len()),
+            display: f.name.clone(),
+            test: false,
+        });
+    }
+    for key in source_package_keys(pkg) {
+        let entry = state.sources.entry(key).or_default();
+        for (digest, recs) in &by_digest {
+            entry
+                .entry(digest.clone())
+                .or_default()
+                .extend(recs.iter().cloned());
+        }
+    }
 }
 
 impl SourceCheck {
@@ -111,6 +306,7 @@ impl SourceCheck {
             compress_ext,
             valid_src_perms,
             ext_magic,
+            shipped: ShippedState::default(),
         }
     }
 
@@ -217,7 +413,7 @@ impl SourceCheck {
     /// the build copies into the payload) must not fire twice. Each
     /// payload file is read once here and the bytes are shared with
     /// the bidi pass below.
-    fn check_source_archives(&self, pkg: &Pkg, out: &mut Filter) {
+    fn check_source_archives(&mut self, pkg: &Pkg, out: &mut Filter) {
         let url_sources = source_url_files(pkg);
         for f in &pkg.files {
             let size = std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0);
@@ -234,7 +430,7 @@ impl SourceCheck {
     }
 
     fn archive_contents_for(
-        &self,
+        &mut self,
         pkg: &Pkg,
         url_sources: &std::collections::HashSet<String>,
         f: &crate::pkg::pkgfile::PkgFile,
@@ -242,12 +438,15 @@ impl SourceCheck {
         out: &mut Filter,
     ) {
         let mut hits = Vec::new();
-        let members = prebuilt::inspect_top_level(&f.name, data, &f.name, &mut hits);
+        let mut archives = Vec::new();
+        let members = prebuilt::inspect_top_level(&f.name, data, &f.name, &mut hits, &mut archives);
         // The grouped kinds (ar, PE, wasm) collapse per archive,
         // directory and kind; every other hit keeps its per-member
         // line, as do bare Sources, which have no archive chain.
         let mut groups: Vec<(String, String, prebuilt::BinaryKind, usize, String)> = Vec::new();
-        for (kind, path) in hits {
+        for hit in &hits {
+            let kind = hit.kind;
+            let path = hit.path.clone();
             if !kind.grouped() {
                 add_info(
                     out,
@@ -307,6 +506,7 @@ impl SourceCheck {
                 );
             }
         }
+        record_shipped_source(&mut self.shipped, pkg, f, data, &hits, &archives);
         if !url_sources.contains(&f.name) {
             for root in prebuilt::vcs_roots(&members) {
                 let entries = format!("{} entries", root.entries);
@@ -481,6 +681,27 @@ mod prebuilt {
         }
     }
 
+    /// One prebuilt binary found by the walk: its kind, its display path
+    /// (the member chain as `prebuilt-binary-in-sources` prints it), and
+    /// the sha256 of the member's bytes, so the run-scoped join can tell
+    /// whether a shipped file is byte-identical to it.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Hit {
+        pub kind: BinaryKind,
+        pub path: String,
+        pub sha256: String,
+    }
+
+    /// A nested archive that holds at least one hit: the sha256 of the
+    /// archive member's bytes, how many hits it holds, and its display
+    /// path in the member chain.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ArchiveHits {
+        pub sha256: String,
+        pub hits: usize,
+        pub path: String,
+    }
+
     /// Magic-byte classification of one file's bytes. ELF and Java class
     /// magics are unambiguous; Python bytecode needs its `.pyc`/`.pyo` name
     /// too (bytes 2-3 are `\r\n` in every CPython version, but so are the
@@ -560,54 +781,83 @@ mod prebuilt {
         data: &[u8],
         ctx: &str,
         depth: u8,
-        hits: &mut Vec<(BinaryKind, String)>,
+        hits: &mut Vec<Hit>,
+        archives: &mut Vec<ArchiveHits>,
     ) {
         if let Some(kind) = classify(name, data) {
             // A jar is reported as a unit; its classes are not listed
             // separately — the jar is what the packager removes in %prep.
-            hits.push((kind, ctx.to_string()));
+            hits.push(Hit {
+                kind,
+                path: ctx.to_string(),
+                sha256: super::sha256_hex(data),
+            });
         } else {
-            scan_archive(data, ctx, depth + 1, hits);
+            let before = hits.len();
+            scan_archive(data, ctx, depth + 1, hits, archives);
+            if hits.len() > before {
+                archives.push(ArchiveHits {
+                    sha256: super::sha256_hex(data),
+                    hits: hits.len() - before,
+                    path: ctx.to_string(),
+                });
+            }
         }
     }
 
-    fn scan_archive(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<(BinaryKind, String)>) {
+    fn scan_archive(
+        data: &[u8],
+        ctx: &str,
+        depth: u8,
+        hits: &mut Vec<Hit>,
+        archives: &mut Vec<ArchiveHits>,
+    ) {
         if depth > MAX_DEPTH {
             return;
         }
         if data.starts_with(b"\x1f\x8b") {
             if let Some(d) = decompress_gzip(data) {
-                scan_decompressed(&d, ctx, depth, hits);
+                scan_decompressed(&d, ctx, depth, hits, archives);
             }
         } else if data.starts_with(b"\xfd7zXZ\x00") {
             if let Some(d) = decompress_xz(data) {
-                scan_decompressed(&d, ctx, depth, hits);
+                scan_decompressed(&d, ctx, depth, hits, archives);
             }
         } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
             if let Some(d) = decompress_zstd(data) {
-                scan_decompressed(&d, ctx, depth, hits);
+                scan_decompressed(&d, ctx, depth, hits, archives);
             }
         } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
             // The 4th magic byte is the bzip2 block-size digit
             // ('1'..='9'); anything else is not a bzip2 stream.
             if let Some(d) = decompress_bzip2(data) {
-                scan_decompressed(&d, ctx, depth, hits);
+                scan_decompressed(&d, ctx, depth, hits, archives);
             }
         } else if data.starts_with(b"PK\x03\x04") {
-            walk_zip(data, ctx, depth, hits);
+            walk_zip(data, ctx, depth, hits, archives);
         } else if is_tar(data) {
-            walk_tar(data, ctx, depth, hits);
+            walk_tar(data, ctx, depth, hits, archives);
         }
         // Anything else is opaque: skip silently.
     }
 
     /// A decompressed stream is either a tarball or a single file (e.g.
     /// `prebuilt.o.gz` — the compressed file itself is the binary).
-    fn scan_decompressed(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<(BinaryKind, String)>) {
+    fn scan_decompressed(
+        data: &[u8],
+        ctx: &str,
+        depth: u8,
+        hits: &mut Vec<Hit>,
+        archives: &mut Vec<ArchiveHits>,
+    ) {
         if is_tar(data) {
-            walk_tar(data, ctx, depth, hits);
+            walk_tar(data, ctx, depth, hits, archives);
         } else if let Some(kind) = classify(ctx, data) {
-            hits.push((kind, ctx.to_string()));
+            hits.push(Hit {
+                kind,
+                path: ctx.to_string(),
+                sha256: super::sha256_hex(data),
+            });
         }
     }
 
@@ -615,14 +865,33 @@ mod prebuilt {
         data.len() >= 512 && &data[257..262] == b"ustar"
     }
 
-    fn walk_tar(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<(BinaryKind, String)>) {
+    fn walk_tar(
+        data: &[u8],
+        ctx: &str,
+        depth: u8,
+        hits: &mut Vec<Hit>,
+        archives: &mut Vec<ArchiveHits>,
+    ) {
         for (name, off, len, _size) in read_tar(data) {
             let entry = &data[off..off + len];
-            inspect_entry(&name, entry, &format!("{ctx}: {name}"), depth, hits);
+            inspect_entry(
+                &name,
+                entry,
+                &format!("{ctx}: {name}"),
+                depth,
+                hits,
+                archives,
+            );
         }
     }
 
-    fn walk_zip(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<(BinaryKind, String)>) {
+    fn walk_zip(
+        data: &[u8],
+        ctx: &str,
+        depth: u8,
+        hits: &mut Vec<Hit>,
+        archives: &mut Vec<ArchiveHits>,
+    ) {
         let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(data)) {
             Ok(a) => a,
             Err(_) => return,
@@ -653,7 +922,14 @@ mod prebuilt {
             {
                 continue;
             }
-            inspect_entry(&name, &bytes, &format!("{ctx}: {name}"), depth, hits);
+            inspect_entry(
+                &name,
+                &bytes,
+                &format!("{ctx}: {name}"),
+                depth,
+                hits,
+                archives,
+            );
         }
     }
 
@@ -682,50 +958,55 @@ mod prebuilt {
         name: &str,
         data: &[u8],
         ctx: &str,
-        hits: &mut Vec<(BinaryKind, String)>,
+        hits: &mut Vec<Hit>,
+        archives: &mut Vec<ArchiveHits>,
     ) -> Vec<TopLevelMember> {
         if let Some(kind) = classify(name, data) {
             // A jar is reported as a unit; its classes are not listed
             // separately -- the jar is what the packager removes in
             // %prep.
-            hits.push((kind, ctx.to_string()));
+            hits.push(Hit {
+                kind,
+                path: ctx.to_string(),
+                sha256: super::sha256_hex(data),
+            });
             return top_level_members(data);
         }
         if data.starts_with(b"\x1f\x8b") {
             decompress_gzip(data)
                 .map(|d| {
-                    scan_decompressed(&d, ctx, 1, hits);
+                    scan_decompressed(&d, ctx, 1, hits, archives);
                     tar_members(&d)
                 })
                 .unwrap_or_default()
         } else if data.starts_with(b"\xfd7zXZ\x00") {
             decompress_xz(data)
                 .map(|d| {
-                    scan_decompressed(&d, ctx, 1, hits);
+                    scan_decompressed(&d, ctx, 1, hits, archives);
                     tar_members(&d)
                 })
                 .unwrap_or_default()
         } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
             decompress_zstd(data)
                 .map(|d| {
-                    scan_decompressed(&d, ctx, 1, hits);
+                    scan_decompressed(&d, ctx, 1, hits, archives);
                     tar_members(&d)
                 })
                 .unwrap_or_default()
         } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
             decompress_bzip2(data)
                 .map(|d| {
-                    scan_decompressed(&d, ctx, 1, hits);
+                    scan_decompressed(&d, ctx, 1, hits, archives);
                     tar_members(&d)
                 })
                 .unwrap_or_default()
         } else if data.starts_with(b"PK\x03\x04") {
-            zip_scan(data, ctx, 1, hits)
+            zip_scan(data, ctx, 1, hits, archives)
         } else if is_tar(data) {
             let entries = read_tar(data);
             for (ename, off, len, _size) in &entries {
                 let entry = &data[*off..*off + *len];
-                inspect_entry(ename, entry, &format!("{ctx}: {ename}"), 1, hits);
+                inspect_entry(ename, entry, &format!("{ctx}: {ename}"), 1, hits, archives);
             }
             entries
                 .into_iter()
@@ -747,7 +1028,8 @@ mod prebuilt {
         data: &[u8],
         ctx: &str,
         depth: u8,
-        hits: &mut Vec<(BinaryKind, String)>,
+        hits: &mut Vec<Hit>,
+        archives: &mut Vec<ArchiveHits>,
     ) -> Vec<TopLevelMember> {
         let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(data)) {
             Ok(a) => a,
@@ -811,7 +1093,14 @@ mod prebuilt {
             if bytes.len() > MAX_ENTRY_BYTES {
                 continue;
             }
-            inspect_entry(&name, &bytes, &format!("{ctx}: {name}"), depth, hits);
+            inspect_entry(
+                &name,
+                &bytes,
+                &format!("{ctx}: {name}"),
+                depth,
+                hits,
+                archives,
+            );
         }
         members
     }
@@ -1733,6 +2022,102 @@ impl Check for SourceCheck {
         self.check_rpmlintrc_setbadness(pkg, config, out);
         self.check_source_archives(pkg, out);
     }
+
+    /// `prebuilt-binary-shipped` (run-scoped): record every binary
+    /// payload file whose first 512 bytes could match a source record,
+    /// keyed by the build's `SOURCERPM`. The verdict waits for
+    /// `after_checks`, when the run's source records are known; a
+    /// binary linted without its source package stays silent.
+    fn check_binary(&mut self, pkg: &Pkg, _config: &Config, _out: &mut Filter) {
+        let Some(key) = binary_source_key(pkg) else {
+            return;
+        };
+        let algo_is_8 = pkg.tag_i64(librpm::Tag::FILEDIGESTALGO) == Some(8);
+        for f in &pkg.files {
+            if !is_reg(f.mode) || is_ghost_file(pkg, f) {
+                continue;
+            }
+            let Some(md5) = f.md5.as_ref().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let mut head = [0u8; 512];
+            let head_len = std::fs::File::open(&f.path)
+                .and_then(|mut file| std::io::Read::read(&mut file, &mut head))
+                .unwrap_or(0);
+            if !payload_could_match(&f.name, &head[..head_len]) {
+                continue;
+            }
+            let Some(digest) = binary_digest(algo_is_8, md5, &f.path) else {
+                continue;
+            };
+            self.shipped.binaries.push((
+                key.clone(),
+                BinaryRecord {
+                    digest,
+                    path: f.name.clone(),
+                    pkg_name: pkg.name.clone(),
+                    arch: pkg.arch.clone(),
+                },
+            ));
+        }
+    }
+
+    /// `prebuilt-binary-shipped` verdict: for each recorded binary file
+    /// whose digest is a source record of its own build, report the
+    /// payload path, the kind, and the source member it matches. Two
+    /// shapes stay quiet: a digest whose every source copy sits under
+    /// a test directory, and a payload path under a firmware
+    /// directory (the guideline's binary-firmware exception).
+    fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
+        for (key, rec) in &self.shipped.binaries {
+            let Some(by_digest) = self.shipped.sources.get(key) else {
+                continue;
+            };
+            let Some(copies) = by_digest.get(&rec.digest) else {
+                continue;
+            };
+            if copies.iter().all(|c| c.test) {
+                continue;
+            }
+            if rec.path.starts_with("/usr/lib/firmware/") || rec.path.starts_with("/lib/firmware/")
+            {
+                continue;
+            }
+            let first = &copies[0];
+            out.add_info(make_finding(
+                &rec.pkg_name,
+                &rec.arch,
+                Level::Warning,
+                "prebuilt-binary-shipped",
+                vec![
+                    rec.path.clone(),
+                    first.kind.clone(),
+                    format!("from {}", first.display),
+                ],
+                None,
+            ));
+        }
+    }
+
+    fn reset(&mut self) {
+        self.shipped = ShippedState::default();
+    }
+
+    fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        Some(Box::new(std::mem::take(&mut self.shipped)))
+    }
+
+    fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
+        if let Ok(mut state) = state.downcast::<ShippedState>() {
+            for (key, digests) in std::mem::take(&mut state.sources) {
+                let entry = self.shipped.sources.entry(key).or_default();
+                for (digest, recs) in digests {
+                    entry.entry(digest).or_default().extend(recs);
+                }
+            }
+            self.shipped.binaries.append(&mut state.binaries);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2448,6 +2833,211 @@ mod prebuilt_tests {
         );
     }
 
+    /// A package built from the shared fixture header (name
+    /// `fcprobe`, version `1`, release `1`, `SOURCERPM`
+    /// `fcprobe-1-1.src.rpm`), with name/arch/files replaced.
+    fn fixture_pkg(name: &str, files: Vec<crate::pkg::pkgfile::PkgFile>) -> Pkg {
+        let mut pkg = Pkg::open_no_extract(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm"),
+        )
+        .expect("open fixture pkg header");
+        pkg.name = name.to_string();
+        pkg.arch = "x86_64".to_string();
+        pkg.files = files;
+        pkg
+    }
+
+    /// The fixture header as a source package: the source identity
+    /// `check_source` derives from it is `fcprobe-1-1.src.rpm`, the
+    /// `SOURCERPM` every `fixture_pkg` binary carries.
+    fn fixture_src(files: Vec<crate::pkg::pkgfile::PkgFile>) -> Pkg {
+        let mut pkg = fixture_pkg("fcprobe", files);
+        pkg.is_source = true;
+        pkg
+    }
+
+    /// A regular file whose bytes live at `dir` and whose header
+    /// digest is the true sha256 of those bytes, as a real RPM header
+    /// would carry for that payload.
+    fn payload_file(
+        dir: &std::path::Path,
+        name: &str,
+        bytes: &[u8],
+    ) -> crate::pkg::pkgfile::PkgFile {
+        let disk = dir.join(name.rsplit('/').next().unwrap_or(name));
+        std::fs::write(&disk, bytes).expect("write fixture payload");
+        crate::pkg::pkgfile::PkgFile {
+            name: name.to_string(),
+            path: disk.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            md5: Some(sha256_hex(bytes)),
+            ..Default::default()
+        }
+    }
+
+    fn shipped_lines(findings: &[(String, String, Level)]) -> Vec<String> {
+        let mut lines: Vec<String> = findings
+            .iter()
+            .filter(|(n, _, l)| n == "prebuilt-binary-shipped" && *l == Level::Warning)
+            .map(|(_, line, _)| line.clone())
+            .collect();
+        lines.sort();
+        lines
+    }
+
+    /// The binary-side filter: hit-kind headers, `.pyc`/`.pyo` names
+    /// and archive headers pass; anything else stays out.
+    #[test]
+    fn shipped_payload_filter_keeps_hit_kinds_only() {
+        assert!(payload_could_match("a.o", b"\x7fELFxxxx"));
+        assert!(payload_could_match("a.zip", b"PK\x03\x04xxxx"));
+        assert!(payload_could_match("a.a", b"!<arch>\nxxxx"));
+        assert!(payload_could_match("a.a", b"!<thin>\nxxxx"));
+        assert!(payload_could_match("a.exe", b"MZxxxx"));
+        assert!(payload_could_match("a.wasm", b"\0asm\x01\0\0\0"));
+        assert!(payload_could_match("a.o", b"\xfe\xed\xfa\xcexxxx"));
+        assert!(payload_could_match("a.o", b"\xfe\xed\xfa\xcfxxxx"));
+        assert!(payload_could_match("a.o", b"\xce\xfa\xed\xfexxxx"));
+        assert!(payload_could_match("a.o", b"\xcf\xfa\xed\xfexxxx"));
+        assert!(payload_could_match("a.rpm", b"\xed\xab\xee\xdbxxxx"));
+        assert!(payload_could_match("a.gz", b"\x1f\x8bxxxx"));
+        assert!(payload_could_match("a.xz", b"\xfd7zXZ\x00xxxx"));
+        assert!(payload_could_match("a.zst", b"\x28\xb5\x2f\xfdxxxx"));
+        assert!(payload_could_match("a.bz2", b"BZh9xxxx"));
+        assert!(payload_could_match("m.pyc", b"junk"));
+        assert!(payload_could_match("m.PYC", b"junk"));
+        assert!(payload_could_match("m.pyo", b"junk"));
+        let mut tar_head = vec![0u8; 512];
+        tar_head[257..262].copy_from_slice(b"ustar");
+        assert!(payload_could_match("a.tar", &tar_head));
+        assert!(!payload_could_match("a.txt", b"plain text, no magic here"));
+        assert!(!payload_could_match("a.txt", b""));
+        assert!(!payload_could_match("a.py", b"#!/usr/bin/python\n"));
+        assert!(!payload_could_match("a.tar", &vec![0u8; 261]));
+    }
+
+    /// Test-directory detection is by directory component, not
+    /// substring: `contest` and a file named `test` stay out.
+    #[test]
+    fn shipped_test_path_needs_a_test_directory() {
+        assert!(is_test_path("s.tar.gz: tests/data/f.bin"));
+        assert!(is_test_path("s.tar.gz: src/testdata/x.o"));
+        assert!(is_test_path("s.tar.gz: outer.zip: test/x.o"));
+        assert!(!is_test_path("s.tar.gz: src/contest/x.o"));
+        assert!(!is_test_path("s.tar.gz: test"));
+        assert!(!is_test_path("s.tar.gz: src/my test/x.o"));
+        assert!(!is_test_path("s.tar.gz"));
+    }
+
+    /// The digest rule: algorithm 8 trusts the header digest without
+    /// touching disk; any other algorithm hashes the payload file.
+    #[test]
+    fn shipped_binary_digest_prefers_header_algo_8() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("blob.bin");
+        std::fs::write(&disk, ELF).unwrap();
+        let path = disk.to_string_lossy().into_owned();
+        assert_eq!(
+            binary_digest(true, "deadbeef", "/nonexistent/path"),
+            Some("deadbeef".to_string())
+        );
+        assert_eq!(
+            binary_digest(false, "deadbeef", &path),
+            Some(sha256_hex(ELF))
+        );
+        assert_eq!(binary_digest(false, "deadbeef", "/nonexistent/path"), None);
+    }
+
+    /// Run-scoped verdict through `Check::check` + `after_checks`:
+    /// shipped files byte-identical to source binaries fire; test
+    /// data, non-binaries, firmware paths, and binaries of a foreign
+    /// build stay quiet.
+    #[test]
+    fn shipped_binaries_fire_and_quiet_shapes_stay_quiet() {
+        use crate::color::Color;
+        const FIXTURE_ELF: &[u8] = b"\x7fELF\x02\x01\x01\x00fixture-elf-body";
+        let jar = zip_bytes(&[("com/example/Foo.class", CLASS)]);
+        let bundle = zip_bytes(&[("mod.pyc", PYC)]);
+        let inner = tarball(&[("nested/prebuilt2.o", ELF)]);
+        let tar = tarball(&[
+            ("src/prebuilt.o", ELF),
+            ("lib/nested.jar", &jar),
+            ("lib/bundle.zip", &bundle),
+            ("deep/inner.tar.gz", &gzip_bytes(&inner)),
+            ("tests/data/fixture.bin", FIXTURE_ELF),
+            ("README", b"plain text\n"),
+        ]);
+        let tar_gz = gzip_bytes(&tar);
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_pkg = fixture_src(vec![
+            payload_file(src_dir.path(), "fcprobe.spec", b"Name: fcprobe\n"),
+            payload_file(src_dir.path(), "fcprobe-1-1.tar.gz", &tar_gz),
+        ]);
+        let bin_dir = tempfile::tempdir().unwrap();
+        let bin_pkg = fixture_pkg(
+            "fcprobe",
+            vec![
+                payload_file(bin_dir.path(), "/usr/libexec/shipexp/stripped", ELF),
+                payload_file(bin_dir.path(), "/usr/share/shipexp/bundle.zip", &bundle),
+                payload_file(bin_dir.path(), "/usr/share/shipexp/nested.jar", &jar),
+                payload_file(
+                    bin_dir.path(),
+                    "/usr/share/shipexp/fcprobe-1-1.tar.gz",
+                    &tar_gz,
+                ),
+                payload_file(
+                    bin_dir.path(),
+                    "/usr/share/shipexp/tests/data/fixture.bin",
+                    FIXTURE_ELF,
+                ),
+                payload_file(bin_dir.path(), "/usr/share/shipexp/README", b"plain text\n"),
+                payload_file(bin_dir.path(), "/usr/lib/firmware/fblob.bin", ELF),
+            ],
+        );
+        // A binary of a foreign build: the builder hard-codes
+        // SOURCERPM to "(none)", which no source package answers to.
+        let foreign_dir = tempfile::tempdir().unwrap();
+        let foreign_path = foreign_dir.path().join("foreign-1.0-1.x86_64.rpm");
+        let mut b = rpm::PackageBuilder::new("foreign", "1.0", "MIT", "x86_64", "foreign");
+        b.using_config(rpm::BuildConfig::default());
+        b.with_file_contents(
+            ELF.to_vec(),
+            rpm::FileOptions::new("/usr/bin/foreign").mode(rpm::FileMode::regular(0o644)),
+        )
+        .unwrap();
+        let built = b.build().unwrap();
+        built
+            .write(&mut std::fs::File::create(&foreign_path).unwrap())
+            .unwrap();
+        let foreign_extract = tempfile::tempdir().unwrap();
+        let foreign_pkg =
+            Pkg::open(&foreign_path, foreign_extract.path(), true).expect("open foreign binary");
+
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(&config);
+        Check::check(&mut check, &src_pkg, &config, &mut out);
+        Check::check(&mut check, &bin_pkg, &config, &mut out);
+        Check::check(&mut check, &foreign_pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let findings: Vec<(String, String, Level)> = out
+            .results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect();
+        assert_eq!(
+            shipped_lines(&findings),
+            [
+                "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/libexec/shipexp/stripped ELF binary from fcprobe-1-1.tar.gz: src/prebuilt.o",
+                "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/share/shipexp/bundle.zip archive with 1 hit from fcprobe-1-1.tar.gz: lib/bundle.zip",
+                "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/share/shipexp/fcprobe-1-1.tar.gz archive with 5 hits from fcprobe-1-1.tar.gz",
+                "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/share/shipexp/nested.jar Java archive (jar) from fcprobe-1-1.tar.gz: lib/nested.jar",
+            ]
+        );
+    }
+
     #[test]
     fn setbadness_in_a_payload_rpmlintrc_fires_per_occurrence() {
         let (pkg, _src, _extract) = source_pkg(&[
@@ -2643,9 +3233,18 @@ mod prebuilt_tests {
         let tar = tarball(&[("src/prebuilt.o", ELF)]);
         let bz2 = bzip2_bytes(&tar);
         let mut hits = Vec::new();
-        inspect_entry("t.tar.bz2", &bz2, "t.tar.bz2", 0, &mut hits);
+        inspect_entry(
+            "t.tar.bz2",
+            &bz2,
+            "t.tar.bz2",
+            0,
+            &mut hits,
+            &mut Vec::new(),
+        );
         assert_eq!(
-            hits,
+            hits.iter()
+                .map(|h| (h.kind, h.path.clone()))
+                .collect::<Vec<_>>(),
             [(BinaryKind::Elf, "t.tar.bz2: src/prebuilt.o".to_string())]
         );
     }
@@ -2675,7 +3274,14 @@ mod prebuilt_tests {
         let mut fake = b"BZhx".to_vec();
         fake.extend_from_slice(&tar);
         let mut hits = Vec::new();
-        inspect_entry("t.tar.bz2", &fake, "t.tar.bz2", 0, &mut hits);
+        inspect_entry(
+            "t.tar.bz2",
+            &fake,
+            "t.tar.bz2",
+            0,
+            &mut hits,
+            &mut Vec::new(),
+        );
         assert!(hits.is_empty(), "{hits:?}");
     }
 
@@ -2786,25 +3392,52 @@ mod prebuilt_tests {
     fn prebuilt_unit_classify() {
         use super::prebuilt::{BinaryKind, inspect_entry};
         let mut hits = Vec::new();
-        inspect_entry("a.o", ELF, "a.o", 0, &mut hits);
-        assert_eq!(hits, [(BinaryKind::Elf, "a.o".to_string())]);
+        inspect_entry("a.o", ELF, "a.o", 0, &mut hits, &mut Vec::new());
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.kind, h.path.clone()))
+                .collect::<Vec<_>>(),
+            [(BinaryKind::Elf, "a.o".to_string())]
+        );
         hits.clear();
-        inspect_entry("A.class", CLASS, "A.class", 0, &mut hits);
-        assert_eq!(hits, [(BinaryKind::JavaClass, "A.class".to_string())]);
+        inspect_entry("A.class", CLASS, "A.class", 0, &mut hits, &mut Vec::new());
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.kind, h.path.clone()))
+                .collect::<Vec<_>>(),
+            [(BinaryKind::JavaClass, "A.class".to_string())]
+        );
         hits.clear();
-        inspect_entry("m.pyc", PYC, "m.pyc", 0, &mut hits);
-        assert_eq!(hits, [(BinaryKind::PythonBytecode, "m.pyc".to_string())]);
+        inspect_entry("m.pyc", PYC, "m.pyc", 0, &mut hits, &mut Vec::new());
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.kind, h.path.clone()))
+                .collect::<Vec<_>>(),
+            [(BinaryKind::PythonBytecode, "m.pyc".to_string())]
+        );
         // .pyo shares the pyc format.
         hits.clear();
-        inspect_entry("m.pyo", PYC, "m.pyo", 0, &mut hits);
-        assert_eq!(hits, [(BinaryKind::PythonBytecode, "m.pyo".to_string())]);
+        inspect_entry("m.pyo", PYC, "m.pyo", 0, &mut hits, &mut Vec::new());
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.kind, h.path.clone()))
+                .collect::<Vec<_>>(),
+            [(BinaryKind::PythonBytecode, "m.pyo".to_string())]
+        );
         // Text is never a binary, whatever its head bytes.
         hits.clear();
-        inspect_entry("t.txt", b"ab\r\ncd", "t.txt", 0, &mut hits);
+        inspect_entry("t.txt", b"ab\r\ncd", "t.txt", 0, &mut hits, &mut Vec::new());
         assert!(hits.is_empty());
         // A zip that is not a jar is walked, not flagged.
         hits.clear();
-        inspect_entry("a.zip", b"PK\x03\x04garbage", "a.zip", 0, &mut hits);
+        inspect_entry(
+            "a.zip",
+            b"PK\x03\x04garbage",
+            "a.zip",
+            0,
+            &mut hits,
+            &mut Vec::new(),
+        );
         assert!(hits.is_empty());
     }
 
@@ -2820,9 +3453,9 @@ mod prebuilt_tests {
         let at = tar.len() - 1024; // before the end-of-archive zero blocks
         tar.splice(at..at, dir_hdr.iter().cloned());
         let mut hits = Vec::new();
-        super::prebuilt::inspect_entry("t.tar", &tar, "t.tar", 0, &mut hits);
+        super::prebuilt::inspect_entry("t.tar", &tar, "t.tar", 0, &mut hits, &mut Vec::new());
         assert_eq!(hits.len(), 1, "{hits:?}");
-        assert!(hits[0].1.ends_with("src/prebuilt.o"));
+        assert!(hits[0].path.ends_with("src/prebuilt.o"));
     }
 
     const LFS_POINTER: &[u8] =

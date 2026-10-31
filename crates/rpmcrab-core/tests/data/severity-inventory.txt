@@ -285,6 +285,7 @@ postun-without-update-menus = E
 potential-bashisms = I
 pre-with-tmpfile-creation = W
 prebuilt-binary-in-sources = W
+prebuilt-binary-shipped = W
 prereq-use = W
 program-not-linked-against-libc = W
 pybeam-failed = E
