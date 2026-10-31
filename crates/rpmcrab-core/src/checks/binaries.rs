@@ -3389,7 +3389,7 @@ fn direct_provider(
     runpath_dirs: &[PathBuf],
     owner: &PackageId,
 ) -> Option<Arc<SymbolProvider>> {
-    if let Some((_id, provider)) = providers.lookup(soname, owner) {
+    if let Some(provider) = providers.lookup_provider(soname, owner) {
         return Some(provider);
     }
     // The caller flattens the RPATH chain once per consumer file;
@@ -5572,8 +5572,10 @@ fn pkg_ships_daemon_units(pkg: &Pkg) -> bool {
 /// started. Only `.service`/`.socket` units under the systemd unit
 /// directories count, with the same ghost/masked/doc-substring
 /// exclusions as `pkg_ships_daemon_units`; a socket contributes
-/// through its `Service=` target, else its same-stem service, else
-/// its `@`-template for Accept=yes sockets.
+/// through its `Service=` target, else its `@`-template then its
+/// same-stem service for Accept=yes sockets, else its same-stem
+/// service.
+#[derive(Debug)]
 struct DaemonExec {
     binaries: HashSet<String>,
     has_unresolvable: bool,
@@ -5676,7 +5678,7 @@ fn follow_symlink_chain(
                 let dir = path.rsplit_once('/').map_or("/", |(d, _)| d);
                 format!("{dir}/{target}")
             };
-            path = normalize_lexical(&normalize_usrmerge(&next));
+            path = normalize_usrmerge(&normalize_lexical(&next));
         } else {
             break;
         }
@@ -5710,7 +5712,7 @@ fn resolve_exec_token(
         return (vec![], false);
     }
     if tok.starts_with('/') {
-        let path = normalize_lexical(&normalize_usrmerge(tok));
+        let path = normalize_usrmerge(&normalize_lexical(tok));
         return match follow_symlink_chain(&path, symlink_names, symlink_targets) {
             Some(path) => (vec![path], true),
             None => (vec![], false),
@@ -5727,7 +5729,7 @@ fn resolve_exec_token(
             // symlink follows it like an absolute path, so the
             // real daemon target enters the set instead of the
             // unit contributing nothing.
-            let start = normalize_lexical(&normalize_usrmerge(&matches[0].name));
+            let start = normalize_usrmerge(&normalize_lexical(&matches[0].name));
             match follow_symlink_chain(&start, symlink_names, symlink_targets) {
                 Some(path) => (vec![path], true),
                 None => (vec![], false),
@@ -5749,8 +5751,11 @@ fn resolve_exec_token(
 /// alias, not content: reading it would follow the link off the
 /// extraction path onto the host filesystem, so it is skipped and
 /// reported unresolvable (fail-open, preserving the package arm).
-/// An empty ExecStart resets the list and contributes nothing; a
-/// service with no ExecStart starts no binary.
+/// An empty ExecStart resets the accumulated list. A service with
+/// no ExecStart line at all is unresolvable (fail-open): there is
+/// no command to judge. Only the unit file itself is read;
+/// `*.d/*.conf` drop-ins are never consulted, so a unit whose
+/// ExecStart lives only in a drop-in is unresolvable the same way.
 fn service_exec_binaries(
     pkg: &Pkg,
     unit: &PkgFile,
@@ -5764,6 +5769,7 @@ fn service_exec_binaries(
         return (vec![], false);
     };
     let mut binaries = Vec::new();
+    let mut saw_execstart = false;
     let mut in_service = false;
     for raw in content.lines() {
         let line = raw.trim();
@@ -5780,8 +5786,10 @@ fn service_exec_binaries(
         if key.trim() != "ExecStart" {
             continue;
         }
+        saw_execstart = true;
         let cmd = value.trim();
         if cmd.is_empty() {
+            binaries.clear();
             continue;
         }
         let Some(token) = systemd_first_token(cmd) else {
@@ -5792,6 +5800,9 @@ fn service_exec_binaries(
             return (vec![], false);
         }
         binaries.append(&mut bins);
+    }
+    if !saw_execstart {
+        return (vec![], false);
     }
     (binaries, true)
 }
@@ -5842,7 +5853,12 @@ fn socket_exec_binaries(
         };
         match key.trim() {
             "Service" => service_name = Some(value.trim().to_string()),
-            "Accept" => accept_yes = matches!(value.trim(), "yes" | "true" | "1"),
+            "Accept" => {
+                accept_yes = matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "yes" | "true" | "1" | "y" | "t" | "on"
+                )
+            }
             _ => {}
         }
     }
@@ -5853,11 +5869,11 @@ fn socket_exec_binaries(
             name.push_str(".service");
         }
         candidates.push(name);
+    } else if accept_yes {
+        candidates.push(format!("{stem_base}@.service"));
+        candidates.push(format!("{stem_base}.service"));
     } else {
         candidates.push(format!("{stem_base}.service"));
-        if accept_yes {
-            candidates.push(format!("{stem_base}@.service"));
-        }
     }
     for name in candidates {
         let mut found = None;
@@ -5927,8 +5943,7 @@ fn daemon_exec_binaries(pkg: &Pkg) -> DaemonExec {
 /// Daemon arm of the weak-prng gate after narrowing: the file is a
 /// binary a daemon unit actually starts, or the package has an
 /// unresolvable daemon unit (fail-open, reported not guessed).
-fn file_is_daemon_exec(pkg: &Pkg, pkgfile: &PkgFile) -> bool {
-    let exec = daemon_exec_binaries(pkg);
+fn file_is_daemon_exec(pkgfile: &PkgFile, exec: &DaemonExec) -> bool {
     exec.has_unresolvable || exec.binaries.contains(&normalize_usrmerge(&pkgfile.name))
 }
 
@@ -7725,6 +7740,7 @@ impl BinariesCheck {
         pkg: &Pkg,
         pkgfile: &PkgFile,
         info: &ReadelfInfo,
+        daemon_exec: &DaemonExec,
         out: &mut Filter,
     ) {
         // An archive charges only a reference, like mktemp below:
@@ -7873,7 +7889,7 @@ impl BinariesCheck {
         // net predicate is generator presence and seeder-only files
         // stay silent. The privileged arm is unchanged.
         let weak_prng = info.has_undefined_function_matching(&self.weak_prng_generator_regex)
-            && (file_is_privileged(pkgfile) || file_is_daemon_exec(pkg, pkgfile));
+            && (file_is_privileged(pkgfile) || file_is_daemon_exec(pkgfile, daemon_exec));
         // An undefined reference charges the call (#972 candidate 4):
         // the definition site -- glibc itself, or a library shipping
         // its own variant -- makes no call and stays silent, unlike
@@ -8498,6 +8514,7 @@ impl BinariesCheck {
         config: &Config,
         out: &mut Filter,
         pre: Option<&ElfAnalysis>,
+        daemon_exec: &DaemonExec,
     ) {
         if self.is_archive && !self.is_standard_archive(pkg, pkgfile, out) {
             self.is_nonstandard_archive = true;
@@ -8545,7 +8562,7 @@ impl BinariesCheck {
             self.check_dependency(pkg, pkgfile, info, l, out);
             self.check_library_dependency_location(pkg, pkgfile, l, out);
         }
-        self.check_security_functions(pkg, pkgfile, info, out);
+        self.check_security_functions(pkg, pkgfile, info, daemon_exec, out);
         self.check_go_toolchain(pkg, pkgfile, info, out);
         self.check_bundled_library_provides(pkg, pkgfile, info, out);
         self.check_rpath(pkg, pkgfile, info, out);
@@ -8679,6 +8696,9 @@ impl Check for BinariesCheck {
             ));
         }
 
+        // Daemon units are read from disk: resolve them once per
+        // package, not once per file.
+        let daemon_exec = daemon_exec_binaries(pkg);
         for (idx, pkgfile) in pkg.files.iter().enumerate() {
             let fname: &str = &pkgfile.name;
             self.check_libtool_wrapper(pkg, fname, pkgfile, out);
@@ -8752,7 +8772,14 @@ impl Check for BinariesCheck {
 
             self.check_unstripped_binary(fname, pkg, pkgfile, out);
             self.detect_attributes(&pkgfile.magic);
-            self.run_elf_checks(pkg, pkgfile, config, out, analyses[idx].as_ref());
+            self.run_elf_checks(
+                pkg,
+                pkgfile,
+                config,
+                out,
+                analyses[idx].as_ref(),
+                &daemon_exec,
+            );
 
             if self.is_nonstandard_archive {
                 continue;
@@ -20039,7 +20066,14 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let analysis =
             ElfAnalysis::wants_analysis(&pkgfile, false).then(|| ElfAnalysis::parse(&pkgfile));
-        check.run_elf_checks(&pkg, &pkgfile, &config, &mut out, analysis.as_ref());
+        check.run_elf_checks(
+            &pkg,
+            &pkgfile,
+            &config,
+            &mut out,
+            analysis.as_ref(),
+            &daemon_exec_binaries(&pkg),
+        );
         let results = out.results().to_vec();
         assert!(
             results.is_empty(),
@@ -20093,7 +20127,14 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let analysis =
             ElfAnalysis::wants_analysis(&pkgfile, false).then(|| ElfAnalysis::parse(&pkgfile));
-        check.run_elf_checks(&pkg, &pkgfile, &config, &mut out, analysis.as_ref());
+        check.run_elf_checks(
+            &pkg,
+            &pkgfile,
+            &config,
+            &mut out,
+            analysis.as_ref(),
+            &daemon_exec_binaries(&pkg),
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "readelf-failed");
         assert_eq!(lines.len(), 1, "exactly one readelf-failed: {results:?}");
@@ -20656,7 +20697,14 @@ description = "explicit priority string bypasses the system crypto policy"
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             let analysis =
                 ElfAnalysis::wants_analysis(&pkgfile, false).then(|| ElfAnalysis::parse(&pkgfile));
-            check.run_elf_checks(&pkg, &pkgfile, &config, &mut out, analysis.as_ref());
+            check.run_elf_checks(
+                &pkg,
+                &pkgfile,
+                &config,
+                &mut out,
+                analysis.as_ref(),
+                &daemon_exec_binaries(&pkg),
+            );
             std::fs::remove_file(&path).ok();
             out.results().to_vec()
         };
@@ -23049,7 +23097,13 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkgfile = syn_file("/usr/lib64/libc.a", "current ar archive");
         let count = |info: &ReadelfInfo| {
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            check.check_security_functions(
+                &pkg,
+                &pkgfile,
+                info,
+                &daemon_exec_binaries(&pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "call-to-mktemp").len()
         };
@@ -23085,7 +23139,13 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
         let count = |info: &ReadelfInfo| {
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            check.check_security_functions(
+                &pkg,
+                &pkgfile,
+                info,
+                &daemon_exec_binaries(&pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "call-to-mktemp").len()
         };
@@ -23125,7 +23185,13 @@ description = "explicit priority string bypasses the system crypto policy"
                 syn_file("/usr/lib64/libfoo.so", "ELF 64-bit LSB shared object")
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            check.check_security_functions(
+                &pkg,
+                &pkgfile,
+                info,
+                &daemon_exec_binaries(&pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "call-to-gets").len()
         };
@@ -23181,7 +23247,13 @@ description = "explicit priority string bypasses the system crypto policy"
                 syn_file("/usr/lib64/libfoo.so", "ELF 64-bit LSB shared object")
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            check.check_security_functions(
+                &pkg,
+                &pkgfile,
+                info,
+                &daemon_exec_binaries(&pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "call-to-tmpnam").len()
         };
@@ -23229,7 +23301,13 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let run = |check: &BinariesCheck, pkgfile: &PkgFile, info: &ReadelfInfo| {
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(&pkg, pkgfile, info, &mut out);
+            check.check_security_functions(
+                &pkg,
+                pkgfile,
+                info,
+                &daemon_exec_binaries(&pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "call-to-mktemp").len()
         };
@@ -23481,7 +23559,13 @@ description = "explicit priority string bypasses the system crypto policy"
         info.undefined_function_refs = vec!["mktemp".to_string()];
         let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "call-to-mktemp");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
@@ -23493,7 +23577,13 @@ description = "explicit priority string bypasses the system crypto policy"
         info.functions = vec!["gethostbyname".to_string()];
         info.functions_printed = info.functions.clone();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "binary-or-shlib-calls-gethostbyname");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
@@ -23506,7 +23596,13 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut pkgfile = syn_file("/usr/bin/setuidbin", "ELF 64-bit LSB executable");
         pkgfile.mode = 0o104755;
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
@@ -23514,7 +23610,13 @@ description = "explicit priority string bypasses the system crypto policy"
 
         pkgfile.mode = 0o100755;
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
@@ -23528,7 +23630,13 @@ description = "explicit priority string bypasses the system crypto policy"
             "setgroups".to_string(),
         ];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         assert!(
             out.results().is_empty(),
             "setgroups present must be quiet: {:?}",
@@ -23543,7 +23651,13 @@ description = "explicit priority string bypasses the system crypto policy"
             "initgroups".to_string(),
         ];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         assert!(
             out.results().is_empty(),
             "initgroups present must be quiet: {:?}",
@@ -23558,7 +23672,13 @@ description = "explicit priority string bypasses the system crypto policy"
             "lttng_ust_after_setgid".to_string(),
         ];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         assert!(
             out.results().is_empty(),
             "affixed names must be quiet: {:?}",
@@ -23572,7 +23692,13 @@ description = "explicit priority string bypasses the system crypto policy"
             "setgid@GLIBC_2.2.5".to_string(),
         ];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
@@ -23585,7 +23711,13 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut info = syn_info();
         info.functions = vec!["setuid".to_string(), "setgid".to_string()];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        archive_check.check_security_functions(&pkg, &archive_file, &info, &mut out);
+        archive_check.check_security_functions(
+            &pkg,
+            &archive_file,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         assert!(
             out.results().is_empty(),
             "defined-only archive must be quiet: {:?}",
@@ -23595,7 +23727,13 @@ description = "explicit priority string bypasses the system crypto policy"
         info.functions = vec!["setuid".to_string(), "setgid".to_string()];
         info.undefined_function_refs = vec!["setuid".to_string(), "setgid".to_string()];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        archive_check.check_security_functions(&pkg, &archive_file, &info, &mut out);
+        archive_check.check_security_functions(
+            &pkg,
+            &archive_file,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
@@ -23612,7 +23750,13 @@ description = "explicit priority string bypasses the system crypto policy"
             "setgroups".to_string(),
         ];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        archive_check.check_security_functions(&pkg, &archive_file, &info, &mut out);
+        archive_check.check_security_functions(
+            &pkg,
+            &archive_file,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         assert!(
             out.results().is_empty(),
             "referenced setgroups must be quiet: {:?}",
@@ -23633,7 +23777,13 @@ description = "explicit priority string bypasses the system crypto policy"
         info.functions = vec!["setuid".to_string(), "setgid".to_string()];
         info.undefined_function_refs = vec!["dlsym".to_string()];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         assert!(
             out.results().is_empty(),
             "defined setuid/setgid with undefined dlsym must be quiet: {:?}",
@@ -23650,7 +23800,13 @@ description = "explicit priority string bypasses the system crypto policy"
             "dlsym".to_string(),
         ];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(
@@ -23663,7 +23819,13 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut info = syn_info();
         info.functions = vec!["setuid".to_string(), "setgid".to_string()];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(
@@ -23686,7 +23848,13 @@ description = "explicit priority string bypasses the system crypto policy"
             "dlsym".to_string(),
         ];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        archive_check.check_security_functions(&pkg, &archive_file, &info, &mut out);
+        archive_check.check_security_functions(
+            &pkg,
+            &archive_file,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(
@@ -23698,7 +23866,13 @@ description = "explicit priority string bypasses the system crypto policy"
         info.functions = vec!["setuid".to_string(), "setgid".to_string()];
         info.undefined_function_refs = vec!["dlsym".to_string()];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        archive_check.check_security_functions(&pkg, &archive_file, &info, &mut out);
+        archive_check.check_security_functions(
+            &pkg,
+            &archive_file,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         assert!(
             out.results().is_empty(),
             "defined-only archive member must stay quiet: {:?}",
@@ -23719,7 +23893,13 @@ description = "explicit priority string bypasses the system crypto policy"
         info.functions = vec!["setuid".to_string(), "setgid".to_string()];
         info.undefined_function_refs = vec!["dlsym@GLIBC_2.34".to_string()];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         assert!(
             out.results().is_empty(),
             "versioned dlsym must credit: {:?}",
@@ -23733,7 +23913,13 @@ description = "explicit priority string bypasses the system crypto policy"
         info.functions = vec!["setuid".to_string(), "setgid".to_string()];
         info.undefined_functions = vec!["dlsym".to_string()];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         assert!(
             out.results().is_empty(),
             "broad-set dlsym must credit: {:?}",
@@ -23748,7 +23934,13 @@ description = "explicit priority string bypasses the system crypto policy"
         info.functions = vec!["setuid".to_string(), "setgid".to_string()];
         info.undefined_functions = vec!["setuid".to_string(), "dlsym".to_string()];
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(
@@ -23770,7 +23962,13 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
         let count = |info: &ReadelfInfo, tag: &str| {
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            check.check_security_functions(
+                &pkg,
+                &pkgfile,
+                info,
+                &daemon_exec_binaries(&pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, tag).len()
         };
@@ -23785,7 +23983,13 @@ description = "explicit priority string bypasses the system crypto policy"
         for sym in ["MD5", "MD5_Init", "MD5_Update", "MD5_Final"] {
             let info = with(&[sym], &[sym]);
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+            check.check_security_functions(
+                &pkg,
+                &pkgfile,
+                &info,
+                &daemon_exec_binaries(&pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             let lines = lines_for(&results, "binary-or-shlib-calls-md5");
             assert_eq!(lines.len(), 1, "{sym} referenced must fire: {results:?}");
@@ -23859,6 +24063,144 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn daemon_exec_binaries_rules() {
+        // Unit files live in a temp dir; the synthetic unit entries
+        // point at them through PkgFile.path while keeping their
+        // package names, so the parser reads real content.
+        fn unit_file(dir: &std::path::Path, pkg_path: &str, content: &str) -> PkgFile {
+            let path = dir.join(pkg_path.trim_start_matches('/'));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, content).unwrap();
+            let mut f = syn_file(pkg_path, "ASCII text");
+            f.path = path.to_string_lossy().into_owned();
+            f
+        }
+
+        let dir = std::env::temp_dir().join(format!("rpmcrab-daemon-rules-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let empty_targets: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        // W1: lexical normalization precedes usrmerge, so
+        // /usr/bin/../bin/x resolves to the usrmerged /usr/bin/x,
+        // not /bin/x.
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/w1.service",
+            "[Service]\nExecStart=/usr/bin/../bin/x\n",
+        );
+        let mut x = syn_file("/usr/bin/x", "ELF 64-bit LSB executable");
+        x.mode = 0o100755;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit, x]);
+        let exec = daemon_exec_binaries(&pkg);
+        assert!(exec.binaries.contains("/usr/bin/x"), "{exec:?}");
+        assert!(!exec.binaries.contains("/bin/x"), "{exec:?}");
+
+        // W1 via a symlink chain: the link target's .. resolves
+        // lexically first, then usrmerges.
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/w1link.service",
+            "[Service]\nExecStart=/usr/bin/link\n",
+        );
+        let mut link = syn_file("/usr/bin/link", "symbolic link");
+        link.mode = 0o120777;
+        link.linkto = "../bin/x".to_string();
+        let mut x = syn_file("/usr/bin/x", "ELF 64-bit LSB executable");
+        x.mode = 0o100755;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit, link, x]);
+        let exec = daemon_exec_binaries(&pkg);
+        assert!(exec.binaries.contains("/usr/bin/x"), "{exec:?}");
+
+        // W2: a service with no ExecStart line at all is
+        // unresolvable (fail-open), not resolved-empty.
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/w2.service",
+            "[Service]\nType=simple\n",
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit]);
+        let exec = daemon_exec_binaries(&pkg);
+        assert!(exec.has_unresolvable, "{exec:?}");
+        assert!(exec.binaries.is_empty(), "{exec:?}");
+
+        // W4: an empty ExecStart clears the accumulated list, and a
+        // unit left with only cleared entries resolves empty.
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/w4.service",
+            "[Service]\nExecStart=/usr/bin/foo\nExecStart=\nExecStart=/usr/bin/bar\n",
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit]);
+        let exec = daemon_exec_binaries(&pkg);
+        assert_eq!(exec.binaries.len(), 1, "{exec:?}");
+        assert!(exec.binaries.contains("/usr/bin/bar"), "{exec:?}");
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/w4empty.service",
+            "[Service]\nExecStart=/usr/bin/foo\nExecStart=\n",
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit]);
+        let exec = daemon_exec_binaries(&pkg);
+        assert!(!exec.has_unresolvable, "{exec:?}");
+        assert!(exec.binaries.is_empty(), "{exec:?}");
+
+        // W5: with Accept=yes (and the wider boolean spellings) the
+        // @-template is tried before the same-stem service.
+        for accept in ["yes", "on", "y", "t", "ON"] {
+            let svc = unit_file(
+                &dir,
+                "/usr/lib/systemd/system/w5.service",
+                "[Service]\nExecStart=/usr/bin/foo\n",
+            );
+            let tmpl = unit_file(
+                &dir,
+                "/usr/lib/systemd/system/w5@.service",
+                "[Service]\nExecStart=/usr/bin/foobar\n",
+            );
+            let sock = unit_file(
+                &dir,
+                "/usr/lib/systemd/system/w5.socket",
+                &format!("[Socket]\nAccept={accept}\n"),
+            );
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![svc, tmpl, sock]);
+            let sock = pkg
+                .files
+                .iter()
+                .find(|f| f.name.ends_with("w5.socket"))
+                .unwrap();
+            let (bins, ok) = socket_exec_binaries(&pkg, sock, &empty_names, &empty_targets);
+            assert!(ok, "Accept={accept} must resolve");
+            assert_eq!(bins, vec!["/usr/bin/foobar".to_string()], "Accept={accept}");
+        }
+
+        // F7: a unit whose ExecStart lives only in a drop-in is
+        // unresolvable: drop-ins are never read.
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/w7.service",
+            "[Service]\nType=simple\n",
+        );
+        let dropin = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/w7.service.d/override.conf",
+            "[Service]\nExecStart=/usr/bin/foo\n",
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit, dropin]);
+        let unit = pkg
+            .files
+            .iter()
+            .find(|f| f.name.ends_with("w7.service"))
+            .unwrap();
+        let (bins, ok) = service_exec_binaries(&pkg, unit, &empty_names, &empty_targets);
+        assert!(!ok, "drop-in ExecStart must not resolve");
+        assert!(bins.is_empty());
+    }
+
+    #[test]
     fn weak_prng_execstart_narrowing() {
         // Unit files live in a temp dir; the synthetic unit entries
         // point at them through PkgFile.path while keeping their
@@ -23881,7 +24223,13 @@ description = "explicit priority string bypasses the system crypto policy"
             info.functions = functions.iter().map(|s| s.to_string()).collect();
             info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            check.check_security_functions(
+                pkg,
+                pkgfile,
+                &info,
+                &daemon_exec_binaries(pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "binary-or-shlib-calls-weak-prng").len()
         };
@@ -24045,7 +24393,13 @@ description = "explicit priority string bypasses the system crypto policy"
             info.functions = functions.iter().map(|s| s.to_string()).collect();
             info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            check.check_security_functions(
+                pkg,
+                pkgfile,
+                &info,
+                &daemon_exec_binaries(pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "binary-or-shlib-calls-weak-prng").len()
         };
@@ -24063,7 +24417,13 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut info = syn_info();
         info.functions = vec!["rand".to_string()];
         info.undefined_function_refs = vec!["rand".to_string()];
-        check.check_security_functions(&bare_pkg, &suid, &info, &mut out);
+        check.check_security_functions(
+            &bare_pkg,
+            &suid,
+            &info,
+            &daemon_exec_binaries(&bare_pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "binary-or-shlib-calls-weak-prng");
         assert_eq!(lines.len(), 1, "one finding: {results:?}");
@@ -24167,7 +24527,13 @@ description = "explicit priority string bypasses the system crypto policy"
             info.undefined_function_refs = undefined_refs.iter().map(|s| s.to_string()).collect();
             info.undefined_functions = undefined_all.iter().map(|s| s.to_string()).collect();
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+            check.check_security_functions(
+                &pkg,
+                &pkgfile,
+                &info,
+                &daemon_exec_binaries(&pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "binary-or-shlib-calls-legacy-network")
                 .iter()
@@ -24222,7 +24588,13 @@ description = "explicit priority string bypasses the system crypto policy"
             info.functions_printed = info.functions.clone();
             info.undefined_function_refs_printed = info.undefined_function_refs.clone();
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            check.check_security_functions(
+                pkg,
+                pkgfile,
+                &info,
+                &daemon_exec_binaries(pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "binary-or-shlib-calls-gethostbyname")
                 .iter()
@@ -24238,7 +24610,13 @@ description = "explicit priority string bypasses the system crypto policy"
             info.functions = vec!["gethostbyname".to_string()];
             info.functions_printed = info.functions.clone();
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            check.check_security_functions(
+                pkg,
+                pkgfile,
+                &info,
+                &daemon_exec_binaries(pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "binary-or-shlib-calls-gethostbyname")
                 .iter()
@@ -24367,7 +24745,13 @@ description = "explicit priority string bypasses the system crypto policy"
             info.undefined_function_refs_printed =
                 undefined.iter().map(|s| s.to_string()).collect();
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            check.check_security_functions(
+                pkg,
+                pkgfile,
+                &info,
+                &daemon_exec_binaries(pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "binary-or-shlib-calls-gethostbyname")
                 .iter()
@@ -24490,7 +24874,13 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
         let count = |info: &ReadelfInfo| {
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(&pkg, &pkgfile, info, &mut out);
+            check.check_security_functions(
+                &pkg,
+                &pkgfile,
+                info,
+                &daemon_exec_binaries(&pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "binary-or-shlib-calls-unbounded-copy").len()
         };
@@ -24505,7 +24895,13 @@ description = "explicit priority string bypasses the system crypto policy"
         for sym in ["strcpy", "strcat", "sprintf", "vsprintf"] {
             let info = with(&[sym], &[sym]);
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+            check.check_security_functions(
+                &pkg,
+                &pkgfile,
+                &info,
+                &daemon_exec_binaries(&pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             let lines = lines_for(&results, "binary-or-shlib-calls-unbounded-copy");
             assert_eq!(lines.len(), 1, "{sym} referenced must fire: {results:?}");
@@ -24543,7 +24939,13 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let info = with(&["strcat"], &["strcat"]);
-        check.check_security_functions(&pkg, &pkgfile, &info, &mut out);
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         assert_eq!(
             lines_for(&results, "binary-or-shlib-calls-unbounded-copy").len(),
@@ -24570,7 +24972,13 @@ description = "explicit priority string bypasses the system crypto policy"
             info.functions = functions.iter().map(|s| s.to_string()).collect();
             info.undefined_function_refs = info.functions.clone();
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            check.check_security_functions(
+                pkg,
+                pkgfile,
+                &info,
+                &daemon_exec_binaries(pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "binary-or-shlib-calls-shell")
                 .iter()
@@ -24585,7 +24993,13 @@ description = "explicit priority string bypasses the system crypto policy"
             let mut info = syn_info();
             info.functions = vec!["system".to_string(), "popen".to_string()];
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            check.check_security_functions(
+                pkg,
+                pkgfile,
+                &info,
+                &daemon_exec_binaries(pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "binary-or-shlib-calls-shell")
                 .iter()
@@ -24702,7 +25116,13 @@ description = "explicit priority string bypasses the system crypto policy"
             let mut info = syn_info();
             info.undefined_functions = symbols.iter().map(|s| s.to_string()).collect();
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            check.check_security_functions(pkg, pkgfile, &info, &mut out);
+            check.check_security_functions(
+                pkg,
+                pkgfile,
+                &info,
+                &daemon_exec_binaries(pkg),
+                &mut out,
+            );
             let results = out.results().to_vec();
             lines_for(&results, "binary-or-shlib-calls-shell")
                 .iter()

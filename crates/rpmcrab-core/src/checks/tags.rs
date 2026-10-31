@@ -5047,6 +5047,19 @@ mod rich_dep_emission_tests {
     }
 
     #[test]
+    fn missing_dependency_on_strict_upper_bound_at_ancestor_version_still_fires() {
+        // A strict upper bound at the ancestor version excludes the
+        // package's own version just as <= does, so it keeps firing.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![flagged_dep("tags-missingdep-libs", RPMSENSE_LESS, "1")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "missing-dependency-on");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+    }
+
+    #[test]
     fn missing_dependency_on_lower_bound_off_ancestor_still_fires() {
         // 1.1 under 1.15.1 is a string prefix, not a dot-boundary one,
         // and a lower bound there excludes the package's own version.

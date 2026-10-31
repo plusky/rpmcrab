@@ -360,7 +360,11 @@ impl Check for BrandingPolicyCheck {
         // A Suggests on the package's own documentation subpackage is
         // self-documentation, not a dependency on other software: it
         // pulls in nothing but the package's own docs, and a Suggests
-        // is not installed by default. Any other Suggests still fires.
+        // is not installed by default. The exemption is
+        // plain-exact-name-only: the Suggests name must equal
+        // `<pkg>-doc` exactly, and a version on it changes nothing;
+        // a rich Suggests naming own-doc plus anything else still
+        // fires. Any other Suggests still fires.
         let own_doc = format!("{}-doc", pkg.name);
         for r in &pkg.suggests {
             if r.name == own_doc {
@@ -862,6 +866,26 @@ mod tests {
         assert_eq!(supplements_missing(&pkg).len(), 1, "{:?}", run(&pkg));
     }
 
+    // Nor does the flavour atom under `unless`.
+    #[test]
+    fn flavour_atom_under_unless_still_fires() {
+        let pkg = branding_pkg(
+            "grub2-branding-openSUSE",
+            vec![dep("(grub2 unless branding-openSUSE)", 0)],
+        );
+        assert_eq!(supplements_missing(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
+    // Nor does the flavour atom under `with`.
+    #[test]
+    fn flavour_atom_under_with_still_fires() {
+        let pkg = branding_pkg(
+            "grub2-branding-openSUSE",
+            vec![dep("(grub2 with branding-openSUSE)", 0)],
+        );
+        assert_eq!(supplements_missing(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
     // A versioned flavour conjunct is not the plain atom the
     // obligation prescribes: the finding still fires.
     #[test]
@@ -1034,6 +1058,8 @@ mod tests {
         assert!(excessive_enhances(&pkg).is_empty(), "{:?}", run(&pkg));
         let pkg = enhances_pkg(vec![dep("((bla or bla-common) and branding-openSUSE)", 0)]);
         assert!(excessive_enhances(&pkg).is_empty(), "{:?}", run(&pkg));
+        let pkg = enhances_pkg(vec![dep("((bla and bla-common) and branding-openSUSE)", 0)]);
+        assert!(excessive_enhances(&pkg).is_empty(), "{:?}", run(&pkg));
     }
 
     // The zypp spelling of the same gate is not credited: the
@@ -1060,6 +1086,19 @@ mod tests {
         assert_eq!(excessive_enhances(&pkg).len(), 5, "{:?}", run(&pkg));
     }
 
+    // Near misses on the Enhances arm: a marker under `unless`,
+    // `with` or `without` does not gate the Enhances on the flavour,
+    // so each still fires.
+    #[test]
+    fn ungated_enhances_still_fire() {
+        let pkg = enhances_pkg(vec![
+            dep("(bla unless branding-openSUSE)", 0),
+            dep("(bla with branding-openSUSE)", 0),
+            dep("(bla without branding-openSUSE)", 0),
+        ]);
+        assert_eq!(excessive_enhances(&pkg).len(), 3, "{:?}", run(&pkg));
+    }
+
     // The corpus shape: a TeX beamer theme whose name matches the
     // theme pattern suggests its own documentation subpackage, the
     // universal TeX pattern of suggesting the -doc companion. The
@@ -1078,6 +1117,16 @@ mod tests {
             ),
         ];
         assert!(excessive_suggests(&pkg).is_empty(), "{:?}", run(&pkg));
+    }
+
+    // A rich Suggests naming own-doc plus anything else is not
+    // the plain own-doc name, so it still fires.
+    #[test]
+    fn rich_own_doc_suggests_still_fires() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.suggests = vec![dep("(bla-theme-openSUSE-doc and bar)", 0)];
+        assert_eq!(excessive_suggests(&pkg).len(), 1, "{:?}", run(&pkg));
     }
 
     // Near misses: a Suggests on a documentation package that is not

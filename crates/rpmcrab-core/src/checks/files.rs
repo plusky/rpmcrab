@@ -16701,6 +16701,98 @@ print("hi")
     }
 
     #[test]
+    fn duplicate_executable_quiet_for_identical_copies_x3() {
+        // Identical header digests across three bindirs: whichever
+        // bindir wins in $PATH, the same bytes run.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/bin/mytool", 0o100755, 51)
+            },
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/sbin/mytool", 0o100755, 52)
+            },
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/bin/mytool", 0o100755, 53)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results.iter().any(|(n, _)| n == "duplicate-executable"),
+            "identical copies must not fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_executable_still_fires_for_two_identical_one_differing() {
+        // Two identical copies plus one differing copy still fire:
+        // a $PATH reorder can change which binary runs.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/bin/mytool", 0o100755, 61)
+            },
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/sbin/mytool", 0o100755, 62)
+            },
+            PkgFile {
+                md5: Some("63be3e30".to_string()),
+                ..mkfile("/bin/mytool", 0o100755, 63)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results.iter().any(|(n, _)| n == "duplicate-executable"),
+            "two identical plus one differing must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_executable_still_fires_for_two_identical_one_missing_digest() {
+        // Fail closed at N=3 too: a copy without a header digest
+        // cannot be shown identical, so it fires, and likewise for
+        // an empty digest string.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/bin/mytool", 0o100755, 71)
+            },
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/sbin/mytool", 0o100755, 72)
+            },
+            mkfile("/bin/mytool", 0o100755, 73),
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results.iter().any(|(n, _)| n == "duplicate-executable"),
+            "a missing digest must fire: {results:?}"
+        );
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/bin/mytool", 0o100755, 74)
+            },
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/sbin/mytool", 0o100755, 75)
+            },
+            PkgFile {
+                md5: Some(String::new()),
+                ..mkfile("/bin/mytool", 0o100755, 76)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results.iter().any(|(n, _)| n == "duplicate-executable"),
+            "an empty digest must fire: {results:?}"
+        );
+    }
+
+    #[test]
     fn bindir_exes_emit_in_package_file_order() {
         // The reference iterates its exe dict in insertion (package file)
         // order, and emission order is a contract: swapping the IndexMap for
@@ -16815,6 +16907,24 @@ print("hi")
                 .iter()
                 .any(|(n, d)| n == "duplicate-executable" && d.contains("ghosttool")),
             "ghost+ghost pair must still register for duplicates: {results:?}"
+        );
+    }
+
+    #[test]
+    fn symlink_only_executable_still_owes_man_page() {
+        // A name carried only by a symlink installs through that
+        // symlink: with no regular path and no man page, the
+        // all-ghost suppression cannot apply and the demand fires.
+        let (pkg, _dir) = pkg_with_files(vec![PkgFile {
+            linkto: "/usr/libexec/linktool-backend".to_string(),
+            ..mkfile("/bin/linktool", 0o120777, 44)
+        }]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("linktool")),
+            "symlink-only exe must still owe a man page: {results:?}"
         );
     }
 
