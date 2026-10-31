@@ -35,6 +35,31 @@ impl KMPPolicyCheck {
         let kernel = caps.name("kernel")?.as_str();
         Some(format!("kernel-{kernel}"))
     }
+
+    /// Whether the kernel flavor appears as a non-first member of a
+    /// conjunction supplement: `(a and kernel-flavor ...)` or
+    /// `packageand(a:kernel-flavor ...)`. Conjunctions commute, so the
+    /// flavor counts in any position; the flavor-first forms keep
+    /// their existing prefix credit at the call site. Members compare
+    /// exactly, so lookalikes such as `(kernel-flavorfoo and a)` do
+    /// not credit.
+    fn has_kernel_flavor_later_member(supplement: &str, kernel_flavor: &str) -> bool {
+        if let Some(inner) = supplement.strip_prefix('(') {
+            let inner = inner.strip_suffix(')').unwrap_or(inner);
+            let members: Vec<&str> = inner.split(" and ").map(str::trim).collect();
+            if members.len() > 1 && members[1..].contains(&kernel_flavor) {
+                return true;
+            }
+        }
+        if let Some(inner) = supplement.strip_prefix("packageand(") {
+            let inner = inner.strip_suffix(')').unwrap_or(inner);
+            let members: Vec<&str> = inner.split(':').map(str::trim).collect();
+            if members.len() > 1 && members[1..].contains(&kernel_flavor) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl Check for KMPPolicyCheck {
@@ -110,6 +135,7 @@ impl Check for KMPPolicyCheck {
             }
             if s.name.starts_with(&format!("packageand({kernel_flavor}"))
                 || s.name.starts_with(&format!("({kernel_flavor} and"))
+                || Self::has_kernel_flavor_later_member(&s.name, &kernel_flavor)
             {
                 have_proper_suppl = true;
                 continue;
@@ -316,5 +342,78 @@ mod tests {
         pkg.supplements = vec![dep("(kernel-default and foo)")];
         let results = run(&pkg);
         assert!(results.is_empty(), "{results:?}");
+    }
+
+    // The virtualbox supplements carry the kernel flavor second in the
+    // conjunction: `(virtualbox-guest-tools and kernel-default)`.
+    #[test]
+    fn kmp_flavor_second_in_conjunction_is_quiet() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "virtualbox-kmp-default".to_string();
+        pkg.requires = vec![dep("kernel-default")];
+        pkg.enhances = vec![dep("kernel-default")];
+        pkg.supplements = vec![dep("(virtualbox-guest-tools and kernel-default)")];
+        let results = run(&pkg);
+        assert!(results.is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn kmp_flavor_second_in_conjunction_longterm_is_quiet() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "virtualbox-kmp-longterm".to_string();
+        pkg.requires = vec![dep("kernel-longterm")];
+        pkg.enhances = vec![dep("kernel-longterm")];
+        pkg.supplements = vec![dep("(virtualbox-guest-tools and kernel-longterm)")];
+        let results = run(&pkg);
+        assert!(results.is_empty(), "{results:?}");
+    }
+
+    // `packageand` members commute the same way: the flavor counts in
+    // any colon-separated position.
+    #[test]
+    fn kmp_flavor_later_in_packageand_is_quiet() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "supplements-kmp-default".to_string();
+        pkg.requires = vec![dep("kernel-default")];
+        pkg.enhances = vec![dep("kernel-default")];
+        pkg.supplements = vec![
+            dep("packageand(foo:kernel-default)"),
+            dep("packageand(kernel-default:foo)"),
+        ];
+        let results = run(&pkg);
+        assert!(results.is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn kmp_conjunction_without_flavor_still_fires() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "supplements-kmp-default".to_string();
+        pkg.requires = vec![dep("kernel-default")];
+        pkg.enhances = vec![dep("kernel-default")];
+        pkg.supplements = vec![dep("(foo and bar)")];
+        let results = run(&pkg);
+        assert_eq!(
+            has(&results, "kmp-excessive-supplements").len(),
+            1,
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn kmp_conjunction_flavor_lookalike_still_fires() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "supplements-kmp-default".to_string();
+        pkg.requires = vec![dep("kernel-default")];
+        pkg.enhances = vec![dep("kernel-default")];
+        pkg.supplements = vec![
+            dep("(kernel-defaultfoo and bar)"),
+            dep("(foo and kernel-defaultfoo)"),
+        ];
+        let results = run(&pkg);
+        assert_eq!(
+            has(&results, "kmp-excessive-supplements").len(),
+            2,
+            "{results:?}"
+        );
     }
 }
