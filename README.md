@@ -29,7 +29,7 @@ The details live in the machine-enforced ledger and the commit history: [`tests/
 
 - **The compatibility contract** — what is frozen and what may diverge — lives
   in [`docs/DESIGN.md`](docs/DESIGN.md).
-- **The roadmap** lives in the milestones and the umbrella RFC issue.
+- **The roadmap** lives in the milestones and the umbrella RFC issue; the spec lives in `docs/DESIGN.md`, never the reverse.
 
 ## Status
 
