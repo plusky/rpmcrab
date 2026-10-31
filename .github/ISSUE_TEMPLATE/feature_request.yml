@@ -1,6 +1,5 @@
 name: Feature request
 description: Propose new rpmcrab behaviour
-title: ""
 labels: [enhancement]
 body:
   - type: markdown
