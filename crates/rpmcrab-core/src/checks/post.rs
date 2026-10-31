@@ -295,8 +295,10 @@ impl PostCheck {
     /// The logical command line starting at byte `at` in `text`: the
     /// rest of the physical line, with backslash-newline continuations
     /// (outside single quotes) joined. Stops at an unquoted newline.
-    /// Inside double quotes a backslash unescapes the next character
-    /// (`\"` becomes `"`); outside quotes the backslash is preserved
+    /// Inside double quotes a backslash is preserved verbatim
+    /// (except a backslash-newline, which still joins); escape
+    /// handling belongs to the tokenizer downstream, which applies
+    /// the POSIX set; outside quotes the backslash is preserved
     /// except for continuations.
     fn logical_line_after(text: &str, at: usize) -> String {
         let mut out = String::new();
