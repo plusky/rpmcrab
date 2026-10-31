@@ -157,3 +157,22 @@ name = "lmdb-master-sys"
 srpm = "lmdb"
 accepted_names = ["lmdb", "liblmdb"]
 witness = "MDB_KEYEXIST: Key/data pair already exists"
+# tikv-jemalloc-sys's witness is the prefix of every jemalloc
+# message, <jemalloc>: , from the crate vendored jemalloc
+# source (tikv-jemalloc-sys-0.7.1+5.3.1-0-g81034ce: src/conf.c:221,
+# src/jemalloc.c:890; 0.6.1+5.3.0-1-ge13ca99: src/jemalloc.c:950,
+# :1824). TW ships libjemalloc.so.2, but the crate cannot link it:
+# it defaults to the _rjem_ symbol prefix and emits
+# cfg(prefixed) even under JEMALLOC_OVERRIDE, while the system
+# library exports only unprefixed symbols, so linking it needs the
+# unprefixed_malloc_on_supported_platforms Cargo feature, not an
+# environment switch -- no link remedy. No version source either:
+# the crate versions carry git-describe build metadata
+# (0.7.1+5.3.1-0-g81034ce and kin), which is not the jemalloc
+# release version, and the parser already returns None for all
+# three shapes.
+[[crate]]
+name = "tikv-jemalloc-sys"
+srpm = "jemalloc"
+accepted_names = ["jemalloc"]
+witness = "<jemalloc>: "

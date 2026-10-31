@@ -26535,6 +26535,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 "lmdb-master-sys",
                 "onig_sys",
                 "openssl-src",
+                "tikv-jemalloc-sys",
                 "zstd-sys"
             ]
         );
@@ -26606,6 +26607,16 @@ description = "explicit priority string bypasses the system crypto policy"
             zstd.c_version_source,
             Some(CVersionSource::CrateBuildMetadata)
         );
+        let jemalloc = map.iter().find(|e| e.name == "tikv-jemalloc-sys").unwrap();
+        assert_eq!(jemalloc.srpm, "jemalloc");
+        assert_eq!(jemalloc.accepted_names, ["jemalloc"]);
+        // TW ships libjemalloc.so.2, but the crate cannot link it:
+        // it defaults to the _rjem_ symbol prefix while the system
+        // library exports only unprefixed symbols. No soname pair,
+        // and no version source: the crate versions carry
+        // git-describe build metadata, not the jemalloc release.
+        assert!(jemalloc.system_soname_prefix.is_none() && jemalloc.link_soname.is_none());
+        assert!(jemalloc.c_version_source.is_none());
     }
 
     #[test]
@@ -26839,6 +26850,53 @@ description = "explicit priority string bypasses the system crypto policy"
                 "bundled({accepted}) must satisfy the finding"
             );
         }
+    }
+
+    #[test]
+    fn bundled_library_tikv_jemalloc_detail_drops_link_and_version() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored(
+            "tikv-jemalloc-sys",
+            "0.7.1+5.3.1-0-g81034ce",
+            None,
+            true,
+        )];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe tikv-jemalloc-sys 0.7.1+5.3.1-0-g81034ce: add Provides: bundled(jemalloc)"
+            ],
+            "tikv-jemalloc-sys has no linkable system form and no version source: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn bundled_library_tikv_jemalloc_quiet_when_declared() {
+        let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        pkg.provides = vec![bundled_provide("jemalloc")];
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored(
+            "tikv-jemalloc-sys",
+            "0.7.1+5.3.1-0-g81034ce",
+            None,
+            true,
+        )];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn bundled_library_tikv_jemalloc_quiet_without_witness() {
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored(
+            "tikv-jemalloc-sys",
+            "0.7.1+5.3.1-0-g81034ce",
+            None,
+            false,
+        )];
+        assert!(bundled_lines(&pkg, &info).is_empty());
     }
 
     #[test]
@@ -27371,6 +27429,11 @@ description = "explicit priority string bypasses the system crypto policy"
             crate_build_metadata_version("300.6.1+3.6.3").as_deref(),
             Some("3.6.3")
         );
+        // Git-describe build metadata is not the jemalloc release
+        // version: all three tikv-jemalloc-sys shapes give None.
+        assert_eq!(crate_build_metadata_version("0.7.1+5.3.1-0-g81034ce"), None);
+        assert_eq!(crate_build_metadata_version("0.6.1+5.3.0-1-ge13ca99"), None);
+        assert_eq!(crate_build_metadata_version("0.5.4+5.3.0-patched"), None);
     }
 
     #[test]
