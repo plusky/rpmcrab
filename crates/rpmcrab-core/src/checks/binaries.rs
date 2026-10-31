@@ -4228,7 +4228,11 @@ struct HardeningObservation {
 #[derive(Default)]
 struct HardeningRollup {
     files: usize,
-    first_paths: Vec<String>,
+    /// Example paths per arm, capped at 3 each: the detail's
+    /// examples come from the arm's own population, never the union.
+    ssp_paths: Vec<String>,
+    fortify_paths: Vec<String>,
+    cet_paths: Vec<String>,
     any_ssp_applicable: bool,
     any_fortify_applicable: bool,
     any_ssp_symbol: bool,
@@ -4237,9 +4241,6 @@ struct HardeningRollup {
     ssp_files: usize,
     /// Files applicable to the fortify arm.
     fortify_files: usize,
-    /// Files applicable to at least one arm: the population the
-    /// detail's counts and example paths describe.
-    judged_files: usize,
     cet_judged: bool,
     /// Judged x86_64 files: the cf-protection arm's population.
     cet_files: usize,
@@ -4259,12 +4260,21 @@ impl HardeningRollup {
         self.any_fortify_symbol |= obs.has_fortify_symbol;
         if obs.ssp_applicable {
             self.ssp_files += 1;
+            if self.ssp_paths.len() < 3 {
+                self.ssp_paths.push(path.to_string());
+            }
         }
         if obs.fortify_applicable {
             self.fortify_files += 1;
+            if self.fortify_paths.len() < 3 {
+                self.fortify_paths.push(path.to_string());
+            }
         }
         if obs.cet_judged {
             self.cet_files += 1;
+            if self.cet_paths.len() < 3 {
+                self.cet_paths.push(path.to_string());
+            }
             if !self.cet_judged {
                 self.cet_judged = true;
                 self.cet_absent_everywhere = true;
@@ -4272,12 +4282,6 @@ impl HardeningRollup {
             }
             self.cet_absent_everywhere &= obs.cet_absent;
             self.cet_endbr64_absent_everywhere &= obs.cet_endbr64_absent;
-        }
-        if obs.ssp_applicable || obs.fortify_applicable || obs.cet_judged {
-            self.judged_files += 1;
-            if self.first_paths.len() < 3 {
-                self.first_paths.push(path.to_string());
-            }
         }
     }
 }
@@ -7147,38 +7151,47 @@ impl BinariesCheck {
         if rollup.any_ssp_symbol || rollup.any_fortify_symbol {
             return None;
         }
-        // Each arm is counted over its own applicable population:
-        // the three do not in general coincide (a non-x86_64 file
-        // is no part of the cf-protection population).
-        let mut named: Vec<(&str, usize)> = vec![
-            ("stack-protector", rollup.ssp_files),
-            ("fortify", rollup.fortify_files),
+        // Each arm is counted over its own applicable population
+        // and exemplified from that population alone: the three do
+        // not in general coincide (a gccgo file is CET-judged but
+        // no part of the stack-protector/fortify populations, and a
+        // non-x86_64 file is no part of the cf-protection one).
+        let mut named: Vec<(&str, usize, &Vec<String>)> = vec![
+            ("stack-protector", rollup.ssp_files, &rollup.ssp_paths),
+            ("fortify", rollup.fortify_files, &rollup.fortify_paths),
         ];
         if expected.cet
             && rollup.cet_judged
             && rollup.cet_absent_everywhere
             && rollup.cet_endbr64_absent_everywhere
         {
-            named.push(("cf-protection", rollup.cet_files));
+            named.push(("cf-protection", rollup.cet_files, &rollup.cet_paths));
         }
-        let mut paths = rollup.first_paths.join(", ");
-        if rollup.judged_files > rollup.first_paths.len() {
-            paths.push_str(", \u{2026}");
-        }
-        if named.iter().all(|(_, n)| *n == named[0].1) {
-            let names: Vec<&str> = named.iter().map(|(name, _)| *name).collect();
+        let paths_for = |paths: &[String], n: usize| -> String {
+            let mut s = paths.join(", ");
+            if n > paths.len() {
+                s.push_str(", \u{2026}");
+            }
+            s
+        };
+        if named.iter().all(|(_, n, _)| *n == named[0].1)
+            && named.iter().all(|(_, _, paths)| paths == &named[0].2)
+        {
+            let names: Vec<&str> = named.iter().map(|(name, _, _)| *name).collect();
             Some(format!(
                 "{} absent from all {} ELF files ({})",
                 names.join(","),
                 named[0].1,
-                paths
+                paths_for(named[0].2, named[0].1)
             ))
         } else {
             let clauses: Vec<String> = named
                 .iter()
-                .map(|(name, n)| format!("{name} absent from all {n} ELF files"))
+                .map(|(name, n, paths)| {
+                    format!("{name} absent from all {n} ELF files ({})", paths_for(paths, *n))
+                })
                 .collect();
-            Some(format!("{} ({})", clauses.join(", "), paths))
+            Some(clauses.join(", "))
         }
     }
 
@@ -11179,9 +11192,9 @@ mod tests {
         // and a fortified wrapper: that is not the C
         // instrumentation the tag asks for, so it does not quiet
         // the finding, and the counts cover the C file alone. The
-        // gccgo file still appears among the example paths: it is
-        // CET-judged, so it belongs to the judged population even
-        // though no stack-protector/fortify arm counts it.
+        // gccgo file no longer appears among the example paths:
+        // it is CET-judged, but no stack-protector/fortify arm
+        // counts it, so per-arm paths exclude it.
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let mut gccgo = flagless_info(FLAGLESS_IMPORTS);
         gccgo.functions = vec![
@@ -11198,7 +11211,39 @@ mod tests {
             check.optflags_not_applied_detail("-fstack-protector-strong -D_FORTIFY_SOURCE=2");
         assert_eq!(
             detail.as_deref(),
-            Some("stack-protector,fortify absent from all 1 ELF files (/usr/bin/a, /usr/bin/b)")
+            Some("stack-protector,fortify absent from all 1 ELF files (/usr/bin/a)")
+        );
+    }
+
+    #[test]
+    fn optflags_not_applied_per_arm_paths_follow_per_arm_counts() {
+        // The M2 shape: a C file plus a gccgo file under a CET tag.
+        // The counts differ (1 C file per C arm, 2 CET-judged
+        // files), so the detail splits into per-arm clauses, and
+        // each clause's paths come from that arm's own population:
+        // the gccgo file appears only in the cf-protection clause.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut gccgo = flagless_info(FLAGLESS_IMPORTS);
+        gccgo.functions = vec![
+            "__go_construct_map".to_string(),
+            "__stack_chk_fail".to_string(),
+            "__memcpy_chk".to_string(),
+        ];
+        let files: Vec<(&str, ReadelfInfo)> = vec![
+            ("/usr/bin/a", flagless_info(FLAGLESS_IMPORTS)),
+            ("/usr/bin/b", gccgo),
+        ];
+        let check = optflags_rollup_check(&pkg, &files);
+        let detail = check.optflags_not_applied_detail(
+            "-fstack-protector-strong -D_FORTIFY_SOURCE=3 -fcf-protection",
+        );
+        assert_eq!(
+            detail.as_deref(),
+            Some(
+                "stack-protector absent from all 1 ELF files (/usr/bin/a), \
+                fortify absent from all 1 ELF files (/usr/bin/a), \
+                cf-protection absent from all 2 ELF files (/usr/bin/a, /usr/bin/b)"
+            )
         );
     }
 
