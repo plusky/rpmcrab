@@ -39,7 +39,8 @@
 #                         binary's data) or
 #                         "crate-build-metadata" (the trailing
 #                         all-numeric dotted run of the crate
-#                         version's +build metadata);
+#                         version's +build metadata, +<lib>.X.Y.Z,
+#                         or a bare X.Y.Z as libgit2-sys records it);
 #                         absent: no version source, and the detail
 #                         prescribes no version
 #   embedded_version_major  for "embedded-version-string": the major
@@ -57,6 +58,15 @@
 # debuginfo carrying no DWARF for the library, so the witness is the
 # only evidence there. The witness cannot tell SQLite from its
 # SQLCipher fork (see the libsqlite3-sys entry below).
+#
+# The libgit2 witness is the index-lock error string from
+# libgit2/src/libgit2/index.c: in the draw behind the ledger entry
+# it fires in 10 of the 11 runtime libgit2-sys ELFs, against 6 of
+# 11 for the `libgit2 X.Y.Z` banner, which is library-internal and
+# is not a witness. The crate version's build metadata names the
+# C version (+1.9.7 carries libgit2 1.9.7), and the crate's
+# LIBGIT2_NO_VENDOR switch links the system library instead, so
+# the detail prescribes that link or bundled(libgit2).
 
 # The onig_sys witness is the error string `too big wide-char value`
 # from Oniguruma's regerror.c, which the crate vendors whole: in the
@@ -123,4 +133,12 @@ accepted_names = ["openssl-3", "openssl"]
 system_soname_prefix = "libcrypto.so."
 link_soname = "libcrypto.so.3"
 witness = "OpenSSL Default Provider"
+c_version_source = "crate-build-metadata"
+[[crate]]
+name = "libgit2-sys"
+srpm = "libgit2"
+accepted_names = ["libgit2"]
+system_soname_prefix = "libgit2.so."
+link_soname = "libgit2.so.1.9"
+witness = "the index is locked; this might be due to a concurrent or crashed process"
 c_version_source = "crate-build-metadata"

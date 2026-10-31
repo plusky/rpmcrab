@@ -1956,7 +1956,7 @@ struct VendoredCrate {
     crate_version: String,
     /// The C library's version, where the map names a source for it:
     /// a standalone version string embedded in the binary (sqlite) or
-    /// the crate version's build metadata (zstd, openssl-src). `None` where the
+    /// the crate version's build metadata (zstd, openssl-src, libgit2). `None` where the
     /// map has no source (aws-lc, onig_sys).
     c_version: Option<String>,
     /// The map entry's witness bytes occur in the file: the C code is
@@ -2319,10 +2319,11 @@ fn dotted_version_at(data: &[u8], start: usize) -> Option<(&str, usize)> {
 }
 
 /// The C version from a crate version's `+build` metadata: the
-/// metadata's trailing all-numeric dotted run (`2.1.0+zstd.1.5.7`
-/// carries zstd 1.5.7, `300.6.1+3.6.3` carries OpenSSL 3.6.3).
-/// `None` when there is no metadata or its tail is not a plain
-/// dotted version.
+/// metadata's trailing all-numeric dotted run, with or without a
+/// `<lib>.` prefix (`2.1.0+zstd.1.5.7` carries zstd 1.5.7,
+/// `300.6.1+3.6.3` carries OpenSSL 3.6.3, `0.18.8+1.9.7` carries
+/// libgit2 1.9.7). `None` when there is no metadata or its tail is
+/// not a plain dotted version.
 fn crate_build_metadata_version(crate_version: &str) -> Option<String> {
     let metadata = crate_version.split_once('+')?.1;
     let segments: Vec<&str> = metadata.split('.').collect();
@@ -26529,6 +26530,7 @@ description = "explicit priority string bypasses the system crypto policy"
             names,
             [
                 "aws-lc-sys",
+                "libgit2-sys",
                 "libsqlite3-sys",
                 "onig_sys",
                 "openssl-src",
@@ -26577,6 +26579,15 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(openssl.link_soname.as_deref(), Some("libcrypto.so.3"));
         assert_eq!(
             openssl.c_version_source,
+            Some(CVersionSource::CrateBuildMetadata)
+        );
+        let libgit2 = map.iter().find(|e| e.name == "libgit2-sys").unwrap();
+        assert_eq!(libgit2.srpm, "libgit2");
+        assert_eq!(libgit2.accepted_names, ["libgit2"]);
+        assert_eq!(libgit2.system_soname_prefix.as_deref(), Some("libgit2.so."));
+        assert_eq!(libgit2.link_soname.as_deref(), Some("libgit2.so.1.9"));
+        assert_eq!(
+            libgit2.c_version_source,
             Some(CVersionSource::CrateBuildMetadata)
         );
         let zstd = map.iter().find(|e| e.name == "zstd-sys").unwrap();
@@ -26949,6 +26960,52 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn bundled_library_libgit2_fires_with_link_remedy_and_version() {
+        // The nushell shape: libgit2-sys resolved, the index-lock
+        // witness present, no system soname needed, nothing declared.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("libgit2-sys", "0.18.8+1.9.7", Some("1.9.7"), true)];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe libgit2-sys 0.18.8+1.9.7: link the system libgit2.so.1.9 or add Provides: bundled(libgit2) = 1.9.7"
+            ],
+            "libgit2 firing line: {lines:?}"
+        );
+        // System-linked and witnessed: fires, link remedy dropped.
+        let mut info = syn_info();
+        info.needed = vec!["libgit2.so.1.9".to_string()];
+        info.vendored_crates = vec![vendored("libgit2-sys", "0.18.8+1.9.7", Some("1.9.7"), true)];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe libgit2-sys 0.18.8+1.9.7: add Provides: bundled(libgit2) = 1.9.7"
+            ],
+            "dual-link libgit2 firing line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn bundled_library_libgit2_quiet_without_witness_or_when_declared() {
+        // The build-kind shape: the crate is listed but its code is
+        // not in this binary.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("libgit2-sys", "0.18.8+1.9.7", None, false)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+        // Declared under its accepted name, the witnessed carrier
+        // is satisfied.
+        let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        pkg.provides = vec![bundled_provide("libgit2")];
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("libgit2-sys", "0.18.8+1.9.7", Some("1.9.7"), true)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
     fn dep_v0_extraction_reads_the_graph_witnesses_and_versions() {
         let dep = dep_v0_bytes(&[
             ("serde", "1.0.0"),
@@ -27098,6 +27155,22 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(info.vendored_crates.len(), 1);
         assert!(info.vendored_crates[0].witness_present);
         assert_eq!(info.vendored_crates[0].c_version, None);
+        // The libgit2 witness only in a writable section: the
+        // crate is listed but its code is not proven linked.
+        let dep = dep_v0_bytes(&[("libgit2-sys", "0.18.8+1.9.7")]);
+        let info = writable_info(
+            "depv0-writable-libgit2-witness",
+            &[
+                (
+                    ".data",
+                    b"the index is locked; this might be due to a concurrent or crashed process\0",
+                ),
+                (".dep-v0", &dep),
+            ],
+            0,
+        );
+        assert_eq!(info.vendored_crates.len(), 1);
+        assert!(!info.vendored_crates[0].witness_present);
     }
 
     #[test]
@@ -27241,6 +27314,11 @@ description = "explicit priority string bypasses the system crypto policy"
             Some("1.5.7")
         );
         assert_eq!(crate_build_metadata_version("0.35.0"), None);
+        // libgit2-sys records a bare C version, no <lib>. prefix.
+        assert_eq!(
+            crate_build_metadata_version("0.18.8+1.9.7").as_deref(),
+            Some("1.9.7")
+        );
         // A lone trailing number is not a dotted version.
         assert_eq!(crate_build_metadata_version("1.0.0+zstd.2"), None);
         assert_eq!(crate_build_metadata_version("1.0.0+build.info"), None);
