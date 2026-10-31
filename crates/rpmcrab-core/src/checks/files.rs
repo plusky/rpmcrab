@@ -7317,8 +7317,16 @@ impl FilesCheck {
             Ok(Some(c)) => c,
             _ => return,
         };
+        // Managed targets are never dangling: an alternatives endpoint
+        // exists only once its alternative is selected (the alternatives
+        // tool materialises it at install time), and a /dev/null target
+        // is a deliberate mask, not a missing file. Neither has a
+        // package-side remedy, so neither fires. Only the dangling
+        // report is gated: the relative-symlink tag below is untouched.
+        let managed_target = link == "/dev/null" || link.starts_with("/etc/alternatives/");
         let is_so = is_match(&self.sofile_re, fname);
-        if !is_so
+        if !managed_target
+            && !is_so
             && !pkg.files.iter().any(|f| f.name == *link)
             && !pkg.req_names.iter().any(|n| n == link)
         {
@@ -10392,7 +10400,12 @@ mod tests {
         assert_has(&names, "symlink-has-too-many-up-segments");
         assert_has(&names, "symlink-should-be-relative");
         assert_has(&names, "symlink-to-binary-with-shebang");
-        assert_has(&names, "dangling-symlink");
+        // The sink's absolute dangling link points at
+        // /etc/alternatives/foo, a managed target, so it stays quiet
+        // under the exemption; the sink's relative dangling links are
+        // unaffected (the exemption lives only in the absolute path).
+        assert_lacks(&names, "dangling-symlink");
+        assert_has(&names, "dangling-relative-symlink");
         // logs
         assert_has(&names, "non-root-user-log-file");
         assert_has(&names, "non-root-group-log-file");
@@ -15130,6 +15143,84 @@ print("hi")
         };
         let results = run_files_check_with_files(vec![symlink("/usr/share/link", "foo"), dir]);
         assert_lacks(&finding_names(&results), "symlink-loop");
+    }
+
+    #[test]
+    fn dangling_symlink_quiet_for_managed_targets() {
+        // Alternatives endpoints dangle by design (the target is
+        // materialised only when an alternative is selected) and a
+        // /dev/null target is a deliberate mask: neither fires. The
+        // shapes below are the worker-A instances verbatim: the seven
+        // bogofilter-doc man links, the three avocado-runner links,
+        // the ogre plugins link, and both /dev/null mask fnames (the
+        // cloud-netconfig rules file and udev-persistent-ifnames').
+        let results = run_files_check_with_files(vec![
+            symlink(
+                "/usr/share/man/man1/bf_compact.1.gz",
+                "/etc/alternatives/bf_compact.1.gz",
+            ),
+            symlink(
+                "/usr/share/man/man1/bf_copy.1.gz",
+                "/etc/alternatives/bf_copy.1.gz",
+            ),
+            symlink(
+                "/usr/share/man/man1/bf_tar.1.gz",
+                "/etc/alternatives/bf_tar.1.gz",
+            ),
+            symlink(
+                "/usr/share/man/man1/bogofilter.1.gz",
+                "/etc/alternatives/bogofilter.1.gz",
+            ),
+            symlink(
+                "/usr/share/man/man1/bogolexer.1.gz",
+                "/etc/alternatives/bogolexer.1.gz",
+            ),
+            symlink(
+                "/usr/share/man/man1/bogotune.1.gz",
+                "/etc/alternatives/bogotune.1.gz",
+            ),
+            symlink(
+                "/usr/share/man/man1/bogoutil.1.gz",
+                "/etc/alternatives/bogoutil.1.gz",
+            ),
+            symlink(
+                "/usr/bin/avocado-runner-robot",
+                "/etc/alternatives/avocado-runner-robot",
+            ),
+            symlink(
+                "/usr/bin/avocado-runner-golang",
+                "/etc/alternatives/avocado-runner-golang",
+            ),
+            symlink(
+                "/usr/bin/avocado-runner-ansible-module",
+                "/etc/alternatives/avocado-runner-ansible-module",
+            ),
+            symlink("/usr/share/OGRE/plugins.cfg", "/etc/alternatives/ogre"),
+            symlink(
+                "/etc/udev/rules.d/75-persistent-net-generator.rules",
+                "/dev/null",
+            ),
+            symlink("/etc/udev/rules.d/80-net-setup-link.rules", "/dev/null"),
+        ]);
+        assert_lacks(&finding_names(&results), "dangling-symlink");
+        assert_lacks(&finding_names(&results), "no-dependency-on");
+    }
+
+    #[test]
+    fn dangling_symlink_managed_target_lookalikes_still_fire() {
+        // The exemption is exact: a sibling prefix and a longer
+        // /dev/null path are ordinary missing targets, not managed
+        // ones, so genuine dangling findings still fire.
+        let results = run_files_check_with_files(vec![
+            symlink("/usr/share/foo/bar", "/etc/alternativesX/foo"),
+            symlink("/etc/udev/rules.d/99-test.rules", "/dev/nullfoo"),
+            symlink("/usr/lib/foo/dangling", "/usr/lib/foo/missing"),
+        ]);
+        let dangling = finding_names(&results)
+            .iter()
+            .filter(|n| n.as_str() == "dangling-symlink")
+            .count();
+        assert_eq!(dangling, 3, "got: {results:?}");
     }
 
     #[test]
