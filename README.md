@@ -17,7 +17,7 @@ openQA) already consumes — except for the deliberate divergences recorded in
 the machine-enforced ledger
 ([`tests/parity/divergences.toml`](tests/parity/divergences.toml)). It is not
 a bug-for-bug port: upstream false positives and never-firing checks are
-fixed. The current version is **0.4.1**.
+fixed. The current release is **0.4.1**.
 
 ## Validation and security tightening
 
