@@ -316,7 +316,7 @@ carries no marker at all -- and the
 maintenance query defined by the bundled software policy --
 whatprovides 'bundled(<source package>)' -- does not match it, so
 the package stays invisible when the library needs a security
-update. Where the library has a system shared form, link that
+update. Where the library has a system form the crate can link, link that
 instead of the vendored copy; the vendored copy can always be
 declared instead: add Provides: bundled(<source package>), with
 `= <version>` naming the version of the library that is actually
