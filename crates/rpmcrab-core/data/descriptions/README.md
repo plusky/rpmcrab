@@ -60,7 +60,9 @@ Provenance, verified against the pinned reference (`84848c0`):
 - `TagsCheck.toml` — the pinned reference file, with the `useless-provides`
   entry reworded per upstream rpmlint#427 (scoped to the pair the check
   fires on: a name in both unversioned and versioned form), staged ahead
-  of the reference per the fix-in-port rule; minus the `non-standard-group`,
+  of the reference per the fix-in-port rule; plus the port-only
+  `summary-with-trademark-symbol` entry (the reference has no
+  trademark-symbol check); minus the `non-standard-group`,
   `no-group-tag`, `devel-package-with-non-devel-group`,
   `no-major-in-name`, `incoherent-version-in-changelog`,
   `invalid-buildhost`, `invalid-packager`, `invalid-version`,

@@ -32,6 +32,9 @@ Summary ends with a dot.
 summary-has-leading-spaces="""
 Summary begins with whitespace which will waste space when displayed.
 """
+summary-with-trademark-symbol="""
+Summary contains a literal trademark symbol (™ or ®). The symbol carries no information in a one-line summary; drop it and keep the name.
+"""
 no-description-tag="""
 The description of the package is empty or missing.
 """
