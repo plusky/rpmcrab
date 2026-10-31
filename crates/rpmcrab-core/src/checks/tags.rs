@@ -1015,14 +1015,47 @@ impl TagsCheck {
                     // a different version: the same-build library satisfies
                     // it, and the bound names the base version the package
                     // version extends with a further dot component.
+                    // Ancestor is lineage, not order: rpm order alone
+                    // would silence every floor below the version,
+                    // including the pinned off-ancestor case (1.1 under
+                    // 1.15.1), so the dot-prefix test stays and the
+                    // tilde case joins it as a second arm. A
+                    // tilde-suffixed bound sorts below its base, so a
+                    // bound like 1.0~rc1 is a prerelease of the 1.0
+                    // line: stripping the tilde suffix leaves a
+                    // dot-prefix-or-equal of the package version's
+                    // own tilde-stripped form, and rpm order confirms
+                    // the package version sits above the bound.
+                    // `>` and `>=` differ at the package version
+                    // itself: `>=` there is the exact pin and stays
+                    // silent, while `>` excludes the same-build
+                    // library and keeps firing.
                     let lower_bound_at_ancestor = dep.epoch == epoch
-                        && dep.flags & RPMSENSE_GREATER != 0
-                        && dep.flags & RPMSENSE_LESS == 0
+                        && (dep.flags == RPMSENSE_GREATER
+                            || dep.flags == (RPMSENSE_GREATER | RPMSENSE_EQUAL))
                         && dep.version.as_deref().is_some_and(|v| {
-                            !v.is_empty()
+                            let dot_ancestor = !v.is_empty()
                                 && version
                                     .strip_prefix(v)
-                                    .is_some_and(|rest| rest.starts_with('.'))
+                                    .is_some_and(|rest| rest.starts_with('.'));
+                            let tilde_ancestor = v.contains('~') && {
+                                let dep_base = v.split('~').next().unwrap_or("");
+                                let pkg_base = version.split('~').next().unwrap_or("");
+                                !dep_base.is_empty()
+                                    && (pkg_base == dep_base
+                                        || pkg_base
+                                            .strip_prefix(dep_base)
+                                            .is_some_and(|rest| rest.starts_with('.')))
+                                    && compare_evr(
+                                        epoch,
+                                        Some(version.as_str()),
+                                        None,
+                                        dep.epoch,
+                                        Some(v),
+                                        None,
+                                    ) == std::cmp::Ordering::Greater
+                            };
+                            dot_ancestor || tilde_ancestor
                         });
                     if dep.flags == 0 {
                         add_info(
@@ -1032,7 +1065,8 @@ impl TagsCheck {
                             "no-version-dependency-on",
                             &[&base_or_libs, &sexp],
                         );
-                    } else if (dep.epoch, dep.version.as_deref()) != (exp.0, exp.1)
+                    } else if ((dep.epoch, dep.version.as_deref()) != (exp.0, exp.1)
+                        || dep.flags == RPMSENSE_GREATER)
                         && !lower_bound_at_ancestor
                     {
                         let v = version_to_string(dep.epoch, dep.version.as_deref(), None);
@@ -5014,6 +5048,53 @@ mod rich_dep_emission_tests {
                 "flags {flags}: {results:?}"
             );
         }
+    }
+
+    #[test]
+    fn missing_dependency_on_lower_bound_tilde_ancestor_is_silent() {
+        // A tilde-suffixed bound sorts below its base under rpm
+        // vercmp, so the package version sits above it even though
+        // no dot-prefix ancestor relation holds textually: 1.0 is
+        // above 1.0~rc1, and the lower bound is satisfied by the
+        // same-build library either way.
+        for flags in [RPMSENSE_GREATER | RPMSENSE_EQUAL, RPMSENSE_GREATER] {
+            let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+            pkg.name = "tags-missingdep-devel".to_string();
+            pkg.files.push(so_file());
+            pkg.requires = vec![flagged_dep("tags-missingdep-libs", flags, "1.0~rc1")];
+            let results = run(&pkg, &rich_test_config(&[], false));
+            assert!(
+                named(&results, "missing-dependency-on").is_empty(),
+                "flags {flags}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_dependency_on_strict_lower_bound_at_package_version_still_fires() {
+        // `>` and `>=` split at the package version itself: `>=`
+        // there is the exact pin and stays silent, while `>` excludes
+        // the same-build library and keeps firing.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![flagged_dep("tags-missingdep-libs", RPMSENSE_GREATER, "1.0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "missing-dependency-on");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![flagged_dep(
+            "tags-missingdep-libs",
+            RPMSENSE_GREATER | RPMSENSE_EQUAL,
+            "1.0",
+        )];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "missing-dependency-on").is_empty(),
+            "all: {results:?}"
+        );
     }
 
     #[test]

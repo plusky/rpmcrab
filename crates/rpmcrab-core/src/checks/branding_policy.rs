@@ -1130,8 +1130,9 @@ mod tests {
     }
 
     // Near misses: a Suggests on a documentation package that is not
-    // exactly the package's own -doc companion, and a Suggests on the
-    // package itself, still fire.
+    // exactly the package's own -doc companion, a Suggests on the
+    // package itself, and a versioned Suggests on another package's
+    // docs, still fire.
     #[test]
     fn non_own_doc_suggests_still_fire() {
         let mut pkg = fixture_pkg();
@@ -1140,7 +1141,8 @@ mod tests {
             dep("bla-theme-openSUSE-doc-extra", 0),
             dep("other-theme-doc", 0),
             dep("bla-theme-openSUSE", 0),
+            dep_ev("third-theme-doc", RPMSENSE_GREATER | RPMSENSE_EQUAL, "2.0"),
         ];
-        assert_eq!(excessive_suggests(&pkg).len(), 3, "{:?}", run(&pkg));
+        assert_eq!(excessive_suggests(&pkg).len(), 4, "{:?}", run(&pkg));
     }
 }
