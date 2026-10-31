@@ -339,10 +339,11 @@ impl PostCheck {
     /// The logical command line starting at byte `at` in `text`: the
     /// rest of the physical line, with backslash-newline continuations
     /// (outside single quotes) joined. Stops at an unquoted newline.
-    /// Inside double quotes a backslash follows the shell escape set:
-    /// it is kept except before `$`, backtick, `"`, `\` and newline
-    /// (a backslash-newline still joins); outside quotes the
-    /// backslash is preserved except for continuations.
+    /// Inside double quotes a backslash is preserved verbatim
+    /// (except a backslash-newline, which still joins): escape
+    /// handling belongs to the tokenizer downstream, which applies
+    /// the POSIX set; outside quotes the backslash is preserved
+    /// except for continuations.
     fn logical_line_after(text: &str, at: usize) -> String {
         let mut out = String::new();
         let mut chars = text[at..].chars().peekable();
@@ -350,17 +351,14 @@ impl PostCheck {
         while let Some(c) = chars.next() {
             match quote {
                 Some(q) => {
-                    // Inside double quotes a backslash follows the
-                    // shell escape set: kept except before `$`,
-                    // backtick, `"`, `\` and newline, where the
-                    // escape resolves (a backslash-newline joins).
+                    // Inside double quotes a backslash is preserved
+                    // verbatim (except a backslash-newline, which
+                    // still joins): the tokenizer downstream owns
+                    // escape handling, and stripping here would turn
+                    // an escaped quote into a closing quote.
                     if c == '\\' && q == '"' {
                         match chars.peek() {
                             Some('\n') => {
-                                chars.next();
-                            }
-                            Some(n) if matches!(*n, '$' | '`' | '"' | '\\') => {
-                                out.push(*n);
                                 chars.next();
                             }
                             Some(n) => {
@@ -4146,13 +4144,13 @@ mod tests {
     }
 
     #[test]
-    fn logical_line_after_applies_double_quote_escape_set() {
-        // Inside double quotes the shell escape set applies: a
-        // backslash is kept except before `$`, backtick, `"`,
-        // `\` and newline (a backslash-newline still joins).
+    fn logical_line_after_preserves_double_quote_escapes() {
+        // Escapes inside double quotes survive the logical line: the
+        // tokenizer owns unescaping, and stripping here would turn an
+        // escaped quote into a closing quote.
         assert_eq!(
             PostCheck::logical_line_after("cp \"a\\\"b\" /etc/x\n", 3),
-            "\"a\"b\" /etc/x"
+            "\"a\\\"b\" /etc/x"
         );
         assert_eq!(
             PostCheck::logical_line_after("cp \"a\\b\" /etc/x\n", 3),
@@ -4160,20 +4158,35 @@ mod tests {
         );
         assert_eq!(
             PostCheck::logical_line_after("cp \"a\\$b\" /etc/x\n", 3),
-            "\"a$b\" /etc/x"
+            "\"a\\$b\" /etc/x"
         );
         assert_eq!(
             PostCheck::logical_line_after("cp \"a\\\\b\" /etc/x\n", 3),
-            "\"a\\b\" /etc/x"
+            "\"a\\\\b\" /etc/x"
         );
         assert_eq!(
             PostCheck::logical_line_after("cp \"a\\`b\" /etc/x\n", 3),
-            "\"a`b\" /etc/x"
+            "\"a\\`b\" /etc/x"
         );
         // A backslash-newline inside quotes still joins.
         assert_eq!(
             PostCheck::logical_line_after("cp \"a\\\n b\" /etc/x\n", 3),
             "\"a b\" /etc/x"
+        );
+    }
+
+    #[test]
+    fn logical_line_after_split_operands_quoted_backslash_composition() {
+        // Regression for the #1378 HIGH: a quoted backslash must
+        // survive logical_line_after verbatim and unescape exactly
+        // once, in split_operands. Resolving the escape in
+        // logical_line_after turned the escaped quote into a closing
+        // quote downstream and broke the downstream tokenization.
+        let line = PostCheck::logical_line_after("cp \"a\\\"b\" /etc/x\n", 3);
+        assert_eq!(line, "\"a\\\"b\" /etc/x");
+        assert_eq!(
+            PostCheck::split_operands(&line),
+            vec!["a\"b".to_string(), "/etc/x".to_string()]
         );
     }
 
