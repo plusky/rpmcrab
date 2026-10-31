@@ -67,6 +67,18 @@
 # C version (+1.9.7 carries libgit2 1.9.7), and the crate's
 # LIBGIT2_NO_VENDOR switch links the system library instead, so
 # the detail prescribes that link or bundled(libgit2).
+# The libssh2 witness is the session error string `Unable to
+# exchange encryption keys` (libssh2/src/session.c:792 in
+# libssh2-sys-0.3.1): the public banner `SSH-2.0-libssh2_` was
+# rejected as a witness because it comes from the public header
+# (include/libssh2.h:251) and lands in dynamic libssh2 consumers
+# too. The system form is libssh2.so.1 (TW libssh2-1 1.11.1-4.1,
+# srpm libssh2_org); the crate's system-link switch is
+# LIBSSH2_SYS_USE_PKG_CONFIG. In the tracking issue's draws, all 14
+# binary packages in the libssh2-sys frame carry
+# bundled(rust-crate:libssh2-sys) with no Requires on the system
+# soname; the 8-package draw lists the crate in 12 ELFs, 7 of which
+# carry the witness with no system link.
 
 # The onig_sys witness is the error string `too big wide-char value`
 # from Oniguruma's regerror.c, which the crate vendors whole: in the
@@ -176,3 +188,11 @@ name = "tikv-jemalloc-sys"
 srpm = "jemalloc"
 accepted_names = ["jemalloc"]
 witness = "<jemalloc>: "
+
+[[crate]]
+name = "libssh2-sys"
+srpm = "libssh2_org"
+accepted_names = ["libssh2_org", "libssh2"]
+system_soname_prefix = "libssh2.so."
+link_soname = "libssh2.so.1"
+witness = "Unable to exchange encryption keys"
