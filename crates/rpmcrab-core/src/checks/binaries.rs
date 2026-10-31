@@ -1949,14 +1949,14 @@ fn detect_go_toolchain(elf: &goblin::elf::Elf, data: &[u8]) -> Option<GoVersion>
 /// matched against `data/vendored-c-crates.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VendoredCrate {
-    /// The -sys crate name (the map key), e.g. `zstd-sys`.
+    /// The crate name (the map key), e.g. `zstd-sys`.
     name: String,
     /// The crate version from `.dep-v0`, build metadata included
     /// (e.g. `2.1.0+zstd.1.5.7`).
     crate_version: String,
     /// The C library's version, where the map names a source for it:
     /// a standalone version string embedded in the binary (sqlite) or
-    /// the crate version's build metadata (zstd). `None` where the
+    /// the crate version's build metadata (zstd, openssl-src). `None` where the
     /// map has no source (aws-lc, onig_sys).
     c_version: Option<String>,
     /// The map entry's witness bytes occur in the file: the C code is
@@ -1979,12 +1979,12 @@ enum CVersionSource {
     CrateBuildMetadata,
 }
 
-/// One entry of `data/vendored-c-crates.toml`: a -sys crate whose C
+/// One entry of `data/vendored-c-crates.toml`: a crate whose C
 /// library the bundled software policy wants declared as
 /// `bundled(<srpm>)`.
 #[derive(Debug, Clone)]
 struct VendoredCCrate {
-    /// The -sys crate name in `.dep-v0`.
+    /// The crate name in `.dep-v0`.
     name: String,
     /// The source RPM name the finding's detail prescribes.
     srpm: String,
@@ -1992,8 +1992,8 @@ struct VendoredCCrate {
     accepted_names: Vec<String>,
     /// DT_NEEDED prefix of the library's system shared form; a
     /// binary that links it and still carries the witness fires
-    /// without the link remedy. `None` when the library has no
-    /// system shared form to link.
+    /// without the link remedy. `None` when there is no
+    /// system form the crate can link.
     system_soname_prefix: Option<String>,
     /// The soname the detail names for the link-the-system remedy;
     /// present exactly when `system_soname_prefix` is.
@@ -2318,10 +2318,10 @@ fn dotted_version_at(data: &[u8], start: usize) -> Option<(&str, usize)> {
         .map(|text| (text, pos - start))
 }
 
-/// The C version from a crate version's `+build` metadata, in the
-/// `<lib>.X.Y.Z` shape the -sys crates record (`2.1.0+zstd.1.5.7`
-/// carries zstd 1.5.7): the metadata's trailing all-numeric dotted
-/// run. `None` when there is no metadata or its tail is not a plain
+/// The C version from a crate version's `+build` metadata: the
+/// metadata's trailing all-numeric dotted run (`2.1.0+zstd.1.5.7`
+/// carries zstd 1.5.7, `300.6.1+3.6.3` carries OpenSSL 3.6.3).
+/// `None` when there is no metadata or its tail is not a plain
 /// dotted version.
 fn crate_build_metadata_version(crate_version: &str) -> Option<String> {
     let metadata = crate_version.split_once('+')?.1;
@@ -26522,12 +26522,18 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn vendored_c_crates_map_is_the_measured_quartet() {
+    fn vendored_c_crates_map_is_the_measured_set() {
         let map = vendored_c_crates();
         let names: Vec<&str> = map.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
             names,
-            ["aws-lc-sys", "libsqlite3-sys", "onig_sys", "zstd-sys"]
+            [
+                "aws-lc-sys",
+                "libsqlite3-sys",
+                "onig_sys",
+                "openssl-src",
+                "zstd-sys"
+            ]
         );
         // ring stays out: its C code is forked into the crate and
         // bundled(rust-crate:ring) already names it.
@@ -26558,6 +26564,21 @@ description = "explicit priority string bypasses the system crypto policy"
         // Oniguruma has no version source: the detail prescribes
         // bundled(oniguruma) with no version.
         assert!(onig.c_version_source.is_none());
+        let openssl = map.iter().find(|e| e.name == "openssl-src").unwrap();
+        assert_eq!(openssl.srpm, "openssl-3");
+        assert_eq!(openssl.accepted_names, ["openssl-3", "openssl"]);
+        // openssl-src is not a -sys crate: it is the crate whose
+        // OpenSSL build openssl-sys's `vendored` feature uses, always
+        // build kind in .dep-v0; the link remedy names libcrypto.
+        assert_eq!(
+            openssl.system_soname_prefix.as_deref(),
+            Some("libcrypto.so.")
+        );
+        assert_eq!(openssl.link_soname.as_deref(), Some("libcrypto.so.3"));
+        assert_eq!(
+            openssl.c_version_source,
+            Some(CVersionSource::CrateBuildMetadata)
+        );
         let zstd = map.iter().find(|e| e.name == "zstd-sys").unwrap();
         assert_eq!(zstd.accepted_names, ["zstd", "libzstd"]);
         assert_eq!(
@@ -26598,7 +26619,7 @@ description = "explicit priority string bypasses the system crypto policy"
             ],
             "zstd firing line: {lines:?}"
         );
-        // All three map crates in one file fire one finding each.
+        // The three original map crates in one file fire one finding each.
         let mut info = syn_info();
         info.vendored_crates = vec![
             vendored("libsqlite3-sys", "0.35.0", Some("3.50.2"), true),
@@ -26666,6 +26687,104 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut info = syn_info();
         info.vendored_crates = vec![vendored("onig_sys", "69.9.3", None, true)];
         assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn bundled_library_openssl_src_fires_with_link_and_version() {
+        // Issue #1396: openssl-src is not a -sys crate -- it is the
+        // crate whose OpenSSL build openssl-sys's `vendored`
+        // feature uses -- but it rides the same map shape: build
+        // kind in .dep-v0, witness `OpenSSL Default Provider`,
+        // C version from the crate build metadata.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored(
+            "openssl-src",
+            "300.6.1+3.6.3",
+            Some("3.6.3"),
+            true,
+        )];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe openssl-src 300.6.1+3.6.3: link the system libcrypto.so.3 or add Provides: bundled(openssl-3) = 3.6.3"
+            ],
+            "openssl-src firing line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn bundled_library_openssl_src_drops_link_remedy_when_system_linked() {
+        // The issue's synthetic pair: with libcrypto.so.3 NEEDED
+        // the finding still fires (the vendored copy is carried
+        // alongside), prescribing only the declaration.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.needed = vec!["libcrypto.so.3".to_string()];
+        info.vendored_crates = vec![vendored(
+            "openssl-src",
+            "300.6.1+3.6.3",
+            Some("3.6.3"),
+            true,
+        )];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe openssl-src 300.6.1+3.6.3: add Provides: bundled(openssl-3) = 3.6.3"
+            ],
+            "openssl-src dual-link firing line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn bundled_library_openssl_src_quiet_without_witness() {
+        // The public `OpenSSL X.Y.Z` version text is not a witness:
+        // a binary carrying it but not `OpenSSL Default Provider`
+        // stays silent, like any resolved-but-unlinked crate.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("openssl-src", "300.6.1+3.6.3", None, false)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn dep_v0_extraction_reads_openssl_src_witness_and_build_metadata() {
+        // Detection-level pin: the default-provider witness in
+        // .rodata plus the build metadata version, and the version
+        // text alone (no witness) staying silent.
+        let dep = dep_v0_bytes(&[("openssl-src", "300.6.1+3.6.3")]);
+        let mut rodata = Vec::new();
+        rodata.extend_from_slice(b"OpenSSL Default Provider\0");
+        let info =
+            parse_crafted_sections("depv0-openssl", &[(".rodata", &rodata), (".dep-v0", &dep)]);
+        assert_eq!(info.vendored_crates.len(), 1);
+        assert_eq!(info.vendored_crates[0].name, "openssl-src");
+        assert!(info.vendored_crates[0].witness_present);
+        assert_eq!(info.vendored_crates[0].c_version.as_deref(), Some("3.6.3"));
+        // Version text alone: `OpenSSL 3.6.3 ...` is the public
+        // macro text, not the witness.
+        let mut rodata = Vec::new();
+        rodata.extend_from_slice(b"OpenSSL 3.6.3 25 Nov 2025\0");
+        let info = parse_crafted_sections(
+            "depv0-openssl-version-text",
+            &[(".rodata", &rodata), (".dep-v0", &dep)],
+        );
+        assert_eq!(info.vendored_crates.len(), 1);
+        assert!(!info.vendored_crates[0].witness_present);
+        assert_eq!(info.vendored_crates[0].c_version, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "soname prefix and link soname come as a pair")]
+    fn vendored_map_rejects_an_array_soname_prefix() {
+        // Issue #1396: system_soname_prefix is a single Option<String>
+        // read through as_str, so an array reads as absent; next to
+        // a link_soname the pair assert panics when the map loads.
+        parse_vendored_c_crates(&vendored_table(
+            "name = \"openssl-src\"\nsrpm = \"openssl-3\"\naccepted_names = [\"openssl-3\"]\nwitness = \"OpenSSL Default Provider\"\nsystem_soname_prefix = [\"libssl.so.\", \"libcrypto.so.\"]\nlink_soname = \"libcrypto.so.3\"\n",
+        ));
     }
 
     #[test]
@@ -27125,6 +27244,12 @@ description = "explicit priority string bypasses the system crypto policy"
         // A lone trailing number is not a dotted version.
         assert_eq!(crate_build_metadata_version("1.0.0+zstd.2"), None);
         assert_eq!(crate_build_metadata_version("1.0.0+build.info"), None);
+        // openssl-src carries no `<lib>.` prefix: the bare dotted
+        // run is the OpenSSL version.
+        assert_eq!(
+            crate_build_metadata_version("300.6.1+3.6.3").as_deref(),
+            Some("3.6.3")
+        );
     }
 
     #[test]
