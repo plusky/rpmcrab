@@ -51,7 +51,9 @@ impl SourceCheck {
              that can neither be audited nor rebuilt; delete them in %prep \
              (or replace them with real sources). Do not repack the upstream \
              archive to remove them — that breaks source verification. Like \
-             every warning, this one can be filtered out in the configuration."
+             every warning, this one can be filtered out in the configuration. \
+             A vendor archive the packager generates (cargo vendor, node_modules) \
+             is not an upstream archive: leave the binaries out when generating it."
                 .to_string(),
         );
     }
@@ -241,14 +243,69 @@ impl SourceCheck {
     ) {
         let mut hits = Vec::new();
         let members = prebuilt::inspect_top_level(&f.name, data, &f.name, &mut hits);
+        // The grouped kinds (ar, PE, wasm) collapse per archive,
+        // directory and kind; every other hit keeps its per-member
+        // line, as do bare Sources, which have no archive chain.
+        let mut groups: Vec<(String, String, prebuilt::BinaryKind, usize, String)> = Vec::new();
         for (kind, path) in hits {
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "prebuilt-binary-in-sources",
-                &[&path, kind.as_str()],
-            );
+            if !kind.grouped() {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "prebuilt-binary-in-sources",
+                    &[&path, kind.as_str()],
+                );
+                continue;
+            }
+            let Some((archive, member)) = path.rsplit_once(": ") else {
+                // Bare Source: no archive chain, never grouped.
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "prebuilt-binary-in-sources",
+                    &[&path, kind.as_str()],
+                );
+                continue;
+            };
+            let archive = archive.to_string();
+            let dir = match member.rfind('/') {
+                Some(i) => member[..i].to_string(),
+                None => String::new(),
+            };
+            match groups
+                .iter_mut()
+                .find(|(a, d, k, _, _)| *a == archive && *d == dir && *k == kind)
+            {
+                Some(g) => g.3 += 1,
+                None => groups.push((archive, dir, kind, 1, path)),
+            }
+        }
+        for (archive, dir, kind, count, first_path) in groups {
+            if count == 1 {
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "prebuilt-binary-in-sources",
+                    &[&first_path, kind.as_str()],
+                );
+            } else {
+                let path = if dir.is_empty() {
+                    format!("{archive}: *")
+                } else {
+                    format!("{archive}: {dir}/*")
+                };
+                let label = format!("{} ({count} files)", kind.as_str());
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "prebuilt-binary-in-sources",
+                    &[&path, &label],
+                );
+            }
         }
         if !url_sources.contains(&f.name) {
             for root in prebuilt::vcs_roots(&members) {
@@ -398,6 +455,9 @@ mod prebuilt {
         JavaClass,
         PythonBytecode,
         JavaArchive,
+        Ar,
+        Pe,
+        Wasm,
     }
 
     impl BinaryKind {
@@ -407,7 +467,17 @@ mod prebuilt {
                 BinaryKind::JavaClass => "Java class file",
                 BinaryKind::PythonBytecode => "Python bytecode",
                 BinaryKind::JavaArchive => "Java archive (jar)",
+                BinaryKind::Ar => "ar archive",
+                BinaryKind::Pe => "PE executable or DLL",
+                BinaryKind::Wasm => "WebAssembly module",
             }
+        }
+
+        /// Whether findings of this kind are grouped per archive,
+        /// directory and kind (the #1388 kinds only); every other
+        /// kind keeps one finding per member.
+        pub fn grouped(self) -> bool {
+            matches!(self, BinaryKind::Ar | BinaryKind::Pe | BinaryKind::Wasm)
         }
     }
 
@@ -415,13 +485,59 @@ mod prebuilt {
     /// magics are unambiguous; Python bytecode needs its `.pyc`/`.pyo` name
     /// too (bytes 2-3 are `\r\n` in every CPython version, but so are the
     /// first bytes of any CRLF text file); a jar is a zip archive by
-    /// definition, so it needs the `.jar` name as well.
+    /// definition, so it needs the `.jar` name as well. An ar archive
+    /// needs a linker symbol index as its first member (thin and
+    /// index-less archives stay quiet); a PE image needs `MZ` plus the
+    /// `PE` signature at an in-bounds `e_lfanew`; a WebAssembly module
+    /// needs the version-1 magic (components and other versions stay
+    /// quiet). None of the three needs a name gate.
+    /// Whether `data` is an ar archive carrying a linker symbol index
+    /// as its first member: `/`, `/SYM64/`, `__.SYMDEF` or
+    /// `__.SYMDEF SORTED`. The first member header's terminator is
+    /// required, so text starting with the ar magic stays quiet; thin
+    /// archives (`!<thin>`) never reach this test.
+    fn ar_indexed(data: &[u8]) -> bool {
+        if !data.starts_with(b"!<arch>\n") || data.len() < 68 {
+            return false;
+        }
+        if &data[66..68] != b"`\n" {
+            return false;
+        }
+        let name = match std::str::from_utf8(&data[8..24]) {
+            Ok(n) => n.trim_end_matches(' '),
+            Err(_) => return false,
+        };
+        matches!(name, "/" | "/SYM64/" | "__.SYMDEF" | "__.SYMDEF SORTED")
+    }
+
+    /// Whether `data` is a PE image: `MZ`, at least 64 bytes so the
+    /// `e_lfanew` field exists, and `PE\0\0` at an in-bounds `e_lfanew`.
+    fn is_pe(data: &[u8]) -> bool {
+        if data.len() < 64 || !data.starts_with(b"MZ") {
+            return false;
+        }
+        let off = u32::from_le_bytes([data[60], data[61], data[62], data[63]]) as usize;
+        match off.checked_add(4) {
+            Some(end) if end <= data.len() => &data[off..off + 4] == b"PE\0\0",
+            _ => false,
+        }
+    }
+
     fn classify(name: &str, data: &[u8]) -> Option<BinaryKind> {
         if data.starts_with(b"\x7fELF") {
             return Some(BinaryKind::Elf);
         }
         if data.starts_with(b"\xca\xfe\xba\xbe") {
             return Some(BinaryKind::JavaClass);
+        }
+        if ar_indexed(data) {
+            return Some(BinaryKind::Ar);
+        }
+        if is_pe(data) {
+            return Some(BinaryKind::Pe);
+        }
+        if data.starts_with(b"\0asm\x01\0\0\0") {
+            return Some(BinaryKind::Wasm);
         }
         let lower = name.to_ascii_lowercase();
         if data.len() >= 4
@@ -1973,6 +2089,90 @@ mod prebuilt_tests {
     const CLASS: &[u8] = b"\xca\xfe\xba\xbe\x00\x00\x00\x34fake-class-body";
     const PYC: &[u8] = b"\xa6\xf3\x0d\x0afake-pyc-body";
 
+    /// One ar member header: 16-byte space-padded name, blank
+    /// date/uid/gid/mode fields, decimal size, `` `\n `` terminator.
+    /// Only the name field matters to `classify`.
+    fn ar_member(name: &str, body: &[u8]) -> Vec<u8> {
+        let mut hdr = [b' '; 60];
+        hdr[..name.len()].copy_from_slice(name.as_bytes());
+        let size = format!("{:<10}", body.len());
+        hdr[48..58].copy_from_slice(size.as_bytes());
+        hdr[58] = b'`';
+        hdr[59] = b'\n';
+        let mut out = hdr.to_vec();
+        out.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            out.push(b'\n');
+        }
+        out
+    }
+
+    /// An ar archive whose first member carries `first_name`.
+    fn ar_archive(first_name: &str, first_body: &[u8]) -> Vec<u8> {
+        let mut out = b"!<arch>\n".to_vec();
+        out.extend_from_slice(&ar_member(first_name, first_body));
+        out
+    }
+
+    /// A thin ar archive: stores object paths, not objects.
+    fn thin_archive() -> Vec<u8> {
+        let mut out = b"!<thin>\n".to_vec();
+        out.extend_from_slice(&ar_member("hello.o/", ELF));
+        out
+    }
+
+    /// A .deb: an ar archive whose first member is `debian-binary`.
+    fn deb_package() -> Vec<u8> {
+        let mut out = b"!<arch>\n".to_vec();
+        out.extend_from_slice(&ar_member("debian-binary", b"2.0\n"));
+        out.extend_from_slice(&ar_member("control.tar.xz", b"control"));
+        out.extend_from_slice(&ar_member("data.tar.xz", b"data"));
+        out
+    }
+
+    /// A PE32+ DLL in the issue's recipe shape: DOS header,
+    /// `e_lfanew` 0x40, `PE\0\0`, x86-64 COFF header.
+    fn pe_dll() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"MZ");
+        out.extend(std::iter::repeat_n(0, 58));
+        out.extend_from_slice(&0x40u32.to_le_bytes());
+        out.extend_from_slice(b"PE\0\0");
+        out.extend_from_slice(&0x8664u16.to_le_bytes());
+        out.extend(std::iter::repeat_n(0, 14));
+        out.extend_from_slice(&[0xf0, 0x00, 0x42, 0x40, 0x0b, 0x02]);
+        out.extend(std::iter::repeat_n(0, 238));
+        out
+    }
+
+    /// DOS header with `e_lfanew` 0: no PE signature.
+    fn mz_stub() -> Vec<u8> {
+        let mut out = b"MZ".to_vec();
+        out.extend(std::iter::repeat_n(0, 62));
+        out
+    }
+
+    /// DOS header with `e_lfanew` past the end of the file.
+    fn mz_past() -> Vec<u8> {
+        let mut out = b"MZ".to_vec();
+        out.extend(std::iter::repeat_n(0, 58));
+        out.extend_from_slice(&[0xff, 0xff, 0x00, 0x00]);
+        out
+    }
+
+    /// Text that starts with `MZ`: the `e_lfanew` field reads zero.
+    fn mz_txt() -> Vec<u8> {
+        let mut out = b"MZ".to_vec();
+        out.extend(std::iter::repeat_n(b'0', 100));
+        out.push(b'\n');
+        out
+    }
+
+    const WASM: &[u8] =
+        b"\x00asm\x01\x00\x00\x00\x01\x04\x01\x60\x00\x00\x03\x02\x01\x00\x0a\x04\x01\x02\x00\x0b";
+    const WASM_COMPONENT: &[u8] = b"\x00asm\x0d\x00\x01\x00";
+    const WASM_V2: &[u8] = b"\x00asm\x02\x00\x00\x00";
+
     /// Build a source RPM at test time (never a committed distro RPM) with
     /// `files` at package-relative paths, then open it with real payload
     /// extraction. The rpm crate's builder sets no SOURCERPM tag, so
@@ -2977,5 +3177,182 @@ mod prebuilt_tests {
         patch(&mut z, 10);
         let members = super::prebuilt::top_level_members(&z);
         assert!(super::prebuilt::lfs_pointers(&members).is_empty());
+    }
+    #[test]
+    fn new_kinds_fire_in_tarball_and_group_per_directory() {
+        let pe = pe_dll();
+        let tar = tarball(&[
+            ("m/hello.o", ELF),
+            ("m/libf.a", &ar_archive("/", b"\x00\x00\x00\x01")),
+            ("m/libg.a", &ar_archive("/", b"\x00\x00\x00\x01")),
+            ("m/lib.dll", &pe),
+            ("m/mod.wasm", WASM),
+            ("m/thin.a", &thin_archive()),
+            ("m/text.a", &ar_archive("a.txt", b"a\n")),
+            ("m/pkg.deb", &deb_package()),
+            ("m/noidx.a", &ar_archive("hello.o/", ELF)),
+            ("m/mzstub.exe", &mz_stub()),
+            ("m/mzpast.exe", &mz_past()),
+            ("m/mz.txt", &mz_txt()),
+            ("m/component.wasm", WASM_COMPONENT),
+            ("m/v2.wasm", WASM_V2),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/* ar archive (2 files)",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/hello.o ELF binary",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/lib.dll PE executable or DLL",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/mod.wasm WebAssembly module",
+            ]
+        );
+    }
+
+    #[test]
+    fn new_kinds_fire_in_zip_and_group_per_directory() {
+        let pe = pe_dll();
+        let z = zip_bytes(&[
+            ("m/hello.o", ELF),
+            ("m/libf.a", &ar_archive("/", b"\x00\x00\x00\x01")),
+            ("m/libg.a", &ar_archive("/", b"\x00\x00\x00\x01")),
+            ("m/lib.dll", &pe),
+            ("m/mod.wasm", WASM),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.zip", z),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.zip: m/* ar archive (2 files)",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.zip: m/hello.o ELF binary",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.zip: m/lib.dll PE executable or DLL",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.zip: m/mod.wasm WebAssembly module",
+            ]
+        );
+    }
+
+    #[test]
+    fn new_kinds_fire_in_nested_tarball_and_group_per_directory() {
+        let pe = pe_dll();
+        let inner = tarball(&[
+            ("m/hello.o", ELF),
+            ("m/libf.a", &ar_archive("/", b"\x00\x00\x00\x01")),
+            ("m/libg.a", &ar_archive("/", b"\x00\x00\x00\x01")),
+            ("m/lib.dll", &pe),
+            ("m/mod.wasm", WASM),
+        ]);
+        let outer = tarball(&[("n/inner.tar.gz", &gzip_bytes(&inner))]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("nested.tar.gz", gzip_bytes(&outer)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources nested.tar.gz: n/inner.tar.gz: m/* ar archive (2 files)",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources nested.tar.gz: n/inner.tar.gz: m/hello.o ELF binary",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources nested.tar.gz: n/inner.tar.gz: m/lib.dll PE executable or DLL",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources nested.tar.gz: n/inner.tar.gz: m/mod.wasm WebAssembly module",
+            ]
+        );
+    }
+
+    #[test]
+    fn new_kinds_fire_as_bare_sources_ungrouped() {
+        let pe = pe_dll();
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("libf.a", ar_archive("/", b"\x00\x00\x00\x01")),
+            ("libg.a", ar_archive("/", b"\x00\x00\x00\x01")),
+            ("lib.dll", pe),
+            ("mod.wasm", WASM.to_vec()),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources lib.dll PE executable or DLL",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources libf.a ar archive",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources libg.a ar archive",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources mod.wasm WebAssembly module",
+            ]
+        );
+    }
+
+    #[test]
+    fn ar_index_name_variants_fire() {
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("sym64.a", ar_archive("/SYM64/", b"\x00\x00\x00\x01")),
+            ("symdef.a", ar_archive("__.SYMDEF", b"\x00\x00\x00\x01")),
+            (
+                "symdef_sorted.a",
+                ar_archive("__.SYMDEF SORTED", b"\x00\x00\x00\x01"),
+            ),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources sym64.a ar archive",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources symdef.a ar archive",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources symdef_sorted.a ar archive",
+            ]
+        );
+    }
+
+    #[test]
+    fn root_level_ar_members_group_with_star() {
+        let tar = tarball(&[
+            ("a.a", &ar_archive("/", b"\x00\x00\x00\x01")),
+            ("b.a", &ar_archive("/", b"\x00\x00\x00\x01")),
+            ("mod.wasm", WASM),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: * ar archive (2 files)",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: mod.wasm WebAssembly module",
+            ]
+        );
+    }
+
+    #[test]
+    fn near_miss_members_stay_quiet() {
+        let tar = tarball(&[
+            ("thin.a", &thin_archive()),
+            ("text.a", &ar_archive("a.txt", b"a\n")),
+            ("pkg.deb", &deb_package()),
+            ("noidx.a", &ar_archive("hello.o/", ELF)),
+            ("mzstub.exe", &mz_stub()),
+            ("mzpast.exe", &mz_past()),
+            ("mz.txt", &mz_txt()),
+            ("component.wasm", WASM_COMPONENT),
+            ("v2.wasm", WASM_V2),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(
+            prebuilt_lines(&findings).is_empty(),
+            "unexpected: {:?}",
+            prebuilt_lines(&findings)
+        );
     }
 }
