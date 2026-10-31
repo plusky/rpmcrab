@@ -11141,7 +11141,8 @@ mod tests {
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         // The aarch64 file belongs to the stack-protector and
         // fortify populations but not to the cf-protection one, so
-        // the detail counts each arm over its own population.
+        // the detail counts each arm over its own population, and
+        // each clause's example paths come from that arm alone.
         let mut aarch = flagless_info(FLAGLESS_IMPORTS);
         aarch.elf_machine = goblin::elf::header::EM_AARCH64;
         let files: Vec<(&str, ReadelfInfo)> = vec![
@@ -11156,9 +11157,9 @@ mod tests {
         assert_eq!(
             detail.as_deref(),
             Some(
-                "stack-protector absent from all 3 ELF files, fortify absent from all 3 \
-                 ELF files, cf-protection absent from all 2 ELF files \
-                 (/usr/bin/a, /usr/bin/b, /usr/bin/c)"
+                "stack-protector absent from all 3 ELF files (/usr/bin/a, /usr/bin/b, /usr/bin/c), \
+                 fortify absent from all 3 ELF files (/usr/bin/a, /usr/bin/b, /usr/bin/c), \
+                 cf-protection absent from all 2 ELF files (/usr/bin/a, /usr/bin/b)"
             )
         );
     }
