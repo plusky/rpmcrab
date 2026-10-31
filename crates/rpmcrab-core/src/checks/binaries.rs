@@ -770,6 +770,16 @@ struct ReadelfInfo {
     /// (every non-Rust binary, and a Rust binary built without the
     /// section: the bundled check is blind to both).
     vendored_crates: Vec<VendoredCrate>,
+    /// The witness-table libraries whose bytes this file carries,
+    /// one per `data/bundled-c-witnesses.toml` entry whose witness
+    /// occurs in the file's read-only sections. The witness-only
+    /// C path of the bundled check: a C/C++ ELF with no `.dep-v0`
+    /// section, whose own copy of a library the witness proves.
+    /// Computed during parse; see `detect_bundled_c_witnesses`.
+    /// Empty for a Rust or Go binary, for an ELF with a `.dep-v0`
+    /// section (the shipped path covers it), and for a file
+    /// carrying no table witness.
+    bundled_c_witnesses: Vec<BundledCWitness>,
     soname: Option<String>,
     needed: Vec<String>,
     /// DT_RUNPATH entries of this object, one per tag occurrence, in
@@ -905,6 +915,7 @@ impl ReadelfInfo {
             ghc_comment: false,
             has_lto_symbol: false,
             vendored_crates: Vec::new(),
+            bundled_c_witnesses: Vec::new(),
             soname: None,
             needed: Vec::new(),
             runpaths: Vec::new(),
@@ -1384,6 +1395,28 @@ impl ReadelfInfo {
                     }
                 }
                 None => self.vendored_crates.push(vc),
+            }
+        }
+        // Witness-only C path, merged across archive members like
+        // the vendored crates: a witness in any member marks the
+        // file. The scope gates live here, at detection time:
+        // only a linked executable or shared object (ET_EXEC or
+        // ET_DYN) that is neither Rust nor Go output, with no Go
+        // buildinfo block, takes this path. The check re-applies
+        // the gates at emission, so an archive member that passes
+        // them still stays silent (an archive's merged type is
+        // ET_NONE).
+        let c_in_scope = matches!(
+            elf.header.e_type,
+            goblin::elf::header::ET_EXEC | goblin::elf::header::ET_DYN
+        ) && !self.is_rust_binary()
+            && !self.is_go_binary()
+            && !self.go_buildinfo;
+        if c_in_scope {
+            for witness in detect_bundled_c_witnesses(elf, data) {
+                if !self.bundled_c_witnesses.contains(&witness) {
+                    self.bundled_c_witnesses.push(witness);
+                }
             }
         }
     }
@@ -2238,6 +2271,163 @@ fn detect_vendored_c_crates(elf: &goblin::elf::Elf, data: &[u8]) -> Vec<Vendored
         }
     }
     found
+}
+
+/// One witness-table library whose bytes a C/C++ binary carries, as
+/// matched against `data/bundled-c-witnesses.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BundledCWitness {
+    /// The table entry's name (the library name), e.g. `jemalloc`.
+    name: String,
+}
+
+/// One entry of `data/bundled-c-witnesses.toml`: a C library whose
+/// vendored copy a C/C++ binary proves by carrying the entry's
+/// witness bytes, with no `.dep-v0` involved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BundledCEntry {
+    /// The library name the detail leads with, e.g. `jemalloc`.
+    name: String,
+    /// The source RPM name the detail prescribes.
+    srpm: String,
+    /// bundled() names that satisfy the finding.
+    accepted_names: Vec<String>,
+    /// SONAME prefix of the system library: an ELF whose SONAME
+    /// starts with it is the system library itself.
+    library_soname_prefix: String,
+    /// Byte string proving the C code is linked.
+    witness: String,
+}
+
+/// The witness-only C library table: baked in like the vendored C
+/// crate map so an installed binary needs no data dir next to it;
+/// the table's as-of date and admission rule are recorded in the
+/// file itself.
+const BUNDLED_C_WITNESSES_TOML: &str = include_str!("../../data/bundled-c-witnesses.toml");
+
+/// The parsed table, parsed once (the `defect_pattern::registry`
+/// pattern).
+fn bundled_c_witnesses() -> &'static [BundledCEntry] {
+    static TABLE: OnceLock<Vec<BundledCEntry>> = OnceLock::new();
+    TABLE.get_or_init(|| parse_bundled_c_witnesses(BUNDLED_C_WITNESSES_TOML))
+}
+
+/// Parse and validate the table. Validation takes the staged-data
+/// posture (the registry's): a malformed table panics at startup
+/// instead of silently disabling the finder.
+fn parse_bundled_c_witnesses(raw: &str) -> Vec<BundledCEntry> {
+    let table: toml::Table = raw.parse().expect("bundled C witnesses is valid TOML");
+    assert!(
+        table.get("as_of").and_then(toml::Value::as_str).is_some(),
+        "bundled C witnesses records an as_of date"
+    );
+    let records = table
+        .get("library")
+        .and_then(toml::Value::as_array)
+        .expect("bundled C witnesses has a [[library]] array");
+    let mut entries: Vec<BundledCEntry> = records
+        .iter()
+        .map(|record| {
+            let field = |name: &str| -> String {
+                record
+                    .get(name)
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_else(|| panic!("bundled C witness is missing {name:?}"))
+                    .to_string()
+            };
+            let accepted_names: Vec<String> = record
+                .get("accepted_names")
+                .and_then(toml::Value::as_array)
+                .expect("bundled C witness has an accepted_names array")
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .expect("bundled C witness accepted name is a string")
+                        .to_string()
+                })
+                .collect();
+            let srpm = field("srpm");
+            let name = field("name");
+            assert!(!name.is_empty(), "bundled C witness name is non-empty");
+            assert!(
+                accepted_names.iter().all(|a| !a.is_empty()),
+                "bundled C witness accepted names are non-empty"
+            );
+            assert!(
+                accepted_names.contains(&srpm),
+                "bundled C witness accepted_names includes its srpm"
+            );
+            assert!(
+                !accepted_names.is_empty(),
+                "bundled C witness lists at least one accepted name"
+            );
+            let library_soname_prefix = field("library_soname_prefix");
+            assert!(
+                !library_soname_prefix.is_empty(),
+                "bundled C witness soname prefix is non-empty"
+            );
+            let witness = field("witness");
+            assert!(!witness.is_empty(), "bundled C witness is non-empty");
+            BundledCEntry {
+                name,
+                srpm,
+                accepted_names,
+                library_soname_prefix,
+                witness,
+            }
+        })
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "bundled C witnesses lists at least one library"
+    );
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    assert!(
+        entries.windows(2).all(|pair| pair[0].name != pair[1].name),
+        "bundled C witness names are unique"
+    );
+    entries
+}
+
+/// Scan one ELF's read-only sections for the witness-table
+/// libraries' bytes. The scope is the same read-only scan the
+/// `.dep-v0` path uses (SHT_PROGBITS without SHF_WRITE): the same
+/// bytes in a writable section are runtime data and prove nothing.
+/// An ELF with a `.dep-v0` section stays silent here: the shipped
+/// path covers it, and the two paths must never report one vendored
+/// copy twice. A missing section table yields an empty vec, like
+/// the other detectors' posture.
+fn detect_bundled_c_witnesses(elf: &goblin::elf::Elf, data: &[u8]) -> Vec<BundledCWitness> {
+    if elf
+        .section_headers
+        .iter()
+        .any(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(".dep-v0"))
+    {
+        return Vec::new();
+    }
+    let readonly_ranges: Vec<&[u8]> = elf
+        .section_headers
+        .iter()
+        .filter(|sh| {
+            sh.sh_type == goblin::elf::section_header::SHT_PROGBITS
+                && sh.sh_flags & u64::from(goblin::elf::section_header::SHF_WRITE) == 0
+        })
+        .filter_map(section_range)
+        .filter_map(|(start, end)| data.get(start..end))
+        .collect();
+    bundled_c_witnesses()
+        .iter()
+        .filter(|entry| {
+            readonly_ranges.iter().any(|range| {
+                range
+                    .windows(entry.witness.len())
+                    .any(|w| w == entry.witness.as_bytes())
+            })
+        })
+        .map(|entry| BundledCWitness {
+            name: entry.name.clone(),
+        })
+        .collect()
 }
 
 /// The standalone dotted version string in the read-only data
@@ -8191,12 +8381,8 @@ impl BinariesCheck {
         info: &ReadelfInfo,
         out: &mut Filter,
     ) {
-        if info.vendored_crates.is_empty() {
-            return;
-        }
-        let map = vendored_c_crates();
         // The package's declared bundled() names, collected once
-        // for every (file, crate) pair: a versioned provide's name
+        // for every (file, library) pair: a versioned provide's name
         // is the same `bundled(<name>)` string, its version a
         // separate field.
         let declared_names: std::collections::HashSet<&str> = pkg
@@ -8208,6 +8394,14 @@ impl BinariesCheck {
                     .and_then(|rest| rest.strip_suffix(')'))
             })
             .collect();
+        let is_declared = |accepted: &[String]| {
+            accepted
+                .iter()
+                .any(|name| declared_names.contains(name.as_str()))
+        };
+        // Shipped path: an ELF whose .dep-v0 resolves one of the
+        // vendored C crates.
+        let map = vendored_c_crates();
         // One finding per crate per binary: a graph listing the
         // crate at two versions still carries one vendored library
         // in this file, and a finding per version is noise.
@@ -8226,11 +8420,7 @@ impl BinariesCheck {
             if !reported.insert(vc.name.as_str()) {
                 continue;
             }
-            let declared = entry
-                .accepted_names
-                .iter()
-                .any(|accepted| declared_names.contains(accepted.as_str()));
-            if declared {
+            if is_declared(&entry.accepted_names) {
                 continue;
             }
             // The witness puts the vendored code in this binary; a
@@ -8260,6 +8450,64 @@ impl BinariesCheck {
                 "bundled-library-without-provides",
                 &[&pkgfile.name, &detail],
             );
+        }
+        // Witness-only C path: a C/C++ ELF with no .dep-v0 whose
+        // read-only sections carry a witness-table library's bytes.
+        // The scope gates are re-applied here so a record made for
+        // an archive member, or a hand-built record, cannot emit
+        // outside ET_EXEC/ET_DYN, Rust, or Go output.
+        if !info.bundled_c_witnesses.is_empty()
+            && matches!(
+                info.elf_type,
+                goblin::elf::header::ET_EXEC | goblin::elf::header::ET_DYN
+            )
+            && !info.is_rust_binary()
+            && !info.is_go_binary()
+            && !info.go_buildinfo
+        {
+            let table = bundled_c_witnesses();
+            // One finding per library per binary.
+            let mut reported: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for witness in &info.bundled_c_witnesses {
+                let Some(entry) = table.iter().find(|e| e.name == witness.name) else {
+                    continue;
+                };
+                if !reported.insert(entry.name.as_str()) {
+                    continue;
+                }
+                if is_declared(&entry.accepted_names) {
+                    continue;
+                }
+                // The system library itself carries the witness, so
+                // its SONAME exempts it. A private copy keeping the
+                // upstream SONAME is silenced the same way; no such
+                // copy ships in Tumbleweed today.
+                if info
+                    .soname
+                    .as_deref()
+                    .is_some_and(|soname| soname.starts_with(entry.library_soname_prefix.as_str()))
+                {
+                    continue;
+                }
+                // No link remedy on this path: the vendored copies
+                // behind it are modified upstream, so the detail
+                // prescribes only the declaration, even where a build
+                // could link the system library. A DT_NEEDED on the
+                // system library is no exemption either: the headers
+                // do not reproduce the witness, so a binary carrying
+                // it has its own copy whether or not it also links
+                // the system library.
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "bundled-library-without-provides",
+                    &[
+                        &pkgfile.name,
+                        &format!("{}: add Provides: bundled({})", entry.name, entry.srpm),
+                    ],
+                );
+            }
         }
     }
 
@@ -10369,6 +10617,7 @@ mod tests {
                 no_elf_members: false,
                 no_members: false,
                 vendored_crates: Vec::new(),
+                bundled_c_witnesses: Vec::new(),
             };
             let pkgfile = PkgFile {
                 name: name.to_string(),
@@ -13865,6 +14114,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 ghc_comment: false,
                 has_lto_symbol: false,
                 vendored_crates: Vec::new(),
+                bundled_c_witnesses: Vec::new(),
             };
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_hash_sections(&pkg, &pkgfile, &info, &mut out);
@@ -14022,6 +14272,7 @@ description = "explicit priority string bypasses the system crypto policy"
             ghc_comment: false,
             has_lto_symbol: false,
             vendored_crates: Vec::new(),
+            bundled_c_witnesses: Vec::new(),
         }
     }
 
@@ -26626,6 +26877,290 @@ description = "explicit priority string bypasses the system crypto policy"
         // libssh2 names no version source: the detail prescribes no
         // version for it.
         assert!(libssh2.c_version_source.is_none());
+    }
+
+    #[test]
+    fn bundled_c_witnesses_map_is_the_measured_pair() {
+        let table = bundled_c_witnesses();
+        let names: Vec<&str> = table.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["jemalloc", "mimalloc"]);
+        let jemalloc = table.iter().find(|e| e.name == "jemalloc").unwrap();
+        assert_eq!(jemalloc.srpm, "jemalloc");
+        assert_eq!(jemalloc.accepted_names, ["jemalloc"]);
+        assert_eq!(jemalloc.library_soname_prefix, "libjemalloc.so.");
+        assert_eq!(jemalloc.witness, "<jemalloc>: ");
+        let mimalloc = table.iter().find(|e| e.name == "mimalloc").unwrap();
+        assert_eq!(mimalloc.srpm, "mimalloc");
+        assert_eq!(mimalloc.accepted_names, ["mimalloc"]);
+        assert_eq!(mimalloc.library_soname_prefix, "libmimalloc.so.");
+        assert_eq!(mimalloc.witness, "mimalloc: warning: ");
+    }
+
+    fn witnessed(name: &str) -> BundledCWitness {
+        BundledCWitness {
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn bundled_c_witness_fires_valkey_shape() {
+        // The valkey shape: jemalloc witness in .rodata, no NEEDED,
+        // no provides. The detail prescribes only the declaration:
+        // no link remedy on the witness-only path.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe jemalloc: add Provides: bundled(jemalloc)"
+            ],
+            "valkey firing line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn bundled_c_witness_fires_libpython_shape() {
+        // The libpython shape: mimalloc witness in a shared library.
+        // Bitness is invisible to the check, so ET_DYN covers both
+        // the ELF32 and ELF64 builds; the detection tests below pin
+        // the witness scan on both classes.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.elf_type = goblin::elf::header::ET_DYN;
+        info.bundled_c_witnesses = vec![witnessed("mimalloc")];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe mimalloc: add Provides: bundled(mimalloc)"
+            ],
+            "libpython firing line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn bundled_c_witness_fires_when_system_linked() {
+        // #1165 for the C path: a DT_NEEDED on the system library
+        // does not exempt a binary carrying its own copy -- the
+        // headers do not reproduce the witness.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.needed = vec!["libjemalloc.so.2".to_string()];
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        assert_eq!(bundled_lines(&pkg, &info).len(), 1);
+    }
+
+    #[test]
+    fn bundled_c_witness_fires_for_sibling_without_provide() {
+        // The check sees one package at a time: a subpackage that
+        // declares nothing fires even when a sibling subpackage
+        // declares bundled(jemalloc).
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        assert_eq!(bundled_lines(&pkg, &info).len(), 1);
+    }
+
+    #[test]
+    fn bundled_c_witness_quiet_for_system_library_soname() {
+        // The system library itself carries the witness and is
+        // exempt by its SONAME.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.soname = Some("libjemalloc.so.2".to_string());
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+        let mut info = syn_info();
+        info.elf_type = goblin::elf::header::ET_DYN;
+        info.soname = Some("libmimalloc.so.3".to_string());
+        info.bundled_c_witnesses = vec![witnessed("mimalloc")];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn bundled_c_witness_quiet_when_declared() {
+        // Matched by name only: a versioned provide satisfies the
+        // finding like an unversioned one.
+        let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        pkg.provides = vec![bundled_provide("jemalloc")];
+        let mut info = syn_info();
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+        let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        pkg.provides = vec![crate::pkg::dep::DepInfo {
+            name: "bundled(jemalloc)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: Some("5.3.0".to_string()),
+            release: None,
+        }];
+        let mut info = syn_info();
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn bundled_c_witness_quiet_for_relocatable_and_rust_and_go() {
+        // ET_REL is not linked at all; Rust output keeps the .dep-v0
+        // path; Go output is a separate issue.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.elf_type = goblin::elf::header::ET_REL;
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+        let mut info = syn_info();
+        info.is_rust = true;
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".gopclntab")]];
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+        let mut info = syn_info();
+        info.go_buildinfo = true;
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
+    fn bundled_c_witness_detected_in_readonly_sections() {
+        // The valkey shape at detection level: jemalloc witness in
+        // .rodata, no .dep-v0 anywhere.
+        let info = parse_crafted_sections(
+            "bundled-c-valkey",
+            &[(".rodata", b"some init\0<jemalloc>: malloc_conf error\0")],
+        );
+        assert_eq!(
+            info.bundled_c_witnesses,
+            vec![witnessed("jemalloc")],
+            "{:?}",
+            info.bundled_c_witnesses
+        );
+        // The libpython shape, ELF64 and ELF32.
+        let info = parse_crafted_sections(
+            "bundled-c-py64",
+            &[(".rodata", b"mimalloc: warning: out of memory\0")],
+        );
+        assert_eq!(info.bundled_c_witnesses, vec![witnessed("mimalloc")]);
+        let bytes = craft_elf32_sections(&[(".rodata", b"mimalloc: warning: oom\0")]);
+        let info = parse_elf_bytes("bundled-c-py32", &bytes);
+        assert_eq!(info.bundled_c_witnesses, vec![witnessed("mimalloc")]);
+        assert_eq!(info.elf_type, goblin::elf::header::ET_DYN);
+    }
+
+    #[test]
+    fn bundled_c_witness_skipped_with_dep_v0() {
+        // Disjoint by construction: a Rust binary carrying the same
+        // witness bytes reports through the crate map, never here.
+        let dep = dep_v0_bytes(&[("serde", "1.0.0")]);
+        let info = parse_crafted_sections(
+            "bundled-c-depv0",
+            &[(".rodata", b"<jemalloc>: x\0"), (".dep-v0", &dep)],
+        );
+        assert!(info.bundled_c_witnesses.is_empty());
+        assert!(info.vendored_crates.is_empty());
+    }
+
+    #[test]
+    fn bundled_c_witness_writable_section_stays_silent() {
+        // The same bytes in a writable section are runtime data and
+        // prove nothing.
+        let mut bytes = craft_elf_sections(&[(".data", b"<jemalloc>: x\0")]);
+        let shoff = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
+        let flags_at = shoff + 64 + 8;
+        bytes[flags_at..flags_at + 8].copy_from_slice(&1u64.to_le_bytes());
+        let info = parse_elf_bytes("bundled-c-writable", &bytes);
+        assert!(info.bundled_c_witnesses.is_empty());
+    }
+
+    #[test]
+    fn bundled_c_witness_relocatable_stays_silent() {
+        // Detection takes only linked objects: an ET_REL member
+        // records nothing.
+        let mut bytes = craft_elf_sections(&[(".rodata", b"<jemalloc>: x\0")]);
+        bytes[16..18].copy_from_slice(&goblin::elf::header::ET_REL.to_le_bytes());
+        let info = parse_elf_bytes("bundled-c-rel", &bytes);
+        assert!(info.bundled_c_witnesses.is_empty());
+    }
+
+    #[test]
+    fn bundled_c_witness_header_consumer_stays_silent() {
+        // A consumer built against the headers carries the API names
+        // but no witness bytes: the headers do not reproduce them.
+        let info = parse_crafted_sections(
+            "bundled-c-headers",
+            &[(
+                ".rodata",
+                b"malloc\0mallctl\0mi_malloc\0mi_option_enable\0mi_stats_print\0",
+            )],
+        );
+        assert!(info.bundled_c_witnesses.is_empty());
+    }
+
+    fn craft_elf32_sections(sections: &[(&str, &[u8])]) -> Vec<u8> {
+        // Minimal ELF32, same section layout as craft_elf_sections:
+        // NULL + sections + shstrtab, ET_DYN, EM_386.
+        let mut shstrtab = vec![0u8];
+        let mut name_offs = Vec::new();
+        for (name, _) in sections {
+            name_offs.push(shstrtab.len() as u32);
+            shstrtab.extend_from_slice(name.as_bytes());
+            shstrtab.push(0);
+        }
+        let shstrtab_name_off = shstrtab.len() as u32;
+        shstrtab.extend_from_slice(b".shstrtab\0");
+
+        let mut buf = vec![0u8; 52];
+        let mut offs = Vec::new();
+        for (_, data) in sections {
+            offs.push(buf.len() as u32);
+            buf.extend_from_slice(data);
+        }
+        let shstrtab_off = buf.len() as u32;
+        buf.extend_from_slice(&shstrtab);
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+        let shoff = buf.len() as u32;
+
+        let mut shdrs = vec![0u8; 40];
+        for (i, (_, data)) in sections.iter().enumerate() {
+            let mut h = vec![0u8; 40];
+            h[0..4].copy_from_slice(&name_offs[i].to_le_bytes());
+            h[4..8].copy_from_slice(&1u32.to_le_bytes());
+            h[16..20].copy_from_slice(&offs[i].to_le_bytes());
+            h[20..24].copy_from_slice(&(data.len() as u32).to_le_bytes());
+            h[24..28].copy_from_slice(&1u32.to_le_bytes());
+            shdrs.extend(h);
+        }
+        {
+            let mut h = vec![0u8; 40];
+            h[0..4].copy_from_slice(&shstrtab_name_off.to_le_bytes());
+            h[4..8].copy_from_slice(&3u32.to_le_bytes());
+            h[16..20].copy_from_slice(&shstrtab_off.to_le_bytes());
+            h[20..24].copy_from_slice(&(shstrtab.len() as u32).to_le_bytes());
+            h[24..28].copy_from_slice(&1u32.to_le_bytes());
+            shdrs.extend(h);
+        }
+        buf.extend(shdrs);
+
+        let shnum = (sections.len() + 2) as u16;
+        let mut ehdr = vec![0u8; 52];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 1;
+        ehdr[5] = 1;
+        ehdr[6] = 1;
+        ehdr[16..18].copy_from_slice(&3u16.to_le_bytes());
+        ehdr[18..20].copy_from_slice(&3u16.to_le_bytes());
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[32..36].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[46..48].copy_from_slice(&40u16.to_le_bytes());
+        ehdr[48..50].copy_from_slice(&shnum.to_le_bytes());
+        ehdr[50..52].copy_from_slice(&(shnum - 1).to_le_bytes());
+        buf[0..52].copy_from_slice(&ehdr);
+        buf
     }
 
     #[test]
