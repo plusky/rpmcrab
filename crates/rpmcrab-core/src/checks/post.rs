@@ -40,6 +40,50 @@ struct HeredocScan {
 
 static POST_MENU_RE: OnceLock<Regex> = OnceLock::new();
 
+/// What a bundled short-option token contributes to the
+/// target-directory rule. GNU `-t` takes an argument even when
+/// bundled, and `-S` takes one too: the first `t` not consumed
+/// by `-S` is the target flag.
+enum BundleTarget<'a> {
+    /// That `t` carries the rest of the bundle as its argument.
+    Attached(&'a str),
+    /// That `t` is last: the next token is the target.
+    Separate,
+    /// A trailing `-S` takes the next token as its suffix argument.
+    SuffixArg,
+    /// No target-directory reading (not a bundle, or no
+    /// unconsumed `t` and no trailing `-S`).
+    None,
+}
+
+/// Read a token as a bundled short-option token: a reading only
+/// for a single-dash token longer than the flag itself. Scanning
+/// left to right, `-S` consumes the rest of the bundle (or the
+/// next token when last) as its suffix argument, so no later `t`
+/// in the same bundle is a target flag.
+fn bundle_target(tok: &str) -> BundleTarget<'_> {
+    if !tok.starts_with('-') || tok.starts_with("--") || tok.len() <= 2 {
+        return BundleTarget::None;
+    }
+    let bundle = &tok[1..];
+    for (ci, c) in bundle.char_indices() {
+        if c == 'S' {
+            if ci + c.len_utf8() == bundle.len() {
+                return BundleTarget::SuffixArg;
+            }
+            return BundleTarget::None;
+        }
+        if c == 't' {
+            let rest = &bundle[ci + c.len_utf8()..];
+            if rest.is_empty() {
+                return BundleTarget::Separate;
+            }
+            return BundleTarget::Attached(rest);
+        }
+    }
+    BundleTarget::None
+}
+
 impl PostCheck {
     pub fn new(config: &Config) -> Self {
         let get_list = |key: &str, default: &[&str]| {
@@ -453,11 +497,13 @@ impl PostCheck {
     /// backup-direction operation either; it is credited separately
     /// by is_rotation.
     /// The destination rule: `-t` / `--target-directory` (separate
-    /// or attached, including `-tDIR`) supply the destination for
+    /// or attached, including `-tDIR` and bundled `-pt` with the
+    /// first `t` not consumed by `-S`) supply the destination for
     /// `cp`/`mv` only — `rm` has no target-directory option, so its
-    /// `-t` argument stays positional. A copy/move also needs a
-    /// real destination: at least two operands without `-t`, at
-    /// least one with it.
+    /// `-t` argument stays positional, and its attached forms are
+    /// dropped as plain flags with no operand effect. A copy/move
+    /// also needs a real destination: at least two operands without
+    /// `-t`, at least one with it.
     fn dangerous_match_is_backup(scan_text: &str, operand_at: usize, verb: &str) -> bool {
         if !matches!(verb, "cp" | "mv" | "rm") {
             return false;
@@ -492,6 +538,21 @@ impl PostCheck {
                     } else if tok == "--target-directory" {
                         target_dir = tokens.get(i + 1).map(|s| s.as_str());
                         i += 1;
+                    } else {
+                        match bundle_target(tok) {
+                            BundleTarget::Attached(dir) => target_dir = Some(dir),
+                            BundleTarget::Separate => {
+                                target_dir = tokens.get(i + 1).map(|s| s.as_str());
+                                i += 1;
+                            }
+                            BundleTarget::SuffixArg => {
+                                // A trailing `-S` takes the next
+                                // token as its suffix argument,
+                                // not an operand.
+                                i += 1;
+                            }
+                            BundleTarget::None => {}
+                        }
                     }
                 }
                 // Any other dash token is a flag (or a bundle) and
@@ -650,8 +711,11 @@ impl PostCheck {
         push_token!();
         // Skip option flags (`-v`, `--backup=numbered`); `--` ends
         // the flags and is itself skipped. A lone `-` is an operand.
-        // A target-directory flag fails closed: a move into a
-        // directory is never a rotation aside-step.
+        // A target-directory flag fails closed, including a bundled
+        // `-t` not consumed by `-S` (or a trailing `-S` whose
+        // argument is the next token, so the operand reading is
+        // unreliable): a move into a directory is never a rotation
+        // aside-step.
         let mut operands = tokens.into_iter().peekable();
         while let Some(t) = operands.peek() {
             if t == "--" {
@@ -661,6 +725,7 @@ impl PostCheck {
             if t.starts_with("-t")
                 || t == "--target-directory"
                 || t.starts_with("--target-directory=")
+                || !matches!(bundle_target(t), BundleTarget::None)
             {
                 return false;
             }
@@ -3622,6 +3687,28 @@ mod tests {
     }
 
     #[test]
+    fn dangerous_command_rm_attached_target_directory_is_silent() {
+        // GNU rm has no -t in any form: an attached -tDIR or
+        // --target-directory=DIR token is dropped as a plain flag
+        // with no operand effect, so an rm whose only remaining
+        // operands are backup names goes quiet -- unlike the
+        // separate form, where the directory stays positional and
+        // keeps a mixed rm firing.
+        for script in [
+            "rm -t/live /a.rpmsave\n",
+            "rm --target-directory=/live /a.rpmsave\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "rm attached target-dir form fired: {script}"
+            );
+        }
+    }
+
+    #[test]
     fn dangerous_command_mixed_rm_still_fires() {
         // The rm arm credits only all-backup operand sets: a backup
         // name next to a live path still deletes live files.
@@ -3827,6 +3914,31 @@ mod tests {
             "mv",
             2
         ));
+        // The bundled form likewise: the old flag-skip read the
+        // bundle as a plain flag and left exactly the rotation
+        // shape, silencing a move into a directory.
+        assert!(!PostCheck::is_rotation(
+            "mv -pt /etc/foo.rpmsave /etc/foo.rpmsave.old",
+            "mv",
+            2
+        ));
+        // At scriptlet level the live target isolates the rotation
+        // fail-closed: a backup-named target would instead go quiet
+        // through the backup credit, exactly as the separate -t
+        // form does.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "mv -pt /tmp/dir /etc/foo.rpmsave /etc/foo.rpmsave.old\n",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["mv".to_string()]),
+            "bundled -t rotation shape went silent"
+        );
     }
 
     #[test]
@@ -3880,6 +3992,20 @@ mod tests {
     }
 
     #[test]
+    fn dangerous_command_same_verb_masking_still_fires() {
+        // Same-verb masking: a backup-direction cp goes quiet, but
+        // a genuine cp in the same section keeps the finding firing
+        // (contrast the other-verb shape in
+        // dangerous_command_after_backup_still_fires, where the
+        // finding names the genuine rm).
+        let script = "cp /etc/foo /etc/foo.rpmsave; cp /etc/bar /etc/baz\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
+            && f == "dangerous-command-in-%post"
+            && d == &vec!["cp".to_string()]));
+    }
+
+    #[test]
     fn dangerous_command_single_operand_cp_still_fires() {
         for script in ["cp /etc/foo.rpmsave\n", "cp -t /etc/foo.rpmsave\n"] {
             let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
@@ -3922,6 +4048,37 @@ mod tests {
                 && d == &vec!["cp".to_string()]),
             "attached -t live destination went silent"
         );
+        // Bundled `-t`: the first `t` not consumed by `-S` is the
+        // target flag, so a live target still fires even though the
+        // trailing name is a backup name.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "cp -pt /live /etc/foo.rpmsave\n",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["cp".to_string()]),
+            "bundled -t live destination went silent"
+        );
+        // `-S` consumes the `t`: no target flag, so the backup
+        // destination stays silent, as does a trailing `-S` whose
+        // suffix argument is the next token.
+        for script in [
+            "cp -St /live /etc/foo.rpmsave\n",
+            "cp -pS .bak /live /etc/foo.rpmsave\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "S-consumed bundle fired: {script}"
+            );
+        }
     }
 
     #[test]
