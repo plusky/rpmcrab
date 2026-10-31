@@ -1358,24 +1358,88 @@ mod prebuilt {
     }
 
     /// Minimal ustar reader: `(name, data_offset, data_len)` for regular
-    /// files. Understands GNU long names (`L`); skips directories,
-    /// symlinks and pax headers with their data; stops at the first
-    /// corrupt header or the end-of-archive zero blocks. Entry sizes are
-    /// capped — oversized entries are skipped, not read.
+    /// files. Understands GNU long names (`L`) and pax extended headers
+    /// (`x`): a pending `path` record names the next regular member ahead
+    /// of the `L` name and the ustar fields, and a pending `size` record
+    /// replaces that member's size field. Global (`g`) headers stay
+    /// ignored, and any other header drops both pending values. Stops at the
+    /// first corrupt header or the end-of-archive zero blocks. Entry
+    /// sizes are capped — oversized entries are skipped, not read.
+    /// Parse pax extended-header records from the first 4 KiB of an `x`
+    /// header's data: `<length> <key>=<value>\n` records, where the length
+    /// counts itself. Returns the last `path` and `size` records seen;
+    /// other keys are ignored. A malformed record, or one running past
+    /// `data`, ends the parse; records parsed before it still apply.
+    /// Values decode with `from_utf8_lossy`, like `L` names.
+    fn parse_pax(data: &[u8]) -> (Option<String>, Option<u64>) {
+        let mut path = None;
+        let mut size = None;
+        let mut rest = data;
+        while !rest.is_empty() {
+            let Some(space) = rest.iter().position(|&b| b == b' ') else {
+                break;
+            };
+            let len = match std::str::from_utf8(&rest[..space])
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                Some(n) => n,
+                None => break,
+            };
+            if len <= space || rest.len() < len {
+                break;
+            }
+            let record = &rest[space + 1..len];
+            let record = record.strip_suffix(b"\n").unwrap_or(record);
+            if let Some(eq) = record.iter().position(|&b| b == b'=') {
+                let (key, value) = (&record[..eq], &record[eq + 1..]);
+                if key == b"path" {
+                    path = Some(String::from_utf8_lossy(value).into_owned());
+                } else if key == b"size" {
+                    match std::str::from_utf8(value)
+                        .ok()
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
+                        Some(n) => size = Some(n),
+                        None => break,
+                    }
+                }
+            }
+            rest = &rest[len..];
+        }
+        (path, size)
+    }
+
     fn read_tar(data: &[u8]) -> Vec<(String, usize, usize, u64)> {
         let mut out = Vec::new();
         let mut pos = 0;
         let mut long_name: Option<String> = None;
+        let mut pax_path: Option<String> = None;
+        let mut pax_size: Option<u64> = None;
         while pos + 512 <= data.len() {
             let hdr = &data[pos..pos + 512];
             if hdr.iter().all(|&b| b == 0) {
                 break;
             }
             let typeflag = hdr[156];
-            let size = match parse_octal(&hdr[124..136]) {
+            let mut size = match parse_octal(&hdr[124..136]) {
                 Some(s) => s,
                 None => break,
             };
+            // A pending pax `size` replaces the size field of the next
+            // regular member, before its data blocks are counted, so
+            // skipping stays aligned when the ustar field is empty or
+            // capped. An `L` header keeps both pending values for the member
+            // after it, and an `x` header merges its own records into
+            // them; any other non-member header drops them.
+            if typeflag == b'0' || typeflag == 0 {
+                if let Some(s) = pax_size.take() {
+                    size = s;
+                }
+            } else if typeflag != b'L' && typeflag != b'x' {
+                pax_size = None;
+                pax_path = None;
+            }
             pos += 512;
             // `div_ceil` on the raw size: skipping stays aligned even for
             // entries too big to read.
@@ -1395,25 +1459,44 @@ mod prebuilt {
                     let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
                     long_name = Some(String::from_utf8_lossy(&raw[..end]).into_owned());
                 }
+            } else if typeflag == b'x' {
+                // Pax extended header: parse at most the first 4 KiB of
+                // records, like `L` above. Records parsed before a
+                // malformed one still apply; a later record with the same
+                // key wins, and keys absent here leave pending values intact.
+                if data_end <= data.len() {
+                    let (path, psize) = parse_pax(&data[pos..data_end]);
+                    pax_path = path.or(pax_path);
+                    pax_size = psize.or(pax_size);
+                }
             } else if typeflag == b'0' || typeflag == 0 {
-                let name = match long_name.take() {
-                    Some(n) => n,
-                    None => {
-                        let mut name = header_str(hdr, 0..100);
-                        let prefix = header_str(hdr, 345..500);
-                        if !prefix.is_empty() {
-                            name = format!("{prefix}/{name}");
-                        }
-                        name
+                // A pax `path` wins over the `L` name and the ustar fields,
+                // as GNU tar resolves them; either way both pending values are
+                // spent on this member.
+                let name = match pax_path.take() {
+                    Some(p) => {
+                        long_name = None;
+                        p
                     }
+                    None => match long_name.take() {
+                        Some(n) => n,
+                        None => {
+                            let mut name = header_str(hdr, 0..100);
+                            let prefix = header_str(hdr, 345..500);
+                            if !prefix.is_empty() {
+                                name = format!("{prefix}/{name}");
+                            }
+                            name
+                        }
+                    },
                 };
                 let len = (size as usize).min(MAX_ENTRY_BYTES);
                 if size <= MAX_ENTRY_BYTES as u64 && pos + len <= data.len() {
                     out.push((name, pos, len, size));
                 }
             } else {
-                // Directories, symlinks, pax headers: a pending long name
-                // does not belong to them.
+                // Directories, symlinks, global headers: a pending long name
+                // does not belong to them (pax pending values were dropped above).
                 long_name = None;
             }
             pos = pos.saturating_add(blocks);
@@ -2045,20 +2128,92 @@ mod prebuilt_tests {
         let mut out = Vec::new();
         for (name, data) in entries {
             assert!(name.len() <= 100, "test tar writer: name too long");
-            let mut hdr = [0u8; 512];
-            hdr[..name.len()].copy_from_slice(name.as_bytes());
-            hdr[100..108].copy_from_slice(b"0000644\0");
-            let size = format!("{:011o}\0", data.len());
-            hdr[124..136].copy_from_slice(size.as_bytes());
-            hdr[156] = b'0';
-            hdr[257..262].copy_from_slice(b"ustar");
-            hdr[148..156].copy_from_slice(b"        ");
-            let sum: u32 = hdr.iter().map(|&b| b as u32).sum();
-            let sum_field = format!("{sum:06o}\0 ");
-            hdr[148..156].copy_from_slice(sum_field.as_bytes());
-            out.extend_from_slice(&hdr);
-            out.extend_from_slice(data);
-            out.extend(std::iter::repeat_n(0, (512 - data.len() % 512) % 512));
+            append_entry(&mut out, name, data.len(), b'0', data);
+        }
+        out.extend([0u8; 1024]);
+        out
+    }
+
+    /// One ustar header plus its data blocks (test-only writer). `size` is
+    /// the header's size field and may differ from `data.len()` for probes
+    /// of readers that take the size from elsewhere (pax `size` records).
+    fn append_entry(out: &mut Vec<u8>, name: &str, size: usize, typeflag: u8, data: &[u8]) {
+        let mut hdr = [0u8; 512];
+        hdr[..name.len()].copy_from_slice(name.as_bytes());
+        hdr[100..108].copy_from_slice(b"0000644\0");
+        let size_field = format!("{:011o}\0", size);
+        hdr[124..136].copy_from_slice(size_field.as_bytes());
+        hdr[156] = typeflag;
+        hdr[257..262].copy_from_slice(b"ustar");
+        hdr[148..156].copy_from_slice(b"        ");
+        let sum: u32 = hdr.iter().map(|&b| b as u32).sum();
+        let sum_field = format!("{sum:06o}\0 ");
+        hdr[148..156].copy_from_slice(sum_field.as_bytes());
+        out.extend_from_slice(&hdr);
+        out.extend_from_slice(data);
+        out.extend(std::iter::repeat_n(0, (512 - data.len() % 512) % 512));
+    }
+
+    /// One pax extended-header record, `<length> <key>=<value>\n`, with the
+    /// length counting itself (test-only writer).
+    fn pax_record(key: &str, value: &str) -> Vec<u8> {
+        let mut len = key.len() + value.len() + 3;
+        loop {
+            let next = key.len() + value.len() + 3 + len.to_string().len();
+            if next == len {
+                break;
+            }
+            len = next;
+        }
+        format!("{len} {key}={value}\n").into_bytes()
+    }
+
+    /// One member for `tarball_pax`: optional pax `x`/`g` headers, an
+    /// optional GNU long name, then the member itself. `name` is the ustar
+    /// name field (the cut name a real writer emits for a long path);
+    /// `size` overrides the header's size field when set.
+    struct PaxMember<'a> {
+        x: &'a [u8],
+        g: &'a [u8],
+        long: Option<&'a str>,
+        name: &'a str,
+        data: &'a [u8],
+        size: Option<usize>,
+        typeflag: u8,
+    }
+
+    impl<'a> PaxMember<'a> {
+        fn regular(name: &'a str, data: &'a [u8]) -> Self {
+            PaxMember {
+                x: &[],
+                g: &[],
+                long: None,
+                name,
+                data,
+                size: None,
+                typeflag: b'0',
+            }
+        }
+    }
+
+    /// Ustar writer with pax/`L` prefixes per member (test-only). The
+    /// production reader is what is under test.
+    fn tarball_pax(members: &[PaxMember]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for m in members {
+            if !m.g.is_empty() {
+                append_entry(&mut out, "pax-global", m.g.len(), b'g', m.g);
+            }
+            if !m.x.is_empty() {
+                append_entry(&mut out, "pax", m.x.len(), b'x', m.x);
+            }
+            if let Some(long) = m.long {
+                let mut data = long.as_bytes().to_vec();
+                data.push(0);
+                append_entry(&mut out, "longname", data.len(), b'L', &data);
+            }
+            let size = m.size.unwrap_or(m.data.len());
+            append_entry(&mut out, m.name, size, m.typeflag, m.data);
         }
         out.extend([0u8; 1024]);
         out
@@ -3178,6 +3333,7 @@ mod prebuilt_tests {
         let members = super::prebuilt::top_level_members(&z);
         assert!(super::prebuilt::lfs_pointers(&members).is_empty());
     }
+
     #[test]
     fn new_kinds_fire_in_tarball_and_group_per_directory() {
         let pe = pe_dll();
@@ -3354,5 +3510,308 @@ mod prebuilt_tests {
             "unexpected: {:?}",
             prebuilt_lines(&findings)
         );
+    }
+
+    #[test]
+    fn pax_path_names_long_member() {
+        let long = format!("long/{}/mod.pyc", "x".repeat(93));
+        assert_eq!(long.len(), 106);
+        let cut = long[..100].to_string();
+        let mut x = Vec::new();
+        x.extend_from_slice(&pax_record("path", &long));
+        let tar = tarball_pax(&[PaxMember {
+            x: &x,
+            ..PaxMember::regular(&cut, PYC)
+        }]);
+        let members = super::prebuilt::top_level_members(&tar);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, long);
+        assert!(members[0].head.starts_with(&PYC[..4]));
+    }
+
+    #[test]
+    fn pax_size_sizes_member_and_keeps_alignment() {
+        let mut first = ELF.to_vec();
+        first.resize(64, 0);
+        let mut x = Vec::new();
+        x.extend_from_slice(&pax_record("size", "64"));
+        let tar = tarball_pax(&[
+            PaxMember {
+                x: &x,
+                size: Some(0),
+                ..PaxMember::regular("first.bin", &first)
+            },
+            PaxMember::regular("second.bin", ELF),
+        ]);
+        let members = super::prebuilt::top_level_members(&tar);
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].name, "first.bin");
+        assert_eq!(members[0].size, 64);
+        assert!(members[0].head.starts_with(b"\x7fELF"));
+        assert_eq!(members[1].name, "second.bin");
+    }
+
+    #[test]
+    fn pax_path_beats_long_name() {
+        let pax = format!("long/{}/mod.pyc", "x".repeat(93));
+        let lname = format!("other/{}/mod.pyc", "y".repeat(91));
+        let cut = pax[..100].to_string();
+        let mut x = Vec::new();
+        x.extend_from_slice(&pax_record("path", &pax));
+        let tar = tarball_pax(&[PaxMember {
+            x: &x,
+            long: Some(&lname),
+            ..PaxMember::regular(&cut, PYC)
+        }]);
+        let members = super::prebuilt::top_level_members(&tar);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, pax);
+    }
+
+    #[test]
+    fn pax_size_survives_long_name() {
+        let mut data = ELF.to_vec();
+        data.resize(48, 0);
+        let mut x = Vec::new();
+        x.extend_from_slice(&pax_record("size", "48"));
+        let tar = tarball_pax(&[
+            PaxMember {
+                x: &x,
+                long: Some("some/long/name.bin"),
+                size: Some(0),
+                ..PaxMember::regular("cut.bin", &data)
+            },
+            PaxMember::regular("after.bin", ELF),
+        ]);
+        let members = super::prebuilt::top_level_members(&tar);
+        assert_eq!(members.len(), 2);
+        // The `L` name wins for the name (no pax `path`), the pax `size`
+        // for the size, and the member after it proves the `L` data was
+        // read at its own size.
+        assert_eq!(members[0].name, "some/long/name.bin");
+        assert_eq!(members[0].size, 48);
+        assert!(members[0].head.starts_with(b"\x7fELF"));
+        assert_eq!(members[1].name, "after.bin");
+    }
+
+    #[test]
+    fn pax_path_dropped_by_non_member() {
+        let mut x = Vec::new();
+        x.extend_from_slice(&pax_record("path", "should/not/carry.bin"));
+        let tar = tarball_pax(&[
+            PaxMember {
+                x: &x,
+                typeflag: b'5',
+                ..PaxMember::regular("dir/", &[])
+            },
+            PaxMember::regular("real.bin", ELF),
+            PaxMember {
+                x: &x,
+                typeflag: b'2',
+                ..PaxMember::regular("link", &[])
+            },
+            PaxMember::regular("real2.bin", ELF),
+        ]);
+        let members = super::prebuilt::top_level_members(&tar);
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].name, "real.bin");
+        assert_eq!(members[1].name, "real2.bin");
+    }
+
+    #[test]
+    fn pax_global_path_ignored() {
+        let mut g = Vec::new();
+        g.extend_from_slice(&pax_record("path", "global/rename.bin"));
+        let tar = tarball_pax(&[PaxMember {
+            g: &g,
+            ..PaxMember::regular("real.bin", ELF)
+        }]);
+        let members = super::prebuilt::top_level_members(&tar);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "real.bin");
+    }
+
+    #[test]
+    fn pax_malformed_record_keeps_ustar_name() {
+        // Length is not a number.
+        let tar = tarball_pax(&[PaxMember {
+            x: b"xx path=should/not/carry.bin\n",
+            ..PaxMember::regular("a.bin", ELF)
+        }]);
+        let members = super::prebuilt::top_level_members(&tar);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "a.bin");
+        // Length runs past the header data.
+        let tar = tarball_pax(&[PaxMember {
+            x: b"9999 path=should/not/carry.bin\n",
+            ..PaxMember::regular("b.bin", ELF)
+        }]);
+        let members = super::prebuilt::top_level_members(&tar);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "b.bin");
+    }
+
+    #[test]
+    fn pax_path_past_4kib_keeps_ustar_name() {
+        // Fill past the reader's 4 KiB cap with comment records, then a
+        // path record: the member keeps its ustar name, and nothing over
+        // 4 KiB is allocated for the header.
+        let mut x = Vec::new();
+        while x.len() <= 4096 {
+            x.extend_from_slice(&pax_record("comment", "padding"));
+        }
+        x.extend_from_slice(&pax_record("path", "should/not/carry.bin"));
+        let tar = tarball_pax(&[PaxMember {
+            x: &x,
+            ..PaxMember::regular("real.bin", ELF)
+        }]);
+        let members = super::prebuilt::top_level_members(&tar);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "real.bin");
+    }
+
+    #[test]
+    fn paxexp_dispatch_names_long_members() {
+        let jar = zip_bytes(&[("p/A.class", CLASS)]);
+        let dir = format!("long/{}", "x".repeat(93));
+        let elf = format!("{dir}/elf.bin");
+        let jar_name = format!("{dir}/lib.jar");
+        let pyc = format!("{dir}/mod.pyc");
+        let elf_cut = elf[..100].to_string();
+        let jar_cut = jar_name[..100].to_string();
+        let pyc_cut = pyc[..100].to_string();
+        let mut x_elf = Vec::new();
+        x_elf.extend_from_slice(&pax_record("path", &elf));
+        let mut x_jar = Vec::new();
+        x_jar.extend_from_slice(&pax_record("path", &jar_name));
+        let mut x_pyc = Vec::new();
+        x_pyc.extend_from_slice(&pax_record("path", &pyc));
+        let tar = tarball_pax(&[
+            PaxMember::regular("short/elf.bin", ELF),
+            PaxMember::regular("short/lib.jar", &jar),
+            PaxMember::regular("short/mod.pyc", PYC),
+            PaxMember {
+                x: &x_elf,
+                ..PaxMember::regular(&elf_cut, ELF)
+            },
+            PaxMember {
+                x: &x_jar,
+                ..PaxMember::regular(&jar_cut, &jar)
+            },
+            PaxMember {
+                x: &x_pyc,
+                ..PaxMember::regular(&pyc_cut, PYC)
+            },
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("paxexp.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        // Sorted, as the helper sorts: the long jar fires as a unit, with
+        // no class line for it.
+        assert_eq!(
+            prebuilt_lines(&findings),
+            vec![
+                format!(
+                    "prebuilt-test.src: W: prebuilt-binary-in-sources paxexp.tar.gz: {elf} ELF binary"
+                ),
+                format!(
+                    "prebuilt-test.src: W: prebuilt-binary-in-sources paxexp.tar.gz: {jar_name} Java archive (jar)"
+                ),
+                format!(
+                    "prebuilt-test.src: W: prebuilt-binary-in-sources paxexp.tar.gz: {pyc} Python bytecode"
+                ),
+                "prebuilt-test.src: W: prebuilt-binary-in-sources paxexp.tar.gz: short/elf.bin ELF binary"
+                    .to_string(),
+                "prebuilt-test.src: W: prebuilt-binary-in-sources paxexp.tar.gz: short/lib.jar Java archive (jar)"
+                    .to_string(),
+                "prebuilt-test.src: W: prebuilt-binary-in-sources paxexp.tar.gz: short/mod.pyc Python bytecode"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn vcsexp_dispatch_names_long_git_root() {
+        let dir = format!("long/{}", "x".repeat(93));
+        let long_config = format!("{dir}/.git/config");
+        let long_head = format!("{dir}/.git/HEAD");
+        let mut x_config = Vec::new();
+        x_config.extend_from_slice(&pax_record("path", &long_config));
+        let mut x_head = Vec::new();
+        x_head.extend_from_slice(&pax_record("path", &long_head));
+        let tar = tarball_pax(&[
+            PaxMember::regular("short/.git/config", b"[core]\n"),
+            PaxMember::regular("short/.git/HEAD", b"ref: refs/heads/main\n"),
+            PaxMember {
+                x: &x_config,
+                ..PaxMember::regular(&long_config[..100], b"[core]\n")
+            },
+            PaxMember {
+                x: &x_head,
+                ..PaxMember::regular(&long_head[..100], b"ref: refs/heads/main\n")
+            },
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", spec_with_source("vcsexp.tar.gz")),
+            ("vcsexp.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-vcs-metadata"),
+            vec![
+                format!(
+                    "prebuilt-test.src: W: source-archive-contains-vcs-metadata vcsexp.tar.gz {dir}/.git 2 entries 28 bytes"
+                ),
+                "prebuilt-test.src: W: source-archive-contains-vcs-metadata vcsexp.tar.gz short/.git 2 entries 28 bytes"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn pax_names_survive_zip_nesting() {
+        let long = format!("long/{}/mod.pyc", "x".repeat(93));
+        let cut = long[..100].to_string();
+        let mut x = Vec::new();
+        x.extend_from_slice(&pax_record("path", &long));
+        let inner = tarball_pax(&[PaxMember {
+            x: &x,
+            ..PaxMember::regular(&cut, PYC)
+        }]);
+        let zip = zip_bytes(&[("inner.tar.gz", &gzip_bytes(&inner))]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("outer.zip", zip),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            vec![format!(
+                "prebuilt-test.src: W: prebuilt-binary-in-sources outer.zip: inner.tar.gz: {long} Python bytecode"
+            )]
+        );
+    }
+
+    #[test]
+    fn pax_path_bidi_exclusion_uses_full_name() {
+        // The excluded `.txt` suffix lives only in the pax `path`: under
+        // the cut ustar name this member fires, under its full name it
+        // stays quiet.
+        let full = format!("long/{}/note.txt", "x".repeat(93));
+        let cut = full[..100].to_string();
+        let mut x = Vec::new();
+        x.extend_from_slice(&pax_record("path", &full));
+        let tar = tarball_pax(&[PaxMember {
+            x: &x,
+            ..PaxMember::regular(&cut, "hello \u{202e} world\n".as_bytes())
+        }]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("bidi-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(archive_lines(&findings, "source-archive-contains-bidi-control").is_empty());
     }
 }
