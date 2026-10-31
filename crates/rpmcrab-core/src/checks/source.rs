@@ -174,7 +174,6 @@ fn record_shipped_source(
     state: &mut ShippedState,
     pkg: &Pkg,
     f: &PkgFile,
-    data: &[u8],
     hits: &[prebuilt::Hit],
     archives: &[prebuilt::ArchiveHits],
 ) {
@@ -204,15 +203,27 @@ fn record_shipped_source(
             });
     }
     if !self_hit {
+        // The whole-file record: the header digest when
+        // FILEDIGESTALGO is 8, else a streamed sha256 of the file —
+        // but only up to the old 256 MiB whole-file cap, so a large
+        // streamed Source costs no extra full read; its member hits
+        // still join, only the whole-file record is missing.
         let digest = match (pkg.tag_i64(librpm::Tag::FILEDIGESTALGO), f.md5.as_ref()) {
-            (Some(8), Some(md5)) if !md5.is_empty() => md5.clone(),
-            _ => sha256_hex(data),
+            (Some(8), Some(md5)) if !md5.is_empty() => Some(md5.clone()),
+            _ => {
+                let capped = std::fs::metadata(&f.path)
+                    .map(|m| m.len() <= prebuilt::MAX_ARCHIVE_BYTES as u64)
+                    .unwrap_or(false);
+                if capped { sha256_file(&f.path) } else { None }
+            }
         };
-        by_digest.entry(digest).or_default().push(SourceRecord {
-            kind: archive_kind(hits.len()),
-            display: f.name.clone(),
-            test: false,
-        });
+        if let Some(digest) = digest {
+            by_digest.entry(digest).or_default().push(SourceRecord {
+                kind: archive_kind(hits.len()),
+                display: f.name.clone(),
+                test: false,
+            });
+        }
     }
     for key in source_package_keys(pkg) {
         let entry = state.sources.entry(key).or_default();
@@ -415,154 +426,131 @@ impl SourceCheck {
     /// the bidi pass below.
     fn check_source_archives(&mut self, pkg: &Pkg, out: &mut Filter) {
         let url_sources = source_url_files(pkg);
+        // One finding-cap state per source package (issue #1387):
+        // every payload file of the package shares it.
+        let mut caps = prebuilt::CapState::new();
         for f in &pkg.files {
-            let size = std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0);
-            if size > prebuilt::MAX_ARCHIVE_BYTES as u64 {
-                continue;
-            }
-            let data = match std::fs::read(&f.path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            self.archive_contents_for(pkg, &url_sources, f, &data, out);
-            self.bidi_controls_for(pkg, f, &data, out);
-        }
-    }
-
-    fn archive_contents_for(
-        &mut self,
-        pkg: &Pkg,
-        url_sources: &std::collections::HashSet<String>,
-        f: &crate::pkg::pkgfile::PkgFile,
-        data: &[u8],
-        out: &mut Filter,
-    ) {
-        let mut hits = Vec::new();
-        let mut archives = Vec::new();
-        let members = prebuilt::inspect_top_level(&f.name, data, &f.name, &mut hits, &mut archives);
-        // The grouped kinds (ar, PE, wasm) collapse per archive,
-        // directory and kind; every other hit keeps its per-member
-        // line, as do bare Sources, which have no archive chain.
-        let mut groups: Vec<(String, String, prebuilt::BinaryKind, usize, String)> = Vec::new();
-        for hit in &hits {
-            let kind = hit.kind;
-            let path = hit.path.clone();
-            if !kind.grouped() {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "prebuilt-binary-in-sources",
-                    &[&path, kind.as_str()],
-                );
-                continue;
-            }
-            let Some((archive, member)) = path.rsplit_once(": ") else {
-                // Bare Source: no archive chain, never grouped.
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "prebuilt-binary-in-sources",
-                    &[&path, kind.as_str()],
-                );
-                continue;
-            };
-            let archive = archive.to_string();
-            let dir = match member.rfind('/') {
-                Some(i) => member[..i].to_string(),
-                None => String::new(),
-            };
-            match groups
-                .iter_mut()
-                .find(|(a, d, k, _, _)| *a == archive && *d == dir && *k == kind)
-            {
-                Some(g) => g.3 += 1,
-                None => groups.push((archive, dir, kind, 1, path)),
-            }
-        }
-        for (archive, dir, kind, count, first_path) in groups {
-            if count == 1 {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "prebuilt-binary-in-sources",
-                    &[&first_path, kind.as_str()],
-                );
-            } else {
-                let path = if dir.is_empty() {
-                    format!("{archive}: *")
-                } else {
-                    format!("{archive}: {dir}/*")
+            let mut walker = prebuilt::Walker::new(&mut caps, !url_sources.contains(&f.name));
+            walker.walk_file(std::path::Path::new(&f.path), &f.name);
+            let outcome = walker.take_outcome();
+            // The run-scoped shipped join (issue #1389): the walk's
+            // hits and nested-archive records join by digest, like
+            // the old whole-file walk recorded them.
+            record_shipped_source(
+                &mut self.shipped,
+                pkg,
+                f,
+                &outcome.shipped,
+                &outcome.archives,
+            );
+            // Grouped kinds (ar, PE, wasm) collapse per archive,
+            // directory and kind, as on main; every other hit keeps
+            // its per-member line, as do bare Sources, which have no
+            // archive chain.
+            let mut groups: Vec<(String, String, prebuilt::BinaryKind, usize, String)> = Vec::new();
+            for (kind, path) in &outcome.prebuilt {
+                let kind = *kind;
+                if !kind.grouped() {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "prebuilt-binary-in-sources",
+                        &[path, kind.as_str()],
+                    );
+                    continue;
+                }
+                let Some((archive, member)) = path.rsplit_once(": ") else {
+                    // Bare Source: no archive chain, never grouped.
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "prebuilt-binary-in-sources",
+                        &[path, kind.as_str()],
+                    );
+                    continue;
                 };
-                let label = format!("{} ({count} files)", kind.as_str());
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "prebuilt-binary-in-sources",
-                    &[&path, &label],
-                );
+                let archive = archive.to_string();
+                let dir = match member.rfind('/') {
+                    Some(i) => member[..i].to_string(),
+                    None => String::new(),
+                };
+                match groups
+                    .iter_mut()
+                    .find(|(a, d, k, _, _)| *a == archive && *d == dir && *k == kind)
+                {
+                    Some(g) => g.3 += 1,
+                    None => groups.push((archive, dir, kind, 1, path.clone())),
+                }
             }
-        }
-        record_shipped_source(&mut self.shipped, pkg, f, data, &hits, &archives);
-        if !url_sources.contains(&f.name) {
-            for root in prebuilt::vcs_roots(&members) {
-                let entries = format!("{} entries", root.entries);
-                let bytes = format!("{} bytes", root.bytes);
+            for (archive, dir, kind, count, first_path) in groups {
+                if count == 1 {
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "prebuilt-binary-in-sources",
+                        &[&first_path, kind.as_str()],
+                    );
+                } else {
+                    let path = if dir.is_empty() {
+                        format!("{archive}: *")
+                    } else {
+                        format!("{archive}: {dir}/*")
+                    };
+                    let label = format!("{} ({count} files)", kind.as_str());
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "prebuilt-binary-in-sources",
+                        &[&path, &label],
+                    );
+                }
+            }
+            for (root, (entries, bytes)) in &outcome.vcs {
                 add_info(
                     out,
                     Level::Warning,
                     pkg,
                     "source-archive-contains-vcs-metadata",
-                    &[&f.name, &root.root, &entries, &bytes],
+                    &[
+                        &f.name,
+                        root,
+                        &format!("{entries} entries"),
+                        &format!("{bytes} bytes"),
+                    ],
                 );
             }
-        }
-        for member in prebuilt::lfs_pointers(&members) {
-            let path = format!("{}: {}", f.name, member);
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "source-archive-contains-lfs-pointer",
-                &[&path],
-            );
-        }
-    }
-
-    /// `source-archive-contains-bidi-control`: scan the text members
-    /// of each source archive for the nine Unicode bidirectional
-    /// control characters (trojan-source, CVE-2021-42574), one finding
-    /// per member naming the first control and its line and column.
-    /// Direct payload files are not scanned here: the payload text
-    /// scan covers them, including the spec itself. A member is
-    /// scanned only when its bytes decode as UTF-8, or as UTF-16
-    /// behind a byte-order mark; undecodable members are binary and
-    /// stay quiet. Members under the surveyed exclusions stay quiet:
-    /// a `.git` path component, `.desktop` or `.txt` suffixes,
-    /// `Changelog` and `NEWS` basenames, case-folded, and the `.po`,
-    /// `.tex`, `.html`, `.htm` and `.roff` suffixes.
-    fn bidi_controls_for(
-        &self,
-        pkg: &Pkg,
-        f: &crate::pkg::pkgfile::PkgFile,
-        data: &[u8],
-        out: &mut Filter,
-    ) {
-        for hit in prebuilt::bidi_hits(&f.name, data, &f.name) {
-            let detail = format!(
-                "{} line {}, column {} {}",
-                hit.path, hit.line, hit.column, hit.control
-            );
-            add_info(
-                out,
-                Level::Warning,
-                pkg,
-                "source-archive-contains-bidi-control",
-                &[&detail],
-            );
+            for name in &outcome.lfs {
+                let path = format!("{}: {}", f.name, name);
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "source-archive-contains-lfs-pointer",
+                    &[&path],
+                );
+            }
+            for hit in &outcome.bidi {
+                let detail = format!(
+                    "{} line {}, column {} {}",
+                    hit.path, hit.line, hit.column, hit.control
+                );
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "source-archive-contains-bidi-control",
+                    &[&detail],
+                );
+            }
+            // Skips are never silent (issue #1387): every recorded
+            // stop is logged, in the manner of pkg/extract.rs.
+            for line in outcome.stops.lines() {
+                tracing::warn!("sourcecheck: {}: {}", f.name, line);
+            }
         }
     }
 }
@@ -638,16 +626,62 @@ fn has_url_scheme(s: &str) -> bool {
 /// has no magic bytes and is skipped - and of the zip-based Java archives
 /// only `.jar` is reported as a unit; `.war`/`.ear`/`.aar` are walked like
 /// plain zips, their classes listed individually.
+/// Prebuilt-binary detection inside source archives (issue #150).
+///
+/// The walker is deliberately small: magic-byte archive detection, a minimal
+/// ustar reader, and streaming decompression.
+///
+/// Scope choices: only ustar tarballs are recognized - pre-POSIX V7 format
+/// has no magic bytes and is skipped - and of the zip-based Java archives
+/// only `.jar` is reported as a unit; `.war`/`.ear`/`.aar` are walked like
+/// plain zips, their classes listed individually.
+///
+/// Size handling (issue #1387): a top-level Source is streamed, never held
+/// whole. A fixed decompression budget per Source replaces the old 256 MiB
+/// whole-archive cap; a zip Source over 256 MiB on disk is still skipped,
+/// now with a warning. A member over 64 MiB is read through, not buffered:
+/// it counts toward version-control totals at its declared size and its
+/// head goes through the git-lfs test, but it is not classified, not
+/// scanned for bidi controls and not opened as a nested archive. A zip
+/// entry's declared size is never trusted for that decision: an entry
+/// declared over the cap over small actual content is visited for bidi
+/// only, since the old bidi walk saw through the lie and the old
+/// prebuilt walk did not.
 mod prebuilt {
-    use std::io::Read;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::io::{self, Read, Seek, SeekFrom};
+    use std::rc::Rc;
 
-    /// Cap on one archive's in-memory bytes (decompressed). Beyond this the
-    /// archive is skipped rather than risk a decompression bomb.
+    /// On-disk limit kept for zip Sources only (issue #1387): a zip needs
+    /// `Seek`, so it cannot stream, and a zip over this size is skipped
+    /// with a warning instead of being opened.
     pub const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
-    /// Cap on one archive entry's bytes.
+    /// Cap on one archive entry's bytes: a member up to this size is
+    /// buffered; a larger one is read through (see the module doc).
     const MAX_ENTRY_BYTES: usize = 64 * 1024 * 1024;
-    /// Nesting limit for archives inside archives.
+    /// Nesting limit for archives inside archives: the top-level archive
+    /// is depth 0, and an archive nested inside a depth-3 archive is the
+    /// deepest one opened, so five levels are walked in all.
     const MAX_DEPTH: u8 = 5;
+    /// Decompression budget per top-level Source (issue #1387): bytes
+    /// read from a stream, decompressed or from a plain tar, counted
+    /// over all nesting levels. Above the largest Factory Source
+    /// measured (nodejs-electron, about 5.4 GiB decompressed).
+    const DECOMPRESS_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+    /// Findings kept per tag per source package (issue #1387): past
+    /// this the walk stops recording for that tag and logs the stop.
+    const FINDING_CAP: usize = 25_000;
+    /// LZMA decoder memory limit (issue #1387), matching zstd's window.
+    const XZ_MEMLIMIT_BYTES: u64 = 128 * 1024 * 1024;
+    /// Skip-log lines kept per Source per kind (issue #1387); past
+    /// that one closing line gives the count.
+    const LOG_LINES_PER_KIND: usize = 10;
+    /// Detail paths stored in findings are cut to this many bytes
+    /// (issue #1387), with a trailing ellipsis.
+    const DETAIL_PATH_LIMIT: usize = 1024;
+    /// Bytes of a member's head kept for the git-lfs test.
+    const HEAD_BYTES: usize = 1024;
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum BinaryKind {
@@ -773,839 +807,532 @@ mod prebuilt {
         None
     }
 
-    /// Inspect one file: flag it when it is itself a prebuilt binary,
-    /// otherwise walk it when it is an archive. `ctx` is the display path
-    /// (`outer.tar.gz: inner/file.o`); `depth` counts nested archives.
-    pub fn inspect_entry(
-        name: &str,
-        data: &[u8],
-        ctx: &str,
-        depth: u8,
-        hits: &mut Vec<Hit>,
-        archives: &mut Vec<ArchiveHits>,
-    ) {
-        if let Some(kind) = classify(name, data) {
-            // A jar is reported as a unit; its classes are not listed
-            // separately — the jar is what the packager removes in %prep.
-            hits.push(Hit {
-                kind,
-                path: ctx.to_string(),
-                sha256: super::sha256_hex(data),
-            });
-        } else {
-            let before = hits.len();
-            scan_archive(data, ctx, depth + 1, hits, archives);
-            if hits.len() > before {
-                archives.push(ArchiveHits {
-                    sha256: super::sha256_hex(data),
-                    hits: hits.len() - before,
-                    path: ctx.to_string(),
-                });
+    /// Walker limits (issue #1387): the budget and the finding cap are
+    /// arguments, so tests pass small ones.
+    struct Limits {
+        finding_cap: usize,
+    }
+
+    impl Limits {
+        fn production() -> Self {
+            Limits {
+                finding_cap: FINDING_CAP,
             }
         }
     }
 
-    fn scan_archive(
-        data: &[u8],
-        ctx: &str,
-        depth: u8,
-        hits: &mut Vec<Hit>,
-        archives: &mut Vec<ArchiveHits>,
-    ) {
-        if depth > MAX_DEPTH {
-            return;
-        }
-        if data.starts_with(b"\x1f\x8b") {
-            if let Some(d) = decompress_gzip(data) {
-                scan_decompressed(&d, ctx, depth, hits, archives);
-            }
-        } else if data.starts_with(b"\xfd7zXZ\x00") {
-            if let Some(d) = decompress_xz(data) {
-                scan_decompressed(&d, ctx, depth, hits, archives);
-            }
-        } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
-            if let Some(d) = decompress_zstd(data) {
-                scan_decompressed(&d, ctx, depth, hits, archives);
-            }
-        } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
-            // The 4th magic byte is the bzip2 block-size digit
-            // ('1'..='9'); anything else is not a bzip2 stream.
-            if let Some(d) = decompress_bzip2(data) {
-                scan_decompressed(&d, ctx, depth, hits, archives);
-            }
-        } else if data.starts_with(b"PK\x03\x04") {
-            walk_zip(data, ctx, depth, hits, archives);
-        } else if is_tar(data) {
-            walk_tar(data, ctx, depth, hits, archives);
-        }
-        // Anything else is opaque: skip silently.
+    /// Per-tag finding caps for one source package (issue #1387). One
+    /// instance is shared across all payload files of the package; once
+    /// a tag reaches the cap the walk stops recording for it. The
+    /// version-control root count is shared the same way: a root that
+    /// appears in several Sources is a finding per Source, so each
+    /// Source's new root consumes the cap.
+    pub struct CapState {
+        prebuilt: usize,
+        vcs_roots: usize,
+        lfs: usize,
+        bidi: usize,
+        prebuilt_tripped: bool,
+        vcs_tripped: bool,
+        lfs_tripped: bool,
+        bidi_tripped: bool,
     }
 
-    /// A decompressed stream is either a tarball or a single file (e.g.
-    /// `prebuilt.o.gz` — the compressed file itself is the binary).
-    fn scan_decompressed(
-        data: &[u8],
-        ctx: &str,
-        depth: u8,
-        hits: &mut Vec<Hit>,
-        archives: &mut Vec<ArchiveHits>,
-    ) {
-        if is_tar(data) {
-            walk_tar(data, ctx, depth, hits, archives);
-        } else if let Some(kind) = classify(ctx, data) {
-            hits.push(Hit {
-                kind,
-                path: ctx.to_string(),
-                sha256: super::sha256_hex(data),
-            });
+    impl CapState {
+        pub fn new() -> Self {
+            CapState {
+                prebuilt: 0,
+                vcs_roots: 0,
+                lfs: 0,
+                bidi: 0,
+                prebuilt_tripped: false,
+                vcs_tripped: false,
+                lfs_tripped: false,
+                bidi_tripped: false,
+            }
         }
     }
 
-    fn is_tar(data: &[u8]) -> bool {
-        data.len() >= 512 && &data[257..262] == b"ustar"
+    /// Decompression budget shared with the counting readers (issue
+    /// #1387): bytes left, plus whether a read already hit the end of
+    /// it. The flag distinguishes a budget stop from a genuinely
+    /// truncated stream, which ends the walk silently like today.
+    struct BudgetState {
+        left: u64,
+        hit: bool,
+        memlimit_hit: bool,
     }
 
-    fn walk_tar(
-        data: &[u8],
-        ctx: &str,
-        depth: u8,
-        hits: &mut Vec<Hit>,
-        archives: &mut Vec<ArchiveHits>,
-    ) {
-        for (name, off, len, _size) in read_tar(data) {
-            let entry = &data[off..off + len];
-            inspect_entry(
-                &name,
-                entry,
-                &format!("{ctx}: {name}"),
-                depth,
-                hits,
-                archives,
-            );
+    /// A reader that counts every byte toward the walk's budget and
+    /// reports end-of-stream once the budget is spent. It wraps decoder
+    /// outputs and top-level plain-tar streams only: buffer re-reads
+    /// and zip metadata are not new bytes and are not counted, while
+    /// zip entry bytes are charged by hand in the zip walk.
+    struct CountingReader<R: Read> {
+        inner: R,
+        budget: Rc<RefCell<BudgetState>>,
+    }
+
+    impl<R: Read> CountingReader<R> {
+        fn new(inner: R, budget: Rc<RefCell<BudgetState>>) -> Self {
+            CountingReader { inner, budget }
         }
     }
 
-    fn walk_zip(
-        data: &[u8],
-        ctx: &str,
-        depth: u8,
-        hits: &mut Vec<Hit>,
-        archives: &mut Vec<ArchiveHits>,
-    ) {
-        let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(data)) {
-            Ok(a) => a,
-            Err(_) => return,
-        };
-        for i in 0..archive.len() {
-            let entry = match archive.by_index(i) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if !entry.is_file() {
-                continue;
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let mut state = self.budget.borrow_mut();
+            if state.left == 0 {
+                state.hit = true;
+                return Ok(0);
             }
-            // zip 9 returns entry names as results; skip entries whose
-            // names do not decode, like every other unreadable entry here.
-            let name = match entry.name() {
-                Ok(name) => name.into_owned(),
-                Err(_) => continue,
-            };
-            if entry.size() > MAX_ENTRY_BYTES as u64 {
-                continue;
-            }
-            let mut bytes = Vec::new();
-            if entry
-                .take(MAX_ENTRY_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .is_err()
-                || bytes.len() > MAX_ENTRY_BYTES
-            {
-                continue;
-            }
-            inspect_entry(
-                &name,
-                &bytes,
-                &format!("{ctx}: {name}"),
-                depth,
-                hits,
-                archives,
-            );
-        }
-    }
-
-    /// One direct member of a source archive. `head` carries the
-    /// member's first bytes, up to 1024: the whole member when it is
-    /// at most 1023 bytes long (the git-lfs pointer size arm). It is
-    /// empty when the member could not be read.
-    pub struct TopLevelMember {
-        pub name: String,
-        pub size: u64,
-        pub head: Vec<u8>,
-    }
-
-    /// A member's head: its first bytes, up to 1024 -- the whole
-    /// member when it is at most 1023 bytes long.
-    fn member_head(bytes: &[u8]) -> Vec<u8> {
-        bytes[..bytes.len().min(1024)].to_vec()
-    }
-
-    /// Inspect one source file at the top level, returning its
-    /// direct members: the prebuilt walk and the member list share
-    /// one pass -- a compressed stream is decompressed once, a zip
-    /// is opened once, a tar's entry table is read once -- where
-    /// they previously decompressed and walked the archive twice.
-    pub fn inspect_top_level(
-        name: &str,
-        data: &[u8],
-        ctx: &str,
-        hits: &mut Vec<Hit>,
-        archives: &mut Vec<ArchiveHits>,
-    ) -> Vec<TopLevelMember> {
-        if let Some(kind) = classify(name, data) {
-            // A jar is reported as a unit; its classes are not listed
-            // separately -- the jar is what the packager removes in
-            // %prep.
-            hits.push(Hit {
-                kind,
-                path: ctx.to_string(),
-                sha256: super::sha256_hex(data),
-            });
-            return top_level_members(data);
-        }
-        if data.starts_with(b"\x1f\x8b") {
-            decompress_gzip(data)
-                .map(|d| {
-                    scan_decompressed(&d, ctx, 1, hits, archives);
-                    tar_members(&d)
-                })
-                .unwrap_or_default()
-        } else if data.starts_with(b"\xfd7zXZ\x00") {
-            decompress_xz(data)
-                .map(|d| {
-                    scan_decompressed(&d, ctx, 1, hits, archives);
-                    tar_members(&d)
-                })
-                .unwrap_or_default()
-        } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
-            decompress_zstd(data)
-                .map(|d| {
-                    scan_decompressed(&d, ctx, 1, hits, archives);
-                    tar_members(&d)
-                })
-                .unwrap_or_default()
-        } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
-            decompress_bzip2(data)
-                .map(|d| {
-                    scan_decompressed(&d, ctx, 1, hits, archives);
-                    tar_members(&d)
-                })
-                .unwrap_or_default()
-        } else if data.starts_with(b"PK\x03\x04") {
-            zip_scan(data, ctx, 1, hits, archives)
-        } else if is_tar(data) {
-            let entries = read_tar(data);
-            for (ename, off, len, _size) in &entries {
-                let entry = &data[*off..*off + *len];
-                inspect_entry(ename, entry, &format!("{ctx}: {ename}"), 1, hits, archives);
-            }
-            entries
-                .into_iter()
-                .map(|(ename, off, len, size)| TopLevelMember {
-                    name: normalize_member_name(&ename),
-                    size,
-                    head: member_head(&data[off..off + len]),
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// The zip pass of `inspect_top_level`: walk the entries for
-    /// prebuilt binaries and record the direct members in one open
-    /// of the archive (the nested-archive walk stays in `walk_zip`).
-    fn zip_scan(
-        data: &[u8],
-        ctx: &str,
-        depth: u8,
-        hits: &mut Vec<Hit>,
-        archives: &mut Vec<ArchiveHits>,
-    ) -> Vec<TopLevelMember> {
-        let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(data)) {
-            Ok(a) => a,
-            Err(_) => return Vec::new(),
-        };
-        let mut members = Vec::new();
-        for i in 0..archive.len() {
-            let entry = match archive.by_index(i) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if !entry.is_file() {
-                continue;
-            }
-            // zip 9 returns entry names as results; skip entries whose
-            // names do not decode, like every other unreadable entry here.
-            let name = match entry.name() {
-                Ok(name) => name.into_owned(),
-                Err(_) => continue,
-            };
-            let size = entry.size();
-            if size > MAX_ENTRY_BYTES as u64 {
-                // The walk skips the entry unread, but the member
-                // list still records it, its head read on its own.
-                let head = {
-                    let mut bytes = Vec::new();
-                    if entry.take(1024).read_to_end(&mut bytes).is_err() {
-                        Vec::new()
-                    } else {
-                        bytes
+            let want = buf
+                .len()
+                .min(usize::try_from(state.left).unwrap_or(usize::MAX));
+            match self.inner.read(&mut buf[..want]) {
+                Ok(n) => {
+                    state.left -= n as u64;
+                    Ok(n)
+                }
+                Err(e) => {
+                    // An xz decoder refusing a dictionary over its
+                    // memlimit surfaces here; anything else (a corrupt
+                    // stream, a short file) stays silent downstream.
+                    if is_memlimit(&e) {
+                        state.memlimit_hit = true;
                     }
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Whether an I/O error is an xz decoder refusing a dictionary
+    /// over its memlimit (issue #1387): liblzma surfaces that as
+    /// `Error::MemLimit` inside the I/O error.
+    fn is_memlimit(e: &io::Error) -> bool {
+        e.get_ref()
+            .and_then(|r| r.downcast_ref::<liblzma::stream::Error>())
+            .is_some_and(|le| matches!(le, liblzma::stream::Error::MemLimit))
+    }
+
+    /// Skip/stop records for one Source walk (issue #1387): per kind,
+    /// the first lines kept plus the total count, so a walk with many
+    /// skips of one kind logs that kind's lines once and then a
+    /// closing line with the count.
+    pub struct StopLog {
+        kinds: BTreeMap<&'static str, (Vec<String>, usize)>,
+    }
+
+    impl StopLog {
+        fn new() -> Self {
+            StopLog {
+                kinds: BTreeMap::new(),
+            }
+        }
+
+        fn record(&mut self, kind: &'static str, msg: String) {
+            let entry = self.kinds.entry(kind).or_default();
+            entry.1 += 1;
+            if entry.0.len() < LOG_LINES_PER_KIND {
+                entry.0.push(msg);
+            }
+        }
+
+        pub fn lines(&self) -> Vec<String> {
+            let mut out = Vec::new();
+            for (kind, (kept, total)) in &self.kinds {
+                out.extend(kept.iter().cloned());
+                if *total > kept.len() {
+                    out.push(format!(
+                        "{kind}: {} more skips of this kind",
+                        total - kept.len()
+                    ));
+                }
+            }
+            out
+        }
+    }
+
+    /// What one source walk found, plus the stops it recorded for
+    /// logging (issue #1387). Finding vectors are already capped, and
+    /// version-control roots are keyed by root with entry and byte
+    /// totals, in root order like the old member-list fold.
+    pub struct WalkOutcome {
+        pub prebuilt: Vec<(BinaryKind, String)>,
+        /// The same hits with their sha256, plus the nested-archive
+        /// records, for the run-scoped shipped join (issue #1389).
+        /// Both share the finding cap with `prebuilt` (see
+        /// `push_prebuilt`), so a cap-tripped walk records neither
+        /// further findings nor further shipped records.
+        pub shipped: Vec<Hit>,
+        pub archives: Vec<ArchiveHits>,
+        pub vcs: BTreeMap<String, (usize, u64)>,
+        pub lfs: Vec<String>,
+        pub bidi: Vec<BidiHit>,
+        pub stops: StopLog,
+    }
+
+    impl WalkOutcome {
+        fn new() -> Self {
+            WalkOutcome {
+                prebuilt: Vec::new(),
+                shipped: Vec::new(),
+                archives: Vec::new(),
+                vcs: BTreeMap::new(),
+                lfs: Vec::new(),
+                bidi: Vec::new(),
+                stops: StopLog::new(),
+            }
+        }
+    }
+
+    /// Cut a detail path to the storage limit, on a character boundary,
+    /// with a trailing ellipsis (issue #1387).
+    fn cut_detail(path: &str) -> String {
+        if path.len() <= DETAIL_PATH_LIMIT {
+            return path.to_owned();
+        }
+        let mut end = DETAIL_PATH_LIMIT;
+        while end > 0 && !path.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &path[..end])
+    }
+
+    /// The three names a buffered archive is known by: the name its
+    /// bytes classify under, the name bidi scans under, and the name a
+    /// further decompression layer strips. Callers pass the right three
+    /// for their case.
+    pub struct BufferNames<'a> {
+        pub classify: &'a str,
+        pub bidi: &'a str,
+        pub stream: &'a str,
+    }
+
+    /// The streaming walker (issue #1387): one pass per top-level
+    /// Source feeds all four predicates, so no archive is decompressed
+    /// twice and no member list is ever built. Nothing about a member
+    /// outlives its visit except the findings themselves.
+    pub struct Walker<'a> {
+        budget: Rc<RefCell<BudgetState>>,
+        caps: &'a mut CapState,
+        limits: Limits,
+        emit_vcs: bool,
+        out: WalkOutcome,
+        budget_stop_recorded: bool,
+        memlimit_stop_recorded: bool,
+    }
+
+    impl<'a> Walker<'a> {
+        pub fn new(caps: &'a mut CapState, emit_vcs: bool) -> Self {
+            Walker {
+                budget: Rc::new(RefCell::new(BudgetState {
+                    left: DECOMPRESS_BUDGET_BYTES,
+                    hit: false,
+                    memlimit_hit: false,
+                })),
+                caps,
+                limits: Limits::production(),
+                emit_vcs,
+                out: WalkOutcome::new(),
+                budget_stop_recorded: false,
+                memlimit_stop_recorded: false,
+            }
+        }
+
+        /// Test-only entry point: same walker with small limits, so
+        /// budget and cap stops are reachable without huge fixtures.
+        #[cfg(test)]
+        pub fn with_limits(
+            caps: &'a mut CapState,
+            emit_vcs: bool,
+            budget: u64,
+            finding_cap: usize,
+        ) -> Self {
+            Walker {
+                budget: Rc::new(RefCell::new(BudgetState {
+                    left: budget,
+                    hit: false,
+                    memlimit_hit: false,
+                })),
+                caps,
+                limits: Limits { finding_cap },
+                emit_vcs,
+                out: WalkOutcome::new(),
+                budget_stop_recorded: false,
+                memlimit_stop_recorded: false,
+            }
+        }
+
+        fn budget_hit(&self) -> bool {
+            self.budget.borrow().hit
+        }
+
+        fn note_budget_stop(&mut self) {
+            if !self.budget_stop_recorded {
+                self.budget_stop_recorded = true;
+                self.out.stops.record(
+                    "budget",
+                    "decompression budget reached; findings so far are kept".to_owned(),
+                );
+            }
+        }
+
+        fn memlimit_hit(&self) -> bool {
+            self.budget.borrow().memlimit_hit
+        }
+
+        fn note_memlimit_stop(&mut self) {
+            if !self.memlimit_stop_recorded {
+                self.memlimit_stop_recorded = true;
+                self.out.stops.record(
+                    "memlimit",
+                    "xz decoder memory limit reached; archive not walked".to_owned(),
+                );
+            }
+        }
+
+        /// Charge decompressed zip entry bytes to the budget by hand
+        /// (issue #1387): zip entry reads do not go through a counting
+        /// reader. Returns false once the budget is spent.
+        fn charge(&mut self, n: u64) -> bool {
+            let mut state = self.budget.borrow_mut();
+            if state.left >= n {
+                state.left -= n;
+                true
+            } else {
+                state.left = 0;
+                state.hit = true;
+                false
+            }
+        }
+
+        fn push_prebuilt(&mut self, kind: BinaryKind, ctx: &str, sha256: String) {
+            if self.caps.prebuilt >= self.limits.finding_cap {
+                if !self.caps.prebuilt_tripped {
+                    self.caps.prebuilt_tripped = true;
+                    self.out.stops.record(
+                        "finding-cap",
+                        "prebuilt-binary-in-sources reached the finding cap".to_owned(),
+                    );
+                }
+                return;
+            }
+            self.caps.prebuilt += 1;
+            let path = cut_detail(ctx);
+            self.out.prebuilt.push((kind, path.clone()));
+            self.out.shipped.push(Hit { kind, path, sha256 });
+        }
+
+        fn count_vcs(&mut self, name: &str, size: u64) {
+            if !self.emit_vcs {
+                return;
+            }
+            let Some(root) = vcs_root(name) else {
+                return;
+            };
+            if let Some((entries, bytes)) = self.out.vcs.get_mut(&root) {
+                *entries = entries.saturating_add(1);
+                *bytes = bytes.saturating_add(size);
+                return;
+            }
+            if self.caps.vcs_roots >= self.limits.finding_cap {
+                if !self.caps.vcs_tripped {
+                    self.caps.vcs_tripped = true;
+                    self.out.stops.record(
+                        "finding-cap",
+                        "source-archive-contains-vcs-metadata reached the finding cap".to_owned(),
+                    );
+                }
+                return;
+            }
+            self.caps.vcs_roots += 1;
+            self.out.vcs.insert(root, (1, size));
+        }
+
+        fn test_lfs(&mut self, name: &str, head: &[u8]) {
+            // Unlike version-control counting, the git-lfs test is
+            // not gated on URL sources: the old walk reported
+            // pointers for every Source. The gate is the head length,
+            // not the declared size: a pointer is 1-1023 bytes of
+            // actual head, starting with the pointer version line
+            // (the current git-lfs URL or the legacy hawser one,
+            // LF- or CRLF-terminated) and carrying an `oid sha256:`
+            // line of its own.
+            if head.is_empty() || head.len() > 1023 {
+                return;
+            }
+            if !(starts_with_version_line(head, b"version https://git-lfs.github.com/spec/v1")
+                || starts_with_version_line(head, b"version https://hawser.github.com/spec/v1"))
+            {
+                return;
+            }
+            if !head
+                .split(|&b| b == b'\n')
+                .any(|line| line.starts_with(b"oid sha256:"))
+            {
+                return;
+            }
+            if self.caps.lfs >= self.limits.finding_cap {
+                if !self.caps.lfs_tripped {
+                    self.caps.lfs_tripped = true;
+                    self.out.stops.record(
+                        "finding-cap",
+                        "source-archive-contains-lfs-pointer reached the finding cap".to_owned(),
+                    );
+                }
+                return;
+            }
+            self.caps.lfs += 1;
+            self.out.lfs.push(cut_detail(name));
+        }
+
+        fn push_bidi(&mut self, hit: BidiHit) {
+            if self.caps.bidi >= self.limits.finding_cap {
+                if !self.caps.bidi_tripped {
+                    self.caps.bidi_tripped = true;
+                    self.out.stops.record(
+                        "finding-cap",
+                        "source-archive-contains-bidi-control reached the finding cap".to_owned(),
+                    );
+                }
+                return;
+            }
+            self.caps.bidi += 1;
+            self.out.bidi.push(BidiHit {
+                path: cut_detail(&hit.path),
+                line: hit.line,
+                column: hit.column,
+                control: hit.control,
+            });
+        }
+
+        /// Scan one member's bytes for a bidi control, unless its name
+        /// is excluded (issue #1139's exclusions are name-based: `.git`
+        /// path components, documentation suffixes, changelog basenames).
+        fn scan_bidi(&mut self, name: &str, data: &[u8], ctx: &str) {
+            if bidi_excluded(name) {
+                return;
+            }
+            if let Some((line, column, control)) = first_bidi_control_in_text(data) {
+                self.push_bidi(BidiHit {
+                    path: ctx.to_owned(),
+                    line,
+                    column,
+                    control,
+                });
+            }
+        }
+    }
+
+    /// Read up to `limit` bytes from a stream. Returns the bytes plus
+    /// whether the stream holds at least one more byte past the limit
+    /// (a one-byte probe, not a grow-past-the-limit read). A stream
+    /// that ends early returns its bytes with `false`.
+    fn read_up_to<R: Read>(mut r: R, limit: u64) -> io::Result<(Vec<u8>, bool)> {
+        let mut buf = Vec::with_capacity(usize::try_from(limit).unwrap_or(usize::MAX));
+        let mut limited = (&mut r).take(limit);
+        limited.read_to_end(&mut buf)?;
+        if (buf.len() as u64) < limit {
+            return Ok((buf, false));
+        }
+        let mut probe = [0u8; 1];
+        let n = r.read(&mut probe)?;
+        Ok((buf, n > 0))
+    }
+
+    /// A stream that first replays a peeked prefix, then continues
+    /// with the underlying reader.
+    struct Peeked<R: Read> {
+        prefix: io::Cursor<Vec<u8>>,
+        rest: R,
+    }
+
+    impl<R: Read> Read for Peeked<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.prefix.read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            self.rest.read(buf)
+        }
+    }
+
+    /// Read the first 512 bytes of a stream, returning them plus a
+    /// stream that replays them. A short read returns what was read;
+    /// a read error ends the walk silently, like today's decompress
+    /// failure.
+    fn peek<R: Read>(mut r: R) -> Option<(Vec<u8>, Peeked<R>)> {
+        let mut prefix = vec![0u8; 512];
+        let mut got = 0;
+        while got < 512 {
+            match r.read(&mut prefix[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(_) => return None,
+            }
+        }
+        prefix.truncate(got);
+        Some((
+            prefix.clone(),
+            Peeked {
+                prefix: io::Cursor::new(prefix),
+                rest: r,
+            },
+        ))
+    }
+
+    enum DecoderKind {
+        Gzip,
+        Xz,
+        Zstd,
+        Bzip2,
+    }
+
+    /// Stream magics for the four decoders, matching today's
+    /// `decompress_*` dispatch. Bzip2 needs its level digit too.
+    fn decoder_kind(prefix: &[u8]) -> Option<DecoderKind> {
+        if prefix.starts_with(b"\x1f\x8b") {
+            Some(DecoderKind::Gzip)
+        } else if prefix.starts_with(b"\xfd7zXZ\x00") {
+            Some(DecoderKind::Xz)
+        } else if prefix.starts_with(b"\x28\xb5\x2f\xfd") {
+            Some(DecoderKind::Zstd)
+        } else if prefix.len() >= 4
+            && prefix.starts_with(b"BZh")
+            && (b'1'..=b'9').contains(&prefix[3])
+        {
+            Some(DecoderKind::Bzip2)
+        } else {
+            None
+        }
+    }
+
+    /// Build one decoder over a stream. The xz decoder carries the
+    /// stated memlimit (issue #1387): a stream whose dictionary
+    /// exceeds it fails the decode instead of allocating past it.
+    fn decode<'a, R: Read + 'a>(kind: DecoderKind, r: R) -> Option<Box<dyn Read + 'a>> {
+        match kind {
+            DecoderKind::Gzip => Some(Box::new(flate2::read::GzDecoder::new(r))),
+            DecoderKind::Xz => {
+                let Ok(stream) = liblzma::stream::Stream::new_stream_decoder(XZ_MEMLIMIT_BYTES, 0)
+                else {
+                    return None;
                 };
-                members.push(TopLevelMember {
-                    name: normalize_member_name(&name),
-                    size,
-                    head,
-                });
-                continue;
+                Some(Box::new(liblzma::read::XzDecoder::new_stream(r, stream)))
             }
-            let mut bytes = Vec::new();
-            if entry
-                .take(MAX_ENTRY_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .is_err()
-            {
-                // An unreadable entry is still a member (with an
-                // empty head); the walk skips it.
-                members.push(TopLevelMember {
-                    name: normalize_member_name(&name),
-                    size,
-                    head: Vec::new(),
-                });
-                continue;
-            }
-            let head = member_head(&bytes);
-            members.push(TopLevelMember {
-                name: normalize_member_name(&name),
-                size,
-                head,
-            });
-            if bytes.len() > MAX_ENTRY_BYTES {
-                continue;
-            }
-            inspect_entry(
-                &name,
-                &bytes,
-                &format!("{ctx}: {name}"),
-                depth,
-                hits,
-                archives,
-            );
-        }
-        members
-    }
-
-    /// The direct members of the archive in `data` (depth 1 only:
-    /// nested archives appear as opaque members and are not opened).
-    /// A compressed stream that does not hold a tarball is a single
-    /// file, not an archive, and yields no members.
-    pub fn top_level_members(data: &[u8]) -> Vec<TopLevelMember> {
-        if data.starts_with(b"\x1f\x8b") {
-            decompress_gzip(data)
-                .map(|d| tar_members(&d))
-                .unwrap_or_default()
-        } else if data.starts_with(b"\xfd7zXZ\x00") {
-            decompress_xz(data)
-                .map(|d| tar_members(&d))
-                .unwrap_or_default()
-        } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
-            decompress_zstd(data)
-                .map(|d| tar_members(&d))
-                .unwrap_or_default()
-        } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
-            decompress_bzip2(data)
-                .map(|d| tar_members(&d))
-                .unwrap_or_default()
-        } else if data.starts_with(b"PK\x03\x04") {
-            zip_members(data)
-        } else if is_tar(data) {
-            tar_members(data)
-        } else {
-            Vec::new()
+            DecoderKind::Zstd => zstd::Decoder::new(r)
+                .ok()
+                .map(|d| Box::new(d) as Box<dyn Read>),
+            DecoderKind::Bzip2 => Some(Box::new(bzip2::read::BzDecoder::new(r))),
         }
     }
 
-    fn tar_members(data: &[u8]) -> Vec<TopLevelMember> {
-        if !is_tar(data) {
-            return Vec::new();
-        }
-        read_tar(data)
-            .into_iter()
-            .map(|(name, off, len, size)| TopLevelMember {
-                name: normalize_member_name(&name),
-                size,
-                head: member_head(&data[off..off + len]),
-            })
-            .collect()
-    }
-
-    fn zip_members(data: &[u8]) -> Vec<TopLevelMember> {
-        let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(data)) {
-            Ok(a) => a,
-            Err(_) => return Vec::new(),
-        };
-        let mut out = Vec::new();
-        for i in 0..archive.len() {
-            let entry = match archive.by_index(i) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if !entry.is_file() {
-                continue;
-            }
-            let name = match entry.name() {
-                Ok(name) => normalize_member_name(&name),
-                Err(_) => continue,
-            };
-            let size = entry.size();
-            // The head is read whatever the declared size says (a
-            // central directory can lie in either direction); a
-            // member whose head cannot be read stays a member, with
-            // an empty head.
-            let head = {
-                let mut bytes = Vec::new();
-                if entry.take(1024).read_to_end(&mut bytes).is_err() {
-                    Vec::new()
-                } else {
-                    bytes
-                }
-            };
-            out.push(TopLevelMember { name, size, head });
-        }
-        out
-    }
-
-    /// Member names are matched and reported without leading `./` or
-    /// `/` segments.
-    fn normalize_member_name(name: &str) -> String {
-        let mut s = name;
-        loop {
-            if let Some(rest) = s.strip_prefix("./") {
-                s = rest;
-            } else if let Some(rest) = s.strip_prefix('/') {
-                s = rest;
-            } else {
-                break;
-            }
-        }
-        s.to_string()
-    }
-
-    /// A version-control metadata tree found among the members.
-    pub struct VcsRoot {
-        pub root: String,
-        pub entries: usize,
-        pub bytes: u64,
-    }
-
-    /// Group the members matching the VCS predicate by metadata
-    /// root, counting entries and bytes per root.
-    pub fn vcs_roots(members: &[TopLevelMember]) -> Vec<VcsRoot> {
-        let mut by_root: std::collections::BTreeMap<String, (usize, u64)> =
-            std::collections::BTreeMap::new();
-        for m in members {
-            if let Some(root) = vcs_root(&m.name) {
-                let e = by_root.entry(root).or_default();
-                e.0 += 1;
-                e.1 = e.1.saturating_add(m.size);
-            }
-        }
-        by_root
-            .into_iter()
-            .map(|(root, (entries, bytes))| VcsRoot {
-                root,
-                entries,
-                bytes,
-            })
-            .collect()
-    }
-
-    /// The metadata root a member belongs to, if it matches the
-    /// predicate: with `/` prefixed, the name contains a
-    /// `.(bzr|git|hg|svn)/` tree component, or ends with a file
-    /// directly inside a `CVS` directory. The `,v` and `RCS/` arms of
-    /// the file-list pattern are out: a CVS repository fixture's `,v`
-    /// files are content, not a metadata tree. Working-tree dotfiles
-    /// (`.gitignore`, `.gitmodules`, `.github/`) and a `sub/.git`
-    /// gitlink file do not match: the tree component must be a
-    /// directory.
-    fn vcs_root(name: &str) -> Option<String> {
-        let prefixed = format!("/{name}");
-        let mut best: Option<(usize, String)> = None;
-        for kind in [".bzr", ".git", ".hg", ".svn"] {
-            let needle = format!("/{kind}/");
-            if let Some(idx) = prefixed.find(&needle) {
-                let root = prefixed[1..idx + kind.len() + 1].to_string();
-                if best.as_ref().is_none_or(|(i, _)| idx < *i) {
-                    best = Some((idx, root));
-                }
-            }
-        }
-        if let Some(idx) = prefixed.rfind("/CVS/") {
-            let rest = &prefixed[idx + 5..];
-            if !rest.is_empty() && !rest.contains('/') {
-                let root = prefixed[1..idx + 4].to_string();
-                if best.as_ref().is_none_or(|(i, _)| idx < *i) {
-                    best = Some((idx, root));
-                }
-            }
-        }
-        best.map(|(_, root)| root)
-    }
-
-    /// The names of members holding a git-lfs pointer stub: a member
-    /// whose head -- its actual first bytes -- is 1-1023 bytes long,
-    /// starts with the pointer version line (the current git-lfs URL
-    /// or the legacy hawser one, LF- or CRLF-terminated) and carries
-    /// an `oid sha256:` line. The gate is the head length, not the
-    /// declared size: a zip central directory can lie about the size
-    /// in either direction, while the head is bytes actually read. A
-    /// document merely quoting the version line after offset 0 is
-    /// not a pointer.
-    pub fn lfs_pointers(members: &[TopLevelMember]) -> Vec<String> {
-        members
-            .iter()
-            .filter(|m| {
-                !m.head.is_empty()
-                    && m.head.len() <= 1023
-                    && (starts_with_version_line(
-                        &m.head,
-                        b"version https://git-lfs.github.com/spec/v1",
-                    ) || starts_with_version_line(
-                        &m.head,
-                        b"version https://hawser.github.com/spec/v1",
-                    ))
-                    && m.head
-                        .split(|&b| b == b'\n')
-                        .any(|line| line.starts_with(b"oid sha256:"))
-            })
-            .map(|m| m.name.clone())
-            .collect()
-    }
-
-    /// Whether `head` opens with the git-lfs pointer version line
-    /// for `url`, terminated by LF or CRLF.
-    fn starts_with_version_line(head: &[u8], url: &[u8]) -> bool {
-        head.strip_prefix(url)
-            .is_some_and(|rest| rest.starts_with(b"\n") || rest.starts_with(b"\r\n"))
-    }
-
-    /// One bidirectional-control hit inside a source archive:
-    /// the display path (`archive: member`, nested archives joined
-    /// the same way), and the 1-based line and character column of
-    /// the first control in that member.
-    pub struct BidiHit {
-        pub path: String,
-        pub line: u32,
-        pub column: u32,
-        pub control: &'static str,
-    }
-
-    /// The nine Unicode bidirectional control characters
-    /// (U+202A-U+202E, U+2066-U+2069) with their Unicode names.
-    const BIDI_CONTROLS: [(char, &str); 9] = [
-        ('\u{202A}', "U+202A LEFT-TO-RIGHT EMBEDDING"),
-        ('\u{202B}', "U+202B RIGHT-TO-LEFT EMBEDDING"),
-        ('\u{202C}', "U+202C POP DIRECTIONAL FORMATTING"),
-        ('\u{202D}', "U+202D LEFT-TO-RIGHT OVERRIDE"),
-        ('\u{202E}', "U+202E RIGHT-TO-LEFT OVERRIDE"),
-        ('\u{2066}', "U+2066 LEFT-TO-RIGHT ISOLATE"),
-        ('\u{2067}', "U+2067 RIGHT-TO-LEFT ISOLATE"),
-        ('\u{2068}', "U+2068 FIRST STRONG ISOLATE"),
-        ('\u{2069}', "U+2069 POP DIRECTIONAL ISOLATE"),
-    ];
-
-    /// The Unicode name of a bidirectional control character, or
-    /// `None` for any other character.
-    fn bidi_control_name(c: char) -> Option<&'static str> {
-        BIDI_CONTROLS
-            .iter()
-            .find(|(cp, _)| *cp == c)
-            .map(|(_, name)| *name)
-    }
-
-    /// The first bidirectional control in decoded text, with its
-    /// 1-based line and character column, or `None` when the bytes
-    /// hold no control. UTF-8, with an optional byte-order mark, is
-    /// tried first; a UTF-16 byte-order mark selects UTF-16LE or
-    /// UTF-16BE. Bytes that decode neither way are binary, not
-    /// text, and stay quiet; unpaired surrogates fail the UTF-16
-    /// decode the same way.
-    fn first_bidi_control_in_text(data: &[u8]) -> Option<(u32, u32, &'static str)> {
-        if data.starts_with(b"\xEF\xBB\xBF") {
-            let text = std::str::from_utf8(&data[3..]).ok()?;
-            scan_chars(text.chars())
-        } else if data.starts_with(b"\xFF\xFE") {
-            scan_chars(decode_utf16(&data[2..], true)?.into_iter())
-        } else if data.starts_with(b"\xFE\xFF") {
-            scan_chars(decode_utf16(&data[2..], false)?.into_iter())
-        } else {
-            let text = std::str::from_utf8(data).ok()?;
-            scan_chars(text.chars())
-        }
-    }
-
-    /// First bidi control in a char stream, with its 1-based line
-    /// and character column. The stream is consumed lazily: no
-    /// intermediate text buffer is built. (UTF-16 still validates
-    /// through `decode_utf16`, which must see every unit to fail the
-    /// whole member on an unpaired surrogate.)
-    fn scan_chars(chars: impl Iterator<Item = char>) -> Option<(u32, u32, &'static str)> {
-        let mut line = 1u32;
-        let mut column = 1u32;
-        for c in chars {
-            if let Some(name) = bidi_control_name(c) {
-                return Some((line, column, name));
-            }
-            if c == '\n' {
-                line += 1;
-                column = 1;
-            } else {
-                column += 1;
-            }
-        }
-        None
-    }
-
-    /// Decode UTF-16 units from `data` (little-endian when `le`),
-    /// failing on a trailing byte or any unpaired surrogate.
-    fn decode_utf16(data: &[u8], le: bool) -> Option<Vec<char>> {
-        if !data.len().is_multiple_of(2) {
-            return None;
-        }
-        let units: Vec<u16> = data
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| {
-                if le {
-                    u16::from_le_bytes([pair[0], pair[1]])
-                } else {
-                    u16::from_be_bytes([pair[0], pair[1]])
-                }
-            })
-            .collect();
-        char::decode_utf16(units)
-            .collect::<Result<Vec<char>, _>>()
-            .ok()
-    }
-
-    /// Whether an archive member is outside the bidi scan: a `.git`
-    /// path component, a `.desktop` or `.txt` suffix, a `Changelog`
-    /// or `NEWS` basename, case-folded (with or without a dotted suffix), or one
-    /// of the excluded text formats (`.po`, `.tex`, `.html`, `.htm`,
-    /// `.roff`).
-    fn bidi_excluded(name: &str) -> bool {
-        if name.split('/').any(|part| part == ".git") {
-            return true;
-        }
-        let basename = name.rsplit('/').next().unwrap_or(name);
-        let lower = basename.to_ascii_lowercase();
-        if lower == "changelog"
-            || lower == "news"
-            || lower.starts_with("changelog.")
-            || lower.starts_with("news.")
-        {
-            return true;
-        }
-        let lower = name.to_ascii_lowercase();
-        [".po", ".tex", ".html", ".htm", ".roff", ".desktop", ".txt"]
-            .iter()
-            .any(|suffix| lower.ends_with(suffix))
-    }
-
-    /// Scan one member's bytes as text, unless excluded, pushing at
-    /// most one hit (the first control) for the member.
-    fn scan_bidi_member(name: &str, data: &[u8], ctx: &str, hits: &mut Vec<BidiHit>) {
-        if bidi_excluded(name) {
-            return;
-        }
-        if let Some((line, column, control)) = first_bidi_control_in_text(data) {
-            hits.push(BidiHit {
-                path: ctx.to_string(),
-                line,
-                column,
-                control,
-            });
-        }
-    }
-
-    /// A decompressed member is either a tarball (walked) or a
-    /// single file (scanned under the member name without its
-    /// compression suffix, so a compressed excluded type stays
-    /// excluded).
-    fn scan_bidi_decompressed(
-        name: &str,
-        data: &[u8],
-        ctx: &str,
-        depth: u8,
-        hits: &mut Vec<BidiHit>,
-    ) {
-        if is_tar(data) {
-            walk_bidi_tar(data, ctx, depth, hits);
-        } else {
-            // Anything else may itself be an archive (a zip produced
-            // by decompression) or text: route through the entry walk
-            // instead of scanning the raw bytes opaque. Depth + 1 so
-            // decompression layers consume the nesting budget.
-            inspect_bidi_entry(strip_compression_suffix(name), data, ctx, depth + 1, hits);
-        }
-    }
-
-    /// The member name without one compression suffix (`.gz`, `.xz`, `.zst`, `.zstd`, `.bz2`, case-insensitive), or the name unchanged.
-    fn strip_compression_suffix(name: &str) -> &str {
-        // ASCII-only lowercasing preserves byte length, so slicing
-        // the original name by the stripped length is exact.
-        let lower = name.to_ascii_lowercase();
-        for suffix in [".gz", ".xz", ".zst", ".zstd", ".bz2"] {
-            if let Some(stripped) = lower.strip_suffix(suffix) {
-                return &name[..stripped.len()];
-            }
-        }
-        name
-    }
-
-    /// Inspect one archive member for bidi controls: archives
-    /// recurse, compressed members decompress, anything else scans
-    /// as text. Nesting past the archive depth cap stops the walk.
-    fn inspect_bidi_entry(name: &str, data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<BidiHit>) {
-        if depth > MAX_DEPTH {
-            return;
-        }
-        if data.starts_with(b"\x1f\x8b") {
-            if let Some(d) = decompress_gzip(data) {
-                scan_bidi_decompressed(name, &d, ctx, depth, hits);
-            }
-        } else if data.starts_with(b"\xfd7zXZ\x00") {
-            if let Some(d) = decompress_xz(data) {
-                scan_bidi_decompressed(name, &d, ctx, depth, hits);
-            }
-        } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
-            if let Some(d) = decompress_zstd(data) {
-                scan_bidi_decompressed(name, &d, ctx, depth, hits);
-            }
-        } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
-            if let Some(d) = decompress_bzip2(data) {
-                scan_bidi_decompressed(name, &d, ctx, depth, hits);
-            }
-        } else if data.starts_with(b"PK\x03\x04") {
-            walk_bidi_zip(data, ctx, depth, hits);
-        } else if is_tar(data) {
-            walk_bidi_tar(data, ctx, depth, hits);
-        } else {
-            scan_bidi_member(name, data, ctx, hits);
-        }
-    }
-
-    /// The members of one tarball, each inspected for bidi controls.
-    fn walk_bidi_tar(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<BidiHit>) {
-        for (name, off, len, _size) in read_tar(data) {
-            let entry = &data[off..off + len];
-            inspect_bidi_entry(&name, entry, &format!("{ctx}: {name}"), depth + 1, hits);
-        }
-    }
-
-    /// The members of one zip archive, each inspected for bidi
-    /// controls. Unreadable or oversized members are skipped, like
-    /// the prebuilt walk.
-    fn walk_bidi_zip(data: &[u8], ctx: &str, depth: u8, hits: &mut Vec<BidiHit>) {
-        let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(data)) {
-            Ok(a) => a,
-            Err(_) => return,
-        };
-        for i in 0..archive.len() {
-            let entry = match archive.by_index(i) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if !entry.is_file() {
-                continue;
-            }
-            let name = match entry.name() {
-                Ok(name) => name.into_owned(),
-                Err(_) => continue,
-            };
-            let mut bytes = Vec::new();
-            if entry
-                .take(MAX_ENTRY_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .is_err()
-                || bytes.len() > MAX_ENTRY_BYTES
-            {
-                continue;
-            }
-            inspect_bidi_entry(&name, &bytes, &format!("{ctx}: {name}"), depth + 1, hits);
-        }
-    }
-
-    /// Bidi-control hits in one source payload file: the members of
-    /// a source archive (tar, compressed tar, zip, nested up to the
-    /// archive depth cap), or a compressed single file scanned as
-    /// itself. A plain payload file yields nothing: the payload text
-    /// scan already covers it.
-    pub fn bidi_hits(name: &str, data: &[u8], ctx: &str) -> Vec<BidiHit> {
-        let mut hits = Vec::new();
-        if data.starts_with(b"\x1f\x8b") {
-            if let Some(d) = decompress_gzip(data) {
-                scan_bidi_decompressed(name, &d, ctx, 0, &mut hits);
-            }
-        } else if data.starts_with(b"\xfd7zXZ\x00") {
-            if let Some(d) = decompress_xz(data) {
-                scan_bidi_decompressed(name, &d, ctx, 0, &mut hits);
-            }
-        } else if data.starts_with(b"\x28\xb5\x2f\xfd") {
-            if let Some(d) = decompress_zstd(data) {
-                scan_bidi_decompressed(name, &d, ctx, 0, &mut hits);
-            }
-        } else if data.len() >= 4 && data.starts_with(b"BZh") && (b'1'..=b'9').contains(&data[3]) {
-            if let Some(d) = decompress_bzip2(data) {
-                scan_bidi_decompressed(name, &d, ctx, 0, &mut hits);
-            }
-        } else if data.starts_with(b"PK\x03\x04") {
-            walk_bidi_zip(data, ctx, 0, &mut hits);
-        } else if is_tar(data) {
-            walk_bidi_tar(data, ctx, 0, &mut hits);
-        }
-        hits
-    }
-
-    /// Capped decompression: one byte past the cap means "too big".
-    fn capped<R: Read>(r: R) -> Option<Vec<u8>> {
-        let mut out = Vec::new();
-        if r.take(MAX_ARCHIVE_BYTES as u64 + 1)
-            .read_to_end(&mut out)
-            .is_err()
-            || out.len() > MAX_ARCHIVE_BYTES
-        {
-            return None;
-        }
-        Some(out)
-    }
-
-    fn decompress_gzip(data: &[u8]) -> Option<Vec<u8>> {
-        capped(flate2::read::GzDecoder::new(data))
-    }
-
-    fn decompress_xz(data: &[u8]) -> Option<Vec<u8>> {
-        capped(liblzma::read::XzDecoder::new(data))
-    }
-
-    fn decompress_zstd(data: &[u8]) -> Option<Vec<u8>> {
-        capped(zstd::stream::read::Decoder::new(data).ok()?)
-    }
-
-    fn decompress_bzip2(data: &[u8]) -> Option<Vec<u8>> {
-        capped(bzip2::read::BzDecoder::new(data))
+    /// Whether bytes look like an archive or a compressed stream, as
+    /// opposed to a plain single file.
+    fn is_archive_or_compressed(data: &[u8]) -> bool {
+        is_tar(data) || data.starts_with(b"PK\x03\x04") || decoder_kind(data).is_some()
     }
 
     /// Parse an octal field (tar size), strictly: only `[0-7]`, blank-padded.
@@ -1640,20 +1367,37 @@ mod prebuilt {
         Some(v)
     }
 
-    fn header_str(hdr: &[u8], range: std::ops::Range<usize>) -> String {
-        let raw = &hdr[range];
+    /// A tar size field: GNU base-256 when the high bit of the first
+    /// byte is set (a big-endian number, for members of 8 GiB or
+    /// more), strict octal otherwise. Overflow past u64 is corrupt
+    /// and ends the walk.
+    fn parse_tar_size(field: &[u8]) -> Option<u64> {
+        if field.is_empty() {
+            return None;
+        }
+        if field[0] & 0x80 != 0 {
+            let mut value = u64::from(field[0] & 0x7f);
+            for &b in &field[1..] {
+                value = value.checked_mul(256)?.checked_add(u64::from(b))?;
+            }
+            return Some(value);
+        }
+        parse_octal(field)
+    }
+
+    fn header_str(header: &[u8], range: std::ops::Range<usize>) -> String {
+        let raw = &header[range];
         let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
         String::from_utf8_lossy(&raw[..end]).into_owned()
     }
 
-    /// Minimal ustar reader: `(name, data_offset, data_len)` for regular
-    /// files. Understands GNU long names (`L`) and pax extended headers
-    /// (`x`): a pending `path` record names the next regular member ahead
-    /// of the `L` name and the ustar fields, and a pending `size` record
-    /// replaces that member's size field. Global (`g`) headers stay
-    /// ignored, and any other header drops both pending values. Stops at the
-    /// first corrupt header or the end-of-archive zero blocks. Entry
-    /// sizes are capped — oversized entries are skipped, not read.
+    /// A ustar header is recognized by its magic alone: the prebuilt
+    /// check never validates checksums, and V7 tarballs have no magic
+    /// at all, so they are never recognized here.
+    fn is_tar(data: &[u8]) -> bool {
+        data.len() >= 512 && &data[257..262] == b"ustar"
+    }
+
     /// Parse pax extended-header records from the first 4 KiB of an `x`
     /// header's data: `<length> <key>=<value>\n` records, where the length
     /// counts itself. Returns the last `path` and `size` records seen;
@@ -1699,101 +1443,800 @@ mod prebuilt {
         (path, size)
     }
 
-    fn read_tar(data: &[u8]) -> Vec<(String, usize, usize, u64)> {
-        let mut out = Vec::new();
-        let mut pos = 0;
-        let mut long_name: Option<String> = None;
-        let mut pax_path: Option<String> = None;
-        let mut pax_size: Option<u64> = None;
-        while pos + 512 <= data.len() {
-            let hdr = &data[pos..pos + 512];
-            if hdr.iter().all(|&b| b == 0) {
-                break;
+    /// One regular member of a tar stream: its raw name (as written,
+    /// long-name or ustar prefix included) and its declared size.
+    struct TarEntry {
+        name: String,
+        size: u64,
+    }
+
+    /// A minimal streaming ustar reader. It yields regular members
+    /// only (`'0'`/`0` typeflags): GNU long names (`L`, read up to
+    /// 4 KiB for the name, the rest skipped), pax extended headers
+    /// (`x`, first 4 KiB of records parsed: a pending `path` names
+    /// the next regular member ahead of the `L` name and the ustar
+    /// fields, and a pending `size` replaces that member's size
+    /// field), global headers (`g`, ignored), and every other
+    /// non-regular entry are consumed internally, and pending
+    /// values never belong to them.
+    /// Padding to the 512 boundary is skipped before the next header.
+    /// The walk stops at the first corrupt header, at the end-of-
+    /// archive zero blocks, or when the stream ends early.
+    pub struct TarStream<R: Read> {
+        r: R,
+        pending_long_name: Option<String>,
+        pending_pax_path: Option<String>,
+        pending_pax_size: Option<u64>,
+        pending_padding: u64,
+        ended: bool,
+    }
+
+    impl<R: Read> TarStream<R> {
+        pub fn new(r: R) -> Self {
+            TarStream {
+                r,
+                pending_long_name: None,
+                pending_pax_path: None,
+                pending_pax_size: None,
+                pending_padding: 0,
+                ended: false,
             }
-            let typeflag = hdr[156];
-            let mut size = match parse_octal(&hdr[124..136]) {
-                Some(s) => s,
-                None => break,
-            };
-            // A pending pax `size` replaces the size field of the next
-            // regular member, before its data blocks are counted, so
-            // skipping stays aligned when the ustar field is empty or
-            // capped. An `L` header keeps both pending values for the member
-            // after it, and an `x` header merges its own records into
-            // them; any other non-member header drops them.
-            if typeflag == b'0' || typeflag == 0 {
-                if let Some(s) = pax_size.take() {
-                    size = s;
+        }
+
+        fn read_exact_or_end(&mut self, mut buf: &mut [u8]) -> bool {
+            while !buf.is_empty() {
+                match self.r.read(buf) {
+                    Ok(0) => return false,
+                    Ok(n) => buf = &mut buf[n..],
+                    Err(_) => return false,
                 }
-            } else if typeflag != b'L' && typeflag != b'x' {
-                pax_size = None;
-                pax_path = None;
             }
-            pos += 512;
-            // `div_ceil` on the raw size: skipping stays aligned even for
-            // entries too big to read.
-            let blocks = size.div_ceil(512).checked_mul(512);
-            let Some(blocks) = blocks else {
-                break;
-            };
-            let Ok(blocks) = usize::try_from(blocks) else {
-                break;
-            };
-            let data_end = pos.saturating_add(size.min(4096) as usize);
-            if typeflag == b'L' {
-                // GNU long name: the data is the next entry's name. Capped at
-                // 4 KiB: real paths never approach this; longer is corrupt or hostile.
-                if data_end <= data.len() {
-                    let raw = &data[pos..data_end];
-                    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-                    long_name = Some(String::from_utf8_lossy(&raw[..end]).into_owned());
+            true
+        }
+
+        fn skip_bytes(&mut self, mut n: u64) -> bool {
+            let mut chunk = [0u8; 65536];
+            while n > 0 {
+                let want = chunk.len().min(usize::try_from(n).unwrap_or(usize::MAX));
+                match self.r.read(&mut chunk[..want]) {
+                    Ok(0) => return false,
+                    Ok(k) => n -= k as u64,
+                    Err(_) => return false,
                 }
-            } else if typeflag == b'x' {
-                // Pax extended header: parse at most the first 4 KiB of
-                // records, like `L` above. Records parsed before a
-                // malformed one still apply; a later record with the same
-                // key wins, and keys absent here leave pending values intact.
-                if data_end <= data.len() {
-                    let (path, psize) = parse_pax(&data[pos..data_end]);
-                    pax_path = path.or(pax_path);
-                    pax_size = psize.or(pax_size);
+            }
+            true
+        }
+
+        fn next_regular(&mut self) -> Option<TarEntry> {
+            if self.pending_padding > 0 {
+                let pad = self.pending_padding;
+                self.pending_padding = 0;
+                if !self.skip_bytes(pad) {
+                    return None;
                 }
-            } else if typeflag == b'0' || typeflag == 0 {
-                // A pax `path` wins over the `L` name and the ustar fields,
-                // as GNU tar resolves them; either way both pending values are
-                // spent on this member.
-                let name = match pax_path.take() {
-                    Some(p) => {
-                        long_name = None;
-                        p
+            }
+            loop {
+                let mut hdr = [0u8; 512];
+                if !self.read_exact_or_end(&mut hdr) {
+                    return None;
+                }
+                if hdr.iter().all(|&b| b == 0) {
+                    self.ended = true;
+                    return None;
+                }
+                let typeflag = hdr[156];
+                let size = parse_tar_size(&hdr[124..136])?;
+                let data_blocks = size.div_ceil(512).saturating_mul(512);
+                if typeflag == b'L' {
+                    let take = size.min(4096);
+                    let mut name_buf = vec![0u8; usize::try_from(take).unwrap_or(usize::MAX)];
+                    if !self.read_exact_or_end(&mut name_buf) {
+                        return None;
                     }
-                    None => match long_name.take() {
-                        Some(n) => n,
-                        None => {
-                            let mut name = header_str(hdr, 0..100);
-                            let prefix = header_str(hdr, 345..500);
-                            if !prefix.is_empty() {
-                                name = format!("{prefix}/{name}");
-                            }
-                            name
+                    if !self.skip_bytes(data_blocks.saturating_sub(take)) {
+                        return None;
+                    }
+                    let end = name_buf
+                        .iter()
+                        .position(|&b| b == 0)
+                        .unwrap_or(name_buf.len());
+                    self.pending_long_name =
+                        Some(String::from_utf8_lossy(&name_buf[..end]).into_owned());
+                    continue;
+                }
+                if typeflag == b'x' {
+                    // Pax extended header: parse at most the first
+                    // 4 KiB of records, like `L` above, and merge
+                    // them into the pending values (a later record
+                    // with the same key wins; keys absent here leave
+                    // pending values intact). Records parsed before
+                    // a malformed one still apply. A pending `L`
+                    // name stays: a pax `path` wins over it only at
+                    // the regular member.
+                    let take = size.min(4096);
+                    let mut x_buf = vec![0u8; usize::try_from(take).unwrap_or(usize::MAX)];
+                    if !self.read_exact_or_end(&mut x_buf) {
+                        return None;
+                    }
+                    if !self.skip_bytes(data_blocks.saturating_sub(take)) {
+                        return None;
+                    }
+                    let (path, psize) = parse_pax(&x_buf);
+                    self.pending_pax_path = path.or(self.pending_pax_path.take());
+                    self.pending_pax_size = psize.or(self.pending_pax_size.take());
+                    continue;
+                }
+                if typeflag == b'g' {
+                    // Global headers stay ignored, and like every
+                    // other non-member header they drop both pending
+                    // values.
+                    self.pending_long_name = None;
+                    self.pending_pax_path = None;
+                    self.pending_pax_size = None;
+                    if !self.skip_bytes(data_blocks) {
+                        return None;
+                    }
+                    continue;
+                }
+                if typeflag == b'0' || typeflag == 0 {
+                    // A pending pax `size` replaces the size field
+                    // before padding is counted, so skipping stays
+                    // aligned when the ustar field is empty or
+                    // capped; a pax `path` wins over the `L` name
+                    // and the ustar fields, and both pending values
+                    // are spent on this member.
+                    let mut size = size;
+                    if let Some(s) = self.pending_pax_size.take() {
+                        size = s;
+                    }
+                    let data_blocks = size.div_ceil(512).saturating_mul(512);
+                    let name = match self.pending_pax_path.take() {
+                        Some(p) => {
+                            self.pending_long_name = None;
+                            p
                         }
-                    },
+                        None => match self.pending_long_name.take() {
+                            Some(n) => n,
+                            None => {
+                                let mut name = header_str(&hdr, 0..100);
+                                let prefix = header_str(&hdr, 345..500);
+                                if !prefix.is_empty() {
+                                    name = format!("{prefix}/{name}");
+                                }
+                                name
+                            }
+                        },
+                    };
+                    self.pending_padding = data_blocks.saturating_sub(size);
+                    return Some(TarEntry { name, size });
+                }
+                self.pending_long_name = None;
+                self.pending_pax_path = None;
+                self.pending_pax_size = None;
+                if !self.skip_bytes(data_blocks) {
+                    return None;
+                }
+            }
+        }
+
+        /// Read one member's whole content (the caller checked the
+        /// size against the entry cap first). `None` on a short read
+        /// or a read error: the caller checks the budget flag to tell
+        /// a budget stop from a truncated stream.
+        fn read_member(&mut self, size: u64) -> Option<Vec<u8>> {
+            let mut buf = Vec::with_capacity(usize::try_from(size).unwrap_or(usize::MAX));
+            let mut chunk = [0u8; 65536];
+            let mut left = size;
+            while left > 0 {
+                let want = chunk.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+                match self.r.read(&mut chunk[..want]) {
+                    Ok(0) => return None,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        left -= n as u64;
+                    }
+                    Err(_) => return None,
+                }
+            }
+            Some(buf)
+        }
+
+        /// Read a member through without buffering it, keeping only
+        /// its first head bytes. Returns the head plus whether the
+        /// whole declared size was consumed.
+        fn read_through(&mut self, size: u64) -> (Vec<u8>, bool) {
+            let mut head = Vec::new();
+            let mut chunk = [0u8; 65536];
+            let mut left = size;
+            while left > 0 {
+                let want = chunk.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+                match self.r.read(&mut chunk[..want]) {
+                    Ok(0) => return (head, false),
+                    Ok(n) => {
+                        if head.len() < HEAD_BYTES {
+                            let take = (HEAD_BYTES - head.len()).min(n);
+                            head.extend_from_slice(&chunk[..take]);
+                        }
+                        left -= n as u64;
+                    }
+                    Err(_) => return (head, false),
+                }
+            }
+            (head, true)
+        }
+    }
+
+    impl<'a> Walker<'a> {
+        /// Walk one tar stream. Members are visited in stream order;
+        /// an oversized member is read through (see the module doc),
+        /// a short read ends the walk, and a budget stop is recorded
+        /// when the budget flag says the stream ended on the budget
+        /// rather than on the archive's own end or a corrupt header.
+        pub fn walk_tar_stream<R: Read>(
+            &mut self,
+            mut stream: TarStream<R>,
+            ctx: &str,
+            depth: u8,
+            prebuilt_active: bool,
+        ) {
+            while let Some(entry) = stream.next_regular() {
+                let mctx = format!("{ctx}: {}", entry.name);
+                if entry.size > MAX_ENTRY_BYTES as u64 {
+                    let (head, complete) = stream.read_through(entry.size);
+                    if !complete {
+                        if self.budget_hit() {
+                            self.note_budget_stop();
+                        } else if self.memlimit_hit() {
+                            self.note_memlimit_stop();
+                        }
+                        break;
+                    }
+                    if depth == 0 {
+                        let norm = normalize_member_name(&entry.name);
+                        self.count_vcs(&norm, entry.size);
+                        self.test_lfs(&norm, &head);
+                    }
+                    continue;
+                }
+                let Some(bytes) = stream.read_member(entry.size) else {
+                    if self.budget_hit() {
+                        self.note_budget_stop();
+                    } else if self.memlimit_hit() {
+                        self.note_memlimit_stop();
+                    }
+                    break;
                 };
-                let len = (size as usize).min(MAX_ENTRY_BYTES);
-                if size <= MAX_ENTRY_BYTES as u64 && pos + len <= data.len() {
-                    out.push((name, pos, len, size));
+                self.visit_buffered_member(
+                    &entry.name,
+                    &bytes,
+                    entry.size,
+                    &mctx,
+                    depth,
+                    prebuilt_active,
+                );
+            }
+            if !stream.ended {
+                if self.budget_hit() {
+                    self.note_budget_stop();
+                } else if self.memlimit_hit() {
+                    self.note_memlimit_stop();
+                }
+            }
+        }
+
+        /// Walk one zip archive. Entries are visited in central-
+        /// directory order. The declared size is never trusted for
+        /// the walk decision: every entry is read capped at the
+        /// entry cap plus one byte, and the walk follows what was
+        /// actually read. A genuinely oversized or unreadable entry
+        /// still counts as a member at its declared size, with the
+        /// head actually read (empty when unreadable), like today's
+        /// `zip_scan`; a declared-oversized entry over small actual
+        /// content is visited for bidi only, since the old prebuilt
+        /// walk skipped on the declared size while the old bidi walk
+        /// never trusted it.
+        pub fn walk_zip<R: Read + Seek>(
+            &mut self,
+            mut archive: zip::ZipArchive<R>,
+            ctx: &str,
+            depth: u8,
+            prebuilt_active: bool,
+        ) {
+            for i in 0..archive.len() {
+                let entry = match archive.by_index(i) {
+                    Ok(entry) => entry,
+                    Err(_) => continue,
+                };
+                if !entry.is_file() {
+                    continue;
+                }
+                let raw_name = match entry.name() {
+                    Ok(name) => name.into_owned(),
+                    Err(_) => continue,
+                };
+                let declared = entry.size();
+                let mctx = format!("{ctx}: {raw_name}");
+                let mut bytes = Vec::new();
+                let read_ok = entry
+                    .take(MAX_ENTRY_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .is_ok();
+                if !read_ok || bytes.len() > MAX_ENTRY_BYTES {
+                    // Genuinely oversized or unreadable: a member for
+                    // version-control counting and the git-lfs test
+                    // only, at its declared size.
+                    if !self.charge(bytes.len() as u64) {
+                        self.note_budget_stop();
+                        break;
+                    }
+                    if depth == 0 {
+                        let norm = normalize_member_name(&raw_name);
+                        self.count_vcs(&norm, declared);
+                        let head: &[u8] = if read_ok { &member_head(&bytes) } else { &[] };
+                        self.test_lfs(&norm, head);
+                    }
+                    continue;
+                }
+                if !self.charge(bytes.len() as u64) {
+                    self.note_budget_stop();
+                    break;
+                }
+                // A declared-oversized entry over small actual content
+                // is a lie the old bidi walk saw through and the old
+                // prebuilt walk did not: visit it for bidi only.
+                let prebuilt_here = prebuilt_active && declared <= MAX_ENTRY_BYTES as u64;
+                self.visit_buffered_member(
+                    &raw_name,
+                    &bytes,
+                    declared,
+                    &mctx,
+                    depth,
+                    prebuilt_here,
+                );
+            }
+        }
+
+        /// Visit one buffered member (tar member or zip entry at or
+        /// under the entry cap). Version-control counting (skipped
+        /// for URL sources) and the git-lfs test apply to top-level
+        /// members only, whatever the member is; nested members get
+        /// the prebuilt and bidi predicates only. A jar is a prebuilt
+        /// unit - its classes are not listed - but bidi still walks
+        /// it as a zip, so the jar's subtree is visited with
+        /// prebuilt inactive.
+        fn visit_buffered_member(
+            &mut self,
+            raw_name: &str,
+            bytes: &[u8],
+            declared: u64,
+            mctx: &str,
+            depth: u8,
+            prebuilt_active: bool,
+        ) {
+            if depth == 0 {
+                let norm = normalize_member_name(raw_name);
+                self.count_vcs(&norm, declared);
+                self.test_lfs(&norm, &member_head(bytes));
+            }
+            let mut kind = None;
+            if prebuilt_active {
+                kind = classify(raw_name, bytes);
+                if let Some(k) = kind {
+                    self.push_prebuilt(k, mctx, super::sha256_hex(bytes));
+                }
+            }
+            match kind {
+                Some(BinaryKind::JavaArchive) => {
+                    if depth < MAX_DEPTH - 1 {
+                        self.walk_zip_bytes(bytes, mctx, depth + 1, false);
+                    }
+                }
+                Some(_) => {
+                    // A classified non-jar member is a leaf for
+                    // prebuilt; bidi still scans its bytes as text
+                    // (binary bytes fail the decode and stay quiet).
+                    self.scan_bidi(raw_name, bytes, mctx);
+                }
+                None => {
+                    if is_archive_or_compressed(bytes) {
+                        if depth < MAX_DEPTH - 1 {
+                            // A nested archive that holds hits joins
+                            // the run-scoped shipped records (issue
+                            // #1389) with its own bytes' digest, like
+                            // the old inspect_entry did.
+                            let before = self.out.shipped.len();
+                            self.walk_archive_buffer(
+                                bytes,
+                                BufferNames {
+                                    classify: raw_name,
+                                    bidi: raw_name,
+                                    stream: raw_name,
+                                },
+                                mctx,
+                                depth + 1,
+                                prebuilt_active,
+                            );
+                            let hits = self.out.shipped.len() - before;
+                            if hits > 0 {
+                                self.out.archives.push(ArchiveHits {
+                                    sha256: super::sha256_hex(bytes),
+                                    hits,
+                                    path: mctx.to_string(),
+                                });
+                            }
+                        }
+                        // Too deep: neither predicate walks in, and
+                        // the archive's bytes are not scanned as text
+                        // either - the old walk refused here too.
+                    } else {
+                        self.scan_bidi(raw_name, bytes, mctx);
+                    }
+                }
+            }
+        }
+
+        /// Walk an archive held in a buffer, at its own depth. The
+        /// three names exist because the predicates disagree about
+        /// which name to use: a member's bytes classify by the member
+        /// name, while a decompressed buffer classifies by its display
+        /// path and scans bidi by the compression-stripped member
+        /// name; the stream name is what a further decompression
+        /// layer strips. Callers pass the right three for their case.
+        pub fn walk_archive_buffer(
+            &mut self,
+            data: &[u8],
+            names: BufferNames<'_>,
+            ctx: &str,
+            depth: u8,
+            prebuilt_active: bool,
+        ) {
+            if is_tar(data) {
+                self.walk_tar_stream(
+                    TarStream::new(io::Cursor::new(data)),
+                    ctx,
+                    depth,
+                    prebuilt_active,
+                );
+            } else if data.starts_with(b"PK\x03\x04") {
+                if let Ok(archive) = zip::ZipArchive::new(io::Cursor::new(data)) {
+                    self.walk_zip(archive, ctx, depth, prebuilt_active);
+                }
+            } else if let Some(kind) = decoder_kind(data) {
+                if let Some(decoder) = decode(kind, io::Cursor::new(data)) {
+                    let counted = CountingReader::new(decoder, self.budget.clone());
+                    self.walk_streamed(
+                        Box::new(counted),
+                        names.stream,
+                        ctx,
+                        depth,
+                        prebuilt_active,
+                    );
                 }
             } else {
-                // Directories, symlinks, global headers: a pending long name
-                // does not belong to them (pax pending values were dropped above).
-                long_name = None;
+                if prebuilt_active && let Some(k) = classify(names.classify, data) {
+                    self.push_prebuilt(k, ctx, super::sha256_hex(data));
+                }
+                self.scan_bidi(names.bidi, data, ctx);
             }
-            pos = pos.saturating_add(blocks);
-            if pos > data.len() {
+        }
+
+        /// Walk a stream (decoder output or a top-level plain tar):
+        /// peek at its first bytes, walk a tar directly, or buffer a
+        /// compressed single file or zip up to the entry cap and walk
+        /// the buffer. Past the cap the stream is not walked and not
+        /// classified from its head, and the skip is logged.
+        pub fn walk_streamed<'b>(
+            &mut self,
+            stream: Box<dyn Read + 'b>,
+            name: &str,
+            ctx: &str,
+            depth: u8,
+            prebuilt_active: bool,
+        ) {
+            let Some((prefix, peeked)) = peek(stream) else {
+                if self.memlimit_hit() {
+                    self.note_memlimit_stop();
+                }
+                return;
+            };
+            if is_tar(&prefix) {
+                self.walk_tar_stream(TarStream::new(peeked), ctx, depth, prebuilt_active);
+                return;
+            }
+            match read_up_to(peeked, MAX_ENTRY_BYTES as u64) {
+                Ok((buf, false)) => {
+                    let stripped = strip_compression_suffix(name);
+                    self.walk_archive_buffer(
+                        &buf,
+                        BufferNames {
+                            classify: ctx,
+                            bidi: stripped,
+                            stream: name,
+                        },
+                        ctx,
+                        depth,
+                        prebuilt_active,
+                    );
+                }
+                Ok((_, true)) => {
+                    self.out.stops.record(
+                        "single-over-64",
+                        format!("{ctx}: decompressed stream over 64 MiB is not walked"),
+                    );
+                }
+                Err(_) => {
+                    // A corrupt stream ends the walk silently, like
+                    // today's decompress failure; a memlimit refusal
+                    // is reported.
+                    if self.memlimit_hit() {
+                        self.note_memlimit_stop();
+                    }
+                }
+            }
+        }
+
+        /// Walk a zip held in a buffer (a jar member for bidi, or a
+        /// decompressed zip buffer).
+        fn walk_zip_bytes(&mut self, bytes: &[u8], ctx: &str, depth: u8, prebuilt_active: bool) {
+            if let Ok(archive) = zip::ZipArchive::new(io::Cursor::new(bytes)) {
+                self.walk_zip(archive, ctx, depth, prebuilt_active);
+            }
+        }
+
+        /// Walk one top-level Source file. The file is opened once
+        /// and peeked at: a zip over the on-disk cap is skipped with
+        /// a warning, a zip under it is opened from the file, an
+        /// archive or compressed stream is walked streaming, and
+        /// anything else is classified from its first bytes and read
+        /// no further.
+        pub fn walk_file(&mut self, path: &std::path::Path, name: &str) {
+            let Ok(metadata) = std::fs::metadata(path) else {
+                return;
+            };
+            let Ok(file) = std::fs::File::open(path) else {
+                return;
+            };
+            let Some((prefix, peeked)) = peek(file) else {
+                return;
+            };
+            if prefix.starts_with(b"PK\x03\x04") {
+                if metadata.len() > MAX_ARCHIVE_BYTES as u64 {
+                    self.out.stops.record(
+                        "zip-skipped",
+                        format!("{name}: zip Source over 256 MiB on disk is skipped"),
+                    );
+                    return;
+                }
+                let mut file = match std::fs::File::open(path) {
+                    Ok(file) => file,
+                    Err(_) => return,
+                };
+                if file.seek(SeekFrom::Start(0)).is_err() {
+                    return;
+                }
+                if let Ok(archive) = zip::ZipArchive::new(file) {
+                    self.walk_zip(archive, name, 0, true);
+                }
+                return;
+            }
+            // The budget counts decoder outputs and plain-tar bytes
+            // only: a compressed file's raw bytes are not charged, so
+            // the decoder runs over the uncounted peeked stream and
+            // only its output goes through a counting reader.
+            if let Some(kind) = decoder_kind(&prefix) {
+                if let Some(decoder) = decode(kind, peeked) {
+                    let decoder_counted = CountingReader::new(decoder, self.budget.clone());
+                    self.walk_streamed(Box::new(decoder_counted), name, name, 0, true);
+                }
+                return;
+            }
+            if is_tar(&prefix) {
+                let counted = CountingReader::new(peeked, self.budget.clone());
+                self.walk_tar_stream(TarStream::new(counted), name, 0, true);
+                return;
+            }
+            if let Some(k) = classify(name, &prefix) {
+                // A bare file has no member bytes in hand: hash the
+                // file itself, as the old whole-file walk did; an
+                // unreadable file yields an empty digest, which never
+                // matches a shipped record.
+                let digest = super::sha256_file(&path.to_string_lossy()).unwrap_or_default();
+                self.push_prebuilt(k, name, digest);
+            }
+        }
+
+        /// Take the walk's outcome for emission.
+        pub fn take_outcome(&mut self) -> WalkOutcome {
+            std::mem::replace(&mut self.out, WalkOutcome::new())
+        }
+    }
+
+    /// A member's head: its first bytes, up to 1024 -- the whole
+    /// member when it is at most 1023 bytes long.
+    fn member_head(bytes: &[u8]) -> Vec<u8> {
+        bytes[..bytes.len().min(1024)].to_vec()
+    }
+    /// Member names are matched and reported without leading `./` or
+    /// `/` segments.
+    fn normalize_member_name(name: &str) -> String {
+        let mut s = name;
+        loop {
+            if let Some(rest) = s.strip_prefix("./") {
+                s = rest;
+            } else if let Some(rest) = s.strip_prefix('/') {
+                s = rest;
+            } else {
                 break;
             }
         }
-        out
+        s.to_string()
+    }
+    /// The metadata root a member belongs to, if it matches the
+    /// predicate: with `/` prefixed, the name contains a
+    /// `.(bzr|git|hg|svn)/` tree component, or ends with a file
+    /// directly inside a `CVS` directory. The `,v` and `RCS/` arms of
+    /// the file-list pattern are out: a CVS repository fixture's `,v`
+    /// files are content, not a metadata tree. Working-tree dotfiles
+    /// (`.gitignore`, `.gitmodules`, `.github/`) and a `sub/.git`
+    /// gitlink file do not match: the tree component must be a
+    /// directory.
+    fn vcs_root(name: &str) -> Option<String> {
+        let prefixed = format!("/{name}");
+        let mut best: Option<(usize, String)> = None;
+        for kind in [".bzr", ".git", ".hg", ".svn"] {
+            let needle = format!("/{kind}/");
+            if let Some(idx) = prefixed.find(&needle) {
+                let root = prefixed[1..idx + kind.len() + 1].to_string();
+                if best.as_ref().is_none_or(|(i, _)| idx < *i) {
+                    best = Some((idx, root));
+                }
+            }
+        }
+        if let Some(idx) = prefixed.rfind("/CVS/") {
+            let rest = &prefixed[idx + 5..];
+            if !rest.is_empty() && !rest.contains('/') {
+                let root = prefixed[1..idx + 4].to_string();
+                if best.as_ref().is_none_or(|(i, _)| idx < *i) {
+                    best = Some((idx, root));
+                }
+            }
+        }
+        best.map(|(_, root)| root)
+    }
+    /// Whether `head` opens with the git-lfs pointer version line
+    /// for `url`, terminated by LF or CRLF.
+    fn starts_with_version_line(head: &[u8], url: &[u8]) -> bool {
+        head.strip_prefix(url)
+            .is_some_and(|rest| rest.starts_with(b"\n") || rest.starts_with(b"\r\n"))
+    }
+    /// One bidirectional-control hit inside a source archive:
+    /// the display path (`archive: member`, nested archives joined
+    /// the same way), and the 1-based line and character column of
+    /// the first control in that member.
+    pub struct BidiHit {
+        pub path: String,
+        pub line: u32,
+        pub column: u32,
+        pub control: &'static str,
+    }
+    /// The nine Unicode bidirectional control characters
+    /// (U+202A-U+202E, U+2066-U+2069) with their Unicode names.
+    const BIDI_CONTROLS: [(char, &str); 9] = [
+        ('\u{202A}', "U+202A LEFT-TO-RIGHT EMBEDDING"),
+        ('\u{202B}', "U+202B RIGHT-TO-LEFT EMBEDDING"),
+        ('\u{202C}', "U+202C POP DIRECTIONAL FORMATTING"),
+        ('\u{202D}', "U+202D LEFT-TO-RIGHT OVERRIDE"),
+        ('\u{202E}', "U+202E RIGHT-TO-LEFT OVERRIDE"),
+        ('\u{2066}', "U+2066 LEFT-TO-RIGHT ISOLATE"),
+        ('\u{2067}', "U+2067 RIGHT-TO-LEFT ISOLATE"),
+        ('\u{2068}', "U+2068 FIRST STRONG ISOLATE"),
+        ('\u{2069}', "U+2069 POP DIRECTIONAL ISOLATE"),
+    ];
+    /// The Unicode name of a bidirectional control character, or
+    /// `None` for any other character.
+    fn bidi_control_name(c: char) -> Option<&'static str> {
+        BIDI_CONTROLS
+            .iter()
+            .find(|(cp, _)| *cp == c)
+            .map(|(_, name)| *name)
+    }
+    /// The first bidirectional control in decoded text, with its
+    /// 1-based line and character column, or `None` when the bytes
+    /// hold no control. UTF-8, with an optional byte-order mark, is
+    /// tried first; a UTF-16 byte-order mark selects UTF-16LE or
+    /// UTF-16BE. Bytes that decode neither way are binary, not
+    /// text, and stay quiet; unpaired surrogates fail the UTF-16
+    /// decode the same way.
+    fn first_bidi_control_in_text(data: &[u8]) -> Option<(u32, u32, &'static str)> {
+        if data.starts_with(b"\xEF\xBB\xBF") {
+            let text = std::str::from_utf8(&data[3..]).ok()?;
+            scan_chars(text.chars())
+        } else if data.starts_with(b"\xFF\xFE") {
+            scan_chars(decode_utf16(&data[2..], true)?.into_iter())
+        } else if data.starts_with(b"\xFE\xFF") {
+            scan_chars(decode_utf16(&data[2..], false)?.into_iter())
+        } else {
+            let text = std::str::from_utf8(data).ok()?;
+            scan_chars(text.chars())
+        }
+    }
+    /// First bidi control in a char stream, with its 1-based line
+    /// and character column. The stream is consumed lazily: no
+    /// intermediate text buffer is built. (UTF-16 still validates
+    /// through `decode_utf16`, which must see every unit to fail the
+    /// whole member on an unpaired surrogate.)
+    fn scan_chars(chars: impl Iterator<Item = char>) -> Option<(u32, u32, &'static str)> {
+        let mut line = 1u32;
+        let mut column = 1u32;
+        for c in chars {
+            if let Some(name) = bidi_control_name(c) {
+                return Some((line, column, name));
+            }
+            if c == '\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
+        }
+        None
+    }
+    /// Decode UTF-16 units from `data` (little-endian when `le`),
+    /// failing on a trailing byte or any unpaired surrogate.
+    fn decode_utf16(data: &[u8], le: bool) -> Option<Vec<char>> {
+        if !data.len().is_multiple_of(2) {
+            return None;
+        }
+        let units: Vec<u16> = data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                if le {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect();
+        char::decode_utf16(units)
+            .collect::<Result<Vec<char>, _>>()
+            .ok()
+    }
+    /// Whether an archive member is outside the bidi scan: a `.git`
+    /// path component, a `.desktop` or `.txt` suffix, a `Changelog`
+    /// or `NEWS` basename, case-folded (with or without a dotted suffix), or one
+    /// of the excluded text formats (`.po`, `.tex`, `.html`, `.htm`,
+    /// `.roff`).
+    fn bidi_excluded(name: &str) -> bool {
+        if name.split('/').any(|part| part == ".git") {
+            return true;
+        }
+        let basename = name.rsplit('/').next().unwrap_or(name);
+        let lower = basename.to_ascii_lowercase();
+        if lower == "changelog"
+            || lower == "news"
+            || lower.starts_with("changelog.")
+            || lower.starts_with("news.")
+        {
+            return true;
+        }
+        let lower = name.to_ascii_lowercase();
+        [".po", ".tex", ".html", ".htm", ".roff", ".desktop", ".txt"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+    }
+    /// The member name without one compression suffix (`.gz`, `.xz`, `.zst`, `.zstd`, `.bz2`, case-insensitive), or the name unchanged.
+    fn strip_compression_suffix(name: &str) -> &str {
+        // ASCII-only lowercasing preserves byte length, so slicing
+        // the original name by the stripped length is exact.
+        let lower = name.to_ascii_lowercase();
+        for suffix in [".gz", ".xz", ".zst", ".zstd", ".bz2"] {
+            if let Some(stripped) = lower.strip_suffix(suffix) {
+                return &name[..stripped.len()];
+            }
+        }
+        name
     }
 }
 
@@ -2505,6 +2948,7 @@ ValidSrcPerms = ["0o644", "0o755"]
 #[cfg(test)]
 mod prebuilt_tests {
     use super::*;
+    use std::io::Read as _;
     use std::io::Write;
 
     /// Minimal ustar writer for fixtures (test-only). Names must fit in 100
@@ -3229,22 +3673,12 @@ mod prebuilt_tests {
         // Decoder-level pin, without the source-package plumbing:
         // a bzip2 tarball fed straight to the walker is decompressed
         // and its prebuilt entries are reported.
-        use super::prebuilt::{BinaryKind, inspect_entry};
+        use super::prebuilt::BinaryKind;
         let tar = tarball(&[("src/prebuilt.o", ELF)]);
         let bz2 = bzip2_bytes(&tar);
-        let mut hits = Vec::new();
-        inspect_entry(
-            "t.tar.bz2",
-            &bz2,
-            "t.tar.bz2",
-            0,
-            &mut hits,
-            &mut Vec::new(),
-        );
+        let outcome = walk_buffer(&bz2, "t.tar.bz2");
         assert_eq!(
-            hits.iter()
-                .map(|h| (h.kind, h.path.clone()))
-                .collect::<Vec<_>>(),
+            outcome.prebuilt,
             [(BinaryKind::Elf, "t.tar.bz2: src/prebuilt.o".to_string())]
         );
     }
@@ -3269,20 +3703,11 @@ mod prebuilt_tests {
     fn prebuilt_invalid_bzip2_magic_is_skipped() {
         // The 4th magic byte must be the block-size digit: a stream
         // starting BZhx is not bzip2, whatever follows it.
-        use super::prebuilt::inspect_entry;
         let tar = tarball(&[("src/prebuilt.o", ELF)]);
         let mut fake = b"BZhx".to_vec();
         fake.extend_from_slice(&tar);
-        let mut hits = Vec::new();
-        inspect_entry(
-            "t.tar.bz2",
-            &fake,
-            "t.tar.bz2",
-            0,
-            &mut hits,
-            &mut Vec::new(),
-        );
-        assert!(hits.is_empty(), "{hits:?}");
+        let outcome = walk_buffer(&fake, "t.tar.bz2");
+        assert!(outcome.prebuilt.is_empty(), "{:?}", outcome.prebuilt);
     }
 
     #[test]
@@ -3390,55 +3815,31 @@ mod prebuilt_tests {
 
     #[test]
     fn prebuilt_unit_classify() {
-        use super::prebuilt::{BinaryKind, inspect_entry};
-        let mut hits = Vec::new();
-        inspect_entry("a.o", ELF, "a.o", 0, &mut hits, &mut Vec::new());
+        use super::prebuilt::BinaryKind;
+        let outcome = walk_buffer(ELF, "a.o");
+        assert_eq!(outcome.prebuilt, [(BinaryKind::Elf, "a.o".to_string())]);
+        let outcome = walk_buffer(CLASS, "A.class");
         assert_eq!(
-            hits.iter()
-                .map(|h| (h.kind, h.path.clone()))
-                .collect::<Vec<_>>(),
-            [(BinaryKind::Elf, "a.o".to_string())]
-        );
-        hits.clear();
-        inspect_entry("A.class", CLASS, "A.class", 0, &mut hits, &mut Vec::new());
-        assert_eq!(
-            hits.iter()
-                .map(|h| (h.kind, h.path.clone()))
-                .collect::<Vec<_>>(),
+            outcome.prebuilt,
             [(BinaryKind::JavaClass, "A.class".to_string())]
         );
-        hits.clear();
-        inspect_entry("m.pyc", PYC, "m.pyc", 0, &mut hits, &mut Vec::new());
+        let outcome = walk_buffer(PYC, "m.pyc");
         assert_eq!(
-            hits.iter()
-                .map(|h| (h.kind, h.path.clone()))
-                .collect::<Vec<_>>(),
+            outcome.prebuilt,
             [(BinaryKind::PythonBytecode, "m.pyc".to_string())]
         );
         // .pyo shares the pyc format.
-        hits.clear();
-        inspect_entry("m.pyo", PYC, "m.pyo", 0, &mut hits, &mut Vec::new());
+        let outcome = walk_buffer(PYC, "m.pyo");
         assert_eq!(
-            hits.iter()
-                .map(|h| (h.kind, h.path.clone()))
-                .collect::<Vec<_>>(),
+            outcome.prebuilt,
             [(BinaryKind::PythonBytecode, "m.pyo".to_string())]
         );
         // Text is never a binary, whatever its head bytes.
-        hits.clear();
-        inspect_entry("t.txt", b"ab\r\ncd", "t.txt", 0, &mut hits, &mut Vec::new());
-        assert!(hits.is_empty());
+        let outcome = walk_buffer(b"ab\r\ncd", "t.txt");
+        assert!(outcome.prebuilt.is_empty());
         // A zip that is not a jar is walked, not flagged.
-        hits.clear();
-        inspect_entry(
-            "a.zip",
-            b"PK\x03\x04garbage",
-            "a.zip",
-            0,
-            &mut hits,
-            &mut Vec::new(),
-        );
-        assert!(hits.is_empty());
+        let outcome = walk_buffer(b"PK\x03\x04garbage", "a.zip");
+        assert!(outcome.prebuilt.is_empty());
     }
 
     #[test]
@@ -3452,10 +3853,9 @@ mod prebuilt_tests {
         dir_hdr[257..262].copy_from_slice(b"ustar");
         let at = tar.len() - 1024; // before the end-of-archive zero blocks
         tar.splice(at..at, dir_hdr.iter().cloned());
-        let mut hits = Vec::new();
-        super::prebuilt::inspect_entry("t.tar", &tar, "t.tar", 0, &mut hits, &mut Vec::new());
-        assert_eq!(hits.len(), 1, "{hits:?}");
-        assert!(hits[0].path.ends_with("src/prebuilt.o"));
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
+        assert!(outcome.prebuilt[0].1.ends_with("src/prebuilt.o"));
     }
 
     const LFS_POINTER: &[u8] =
@@ -3824,59 +4224,42 @@ mod prebuilt_tests {
             ("a/CVS/Entries", b"e"),
             ("a/.gitignore", b"i"),
         ]);
-        let members = super::prebuilt::top_level_members(&tar);
-        let roots = super::prebuilt::vcs_roots(&members);
-        assert_eq!(roots.len(), 2);
-        assert_eq!(roots[0].root, "a/.git");
-        assert_eq!((roots[0].entries, roots[0].bytes), (1, 2));
-        assert_eq!(roots[1].root, "a/CVS");
-        assert_eq!((roots[1].entries, roots[1].bytes), (1, 1));
-        assert!(super::prebuilt::lfs_pointers(&members).is_empty());
-    }
-
-    #[test]
-    fn vcs_roots_byte_totals_saturate() {
-        // Zip members carry their central directory's declared size
-        // uncapped: two crafted .git members with huge declared
-        // sizes must saturate the per-root byte total, not wrap it.
-        let members = vec![
-            super::prebuilt::TopLevelMember {
-                name: "a/.git/config".to_string(),
-                size: u64::MAX - 1,
-                head: Vec::new(),
-            },
-            super::prebuilt::TopLevelMember {
-                name: "a/.git/HEAD".to_string(),
-                size: 10,
-                head: Vec::new(),
-            },
-        ];
-        let roots = super::prebuilt::vcs_roots(&members);
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0].entries, 2);
-        assert_eq!(roots[0].bytes, u64::MAX);
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert_eq!(outcome.vcs.len(), 2);
+        assert_eq!(outcome.vcs["a/.git"], (1, 2));
+        assert_eq!(outcome.vcs["a/CVS"], (1, 1));
+        assert!(outcome.lfs.is_empty());
     }
 
     #[test]
     fn lfs_gate_is_the_head_length_not_the_declared_size() {
-        let member = |size: u64, head: Vec<u8>| super::prebuilt::TopLevelMember {
-            name: "tests/a.test.xz".to_string(),
-            size,
-            head,
+        // The central directory can lie about the size in either
+        // direction, while the head is bytes actually read.
+        let patch = |z: &mut Vec<u8>, size: u32| {
+            let pos = z
+                .windows(4)
+                .position(|w| w == b"PK\x01\x02")
+                .expect("central directory present");
+            z[pos + 24..pos + 28].copy_from_slice(&size.to_le_bytes());
         };
         // A huge declared size over a real pointer head still fires:
         // the head is bytes actually read.
-        let members = vec![member(u64::MAX, LFS_POINTER.to_vec())];
-        assert_eq!(super::prebuilt::lfs_pointers(&members), ["tests/a.test.xz"]);
+        let mut z = zip_bytes(&[("tests/a.test.xz", LFS_POINTER)]);
+        patch(&mut z, 0xFFFF_FFF0);
+        let outcome = walk_buffer(&z, "t.zip");
+        assert_eq!(outcome.lfs, ["tests/a.test.xz"]);
         // A tiny declared size over a 1024-byte head (a longer member
         // whose first bytes quote the pointer) stays quiet.
         let mut long_head = LFS_POINTER.to_vec();
         long_head.resize(1024, b' ');
-        let members = vec![member(10, long_head)];
-        assert!(super::prebuilt::lfs_pointers(&members).is_empty());
+        let mut z = zip_bytes(&[("tests/a.test.xz", &long_head)]);
+        patch(&mut z, 10);
+        let outcome = walk_buffer(&z, "t.zip");
+        assert!(outcome.lfs.is_empty());
         // An unreadable member (empty head) stays quiet.
-        let members = vec![member(10, Vec::new())];
-        assert!(super::prebuilt::lfs_pointers(&members).is_empty());
+        let z = zip_bytes(&[("tests/a.test.xz", b"")]);
+        let outcome = walk_buffer(&z, "t.zip");
+        assert!(outcome.lfs.is_empty());
     }
 
     #[test]
@@ -3954,8 +4337,8 @@ mod prebuilt_tests {
         // read anyway and the pointer fires.
         let mut z = zip_bytes(&[("tests/a.test.xz", LFS_POINTER)]);
         patch(&mut z, 0xFFFF_FFF0);
-        let members = super::prebuilt::top_level_members(&z);
-        assert_eq!(super::prebuilt::lfs_pointers(&members), ["tests/a.test.xz"]);
+        let outcome = walk_buffer(&z, "t.zip");
+        assert_eq!(outcome.lfs, ["tests/a.test.xz"]);
         // Declared tiny over a 1500-byte payload quoting the pointer
         // text: the head is the actual first 1024 bytes, too long
         // for a pointer, so it stays quiet.
@@ -3963,8 +4346,299 @@ mod prebuilt_tests {
         big.resize(1500, b' ');
         let mut z = zip_bytes(&[("tests/a.test.xz", &big)]);
         patch(&mut z, 10);
-        let members = super::prebuilt::top_level_members(&z);
-        assert!(super::prebuilt::lfs_pointers(&members).is_empty());
+        let outcome = walk_buffer(&z, "t.zip");
+        assert!(outcome.lfs.is_empty());
+    }
+
+    /// Drive the walker over an in-memory archive buffer, as a
+    /// top-level Source with no finding cap and no budget pressure.
+    fn walk_buffer(data: &[u8], name: &str) -> super::prebuilt::WalkOutcome {
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker =
+            super::prebuilt::Walker::with_limits(&mut caps, true, u64::MAX, usize::MAX);
+        walker.walk_archive_buffer(
+            data,
+            super::prebuilt::BufferNames {
+                classify: name,
+                bidi: name,
+                stream: name,
+            },
+            name,
+            0,
+            true,
+        );
+        walker.take_outcome()
+    }
+
+    /// Drive the tar-stream walker over a stream, as a top-level
+    /// Source with production limits and no counting reader: the
+    /// stream itself is what is under test, not the budget.
+    fn walk_tar_stream_bytes(
+        stream: impl std::io::Read,
+        ctx: &str,
+    ) -> super::prebuilt::WalkOutcome {
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::new(&mut caps, true);
+        walker.walk_tar_stream(super::prebuilt::TarStream::new(stream), ctx, 0, true);
+        walker.take_outcome()
+    }
+
+    /// One ustar header: an octal size, or a GNU base-256 size when
+    /// asked (the high bit of byte 124 set, then a big-endian number,
+    /// for members of 8 GiB or more).
+    fn ustar_header(name: &str, size: u64, base256: bool) -> Vec<u8> {
+        let mut hdr = [0u8; 512];
+        hdr[..name.len()].copy_from_slice(name.as_bytes());
+        if base256 {
+            let mut field = [0u8; 12];
+            field[0] = 0x80;
+            field[4..12].copy_from_slice(&size.to_be_bytes());
+            hdr[124..136].copy_from_slice(&field);
+        } else {
+            let size_field = format!("{size:011o}\0");
+            hdr[124..136].copy_from_slice(size_field.as_bytes());
+        }
+        hdr[156] = b'0';
+        hdr[257..262].copy_from_slice(b"ustar");
+        hdr.to_vec()
+    }
+
+    /// An xz stream whose LZMA2 dictionary is declared at 256 MiB,
+    /// over the 128 MiB decoder memlimit: the block header parses,
+    /// then the decoder refuses before allocating the dictionary.
+    fn xz_huge_dict_stream() -> Vec<u8> {
+        let mut out = b"\xfd7zXZ\x00".to_vec();
+        let flags = [0x00u8, 0x01];
+        let mut crc = flate2::Crc::new();
+        crc.update(&flags);
+        out.extend_from_slice(&flags);
+        out.extend_from_slice(&crc.sum().to_le_bytes());
+        let mut header = vec![2u8, 0x00, 0x21, 0x01, 32, 0, 0, 0];
+        let mut crc = flate2::Crc::new();
+        crc.update(&header);
+        header.extend_from_slice(&crc.sum().to_le_bytes());
+        out.extend_from_slice(&header);
+        out
+    }
+
+    #[test]
+    fn large_archive_streams_past_old_cap() {
+        // The old 256 MiB whole-archive cap: a tar whose members total
+        // past it is walked, not skipped, and the member after 260 MiB
+        // of streamed zero padding still fires.
+        let pad = 260u64 * 1024 * 1024;
+        let elf_member = tarball(&[("after.o", ELF)]);
+        let stream = std::io::Cursor::new(ustar_header("big.bin", pad, false))
+            .chain(std::io::repeat(0u8).take(pad))
+            .chain(std::io::Cursor::new(elf_member));
+        let outcome = walk_tar_stream_bytes(stream, "big.tar");
+        assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
+        assert!(outcome.prebuilt[0].1.ends_with("after.o"));
+        assert!(outcome.stops.lines().is_empty());
+    }
+
+    #[test]
+    fn bidi_member_after_large_padding_fires() {
+        let pad = 260u64 * 1024 * 1024;
+        let text_member = tarball(&[("src/evil.c", "int a; \u{202A}int b;\n".as_bytes())]);
+        let stream = std::io::Cursor::new(ustar_header("big.bin", pad, false))
+            .chain(std::io::repeat(0u8).take(pad))
+            .chain(std::io::Cursor::new(text_member));
+        let outcome = walk_tar_stream_bytes(stream, "big.tar");
+        assert_eq!(outcome.bidi.len(), 1);
+        assert!(outcome.bidi[0].path.ends_with("src/evil.c"));
+    }
+
+    #[test]
+    fn vcs_counts_oversized_git_member_at_declared_size() {
+        let size = 64u64 * 1024 * 1024 + 12345;
+        let small = tarball(&[("llama.cpp/.git/objects/pack/small.pack", b"xxxxx")]);
+        // The member's data is followed by its 512-byte-block padding
+        // before the next header, like any tar member.
+        let pad = (512 - size % 512) % 512;
+        let stream = std::io::Cursor::new(ustar_header(
+            "llama.cpp/.git/objects/pack/big.pack",
+            size,
+            false,
+        ))
+        .chain(std::io::repeat(0u8).take(size))
+        .chain(std::io::repeat(0u8).take(pad))
+        .chain(std::io::Cursor::new(small));
+        let outcome = walk_tar_stream_bytes(stream, "big.tar");
+        assert_eq!(outcome.vcs.len(), 1);
+        assert_eq!(outcome.vcs["llama.cpp/.git"], (2, size + 5));
+    }
+
+    #[test]
+    fn base256_size_members_are_walked() {
+        // Both members carry GNU base-256 size fields: the walk reads
+        // them as such instead of stopping at the first header.
+        let mut tar = Vec::new();
+        for name in ["a.o", "b.o"] {
+            tar.extend_from_slice(&ustar_header(name, ELF.len() as u64, true));
+            tar.extend_from_slice(ELF);
+            tar.extend_from_slice(&vec![0u8; (512 - ELF.len() % 512) % 512]);
+        }
+        tar.extend_from_slice(&[0u8; 1024]);
+        let outcome = walk_buffer(&tar, "b256.tar");
+        assert_eq!(outcome.prebuilt.len(), 2, "{:?}", outcome.prebuilt);
+    }
+
+    #[test]
+    fn oversized_member_with_elf_head_stays_quiet() {
+        // A ustar header whose size field is 77777777777 (8 GiB - 1),
+        // followed by 64 bytes starting with the ELF magic, then EOF:
+        // no finding, no panic, no allocation above the entry cap.
+        let mut tar = ustar_header("huge.bin", 8 * 1024 * 1024 * 1024 - 1, false);
+        let mut head = ELF.to_vec();
+        head.resize(64, 0);
+        tar.extend_from_slice(&head);
+        let outcome = walk_tar_stream_bytes(std::io::Cursor::new(tar), "huge.tar");
+        assert!(outcome.prebuilt.is_empty());
+        assert!(outcome.vcs.is_empty());
+        assert!(outcome.lfs.is_empty());
+        assert!(outcome.bidi.is_empty());
+        assert!(outcome.stops.lines().is_empty());
+    }
+
+    #[test]
+    fn budget_stop_keeps_earlier_findings() {
+        let tar = tarball(&[("first.o", ELF), ("second.o", ELF)]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("budget.tar");
+        std::fs::write(&path, &tar).unwrap();
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::with_limits(&mut caps, true, 1100, usize::MAX);
+        walker.walk_file(&path, "budget.tar");
+        let outcome = walker.take_outcome();
+        assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
+        assert!(outcome.prebuilt[0].1.ends_with("first.o"));
+        assert!(
+            outcome.stops.lines().iter().any(|l| l.contains("budget")),
+            "{:?}",
+            outcome.stops.lines()
+        );
+    }
+
+    #[test]
+    fn finding_cap_reports_exactly_cap() {
+        let tar = tarball(&[("a.o", ELF), ("b.o", ELF), ("c.o", ELF)]);
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::with_limits(&mut caps, true, u64::MAX, 2);
+        walker.walk_archive_buffer(
+            &tar,
+            super::prebuilt::BufferNames {
+                classify: "cap.tar",
+                bidi: "cap.tar",
+                stream: "cap.tar",
+            },
+            "cap.tar",
+            0,
+            true,
+        );
+        let outcome = walker.take_outcome();
+        assert_eq!(outcome.prebuilt.len(), 2, "{:?}", outcome.prebuilt);
+        assert!(
+            outcome
+                .stops
+                .lines()
+                .iter()
+                .any(|l| l.contains("finding cap")),
+            "{:?}",
+            outcome.stops.lines()
+        );
+    }
+
+    #[test]
+    fn compressed_single_elf_over_64_mib_not_walked() {
+        let mut plain = ELF.to_vec();
+        plain.resize(64 * 1024 * 1024 + 1, 0);
+        let gz = gzip_bytes(&plain);
+        let outcome = walk_buffer(&gz, "big.elf.gz");
+        assert!(outcome.prebuilt.is_empty());
+        assert!(
+            outcome
+                .stops
+                .lines()
+                .iter()
+                .any(|l| l.contains("over 64 MiB")),
+            "{:?}",
+            outcome.stops.lines()
+        );
+    }
+
+    #[test]
+    fn compressed_single_elf_under_64_mib_fires() {
+        let gz = gzip_bytes(ELF);
+        let outcome = walk_buffer(&gz, "small.elf.gz");
+        assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
+        assert_eq!(outcome.prebuilt[0].1, "small.elf.gz");
+    }
+
+    #[test]
+    fn xz_memlimit_stops_single_and_tar_xz() {
+        for name in ["huge.xz", "huge.tar.xz"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(name);
+            std::fs::write(&path, xz_huge_dict_stream()).unwrap();
+            let mut caps = super::prebuilt::CapState::new();
+            let mut walker = super::prebuilt::Walker::new(&mut caps, true);
+            walker.walk_file(&path, name);
+            let outcome = walker.take_outcome();
+            assert!(outcome.prebuilt.is_empty(), "{name}");
+            assert!(
+                outcome
+                    .stops
+                    .lines()
+                    .iter()
+                    .any(|l| l.contains("memory limit")),
+                "{name}: {:?}",
+                outcome.stops.lines()
+            );
+        }
+    }
+
+    #[test]
+    fn zip_source_from_file_fires_and_oversized_zip_skips() {
+        let z = zip_bytes(&[("payload.o", ELF)]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sources.zip");
+        std::fs::write(&path, &z).unwrap();
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::new(&mut caps, true);
+        walker.walk_file(&path, "sources.zip");
+        let outcome = walker.take_outcome();
+        assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
+        // A zip Source over 256 MiB on disk is skipped, now with a report.
+        let sparse = dir.path().join("huge.zip");
+        let mut f = std::fs::File::create(&sparse).unwrap();
+        f.write_all(b"PK\x03\x04").unwrap();
+        f.set_len(256 * 1024 * 1024 + 1).unwrap();
+        drop(f);
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::new(&mut caps, true);
+        walker.walk_file(&sparse, "huge.zip");
+        let outcome = walker.take_outcome();
+        assert!(outcome.prebuilt.is_empty());
+        assert!(
+            outcome.stops.lines().iter().any(|l| l.contains("256 MiB")),
+            "{:?}",
+            outcome.stops.lines()
+        );
+    }
+
+    #[test]
+    fn small_plain_tar_from_file_fires() {
+        let tar = tarball(&[("src/prebuilt.o", ELF)]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.tar");
+        std::fs::write(&path, &tar).unwrap();
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::new(&mut caps, true);
+        walker.walk_file(&path, "plain.tar");
+        let outcome = walker.take_outcome();
+        assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
+        assert!(outcome.prebuilt[0].1.ends_with("src/prebuilt.o"));
     }
 
     #[test]
@@ -4156,10 +4830,14 @@ mod prebuilt_tests {
             x: &x,
             ..PaxMember::regular(&cut, PYC)
         }]);
-        let members = super::prebuilt::top_level_members(&tar);
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].name, long);
-        assert!(members[0].head.starts_with(&PYC[..4]));
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert_eq!(
+            outcome.prebuilt,
+            [(
+                super::prebuilt::BinaryKind::PythonBytecode,
+                format!("t.tar: {long}")
+            )]
+        );
     }
 
     #[test]
@@ -4176,12 +4854,22 @@ mod prebuilt_tests {
             },
             PaxMember::regular("second.bin", ELF),
         ]);
-        let members = super::prebuilt::top_level_members(&tar);
-        assert_eq!(members.len(), 2);
-        assert_eq!(members[0].name, "first.bin");
-        assert_eq!(members[0].size, 64);
-        assert!(members[0].head.starts_with(b"\x7fELF"));
-        assert_eq!(members[1].name, "second.bin");
+        // The pax `size` stands (first.bin fires on its 64 bytes) and
+        // alignment holds (second.bin fires too).
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert_eq!(
+            outcome.prebuilt,
+            [
+                (
+                    super::prebuilt::BinaryKind::Elf,
+                    "t.tar: first.bin".to_string()
+                ),
+                (
+                    super::prebuilt::BinaryKind::Elf,
+                    "t.tar: second.bin".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -4196,9 +4884,14 @@ mod prebuilt_tests {
             long: Some(&lname),
             ..PaxMember::regular(&cut, PYC)
         }]);
-        let members = super::prebuilt::top_level_members(&tar);
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].name, pax);
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert_eq!(
+            outcome.prebuilt,
+            [(
+                super::prebuilt::BinaryKind::PythonBytecode,
+                format!("t.tar: {pax}")
+            )]
+        );
     }
 
     #[test]
@@ -4216,15 +4909,23 @@ mod prebuilt_tests {
             },
             PaxMember::regular("after.bin", ELF),
         ]);
-        let members = super::prebuilt::top_level_members(&tar);
-        assert_eq!(members.len(), 2);
+        let outcome = walk_buffer(&tar, "t.tar");
         // The `L` name wins for the name (no pax `path`), the pax `size`
         // for the size, and the member after it proves the `L` data was
         // read at its own size.
-        assert_eq!(members[0].name, "some/long/name.bin");
-        assert_eq!(members[0].size, 48);
-        assert!(members[0].head.starts_with(b"\x7fELF"));
-        assert_eq!(members[1].name, "after.bin");
+        assert_eq!(
+            outcome.prebuilt,
+            [
+                (
+                    super::prebuilt::BinaryKind::Elf,
+                    "t.tar: some/long/name.bin".to_string()
+                ),
+                (
+                    super::prebuilt::BinaryKind::Elf,
+                    "t.tar: after.bin".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -4245,10 +4946,20 @@ mod prebuilt_tests {
             },
             PaxMember::regular("real2.bin", ELF),
         ]);
-        let members = super::prebuilt::top_level_members(&tar);
-        assert_eq!(members.len(), 2);
-        assert_eq!(members[0].name, "real.bin");
-        assert_eq!(members[1].name, "real2.bin");
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert_eq!(
+            outcome.prebuilt,
+            [
+                (
+                    super::prebuilt::BinaryKind::Elf,
+                    "t.tar: real.bin".to_string()
+                ),
+                (
+                    super::prebuilt::BinaryKind::Elf,
+                    "t.tar: real2.bin".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -4259,9 +4970,14 @@ mod prebuilt_tests {
             g: &g,
             ..PaxMember::regular("real.bin", ELF)
         }]);
-        let members = super::prebuilt::top_level_members(&tar);
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].name, "real.bin");
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert_eq!(
+            outcome.prebuilt,
+            [(
+                super::prebuilt::BinaryKind::Elf,
+                "t.tar: real.bin".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -4271,17 +4987,21 @@ mod prebuilt_tests {
             x: b"xx path=should/not/carry.bin\n",
             ..PaxMember::regular("a.bin", ELF)
         }]);
-        let members = super::prebuilt::top_level_members(&tar);
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].name, "a.bin");
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert_eq!(
+            outcome.prebuilt,
+            [(super::prebuilt::BinaryKind::Elf, "t.tar: a.bin".to_string())]
+        );
         // Length runs past the header data.
         let tar = tarball_pax(&[PaxMember {
             x: b"9999 path=should/not/carry.bin\n",
             ..PaxMember::regular("b.bin", ELF)
         }]);
-        let members = super::prebuilt::top_level_members(&tar);
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].name, "b.bin");
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert_eq!(
+            outcome.prebuilt,
+            [(super::prebuilt::BinaryKind::Elf, "t.tar: b.bin".to_string())]
+        );
     }
 
     #[test]
@@ -4298,9 +5018,14 @@ mod prebuilt_tests {
             x: &x,
             ..PaxMember::regular("real.bin", ELF)
         }]);
-        let members = super::prebuilt::top_level_members(&tar);
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].name, "real.bin");
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert_eq!(
+            outcome.prebuilt,
+            [(
+                super::prebuilt::BinaryKind::Elf,
+                "t.tar: real.bin".to_string()
+            )]
+        );
     }
 
     #[test]

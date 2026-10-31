@@ -442,7 +442,7 @@ mod tests {
             ),
             (
                 "SourceCheck.toml",
-                "51eb28e8cca5feeacc139f8b45f473d7261ffdd2e6508cd3fa19856607fe018c",
+                "8d0f9cfa3b4e67f48fe6d0031fcf30dbc60a7c02e35091466832d5116f354271",
             ),
             (
                 "SpecCheck.toml",
