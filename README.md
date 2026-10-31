@@ -21,41 +21,11 @@ fixed. The current version is **0.4.1**.
 
 ## Validation and security tightening
 
-Since parity, the checks are tightened to decidable predicates: genuine
-defects fire at the right severity, while providers and legitimate patterns
-stay silent.
+The reference checker's output was hard to act on in both directions: noisy enough that real defects drowned in false positives, and silent on genuine defects that deserved a report. Since parity, rpmcrab tightens the checks to decidable predicates — a finding fires when the evidence for it is actually present, and a legitimate pattern stays silent. That matters because these packages ship to millions of systems, and the defects in question sit at privilege boundaries: setuid and setgid files, systemd units, and files a daemon or the installer runs. A defect missed there is a vulnerability, not a nit.
 
-- **Insecure temporary files and unbounded input (BinariesCheck).**
-  `call-to-mktemp` charges an undefined reference only — the caller exposed
-  to the name race — while a library that defines mktemp stays silent
-  (glibc, fakechroot, ksh). New findings with no reference counterpart:
-  `call-to-gets` (CWE-242: unbounded read into a caller buffer, removed from
-  C11) and `call-to-tmpnam` (CWE-377: the name-to-open race), both Error.
-- **Legacy resolver calls in exposed context (BinariesCheck).**
-  `binary-or-shlib-calls-gethostbyname` reports at Error when the file is
-  privileged (setuid/setgid bits or file capabilities) or its package ships
-  systemd units, and at Warning otherwise.
-- **Weak randomness and privilege drops (BinariesCheck).**
-  `binary-or-shlib-calls-weak-prng` fires at Warning only for privileged
-  files or binaries a systemd unit actually starts (ExecStart resolved
-  through in-package symlinks; unresolvable units fail open), while
-  seeder-only calls stay silent. `missing-call-to-setgroups-before-setuid`
-  credits an LD_PRELOAD-style interposer — an object that defines
-  setuid/setgid and forwards through dlsym — but still fires on an object
-  that both defines and calls.
-- **Outdated Go toolchains (BinariesCheck).** `go-toolchain-outdated`
-  warns on Go binaries built with a toolchain below the floor
-  (`data/go-toolchain-floor.toml`, anchored on CVE-2025-22871), including a
-  toolchain package's own tools on an end-of-life line.
-- **Forbidden compiler flags (BinariesCheck).** A populated
-  ForbiddenOptflags list (`-march=native`/`-mtune=native`, the
-  `-Ofast`/fast-math family, `-funroll-loops`) fires where the reference's
-  empty default list stays silent.
-- **Decidable exemptions, not blind filters.**
-  `shlib-policy-etc-payload` fires only when a sibling SONAME generation
-  ships the exact same `/etc` or `/usr/etc` path in the same run and on the
-  same architecture; text-only patterns packages are exempt from
-  `no-binary`.
+The hardening covers the places where a packaging defect becomes a security problem. Insecure temporary files and unbounded input, where a predictable name or an unchecked read hands an attacker the next step. Legacy resolver calls in exposed or privileged contexts, where an old lookup mechanism weakens a process that runs with more rights than the user who invoked it. Weak randomness and privilege drops, where a guessable value or a privilege left half-dropped widens what an attacker can reach. Outdated toolchains, where a binary carries known weaknesses from the tools that built it. And build flags that trade security or reproducibility for speed, where a package quietly stops behaving the same way twice. Where a legitimate pattern should stay silent, the exemption is itself decidable: it applies only when the evidence for it is present, never as a blanket filter.
+
+The details live in the machine-enforced ledger and the commit history: [`tests/parity/divergences.toml`](tests/parity/divergences.toml).
 
 - **The compatibility contract** — what is frozen and what may diverge — lives
   in [`docs/DESIGN.md`](docs/DESIGN.md).
