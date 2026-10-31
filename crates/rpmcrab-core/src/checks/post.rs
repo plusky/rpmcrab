@@ -305,12 +305,18 @@ impl PostCheck {
         while let Some(c) = chars.next() {
             match quote {
                 Some(q) => {
+                    // Inside double quotes a backslash is preserved
+                    // verbatim (except a backslash-newline, which
+                    // still joins): the tokenizer downstream owns
+                    // escape handling, and stripping here would turn
+                    // an escaped quote into a closing quote.
                     if c == '\\' && q == '"' {
                         match chars.peek() {
                             Some('\n') => {
                                 chars.next();
                             }
                             Some(n) => {
+                                out.push(c);
                                 out.push(*n);
                                 chars.next();
                             }
@@ -351,12 +357,12 @@ impl PostCheck {
     }
 
     /// Split a logical command line into operand tokens, honouring
-    /// single/double quotes and backslash escapes (inside double
-    /// quotes a backslash unescapes only `$`, backtick, `"`, `\` and
-    /// newline, as in shell). Stops at an
-    /// unquoted command separator, redirection, or comment start; a
-    /// trailing all-digit token before a redirection is the
-    /// redirection's file descriptor, not an operand, and is dropped.
+    /// single/double quotes and backslash escapes. Stops at an
+    /// unquoted command separator, redirection, or comment start; an
+    /// all-digit token attached to a redirection (e.g. `2>`) is the
+    /// redirection's file descriptor, not an operand, and is dropped,
+    /// while a space-separated digit before a redirection stays a
+    /// positional operand (the shell parses it as a file to act on).
     fn split_operands(line: &str) -> Vec<String> {
         let mut tokens = Vec::new();
         let mut cur = String::new();
@@ -366,19 +372,20 @@ impl PostCheck {
         while let Some(c) = chars.next() {
             match quote {
                 Some(q) => {
+                    // POSIX: inside double quotes a backslash is
+                    // special only before `$`, backtick, `"`, `\`
+                    // and newline; otherwise both chars are kept.
                     if c == '\\' && q == '"' {
                         match chars.peek() {
                             Some('\n') => {
                                 chars.next();
                             }
-                            Some(n) if matches!(n, '$' | '`' | '"' | '\\') => {
+                            Some(n) if matches!(*n, '$' | '`' | '"' | '\\') => {
                                 cur.push(*n);
                                 chars.next();
                             }
                             Some(n) => {
-                                // Shell keeps the backslash before any
-                                // other character inside double quotes.
-                                cur.push('\\');
+                                cur.push(c);
                                 cur.push(*n);
                                 chars.next();
                             }
@@ -417,12 +424,6 @@ impl PostCheck {
                             }
                             in_token = false;
                         }
-                        if tokens
-                            .last()
-                            .is_some_and(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()))
-                        {
-                            tokens.pop();
-                        }
                         break;
                     }
                     _ => {
@@ -447,6 +448,12 @@ impl PostCheck {
     /// destination carries no backup suffix) is not a
     /// backup-direction operation either; it is credited separately
     /// by is_rotation.
+    /// The destination rule: `-t` / `--target-directory` (separate
+    /// or attached, including `-tDIR`) supply the destination for
+    /// `cp`/`mv` only — `rm` has no target-directory option, so its
+    /// `-t` argument stays positional. A copy/move also needs a
+    /// real destination: at least two operands without `-t`, at
+    /// least one with it.
     fn dangerous_match_is_backup(scan_text: &str, operand_at: usize, verb: &str) -> bool {
         if !matches!(verb, "cp" | "mv" | "rm") {
             return false;
@@ -454,8 +461,8 @@ impl PostCheck {
         let line = Self::logical_line_after(scan_text, operand_at);
         let tokens = Self::split_operands(&line);
         // Walk flags: `--` ends them; `-t` / `--target-directory`
-        // take the destination as their argument, for cp/mv only:
-        // GNU rm has no -t, so for rm every operand stays positional.
+        // (separate or attached, including `-tDIR`) take the
+        // destination as their argument for `cp`/`mv` only.
         let mut positionals: Vec<&str> = Vec::new();
         let mut target_dir: Option<&str> = None;
         let mut i = 0;
@@ -465,16 +472,23 @@ impl PostCheck {
             if !no_more_flags && tok == "--" {
                 no_more_flags = true;
             } else if !no_more_flags && tok.starts_with('-') && tok.len() > 1 {
-                if tok == "-t" && verb != "rm" {
-                    target_dir = tokens.get(i + 1).map(|s| s.as_str());
-                    i += 1;
-                } else if let Some(dir) = tok.strip_prefix("--target-directory=") {
-                    if verb != "rm" {
+                // `-t` / `--target-directory` are `cp`/`mv` options
+                // only: `rm` has no target-directory option, so for
+                // `rm` these tokens are plain flags and a following
+                // path stays positional. Attached `-tDIR` supplies
+                // the destination directly.
+                if verb != "rm" {
+                    if tok == "-t" {
+                        target_dir = tokens.get(i + 1).map(|s| s.as_str());
+                        i += 1;
+                    } else if tok.starts_with("-t") && !tok.starts_with("--") && tok.len() > 2 {
+                        target_dir = Some(&tok[2..]);
+                    } else if let Some(dir) = tok.strip_prefix("--target-directory=") {
                         target_dir = Some(dir);
+                    } else if tok == "--target-directory" {
+                        target_dir = tokens.get(i + 1).map(|s| s.as_str());
+                        i += 1;
                     }
-                } else if tok == "--target-directory" && verb != "rm" {
-                    target_dir = tokens.get(i + 1).map(|s| s.as_str());
-                    i += 1;
                 }
                 // Any other dash token is a flag (or a bundle) and
                 // carries no operand of its own here.
@@ -488,6 +502,18 @@ impl PostCheck {
             // name: a mixed removal still deletes live files.
             "rm" => !positionals.is_empty() && positionals.iter().all(|t| Self::is_backup_name(t)),
             _ => {
+                // A copy/move needs a real destination: at least two
+                // operands without `-t`, at least one with it. A lone
+                // operand (or a bare `-t` target) is an incomplete
+                // command, not a backup-direction operation.
+                let enough = if target_dir.is_some() {
+                    !positionals.is_empty()
+                } else {
+                    positionals.len() >= 2
+                };
+                if !enough {
+                    return false;
+                }
                 let dest = target_dir.or_else(|| positionals.last().copied());
                 dest.is_some_and(Self::is_backup_name)
             }
@@ -3566,6 +3592,8 @@ mod tests {
         for script in [
             "rm -f /etc/foo.rpmsave /etc/passwd\n",
             "rm -f /etc/passwd /etc/foo.rpmsave\n",
+            "rm -f /etc/foo /etc/foo.rpmsave\n",
+            "rm -t /live /etc/foo.rpmsave\n",
         ] {
             let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
             assert!(
@@ -3813,6 +3841,157 @@ mod tests {
         assert!(found.iter().any(|(l, f, d)| *l == Level::Warning
             && f == "dangerous-command-in-%post"
             && d == &vec!["rm".to_string()]));
+    }
+
+    #[test]
+    fn dangerous_command_single_operand_cp_still_fires() {
+        for script in ["cp /etc/foo.rpmsave\n", "cp -t /etc/foo.rpmsave\n"] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["cp".to_string()]),
+                "single-operand cp went silent: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_attached_target_dir() {
+        // Attached `-tDIR` is a real target directory: a backup
+        // destination stays silent, a live destination still fires.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "cp -t/etc/foo.rpmsave /etc/foo\n",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+            "attached -t backup destination fired"
+        );
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "cp -t/etc/live /etc/foo.rpmsave\n",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["cp".to_string()]),
+            "attached -t live destination went silent"
+        );
+    }
+
+    #[test]
+    fn dangerous_command_space_separated_fd_still_fires() {
+        // A space-separated digit before `>` is a positional operand
+        // (a file to act on), not the redirection's file descriptor;
+        // only an attached digit (`2>`) is dropped as an fd.
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "rm /etc/foo.rpmsave 2 > /dev/null\n",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["rm".to_string()]),
+            "space-separated fd went silent"
+        );
+        let found = check().check_scriptlet(
+            "/bin/sh",
+            "rm /etc/foo.rpmsave 2>/dev/null\n",
+            "%post",
+            &[],
+            &[],
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+            "attached fd fired"
+        );
+    }
+
+    #[test]
+    fn dangerous_command_bare_verb_newline_does_not_take_next_line() {
+        // A bare verb at end of line is not a command with operands
+        // from the next line: the next line's own verb fires instead.
+        let found = check().check_scriptlet("/bin/sh", "cp\nrm -rf /foo\n", "%post", &[], &[]);
+        assert!(
+            found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["rm".to_string()]),
+            "bare verb swallowed the next line: {found:?}"
+        );
+        assert!(
+            !found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["cp".to_string()]),
+            "bare verb fired as cp: {found:?}"
+        );
+    }
+
+    #[test]
+    fn dangerous_command_backslash_continuation_still_joins() {
+        let script = "cp -p /etc/foo \\\n/etc/foo.rpmsave\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+            "backslash continuation broke backup credit"
+        );
+    }
+
+    #[test]
+    fn logical_line_after_preserves_double_quote_escapes() {
+        // Escapes inside double quotes survive the logical line: the
+        // tokenizer owns unescaping, and stripping here would turn an
+        // escaped quote into a closing quote.
+        assert_eq!(
+            PostCheck::logical_line_after("cp \"a\\\"b\" /etc/x\n", 3),
+            "\"a\\\"b\" /etc/x"
+        );
+        assert_eq!(
+            PostCheck::logical_line_after("cp \"a\\b\" /etc/x\n", 3),
+            "\"a\\b\" /etc/x"
+        );
+        // A backslash-newline inside quotes still joins.
+        assert_eq!(
+            PostCheck::logical_line_after("cp \"a\\\n b\" /etc/x\n", 3),
+            "\"a b\" /etc/x"
+        );
+    }
+
+    #[test]
+    fn split_operands_posix_double_quote_escapes() {
+        // POSIX: inside double quotes a backslash is special only
+        // before `$`, backtick, `"`, `\` and newline.
+        assert_eq!(
+            PostCheck::split_operands("\"a\\\"b\""),
+            vec!["a\"b".to_string()]
+        );
+        assert_eq!(
+            PostCheck::split_operands("\"a\\b\""),
+            vec!["a\\b".to_string()]
+        );
+        assert_eq!(
+            PostCheck::split_operands("\"a\\$b\""),
+            vec!["a$b".to_string()]
+        );
+        assert_eq!(
+            PostCheck::split_operands("\"a\\\\b\""),
+            vec!["a\\b".to_string()]
+        );
     }
 
     #[test]
