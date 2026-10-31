@@ -4366,9 +4366,17 @@ impl FilesCheck {
         // bindir comes first in $PATH, the same bytes run. Only
         // differing copies fire; a missing digest fails closed and
         // still fires.
+        // Only bindir paths are ever looked up below, so the map is
+        // built over those paths rather than the whole package file list.
+        let bindir_paths: HashSet<&str> = st
+            .bindir_exes
+            .values()
+            .flat_map(|paths| paths.iter().map(|p| p.as_str()))
+            .collect();
         let digests: HashMap<&str, &str> = pkg
             .files
             .iter()
+            .filter(|f| bindir_paths.contains(f.name.as_str()))
             .filter_map(|f| {
                 f.md5
                     .as_deref()
