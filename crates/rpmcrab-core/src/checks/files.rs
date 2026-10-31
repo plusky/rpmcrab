@@ -870,6 +870,12 @@ fn non_executable_script_is_data(
 /// instead --
 /// a raw suffix match would also claim non-test names
 /// (perftest, minetest) whose scripts are real entry points.
+/// Case-insensitive suffix test without allocating a lowered copy.
+fn ends_ignore_ascii_case(s: &str, suffix: &str) -> bool {
+    s.len() >= suffix.len()
+        && s.as_bytes()[s.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
+}
+
 fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
     let parent = fname.rsplit_once('/').map_or("", |(parent, _)| parent);
     if matches!(
@@ -879,9 +885,12 @@ fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
         return false;
     }
     if pkg_name
-        .to_lowercase()
         .split('-')
-        .any(|c| matches!(c, "test" | "tests" | "testsuite"))
+        .any(|c| {
+            c.eq_ignore_ascii_case("test")
+                || c.eq_ignore_ascii_case("tests")
+                || c.eq_ignore_ascii_case("testsuite")
+        })
     {
         return true;
     }
@@ -891,11 +900,10 @@ fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
     }
     let dirs = &comps[..comps.len() - 1];
     if dirs.iter().any(|c| {
-        let cl = c.to_lowercase();
-        cl == "testsuite"
-            || cl == "testsuites"
-            || cl.ends_with("-testsuite")
-            || cl.ends_with("-testsuites")
+        c.eq_ignore_ascii_case("testsuite")
+            || c.eq_ignore_ascii_case("testsuites")
+            || ends_ignore_ascii_case(c, "-testsuite")
+            || ends_ignore_ascii_case(c, "-testsuites")
     }) {
         return true;
     }
@@ -909,12 +917,11 @@ fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
         return false;
     }
     dirs.iter().any(|c| {
-        let cl = c.to_lowercase();
-        cl == "test"
-            || cl == "tests"
-            || cl == "selftests"
-            || cl.ends_with("-tests")
-            || cl.ends_with("-test")
+        c.eq_ignore_ascii_case("test")
+            || c.eq_ignore_ascii_case("tests")
+            || c.eq_ignore_ascii_case("selftests")
+            || ends_ignore_ascii_case(c, "-tests")
+            || ends_ignore_ascii_case(c, "-test")
     })
 }
 
@@ -5623,14 +5630,21 @@ impl FilesCheck {
         if chunk.is_empty() {
             return (chunk, true);
         }
-        let lower = pkgfile.path.to_lowercase();
-        if lower.ends_with(".pdf") && chunk.starts_with(b"%PDF-") {
+        if ends_ignore_ascii_case(&pkgfile.path, ".pdf") && chunk.starts_with(b"%PDF-") {
             return (chunk, false);
         }
-        if lower.ends_with(".ri") && lower.contains("/ri/") {
+        if ends_ignore_ascii_case(&pkgfile.path, ".ri")
+            && pkgfile
+                .path
+                .as_bytes()
+                .windows(4)
+                .any(|w| w.eq_ignore_ascii_case(b"/ri/"))
+        {
             return (chunk, false);
         }
-        if lower.ends_with(".inv") && chunk.starts_with(b"# Sphinx inventory") {
+        if ends_ignore_ascii_case(&pkgfile.path, ".inv")
+            && chunk.starts_with(b"# Sphinx inventory")
+        {
             return (chunk, false);
         }
         let control = chunk.iter().filter(|b| !is_peek_printable(**b)).count();
@@ -6042,14 +6056,13 @@ fn dep_name_matches(dep: &str, name: &str) -> bool {
 impl FilesCheck {
     /// The probed decompressor for `fname`'s extension, if any.
     fn decompressor_for(&self, fname: &str) -> Option<&Tool> {
-        let lower = fname.to_lowercase();
-        let name = if lower.ends_with(".gz") || lower.ends_with(".z") {
+        let name = if ends_ignore_ascii_case(fname, ".gz") || ends_ignore_ascii_case(fname, ".z") {
             "gzip"
-        } else if lower.ends_with(".bz2") {
+        } else if ends_ignore_ascii_case(fname, ".bz2") {
             "bzip2"
-        } else if lower.ends_with(".xz") || lower.ends_with(".lzma") {
+        } else if ends_ignore_ascii_case(fname, ".xz") || ends_ignore_ascii_case(fname, ".lzma") {
             "xz"
-        } else if lower.ends_with(".zst") {
+        } else if ends_ignore_ascii_case(fname, ".zst") {
             "zstd"
         } else {
             return None;

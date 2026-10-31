@@ -90,14 +90,10 @@ impl SystemdInstallCheck {
         postun: &str,
         statically_enabled: bool,
     ) -> Vec<&'static str> {
-        // Heredoc bodies and comments name no invocation: match
-        // over blanked text, so a unit named only in a heredoc
-        // body or a comment earns no credit. Quoted text stays
-        // live (a quoted unit name still credits).
-        let pre = Self::blanked_scriptlet(pre);
-        let post = Self::blanked_scriptlet(post);
-        let preun = Self::blanked_scriptlet(preun);
-        let postun = Self::blanked_scriptlet(postun);
+        // The scriptlets arrive blanked (heredoc bodies and
+        // comments name no invocation): a unit named only in a
+        // heredoc body or a comment earns no credit. Quoted text
+        // stays live (a quoted unit name still credits).
         let escaped = fancy_regex::escape(basename);
         // install-system-units itself runs `systemctl preset` on the
         // units it is given, so a %post line that presets or enables
@@ -133,7 +129,7 @@ impl SystemdInstallCheck {
                     r"systemd-update-helper mark-restart-system-units .*{}",
                     escaped
                 ),
-                postun.clone(),
+                postun,
                 "systemd-service-without-service_del_postun",
             ),
         ];
@@ -593,6 +589,13 @@ impl Check for SystemdInstallCheck {
                 }
             }
         }
+
+        // Blanked once for all units: check_unit matches over
+        // blanked text, and the scriptlets do not vary per unit.
+        let pre = Self::blanked_scriptlet(&pre);
+        let post = Self::blanked_scriptlet(&post);
+        let preun = Self::blanked_scriptlet(&preun);
+        let postun = Self::blanked_scriptlet(&postun);
 
         for (basename, pre_direct) in &units {
             for finding in Self::check_unit(

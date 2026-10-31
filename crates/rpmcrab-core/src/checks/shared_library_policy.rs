@@ -770,7 +770,9 @@ impl Check for SharedLibraryPolicyCheck {
                     // Record the failure and keep collecting later
                     // files: one unreadable file must not skip the
                     // rest of the package's libraries.
-                    readelf_failed = Some((fname, reason));
+                    if readelf_failed.is_none() {
+                        readelf_failed = Some((fname, reason));
+                    }
                     continue;
                 }
                 Ok((soname, needed)) => {
