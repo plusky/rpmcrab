@@ -3704,10 +3704,8 @@ mod tests {
             flags: crate::pkg::pkgfile::RPMFILE_GHOST,
             ..etc_file("/etc/foo/foo.conf")
         };
-        let results = etc_results_many(vec![
-            ("libfoo1", vec![ghost()]),
-            ("libfoo2", vec![ghost()]),
-        ]);
+        let results =
+            etc_results_many(vec![("libfoo1", vec![ghost()]), ("libfoo2", vec![ghost()])]);
         assert!(
             etc_lines(&results).is_empty(),
             "paired ghost entries must stay quiet: {results:?}"
@@ -3775,12 +3773,10 @@ mod tests {
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = checker();
-        let (_d0, mut pkg0) =
-            etc_pkg("libfoo1", vec![etc_file("/etc/foo/foo.conf")]);
+        let (_d0, mut pkg0) = etc_pkg("libfoo1", vec![etc_file("/etc/foo/foo.conf")]);
         pkg0.arch = "x86_64".to_string();
         check.check_binary(&pkg0, &config, &mut out);
-        let (_d1, mut pkg1) =
-            etc_pkg("libfoo2", vec![etc_file("/etc/foo/foo.conf")]);
+        let (_d1, mut pkg1) = etc_pkg("libfoo2", vec![etc_file("/etc/foo/foo.conf")]);
         pkg1.arch = "aarch64".to_string();
         check.check_binary(&pkg1, &config, &mut out);
         check.after_checks(&config, &mut out);

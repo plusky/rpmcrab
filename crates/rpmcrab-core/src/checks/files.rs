@@ -884,14 +884,11 @@ fn script_is_test_data(pkg_name: &str, fname: &str) -> bool {
     ) {
         return false;
     }
-    if pkg_name
-        .split('-')
-        .any(|c| {
-            c.eq_ignore_ascii_case("test")
-                || c.eq_ignore_ascii_case("tests")
-                || c.eq_ignore_ascii_case("testsuite")
-        })
-    {
+    if pkg_name.split('-').any(|c| {
+        c.eq_ignore_ascii_case("test")
+            || c.eq_ignore_ascii_case("tests")
+            || c.eq_ignore_ascii_case("testsuite")
+    }) {
         return true;
     }
     let comps: Vec<&str> = fname.split('/').filter(|c| !c.is_empty()).collect();
@@ -5642,8 +5639,7 @@ impl FilesCheck {
         {
             return (chunk, false);
         }
-        if ends_ignore_ascii_case(&pkgfile.path, ".inv")
-            && chunk.starts_with(b"# Sphinx inventory")
+        if ends_ignore_ascii_case(&pkgfile.path, ".inv") && chunk.starts_with(b"# Sphinx inventory")
         {
             return (chunk, false);
         }

@@ -5665,7 +5665,11 @@ fn systemd_next_token(cmd: &str) -> Option<(String, &str)> {
             }
         }
     }
-    if any { Some((out, chars.as_str())) } else { None }
+    if any {
+        Some((out, chars.as_str()))
+    } else {
+        None
+    }
 }
 
 /// Program token of a systemd command line: the first token after
@@ -5773,7 +5777,10 @@ fn resolve_exec_token(
                 None => (vec![], false),
             }
         } else {
-            (vec![normalize_usrmerge(&normalize_lexical(&matches[0].name))], true)
+            (
+                vec![normalize_usrmerge(&normalize_lexical(&matches[0].name))],
+                true,
+            )
         }
     } else if matches.is_empty() {
         (vec![], true)
@@ -7188,7 +7195,10 @@ impl BinariesCheck {
             let clauses: Vec<String> = named
                 .iter()
                 .map(|(name, n, paths)| {
-                    format!("{name} absent from all {n} ELF files ({})", paths_for(paths, *n))
+                    format!(
+                        "{name} absent from all {n} ELF files ({})",
+                        paths_for(paths, *n)
+                    )
                 })
                 .collect();
             Some(clauses.join(", "))
@@ -24450,7 +24460,8 @@ description = "explicit priority string bypasses the system crypto policy"
                 .iter()
                 .find(|f| f.name.ends_with("w5.socket"))
                 .unwrap();
-            let (bins, ok) = socket_exec_binaries(&pkg, sock, &empty_names, &empty_targets, &empty_ghosts);
+            let (bins, ok) =
+                socket_exec_binaries(&pkg, sock, &empty_names, &empty_targets, &empty_ghosts);
             assert!(ok, "Accept={accept} must resolve");
             assert_eq!(bins, vec!["/usr/bin/foobar".to_string()], "Accept={accept}");
         }
