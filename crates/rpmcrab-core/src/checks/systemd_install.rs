@@ -168,7 +168,7 @@ impl SystemdInstallCheck {
             // `postun_marks_bare_service`).
             if *finding == "systemd-service-without-service_del_postun"
                 && (postun.lines().any(|l| l.trim() == ":")
-                    || Self::postun_marks_bare_service(basename, &postun))
+                    || Self::postun_marks_bare_service(basename, postun))
             {
                 continue;
             }
@@ -638,7 +638,18 @@ mod tests {
     #[test]
     fn heredoc_body_unit_mention_earns_no_credit() {
         let post = "cat <<'EOF'\nsystemd-update-helper install-system-units foo.service\nEOF\n";
-        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        // check_unit takes blanked scriptlets (the caller blanks
+        // once): the heredoc body is blanked away before matching,
+        // as in production.
+        let missing = SystemdInstallCheck::check_unit(
+            "foo.service",
+            true,
+            "",
+            &SystemdInstallCheck::blanked_scriptlet(post),
+            "",
+            "",
+            false,
+        );
         assert!(
             missing.contains(&"systemd-service-without-service_add_post"),
             "a unit named only in a heredoc body must not credit: {missing:?}"
@@ -648,7 +659,18 @@ mod tests {
     #[test]
     fn comment_unit_mention_earns_no_credit() {
         let post = "# systemd-update-helper install-system-units foo.service\n";
-        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        // check_unit takes blanked scriptlets (the caller blanks
+        // once): the comment is blanked away before matching, as
+        // in production.
+        let missing = SystemdInstallCheck::check_unit(
+            "foo.service",
+            true,
+            "",
+            &SystemdInstallCheck::blanked_scriptlet(post),
+            "",
+            "",
+            false,
+        );
         assert!(
             missing.contains(&"systemd-service-without-service_add_post"),
             "a unit named only in a comment must not credit: {missing:?}"
