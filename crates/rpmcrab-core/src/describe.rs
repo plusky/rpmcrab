@@ -318,7 +318,7 @@ mod tests {
             ),
             (
                 "BinariesCheck.toml",
-                "e99c5231bf86ddbd0f2625e2569fefa82332e868528118c324d0dd4d7ab134d3",
+                "b1a80f475fd936c6ee2ea10f849cb642a01a484ca5e2f91b34586627766e416e",
             ),
             (
                 "BrandingPolicyCheck.toml",

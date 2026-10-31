@@ -332,7 +332,7 @@ The binary calls a predictable libc random generator (rand,
 random or the *48 generators, each also in its reentrant *_r
 form) and runs in a privileged or exposed context: the file is
 setuid, setgid or carries file capabilities, or the file is the
-binary a systemd unit starts (ExecStart). A seeder alone (srand,
+binary a systemd unit starts (ExecStart). A unit the gate cannot resolve fails open to the package arm. A seeder alone (srand,
 srandom, initstate, setstate, seed48, lcong48, srand48 and their
 _r forms) does not fire.
 Values from these generators are predictable to anyone who can
