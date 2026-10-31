@@ -1129,6 +1129,17 @@ mod tests {
         assert_eq!(excessive_suggests(&pkg).len(), 1, "{:?}", run(&pkg));
     }
 
+    // A rich Suggests naming only own-doc, with a version, is not
+    // the plain own-doc name either: the exemption is
+    // plain-exact-name-only, so it still fires.
+    #[test]
+    fn rich_versioned_own_doc_suggests_still_fires() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.suggests = vec![dep("(bla-theme-openSUSE-doc >= 1.0)", 0)];
+        assert_eq!(excessive_suggests(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
     // A rich Suggests naming another package's docs with a version
     // is not the plain own-doc name, so it still fires.
     #[test]

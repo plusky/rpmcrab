@@ -696,3 +696,10 @@ check = "call-to-mktemp"
 kind = "behaviour"
 reason = "Fix-and-diverge: call-to-mktemp charges an undefined reference only, in archives and linked objects alike — a definition is never a call. The #852 linked-object rule (any FUNC match, defined or not, in a linked object) is retired for this finder: the implementing library is the provider, not a caller, so glibc's libc.so.6 defining mktemp, fakechroot's libfakechroot.so and ksh's libast carrying mktemp stay silent, aligning with call-to-tmpnam. Measured A/B with the rebuilt binary over the 23 RPMs of the post-anchor stay population (27 files): 27 -> 24, exactly the 3 defined-only providers drop, zero findings added, all other findings identical. Pinned by mktemp_defined_only_is_silent_in_a_linked_object and mktemp_lookalike_names_stay_silent in binaries.rs."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "binary-or-shlib-calls-weak-prng"
+kind = "behaviour"
+reason = "The daemon arm's socket resolution: a socket unit resolves through its Service= target when present, else the `@`-template before the same-stem service for Accept=yes sockets, else the same-stem service. Accept=yes is recognised in any of the boolean spellings yes, true, 1, y, t, on (case-insensitive); with Accept=no, or with no Accept line at all, only the same-stem service is tried and the template is never consulted. A service that is not shipped by the package, or is a ghost entry, is unresolvable (fail-open); a masked service starts nothing. Pinned by daemon_exec_binaries_rules in binaries.rs."
+since = "0.4.1"

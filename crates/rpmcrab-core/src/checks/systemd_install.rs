@@ -78,9 +78,9 @@ impl SystemdInstallCheck {
     /// it unchanged.
     ///
     /// `statically_enabled` is true when the package ships a symlink
-    /// under `<unitdir>/*.wants/` resolving to this unit: systemd
-    /// enables such a unit by the symlink itself, so no install call
-    /// is owed for it.
+    /// under `<unitdir>/*.wants/` or `<unitdir>/*.requires/`
+    /// resolving to this unit: systemd enables such a unit by the
+    /// symlink itself, so no install call is owed for it.
     fn check_unit(
         basename: &str,
         pre_direct: bool,
@@ -556,15 +556,17 @@ impl Check for SystemdInstallCheck {
         }
 
         // Basenames of units statically enabled by a shipped wants
-        // symlink: a symlink directly under `<unitdir>/*.wants/` whose
-        // target resolves within the package. A regular file in a wants
-        // directory, a wants link outside the unit directory, a link
-        // nested below a wants directory, and a link resolving to no
-        // shipped file earn no credit. The credit is keyed by the link's
-        // basename: systemd enables the name the link carries, so a
-        // wants link for another unit never credits this one. With no
-        // units found, there is nothing to credit.
-        let wants_prefix = format!("{}/", self.unit_dir);
+        // or requires symlink: a symlink directly under
+        // `<unitdir>/*.wants/` or `<unitdir>/*.requires/` whose
+        // target resolves within the package. A regular file in a
+        // wants or requires directory, a link outside the unit
+        // directory, a link nested below a wants or requires
+        // directory, and a link resolving to no shipped file earn
+        // no credit. The credit is keyed by the link's basename:
+        // systemd enables the name the link carries, so a link
+        // for another unit never credits this one. With no units
+        // found, there is nothing to credit.
+        let unit_prefix = format!("{}/", self.unit_dir);
         let mut statically_enabled: std::collections::HashSet<&str> =
             std::collections::HashSet::new();
         if !units.is_empty() {
@@ -573,15 +575,18 @@ impl Check for SystemdInstallCheck {
                     continue;
                 }
                 // Parent-directory scope: the link must sit directly in
-                // a `.wants` directory directly under the unit directory;
-                // a `.wants` segment deeper in the path earns nothing.
+                // a `.wants` or `.requires` directory directly under
+                // the unit directory; a `.wants`/`.requires` segment
+                // deeper in the path earns nothing.
                 let Some((parent, link_basename)) = file.name.rsplit_once('/') else {
                     continue;
                 };
-                let Some(wants_dir) = parent.strip_prefix(&wants_prefix) else {
+                let Some(wants_dir) = parent.strip_prefix(&unit_prefix) else {
                     continue;
                 };
-                if wants_dir.contains('/') || !wants_dir.ends_with(".wants") {
+                if wants_dir.contains('/')
+                    || !(wants_dir.ends_with(".wants") || wants_dir.ends_with(".requires"))
+                {
                     continue;
                 }
                 if pkg.readlink(file).is_some() {
@@ -1185,6 +1190,82 @@ mod tests {
                 "bare720.service"
             ),
             0
+        );
+    }
+
+    #[test]
+    fn requires_link_to_shipped_unit_credits_add_post() {
+        // A `.requires` link statically enables like a `.wants` link:
+        // the unit is deduped onto its direct candidate (so `add_pre`
+        // still fires) while `add_post` is credited.
+        let pkg = alias_pkg(Some(vec![
+            reg(&format!("{UNIT}/bare721.service")),
+            link(
+                &format!("{UNIT}/multi-user.target.requires/bare721.service"),
+                "../bare721.service",
+            ),
+        ]));
+        let results = run(&pkg);
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_pre",
+                "bare721.service"
+            ),
+            1
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "bare721.service"
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn nested_or_dangling_requires_link_earns_no_credit() {
+        // A requires link nested below the requires directory, and
+        // one resolving to no shipped file, earn no static-enable
+        // credit: `add_post` still fires for the direct unit.
+        let pkg = alias_pkg(Some(vec![
+            reg(&format!("{UNIT}/bare722.service")),
+            link(
+                &format!("{UNIT}/multi-user.target.requires/sub/bare722.service"),
+                "../../bare722.service",
+            ),
+            link(
+                &format!("{UNIT}/multi-user.target.requires/bare723.service"),
+                "../missing.service",
+            ),
+            reg(&format!("{UNIT}/bare723.service")),
+        ]));
+        let results = run(&pkg);
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_pre",
+                "bare722.service"
+            ),
+            1
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "bare722.service"
+            ),
+            1
+        );
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "bare723.service"
+            ),
+            1
         );
     }
 

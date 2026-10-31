@@ -1420,7 +1420,7 @@ impl PostCheck {
                 Some(w) => w,
                 None => return false,
             };
-            loop {
+            'outer: loop {
                 if matches!(word, "then" | "do" | "else" | "!") {
                     word = match words.next() {
                         Some(w) => w,
@@ -1428,7 +1428,10 @@ impl PostCheck {
                     };
                     continue;
                 }
-                if word == "if" {
+                // Condition keywords take a command next: an
+                // if/elif/while/until condition is executed, so a
+                // heredoc fed to it is shell-fed like an if body.
+                if matches!(word, "if" | "elif" | "while" | "until") {
                     word = match words.next() {
                         Some(w) => w,
                         None => return false,
@@ -1454,12 +1457,41 @@ impl PostCheck {
                         Some(w) => w,
                         None => return false,
                     };
-                    // `env -i` (and other env flags) precede the command.
-                    while word.starts_with('-') {
+                    // `env` flags precede the command. Most are one
+                    // word (`-i`, `--opt=value`); `-u`, `-C`, `-S`,
+                    // `--unset`, `--chdir`, `--split-string`,
+                    // `--default-signal` and `--block-signal` take a
+                    // separate argument, which is skipped too; `--`
+                    // ends flag parsing and the next word is the
+                    // command verbatim. A lone `-` is not a flag.
+                    while word.starts_with('-') && word.len() > 1 {
+                        if word == "--" {
+                            word = match words.next() {
+                                Some(w) => w,
+                                None => return false,
+                            };
+                            break 'outer;
+                        }
+                        let takes_arg = matches!(
+                            word,
+                            "-u" | "-C"
+                                | "-S"
+                                | "--unset"
+                                | "--chdir"
+                                | "--split-string"
+                                | "--default-signal"
+                                | "--block-signal"
+                        );
                         word = match words.next() {
                             Some(w) => w,
                             None => return false,
                         };
+                        if takes_arg {
+                            word = match words.next() {
+                                Some(w) => w,
+                                None => return false,
+                            };
+                        }
                     }
                     continue;
                 }
@@ -2415,8 +2447,13 @@ impl Check for PostCheck {
             let posttrans = pkg.tag_str(Tag::POSTTRANS).unwrap_or_default();
             let tmpfiles = tmpfiles_declared_paths(pkg);
             let posttrans_mentions = posttrans_mention_tokens(&posttrans);
+            // Missingok names once, not per ghost: the linear scan
+            // over the file list is the hot shape for packages with
+            // many ghost entries.
+            let missingok_names: HashSet<&str> =
+                pkg.missingok_files.iter().map(|m| m.as_str()).collect();
             for f in &pkg.ghost_files {
-                if pkg.missingok_files.iter().any(|m| m == f) {
+                if missingok_names.contains(f.as_str()) {
                     continue;
                 }
                 if is_icon_theme_cache(f) {
@@ -3561,6 +3598,14 @@ mod tests {
             "env -i sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "time -p sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "if sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -u FOO sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --chdir /tmp sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -- sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --chdir=/tmp sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --unset=FOO sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "while sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "until sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "elif sh <<'EOF'\nrm -rf /foo\nEOF\n",
         ] {
             let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
             assert!(
@@ -3568,6 +3613,20 @@ mod tests {
                     && f == "dangerous-command-in-%post"
                     && d == &vec!["rm".to_string()]),
                 "shell-fed body must fire: {script}"
+            );
+        }
+        // A flag without its command stays blanked: the flag's
+        // argument is consumed and no shell remains to feed.
+        for script in [
+            "env -u FOO <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -u <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "flag-without-command body stays blanked: {script}"
             );
         }
         // Piped-to-a-shell stays blanked (known residual): the body

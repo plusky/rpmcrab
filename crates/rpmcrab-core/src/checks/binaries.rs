@@ -24466,6 +24466,37 @@ description = "explicit priority string bypasses the system crypto policy"
             assert_eq!(bins, vec!["/usr/bin/foobar".to_string()], "Accept={accept}");
         }
 
+        // W5b: with Accept=no (and with no Accept line at all) the
+        // same-stem service is the only candidate: the @-template
+        // is not tried.
+        for (accept_line, label) in [("Accept=no\n", "Accept=no"), ("", "no Accept line")] {
+            let svc = unit_file(
+                &dir,
+                "/usr/lib/systemd/system/w5b.service",
+                "[Service]\nExecStart=/usr/bin/foo\n",
+            );
+            let tmpl = unit_file(
+                &dir,
+                "/usr/lib/systemd/system/w5b@.service",
+                "[Service]\nExecStart=/usr/bin/foobar\n",
+            );
+            let sock = unit_file(
+                &dir,
+                "/usr/lib/systemd/system/w5b.socket",
+                &format!("[Socket]\n{accept_line}"),
+            );
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![svc, tmpl, sock]);
+            let sock = pkg
+                .files
+                .iter()
+                .find(|f| f.name.ends_with("w5b.socket"))
+                .unwrap();
+            let (bins, ok) =
+                socket_exec_binaries(&pkg, sock, &empty_names, &empty_targets, &empty_ghosts);
+            assert!(ok, "{label} must resolve");
+            assert_eq!(bins, vec!["/usr/bin/foo".to_string()], "{label}");
+        }
+
         // F7: a unit whose ExecStart lives only in a drop-in is
         // unresolvable: drop-ins are never read.
         let unit = unit_file(
@@ -24602,20 +24633,31 @@ description = "explicit priority string bypasses the system crypto policy"
         let at_pkg = synthetic_pkg("testpkg", "x86_64", vec![at_unit]);
         assert_eq!(count(&at_pkg, &foo, &["rand"], &["rand"]), 1);
 
-        // Wrapper: the shell is the started program, so a helper
-        // stays silent even though the payload names it.
+        // Wrapper: the shell is the started program. The payload
+        // file is the discriminating pin: a recurse into the `-c`
+        // argument would judge it as started, while first-token
+        // behaviour keeps it silent. A bystander helper stays silent
+        // under either reading and proves nothing on its own.
         let wrap_unit = unit_file(
             &dir,
             "/usr/lib/systemd/system/wrap.service",
             "[Service]\nExecStart=/bin/sh -c /usr/bin/foo\n",
         );
         let wrap_pkg = synthetic_pkg("testpkg", "x86_64", vec![wrap_unit]);
+        assert_eq!(count(&wrap_pkg, &foo, &["rand"], &["rand"]), 0);
         assert_eq!(count(&wrap_pkg, &helper, &["rand"], &["rand"]), 0);
 
-        // The payload file itself is not the started program either:
-        // counting it pins first-token behaviour against a recurse
-        // that would judge the payload as started.
-        assert_eq!(count(&wrap_pkg, &foo, &["rand"], &["rand"]), 0);
+        // An `env` nested inside the `-c` argument is not parsed
+        // either: the tokenizer stops at the first token, so the
+        // nested command never becomes the started program.
+        let wrap_env_unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/wrapenv.service",
+            "[Service]\nExecStart=/bin/sh -c 'env FOO=bar /usr/bin/foo'\n",
+        );
+        let wrap_env_pkg = synthetic_pkg("testpkg", "x86_64", vec![wrap_env_unit]);
+        assert_eq!(count(&wrap_env_pkg, &foo, &["rand"], &["rand"]), 0);
+        assert_eq!(count(&wrap_env_pkg, &helper, &["rand"], &["rand"]), 0);
 
         // Bare name resolving only via an in-package symlink
         // follows it to the real binary: before, the symlink

@@ -273,7 +273,7 @@ impl DuplicatesCheck {
         Some((dir, stem))
     }
 
-    /// Pure core: group files by md5 and emit findings. `is_config` reports
+    /// Pure core: group files by (digest, mode, filecaps) and emit findings. `is_config` reports
     /// whether a filename is a config file; `is_ghost` for ghost files;
     /// `is_whitelisted_pair` whether two filenames sit one under each
     /// directory of a `DuplicatesWhitelistPairs` pair.
@@ -290,8 +290,14 @@ impl DuplicatesCheck {
         is_ghost: impl Fn(&str) -> bool,
         is_whitelisted_pair: impl Fn(&str, &str) -> bool,
     ) -> Vec<DuplicateFinding> {
-        let mut md5s: BTreeMap<&str, BTreeSet<usize>> = BTreeMap::new();
-        let mut sizes: BTreeMap<&str, u64> = BTreeMap::new();
+        // Grouped by (digest, mode, filecaps), not by digest alone:
+        // copies differing only in mode or filecaps are not
+        // hardlinkable to each other (a hardlink shares one inode,
+        // hence one mode and one capability set), so they are not
+        // duplicates of each other. The finer key cannot split a
+        // hardlink pair: same inode implies same mode and caps.
+        let mut md5s: BTreeMap<(&str, u32, Option<&str>), BTreeSet<usize>> = BTreeMap::new();
+        let mut sizes: BTreeMap<(&str, u32, Option<&str>), u64> = BTreeMap::new();
         let mut out = Vec::new();
         let mut total_dup_size: u64 = 0;
 
@@ -303,12 +309,19 @@ impl DuplicatesCheck {
             if size <= min_size {
                 continue;
             }
-            let md5 = f.md5.as_deref().unwrap_or("");
-            md5s.entry(md5).or_default().insert(i);
-            sizes.insert(md5, size);
+            // A missing or empty digest proves nothing about content:
+            // digest-less files never group (fail-closed), so two
+            // files with unknown digests are not reported as
+            // duplicates of each other.
+            let Some(md5) = f.md5.as_deref().filter(|d| !d.is_empty()) else {
+                continue;
+            };
+            let key = (md5, f.mode, f.filecaps.as_deref());
+            md5s.entry(key).or_default().insert(i);
+            sizes.insert(key, size);
         }
 
-        for (md5_hash, indices) in &md5s {
+        for (group_key, indices) in &md5s {
             if indices.len() == 1 {
                 continue;
             }
@@ -397,7 +410,7 @@ impl DuplicatesCheck {
                         diff -= 1;
                     }
                 }
-                if sizes.get(md5_hash).copied().unwrap_or(0) > 0 && diff > 0 {
+                if sizes.get(group_key).copied().unwrap_or(0) > 0 && diff > 0 {
                     let display: Vec<&str> = duplicates
                         .iter()
                         .take(DUPLICATES_DISPLAY_LIMIT)
@@ -413,7 +426,7 @@ impl DuplicatesCheck {
                         description,
                     ));
                 }
-                total_dup_size += sizes.get(md5_hash).copied().unwrap_or(0) * diff.max(0) as u64;
+                total_dup_size += sizes.get(group_key).copied().unwrap_or(0) * diff.max(0) as u64;
             }
         }
 
@@ -703,6 +716,64 @@ mod tests {
             DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist)
                 .is_empty(),
             "duplicates across top-level directories cannot be linked"
+        );
+    }
+
+    #[test]
+    fn same_digest_different_mode_is_not_a_duplicate() {
+        // N=3 mixed by mode: two 644 copies are duplicates of each
+        // other; the 755 copy with the same digest is not (a hardlink
+        // would lose its mode), so it neither fires nor appears.
+        let a = pkgfile("/usr/bin/a", "aaa", 100, 1);
+        let b = pkgfile("/usr/bin/b", "aaa", 100, 2);
+        let mut c = pkgfile("/usr/bin/c", "aaa", 100, 3);
+        c.mode = 0o100755;
+        let files = [a, b, c];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        let findings =
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist);
+        assert_eq!(
+            findings,
+            vec![DuplicateFinding::FilesDuplicate(
+                "/usr/bin/b".into(),
+                "/usr/bin/a".into(),
+            )],
+            "only the same-mode pair fires: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn same_digest_different_filecaps_is_not_a_duplicate() {
+        // Same shape with filecaps: a capability-carrying copy is
+        // not a duplicate of a plain copy with the same digest.
+        let a = pkgfile("/usr/bin/a", "aaa", 100, 1);
+        let mut b = pkgfile("/usr/bin/b", "aaa", 100, 2);
+        b.filecaps = Some("cap_net_raw+ep".to_string());
+        let files = [a, b];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        let findings =
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist);
+        assert!(
+            findings.is_empty(),
+            "caps-differing pair must stay quiet: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn digest_less_files_never_group() {
+        // Two files with unknown digests are not duplicates: no
+        // digest means no evidence of identical content.
+        let mut a = pkgfile("/usr/bin/a", "aaa", 100, 1);
+        let mut b = pkgfile("/usr/bin/b", "aaa", 100, 2);
+        a.md5 = None;
+        b.md5 = Some(String::new());
+        let files = [a, b];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        let findings =
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist);
+        assert!(
+            findings.is_empty(),
+            "digest-less pair must stay quiet: {findings:?}"
         );
     }
 

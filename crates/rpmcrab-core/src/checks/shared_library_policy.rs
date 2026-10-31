@@ -55,6 +55,7 @@ use fancy_regex::Regex;
 
 use crate::check::{Check, add_info, make_finding};
 use crate::checks::is_match;
+use crate::checks::shared::normalise_absolute_path;
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
@@ -679,7 +680,10 @@ impl Check for SharedLibraryPolicyCheck {
             && self.ships_versioned_library(pkg)
             && let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name)
         {
-            let mut etc_files: Vec<&str> = pkg
+            // Payload paths are normalized before grouping: `//` and
+            // `/./` spellings of one path are the same payload, and
+            // grouping on raw spellings would miss the conflict.
+            let mut etc_files: Vec<String> = pkg
                 .files
                 .iter()
                 .filter(|f| f.name.starts_with("/etc/") || f.name.starts_with("/usr/etc/"))
@@ -693,7 +697,7 @@ impl Check for SharedLibraryPolicyCheck {
                     };
                     stem != pkg.name.as_str() && Some(stem) != pkg.name.strip_prefix("lib")
                 })
-                .map(|f| f.name.as_str())
+                .map(|f| normalise_absolute_path(f.name.as_str()))
                 .collect();
             etc_files.sort_unstable();
             etc_files.dedup();
@@ -703,7 +707,7 @@ impl Check for SharedLibraryPolicyCheck {
                     pkg_arch: pkg.arch.clone(),
                     stem: stem.clone(),
                     number: number.clone(),
-                    path: path.to_string(),
+                    path,
                 });
             }
         }
@@ -3459,6 +3463,23 @@ mod tests {
         assert!(
             lines.iter().all(|l| l.contains("/usr/etc/foo/foo.conf")),
             "detail names the shipped path: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn etc_payload_unsanitized_spellings_group_as_one_path() {
+        // `//` and `/./` spellings of one path are the same payload:
+        // normalization groups them, so sibling generations shipping
+        // different spellings still conflict.
+        let results = etc_results_many(vec![
+            ("libfoo1", vec![etc_file("/etc//foo/foo.conf")]),
+            ("libfoo2", vec![etc_file("/etc/./foo/foo.conf")]),
+        ]);
+        let lines = etc_lines(&results);
+        assert_eq!(lines.len(), 2, "one finding per generation: {results:?}");
+        assert!(
+            lines.iter().all(|l| l.contains("/etc/foo/foo.conf")),
+            "detail names the normalized path: {lines:?}"
         );
     }
 
