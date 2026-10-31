@@ -2681,6 +2681,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "dangling-symlink"
+kind = "behaviour"
+reason = "Fix-and-diverge: absolute links to managed targets never fire dangling-symlink. The reference fires whenever the target is absent from the package file list and requirements, but an /etc/alternatives/ endpoint exists only once its alternative is selected (the alternatives tool materialises it at install time), and a /dev/null target is a deliberate mask, not a missing file -- neither has a package-side remedy. The exemption is exact: only the literal target /dev/null and targets under /etc/alternatives/ (with the trailing slash) stay quiet; boundary lookalikes (/etc/alternativesX/, /dev/nullfoo) still fire, and the relative-symlink tag is untouched. Pinned by dangling_symlink_quiet_for_managed_targets and dangling_symlink_managed_target_lookalikes_still_fire in files.rs."
+since = "0.4.1"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
