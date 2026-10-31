@@ -485,3 +485,10 @@ check = "missing-dependency-on"
 kind = "behaviour"
 reason = "The libs dependency is the first Requires matching the family regex (an optional lib prefix, the devel base, an optional -libs infix, a digit/underscore/dash tail, and an optional parenthesised arch suffix), not the exact-name one: a regex-matching lookalike listed first is evaluated instead of the exact dep, even when the exact dep would be silent on its own. The unversioned branch then fires no-version-dependency-on on the lookalike. Pinned by missing_dependency_first_regex_match_wins_over_exact in tags.rs."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "TagsCheck"
+kind = "behaviour"
+reason = "Emits a Warning-level `summary-with-trademark-symbol` finding when a package Summary contains a literal trademark symbol (™ or ®). The reference TagsCheck.py has no such check. Measured over the full Factory corpus (51,589 RPMs): a single current Summary hit, and every %description hit is legitimate prose (compatibility statements, attribution, copyright lines), so the check covers Summary only and excludes ©, whose only observed uses are legitimate attribution. Pinned by emission-path tests in tags.rs."
+since = "0.4.1"

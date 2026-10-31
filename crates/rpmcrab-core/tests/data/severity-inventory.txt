@@ -352,6 +352,7 @@ summary-has-leading-spaces = E
 summary-not-capitalized = W
 summary-on-multiple-lines = E
 summary-too-long = E
+summary-with-trademark-symbol = W
 superfluous-%clean-section = E
 suse-update-desktop-file-deprecated = W
 symlink-contains-up-and-down-segments = E
