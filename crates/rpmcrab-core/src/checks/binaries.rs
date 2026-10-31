@@ -1957,7 +1957,7 @@ struct VendoredCrate {
     /// The C library's version, where the map names a source for it:
     /// a standalone version string embedded in the binary (sqlite) or
     /// the crate version's build metadata (zstd, openssl-src, libgit2). `None` where the
-    /// map has no source (aws-lc, onig_sys).
+    /// map has no source (aws-lc, libssh2, onig_sys).
     c_version: Option<String>,
     /// The map entry's witness bytes occur in the file: the C code is
     /// linked into this binary, not merely resolved in its crate
@@ -26532,6 +26532,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 "aws-lc-sys",
                 "libgit2-sys",
                 "libsqlite3-sys",
+                "libssh2-sys",
                 "lmdb-master-sys",
                 "onig_sys",
                 "openssl-src",
@@ -26617,6 +26618,14 @@ description = "explicit priority string bypasses the system crypto policy"
         // git-describe build metadata, not the jemalloc release.
         assert!(jemalloc.system_soname_prefix.is_none() && jemalloc.link_soname.is_none());
         assert!(jemalloc.c_version_source.is_none());
+        let libssh2 = map.iter().find(|e| e.name == "libssh2-sys").unwrap();
+        assert_eq!(libssh2.srpm, "libssh2_org");
+        assert_eq!(libssh2.accepted_names, ["libssh2_org", "libssh2"]);
+        assert_eq!(libssh2.system_soname_prefix.as_deref(), Some("libssh2.so."));
+        assert_eq!(libssh2.link_soname.as_deref(), Some("libssh2.so.1"));
+        // libssh2 names no version source: the detail prescribes no
+        // version for it.
+        assert!(libssh2.c_version_source.is_none());
     }
 
     #[test]
@@ -27090,6 +27099,54 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn bundled_library_libssh2_sys_fires_and_quiet_shapes() {
+        // The libssh2 shape: crate resolved, witness present, no
+        // system soname needed, nothing declared. No version source
+        // means the detail prescribes no version.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("libssh2-sys", "0.3.1", None, true)];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe libssh2-sys 0.3.1: link the system libssh2.so.1 or add Provides: bundled(libssh2_org)"
+            ],
+            "libssh2 firing line: {lines:?}"
+        );
+        // System-linked with the witness present: fires, with the
+        // link remedy dropped (the binary already links it).
+        let mut info = syn_info();
+        info.needed = vec!["libssh2.so.1".to_string()];
+        info.vendored_crates = vec![vendored("libssh2-sys", "0.3.1", None, true)];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe libssh2-sys 0.3.1: add Provides: bundled(libssh2_org)"
+            ],
+            "libssh2 dual-link firing line: {lines:?}"
+        );
+        // Declared under either accepted name, the witnessed binary
+        // is satisfied.
+        for accepted in ["libssh2_org", "libssh2"] {
+            let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            pkg.provides = vec![bundled_provide(accepted)];
+            let mut info = syn_info();
+            info.vendored_crates = vec![vendored("libssh2-sys", "0.3.1", None, true)];
+            assert!(
+                bundled_lines(&pkg, &info).is_empty(),
+                "bundled({accepted}) must satisfy the finding"
+            );
+        }
+        // Listed but unwitnessed: resolved, not linked, stays quiet.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("libssh2-sys", "0.3.1", None, false)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+    }
+
+    #[test]
     fn bundled_library_libgit2_quiet_without_witness_or_when_declared() {
         // The build-kind shape: the crate is listed but its code is
         // not in this binary.
@@ -27136,6 +27193,21 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(zstd.name, "zstd-sys");
         assert!(zstd.witness_present);
         assert_eq!(zstd.c_version.as_deref(), Some("1.5.7"));
+    }
+
+    #[test]
+    fn dep_v0_libssh2_sys_witness_and_no_version_source() {
+        // The libssh2 entry end to end: listed in .dep-v0, witness
+        // in .rodata, no version source, so no C version is named.
+        let dep = dep_v0_bytes(&[("libssh2-sys", "0.3.1")]);
+        let mut rodata = Vec::new();
+        rodata.extend_from_slice(b"Unable to exchange encryption keys\0");
+        let info =
+            parse_crafted_sections("depv0-libssh2", &[(".rodata", &rodata), (".dep-v0", &dep)]);
+        assert_eq!(info.vendored_crates.len(), 1);
+        assert_eq!(info.vendored_crates[0].name, "libssh2-sys");
+        assert!(info.vendored_crates[0].witness_present);
+        assert_eq!(info.vendored_crates[0].c_version, None);
     }
 
     #[test]
