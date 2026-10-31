@@ -29,3 +29,10 @@ check = "KMPPolicyCheck"
 kind = "behaviour"
 reason = "The reference fires `kmp-missing-requires` whenever no Require is named exactly `kernel-<flavor>`. A KMP whose modules link flavor-pinned symbols instead carries `ksym(<flavor>:...)` requires, which only a kernel package exporting those symbols satisfies -- the SLE 16 KMP Manual (section 7, RPM Provides and Requires) defines installation success exactly that way, and both `kernel-<flavor>` and `kernel-<flavor>-base` provide the symbols, so the plain name require would force the full kernel package where the `-base` subset suffices. rpmcrab credits own-flavor ksym requires; a KMP with neither form, or only another flavor's ksym, still fires. Corpus: all 13 live findings carry 33-831 own-flavor ksym requires alongside the proper Enhances and Supplements, and no corpus KMP lacks both dependency forms. Pinned by kmp_with_ksym_requires_is_quiet_on_requires, kmp_with_other_flavor_ksym_still_fires and kmp_with_lookalike_ksym_still_fires."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "KMPPolicyCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: the reference credits a kernel-flavor supplement only when the flavor is the first member of the conjunction (`(kernel-<flavor> and ...)` or `packageand(kernel-<flavor>...)`). A conjunction commutes, so rpmcrab credits the flavor in any member position: `(virtualbox-guest-tools and kernel-<flavor>)` and `packageand(foo:kernel-<flavor>)` count as the proper supplement. The reference fires `kmp-excessive-supplements` on the two virtualbox KMP packages whose supplements carry the flavor second; both go quiet here, and a package whose only supplement is such a reordered conjunction no longer fires `kmp-missing-supplements` either. Members compare exactly, so lookalikes (`(kernel-<flavor>foo and ...)`, `(foo and kernel-<flavor>foo)`) still fire. Pinned by kmp_flavor_second_in_conjunction_is_quiet, kmp_flavor_second_in_conjunction_longterm_is_quiet, kmp_flavor_later_in_packageand_is_quiet, kmp_conjunction_without_flavor_still_fires and kmp_conjunction_flavor_lookalike_still_fires."
+since = "0.4.1"
