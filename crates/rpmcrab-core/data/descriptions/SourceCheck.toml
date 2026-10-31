@@ -42,3 +42,12 @@ the first control in the member and its line and column; one finding
 per member. Plain payload files, including the spec, are covered by
 the bidi-control-character scan instead. Archive nesting is capped at 5 levels; a compressed single file is scanned as itself when decompression yields text, while a decompressed payload that itself forms an archive is walked as archive members; compression suffixes are stripped case-insensitively.
 """
+
+prebuilt-binary-shipped="""
+This file is byte-identical to a prebuilt binary, or to an archive
+holding one, in this package's own sources, so the shipped bytes were
+not built in this build. Build it in %build or unbundle it, and delete
+the prebuilt copy in %prep. If the file is a toolchain bootstrap or
+binary firmware (the guideline's exceptions), filter the finding in
+the package's rpmlintrc.
+"""
