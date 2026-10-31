@@ -327,6 +327,29 @@ library and carries the vendored code as well fires: the linked
 copy does not replace the vendored one, which is declared (or
 patched out) like any other.
 """
+python-rust-extension-without-auditable-data="""
+The named file is a Python extension module written in Rust: it
+defines a PyInit_* entry point, was built by the Rust toolchain
+and is a shared object, but it carries no cargo-auditable
+.dep-v0 section, so no bundled(rust-crate:...) provides are
+generated for the crates it vendors. The module's crate graph
+is therefore invisible to the maintenance query for bundled
+code, and it cannot be checked against later advisories the
+way a .dep-v0 section can. Python extension modules are built
+by maturin or setuptools-rust under %pyproject_wheel, which
+run plain cargo from PATH rather than cargo auditable, so the
+section is missing unless the packager adds it. Add
+BuildRequires: cargo-auditable and, at the top of %build, a
+cargo wrapper on PATH (cargo-auditable's REPLACING_CARGO.md
+documents the wrapper for programs such as maturin):
+mkdir -p %{_builddir}/auditable-shim
+printf '#!/bin/sh\\nexec %{_bindir}/cargo auditable "$@"\\n' > %{_builddir}/auditable-shim/cargo
+chmod +x %{_builddir}/auditable-shim/cargo
+export PATH="%{_builddir}/auditable-shim:$PATH"
+No declared bundled() provide silences this finding: without
+.dep-v0 there is nothing to check a hand-written list against,
+and hand-written lists go stale.
+"""
 binary-or-shlib-calls-weak-prng="""
 The binary calls a predictable libc random generator (rand,
 random or the *48 generators, each also in its reentrant *_r
