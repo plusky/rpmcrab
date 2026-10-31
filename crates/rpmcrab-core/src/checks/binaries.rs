@@ -7759,7 +7759,7 @@ impl BinariesCheck {
         daemon_exec: &DaemonExec,
         out: &mut Filter,
     ) {
-        // An archive charges only a reference, like mktemp below:
+        // An archive charges only a reference:
         // its members are separate objects, so the member that
         // defines setuid/setgid (newlib's libgloss stubs) makes no
         // call and stays silent, while a member that references
@@ -7811,20 +7811,12 @@ impl BinariesCheck {
                     .undefined_functions
                     .iter()
                     .any(|s| s.split('@').next().unwrap_or(s) == "dlsym"));
-        // An archive charges only a reference: its members are separate
-        // objects, so the member that defines mktemp (newlib's libc.a
-        // carries the definition in libc_a-mktemp.o) makes no call and
-        // stays silent. A linked object — an executable or a shared
-        // library — charges any match, defined or not: a statically
-        // linked executable bundling mktemp and a wrapper library that
-        // defines and calls its own variant both carry the definition
-        // with no undefined reference, and the reference counts every
-        // FUNC symbol there (fix-and-diverge scoped to archives, #852).
-        let mktemp = if self.is_archive {
-            info.has_undefined_function_matching(&self.mktemp_call_regex)
-        } else {
-            info.has_function_matching(&self.mktemp_call_regex)
-        };
+        // call-to-mktemp charges the undefined reference itself, in
+        // archives and linked objects alike: a definition is never a
+        // call. The library that implements mktemp is the provider,
+        // not a caller — glibc's libc carries the definition and
+        // stays silent, as do libraries shipping their own variant.
+        let mktemp = info.has_undefined_function_matching(&self.mktemp_call_regex);
         // gets (#972): the charge is the undefined reference itself,
         // in archives and linked objects alike. gets reads a line
         // into a caller buffer with no bound -- CWE-242's defining
@@ -7852,9 +7844,8 @@ impl BinariesCheck {
         // definition is never charged: the library that implements
         // the family (glibc's libc carries the definitions) is the
         // provider, not a caller -- the definition-is-not-a-call line
-        // the mktemp scoping draws for archives (#852), applied here
-        // to every object kind, so this finder does not import the
-        // defined-match overreach the family tightening removes.
+        // call-to-mktemp draws, so this finder charges no defined
+        // match either.
         let tmpnam = info.has_undefined_function_matching(&self.tmpnam_call_regex);
         // The family pattern runs over the printed symbol forms:
         // its `@GLIBC` arm accepts a needed GLIBC version and
@@ -7908,9 +7899,7 @@ impl BinariesCheck {
             && (file_is_privileged(pkgfile) || file_is_daemon_exec(pkgfile, daemon_exec));
         // An undefined reference charges the call (#972 candidate 4):
         // the definition site -- glibc itself, or a library shipping
-        // its own variant -- makes no call and stays silent, unlike
-        // call-to-mktemp's linked-object rule (#852), whose subject
-        // has no implementation library in the distribution. The
+        // its own variant -- makes no call and stays silent. The
         // fortified __*_chk spellings do not match the regex: they
         // are the checked form of the same calls. Warning only --
         // whether a call overflows depends on the destination size
@@ -7979,8 +7968,8 @@ impl BinariesCheck {
             // (an NSS module implementing the legacy entry points, a
             // bundled replacement) carries the pattern without making
             // the call and stays in the Warning population: the same
-            // definition/call split the archive scoping of
-            // call-to-mktemp uses (#852). The level rests on the
+            // definition/call split call-to-mktemp uses. The
+            // level rests on the
             // Factory corpus measurement recorded in the divergence
             // ledger (#967).
             if info.has_undefined_printed_function_matching(&self.gethostbyname_call_regex)
@@ -23306,12 +23295,11 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn mktemp_defined_only_fires_in_a_linked_object() {
-        // #852: a linked object — an executable or a shared library —
-        // charges a defined match too. A statically linked executable
-        // bundling mktemp and a wrapper library that defines and calls
-        // its own variant both carry the definition with no undefined
-        // reference, and they fire, as they do in the reference.
+    fn mktemp_defined_only_is_silent_in_a_linked_object() {
+        // A linked object — an executable or a shared library —
+        // charges an undefined reference only: a definition is never
+        // a call. The provider (glibc's libc, a library shipping its
+        // own variant) stays silent, as it does in an archive.
         let config = test_config();
         let check = BinariesCheck::with_tool_dir(&config, None);
         assert!(!check.is_archive);
@@ -23336,11 +23324,11 @@ description = "explicit priority string bypasses the system crypto policy"
             info
         };
 
-        // The definition alone (the statically linked shape) fires.
-        assert_eq!(count(&with(&["mktemp"], &[])), 1);
-        // A versioned definition fires.
-        assert_eq!(count(&with(&["mktemp@GLIBC_2.2.5"], &[])), 1);
-        // An import fires too, as before.
+        // The definition alone (the statically linked shape) is silent.
+        assert_eq!(count(&with(&["mktemp"], &[])), 0);
+        // A versioned definition is silent.
+        assert_eq!(count(&with(&["mktemp@GLIBC_2.2.5"], &[])), 0);
+        // An import fires, as before.
         assert_eq!(count(&with(&["mktemp"], &["mktemp"])), 1);
         // Near-miss defined names stay silent.
         assert_eq!(count(&with(&["mkstemp"], &[])), 0);
@@ -23498,7 +23486,8 @@ description = "explicit priority string bypasses the system crypto policy"
             info
         };
 
-        // Linked object: any FUNC match charges, defined or not.
+        // Linked object: only an undefined reference charges, as in
+        // an archive — a defined-only real symbol stays silent.
         let check = BinariesCheck::with_tool_dir(&config, None);
         let exe = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
         for name in [
@@ -23510,9 +23499,11 @@ description = "explicit priority string bypasses the system crypto policy"
         ] {
             assert_eq!(run(&check, &exe, &with(&[name], &[name])), 0, "{name}");
         }
-        // The real symbol still fires, plain and versioned.
-        assert_eq!(run(&check, &exe, &with(&["mktemp"], &[])), 1);
-        assert_eq!(run(&check, &exe, &with(&["mktemp@GLIBC_2.2.5"], &[])), 1);
+        // A defined-only real symbol is silent, plain and versioned.
+        assert_eq!(run(&check, &exe, &with(&["mktemp"], &[])), 0);
+        assert_eq!(run(&check, &exe, &with(&["mktemp@GLIBC_2.2.5"], &[])), 0);
+        // An undefined reference to the real symbol still fires.
+        assert_eq!(run(&check, &exe, &with(&["mktemp"], &["mktemp"])), 1);
 
         // Archive: only an undefined reference charges.
         let mut check = BinariesCheck::with_tool_dir(&config, None);

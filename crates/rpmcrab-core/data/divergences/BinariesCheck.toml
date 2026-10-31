@@ -689,3 +689,10 @@ check = "no-binary"
 kind = "behaviour"
 reason = "Deliberate fix: the port exempts patterns-* packages from no-binary. A patterns package is text-only by construction: its spec %files ships only the pattern marker .txt under /usr/share/doc/packages/patterns (verified on the workspace spec and on published binaries: patterns-devel-vulkan-devel_vulkan, patterns-devel-tcl-devel_tcl, patterns-yast-devel_yast, patterns-base-basesystem, patterns-gnome-gnome_basis, patterns-media-rest_cd_core and patterns-server-mail_server-32bit each ship exactly the patterns directory plus one .txt), so an arch patterns package with no binaries is the expected shape, not a forgotten noarch. The finding's remedy does not apply to this class: a noarch patterns package would silently bake any later %ifarch branch into every architecture, so the arch marking is deliberate. The reference fires E on the same packages. The exemption is the `patterns-` prefix only: names merely containing the word still fire. Pinned by no_binary_quiet_for_patterns_package and no_binary_still_fires_when_patterns_is_not_the_prefix in binaries.rs."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "call-to-mktemp"
+kind = "behaviour"
+reason = "Fix-and-diverge: call-to-mktemp charges an undefined reference only, in archives and linked objects alike — a definition is never a call. The #852 linked-object rule (any FUNC match, defined or not, in a linked object) is retired for this finder: the implementing library is the provider, not a caller, so glibc's libc.so.6 defining mktemp, fakechroot's libfakechroot.so and ksh's libast carrying mktemp stay silent, aligning with call-to-tmpnam. Measured A/B with the rebuilt binary over the 23 RPMs of the post-anchor stay population (27 files): 27 -> 24, exactly the 3 defined-only providers drop, zero findings added, all other findings identical. Pinned by mktemp_defined_only_is_silent_in_a_linked_object and mktemp_lookalike_names_stay_silent in binaries.rs."
+since = "0.4.1"
