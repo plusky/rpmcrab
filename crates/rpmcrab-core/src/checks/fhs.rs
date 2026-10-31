@@ -89,9 +89,13 @@ pub(crate) fn cross_sysroot_matches(path: &str) -> bool {
 }
 
 /// Allowed subdirectories of `/var` (FHS 3.0, chapters 5.2 and 5.3).
+/// `adm` is standard in distro practice: it is the OS's own admin
+/// directory, shipped by the filesystem package itself and hosting
+/// SUSE's fillup templates (`/var/adm/fillup-templates`), so no
+/// package-side remedy exists for shipping it.
 const FHS_VAR_SUBDIRS: &[&str] = &[
     "cache", "lib", "local", "lock", "log", "opt", "run", "spool", "tmp", "account", "crash",
-    "games", "mail", "yp",
+    "games", "mail", "yp", "adm",
 ];
 
 pub struct FHSCheck;
@@ -270,6 +274,24 @@ mod tests {
     fn non_standard_var_dir_is_reported() {
         let dirs = FHSCheck::non_standard_dirs(["/var/custom/data"].into_iter());
         assert_eq!(dirs, vec![("var".to_string(), "custom".to_string())]);
+    }
+
+    #[test]
+    fn var_adm_is_quiet() {
+        // /var/adm is the OS's own admin directory: shipped by the
+        // filesystem package itself and hosting SUSE's fillup
+        // templates, so no package-side remedy exists for shipping it.
+        let dirs =
+            FHSCheck::non_standard_dirs(["/var/adm/fillup-templates/sysconfig.foo"].into_iter());
+        assert!(dirs.is_empty(), "{dirs:?}");
+    }
+
+    #[test]
+    fn var_samba_still_fires() {
+        // The one clearly package-side case on the audited row:
+        // samba state normally lives under /var/lib/samba.
+        let dirs = FHSCheck::non_standard_dirs(["/var/samba/locks/foo"].into_iter());
+        assert_eq!(dirs, vec![("var".to_string(), "samba".to_string())]);
     }
 
     #[test]
