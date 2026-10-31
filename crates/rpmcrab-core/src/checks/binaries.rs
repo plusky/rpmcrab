@@ -3153,6 +3153,9 @@ impl ProviderIndex {
         None
     }
 
+    /// Unlike `lookup_provider`, this returns the provider package's
+    /// identity owned: the closure walk carries the owner with each
+    /// stack entry, so the clone is load-bearing, not incidental.
     fn lookup(&self, soname: &str, owner: &PackageId) -> Option<(PackageId, Arc<SymbolProvider>)> {
         let base = basename(soname);
         let (id, map) = self.find_set(soname, owner)?;
@@ -24502,6 +24505,11 @@ description = "explicit priority string bypasses the system crypto policy"
         );
         let wrap_pkg = synthetic_pkg("testpkg", "x86_64", vec![wrap_unit]);
         assert_eq!(count(&wrap_pkg, &helper, &["rand"], &["rand"]), 0);
+
+        // The payload file itself is not the started program either:
+        // counting it pins first-token behaviour against a recurse
+        // that would judge the payload as started.
+        assert_eq!(count(&wrap_pkg, &foo, &["rand"], &["rand"]), 0);
 
         // Bare name resolving only via an in-package symlink
         // follows it to the real binary: before, the symlink
