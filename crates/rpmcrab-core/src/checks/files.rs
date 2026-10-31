@@ -4372,22 +4372,29 @@ impl FilesCheck {
         // still fires.
         // Only bindir paths are ever looked up below, so the map is
         // built over those paths rather than the whole package file list.
-        let bindir_paths: HashSet<&str> = st
-            .bindir_exes
-            .values()
-            .flat_map(|paths| paths.iter().map(|p| p.as_str()))
-            .collect();
-        let digests: HashMap<&str, &str> = pkg
-            .files
-            .iter()
-            .filter(|f| bindir_paths.contains(f.name.as_str()))
-            .filter_map(|f| {
-                f.md5
-                    .as_deref()
-                    .filter(|d| !d.is_empty())
-                    .map(|d| (f.name.as_str(), d))
-            })
-            .collect();
+        // And only when some name actually has duplicate paths: the
+        // identical check below is guarded on paths.len() > 1, so a
+        // duplicate-free package builds no map at all.
+        let has_duplicate_paths = st.bindir_exes.values().any(|paths| paths.len() > 1);
+        let digests: HashMap<&str, &str> = if has_duplicate_paths {
+            let bindir_paths: HashSet<&str> = st
+                .bindir_exes
+                .values()
+                .flat_map(|paths| paths.iter().map(|p| p.as_str()))
+                .collect();
+            pkg.files
+                .iter()
+                .filter(|f| bindir_paths.contains(f.name.as_str()))
+                .filter_map(|f| {
+                    f.md5
+                        .as_deref()
+                        .filter(|d| !d.is_empty())
+                        .map(|d| (f.name.as_str(), d))
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
         for (exe, paths) in &st.bindir_exes {
             // Symlink-only entries carry an empty path list; the
             // length guard short-circuits before any indexing.
@@ -23339,6 +23346,15 @@ x /etc/sysconfig/f - - - -
                     b"#!/usr/bin/env python3\n",
                 ),
                 (
+                    // A dotted directory component is not the bare
+                    // `tests` component: exact match only, so the
+                    // data-tree exemption does not apply.
+                    "/usr/share/myapp/tests.d/run.sh",
+                    0o100644,
+                    "Bourne-Again shell script, ASCII text executable",
+                    b"#!/bin/bash\n",
+                ),
+                (
                     "/usr/share/myapp/lib.py",
                     0o100644,
                     "Python script, ASCII text executable",
@@ -23432,6 +23448,7 @@ x /etc/sysconfig/f - - - -
             "/usr/srcfoo/scripts/run.sh",
             "/usr/bin/tool.py",
             "/usr/share/myapp/tests.py",
+            "/usr/share/myapp/tests.d/run.sh",
             "/usr/share/myapp/lib.py",
             "/usr/share/myapp/run.sample.sh",
             "/usr/share/myapp/profile.sh",

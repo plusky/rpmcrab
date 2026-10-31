@@ -6138,6 +6138,33 @@ mod tests {
     }
 
     #[test]
+    fn bare_conditional_markers_in_comments() {
+        // A bare conditional mention is reported like a plain one:
+        // the `?`/`!` marker is stripped before the name is judged,
+        // so the marker alone never silences it. The with/without
+        // space forms are different: they parse as with-text forms
+        // (name plus argument), not bare mentions, and their argument
+        // names no macro, so they stay quiet in comments; their live
+        // behaviour is pinned by the with-macro tests. Markers under
+        // `||` report once per mention.
+        for (line, count) in [
+            ("# see %{?foo} here", 1),
+            ("# see %{!foo} here", 1),
+            ("# see %{?with foo} here", 0),
+            ("# see %{?without foo} here", 0),
+            ("# see %{!?without foo} here", 0),
+            ("# %if %{?foo} || %{?bar}", 2),
+        ] {
+            let results = run_mini(&format!("Name: foo\n{line}\n"));
+            assert_eq!(
+                lines_for(&results, "macro-in-comment").len(),
+                count,
+                "{line}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
     fn mention_of_later_definition_errors_1026() {
         // The scan is textual and does not track definitions, so a
         // mention of a macro defined further down — or under `%if 0`

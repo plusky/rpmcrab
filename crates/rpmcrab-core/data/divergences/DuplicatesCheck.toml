@@ -107,3 +107,10 @@ check = "files-duplicated-waste"
 kind = "behaviour"
 reason = "Fix-and-diverge: the waste total excludes duplicate groups whose members are all %config files (see the files-duplicate entry): the copies are meant to be edited independently after install, so the space is not reclaimable. Measured on the Factory corpus: 227 findings fall to 226 (-1/+0); the one silenced package is mono-web, whose entire waste total rests on such groups."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "files-duplicate"
+kind = "behaviour"
+reason = "Fix-and-diverge: duplicate groups are keyed by (digest, mode, filecaps), not by digest alone: two copies differing only in mode or file capabilities are not hardlinkable (a hardlink shares one inode, hence one mode and one capability set), so they are not duplicates. A file with a missing or empty digest proves nothing about content and never groups. Hardlink pairs are unaffected by the finer key: same inode implies same mode and capabilities, so no hardlink pair splits. The files-duplicated-waste total follows the same grouping, since it accumulates the same suppressed diff. Pinned by same_digest_different_mode_is_not_a_duplicate, same_digest_different_filecaps_is_not_a_duplicate and digest_less_files_never_group in duplicates.rs."
+since = "0.4.1"
