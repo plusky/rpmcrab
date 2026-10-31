@@ -142,3 +142,18 @@ system_soname_prefix = "libgit2.so."
 link_soname = "libgit2.so.1.9"
 witness = "the index is locked; this might be due to a concurrent or crashed process"
 c_version_source = "crate-build-metadata"
+# lmdb-master-sys vendors the LMDB mdb.master branch (0.9.70) while
+# Tumbleweed ships the 0.9.35 release (liblmdb-0.9.35.so); the crate
+# has no environment switch or pkg-config path to link the system
+# library (its build.rs links only advapi32 on Windows), so the
+# entry carries no system soname pair and no version source. The
+# witness is the MDB_KEYEXIST error string from
+# lmdb/libraries/liblmdb/mdb.c:1746 in lmdb-master-sys-0.2.6,
+# measured in nushell's /usr/bin/nu: the frame is 3 of 3 packages
+# carrying bundled(rust-crate:lmdb-master-sys) with no system link,
+# one of which already declares bundled(lmdb).
+[[crate]]
+name = "lmdb-master-sys"
+srpm = "lmdb"
+accepted_names = ["lmdb", "liblmdb"]
+witness = "MDB_KEYEXIST: Key/data pair already exists"

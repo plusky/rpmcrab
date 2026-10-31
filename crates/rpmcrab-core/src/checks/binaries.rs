@@ -26532,6 +26532,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 "aws-lc-sys",
                 "libgit2-sys",
                 "libsqlite3-sys",
+                "lmdb-master-sys",
                 "onig_sys",
                 "openssl-src",
                 "zstd-sys"
@@ -26590,6 +26591,15 @@ description = "explicit priority string bypasses the system crypto policy"
             libgit2.c_version_source,
             Some(CVersionSource::CrateBuildMetadata)
         );
+        let lmdb = map.iter().find(|e| e.name == "lmdb-master-sys").unwrap();
+        assert_eq!(lmdb.srpm, "lmdb");
+        assert_eq!(lmdb.accepted_names, ["lmdb", "liblmdb"]);
+        // lmdb-master-sys has no linkable system form and no version
+        // source: TW's liblmdb-0.9.35.so is the 0.9.35 release, not
+        // the vendored mdb.master branch, and the crate offers no
+        // switch to link it.
+        assert!(lmdb.system_soname_prefix.is_none() && lmdb.link_soname.is_none());
+        assert!(lmdb.c_version_source.is_none());
         let zstd = map.iter().find(|e| e.name == "zstd-sys").unwrap();
         assert_eq!(zstd.accepted_names, ["zstd", "libzstd"]);
         assert_eq!(
@@ -26796,6 +26806,39 @@ description = "explicit priority string bypasses the system crypto policy"
         parse_vendored_c_crates(&vendored_table(
             "name = \"openssl-src\"\nsrpm = \"openssl-3\"\naccepted_names = [\"openssl-3\"]\nwitness = \"OpenSSL Default Provider\"\nsystem_soname_prefix = [\"libssl.so.\", \"libcrypto.so.\"]\nlink_soname = \"libcrypto.so.3\"\n",
         ));
+    }
+
+    #[test]
+    fn bundled_library_lmdb_detail_drops_link_and_version() {
+        // lmdb-master-sys has no system soname to link and no
+        // version source: the detail prescribes only the
+        // declaration, with no version qualifier.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("lmdb-master-sys", "0.2.6", None, true)];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe lmdb-master-sys 0.2.6: add Provides: bundled(lmdb)"
+            ],
+            "lmdb has no system soname to link and no version source: {lines:?}"
+        );
+        // The crate listed but the witness absent stays quiet.
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("lmdb-master-sys", "0.2.6", None, false)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+        // Declared under either accepted name satisfies the finding.
+        for accepted in ["lmdb", "liblmdb"] {
+            let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            pkg.provides = vec![bundled_provide(accepted)];
+            let mut info = syn_info();
+            info.vendored_crates = vec![vendored("lmdb-master-sys", "0.2.6", None, true)];
+            assert!(
+                bundled_lines(&pkg, &info).is_empty(),
+                "bundled({accepted}) must satisfy the finding"
+            );
+        }
     }
 
     #[test]
