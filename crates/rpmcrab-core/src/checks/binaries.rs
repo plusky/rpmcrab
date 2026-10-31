@@ -1957,7 +1957,7 @@ struct VendoredCrate {
     /// The C library's version, where the map names a source for it:
     /// a standalone version string embedded in the binary (sqlite) or
     /// the crate version's build metadata (zstd). `None` where the
-    /// map has no source (aws-lc).
+    /// map has no source (aws-lc, onig_sys).
     c_version: Option<String>,
     /// The map entry's witness bytes occur in the file: the C code is
     /// linked into this binary, not merely resolved in its crate
@@ -26480,10 +26480,13 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn vendored_c_crates_map_is_the_measured_trio() {
+    fn vendored_c_crates_map_is_the_measured_quartet() {
         let map = vendored_c_crates();
         let names: Vec<&str> = map.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, ["aws-lc-sys", "libsqlite3-sys", "zstd-sys"]);
+        assert_eq!(
+            names,
+            ["aws-lc-sys", "libsqlite3-sys", "onig_sys", "zstd-sys"]
+        );
         // ring stays out: its C code is forked into the crate and
         // bundled(rust-crate:ring) already names it.
         assert!(!names.contains(&"ring"));
@@ -26505,6 +26508,14 @@ description = "explicit priority string bypasses the system crypto policy"
         // no version source.
         assert!(aws.system_soname_prefix.is_none() && aws.link_soname.is_none());
         assert!(aws.c_version_source.is_none());
+        let onig = map.iter().find(|e| e.name == "onig_sys").unwrap();
+        assert_eq!(onig.srpm, "oniguruma");
+        assert_eq!(onig.accepted_names, ["oniguruma", "libonig"]);
+        assert_eq!(onig.system_soname_prefix.as_deref(), Some("libonig.so."));
+        assert_eq!(onig.link_soname.as_deref(), Some("libonig.so.5"));
+        // Oniguruma has no version source: the detail prescribes
+        // bundled(oniguruma) with no version.
+        assert!(onig.c_version_source.is_none());
         let zstd = map.iter().find(|e| e.name == "zstd-sys").unwrap();
         assert_eq!(zstd.accepted_names, ["zstd", "libzstd"]);
         assert_eq!(
@@ -26568,6 +26579,51 @@ description = "explicit priority string bypasses the system crypto policy"
             ],
             "aws-lc has no system soname to link and no version source: {lines:?}"
         );
+    }
+
+    #[test]
+    fn bundled_library_onig_sys_fires_and_drops_link_remedy_when_system_linked() {
+        // The rioterm shape: crate resolved, witness present, no
+        // system soname needed, nothing declared.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("onig_sys", "69.9.3", None, true)];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe onig_sys 69.9.3: link the system libonig.so.5 or add Provides: bundled(oniguruma)"
+            ],
+            "onig_sys firing line: {lines:?}"
+        );
+        // With the witness present and the system library linked,
+        // the finding fires with the declaration only: the link
+        // remedy it already follows is dropped, and no version is
+        // named (onig_sys has no version source).
+        let mut info = syn_info();
+        info.needed = vec!["libonig.so.5".to_string()];
+        info.vendored_crates = vec![vendored("onig_sys", "69.9.3", None, true)];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe onig_sys 69.9.3: add Provides: bundled(oniguruma)"
+            ],
+            "dual-link onig_sys firing line: {lines:?}"
+        );
+        // System-linked without the witness: nothing vendored is
+        // carried and nothing fires.
+        let mut info = syn_info();
+        info.needed = vec!["libonig.so.5".to_string()];
+        info.vendored_crates = vec![vendored("onig_sys", "69.9.3", None, false)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+        // Declared under the lib-prefixed accepted name, the
+        // witnessed carrier is satisfied.
+        let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        pkg.provides = vec![bundled_provide("libonig")];
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("onig_sys", "69.9.3", None, true)];
+        assert!(bundled_lines(&pkg, &info).is_empty());
     }
 
     #[test]

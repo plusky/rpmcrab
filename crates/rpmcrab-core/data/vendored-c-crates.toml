@@ -55,7 +55,15 @@
 # only evidence there. The witness cannot tell SQLite from its
 # SQLCipher fork (see the libsqlite3-sys entry below).
 
-as_of = "2026-10-27"
+# The onig_sys witness is the error string `too big wide-char value`
+# from Oniguruma's regerror.c, which the crate vendors whole: in the
+# census behind the ledger entry, rioterm-0.5.28's /usr/bin/rio
+# (onig_sys 69.9.3, vendoring Oniguruma 6.9.10, the version TW's
+# libonig5 ships) carries the witness and NEEDs no libonig. The
+# crate links the system library only when RUSTONIG_SYSTEM_LIBONIG
+# is set, so the system form stays the prescribed remedy.
+
+as_of = "2026-10-31"
 
 # libsqlite3-sys's `sqlcipher` feature builds the SQLCipher fork
 # from the same crate: .dep-v0 still names libsqlite3-sys and the
@@ -86,3 +94,11 @@ system_soname_prefix = "libzstd.so."
 link_soname = "libzstd.so.1"
 witness = "Unknown frame descriptor"
 c_version_source = "crate-build-metadata"
+
+[[crate]]
+name = "onig_sys"
+srpm = "oniguruma"
+accepted_names = ["oniguruma", "libonig"]
+system_soname_prefix = "libonig.so."
+link_soname = "libonig.so.5"
+witness = "too big wide-char value"
