@@ -3796,6 +3796,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1220"
 
 [[divergence]]
 case = "global"
+check = "SourceCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1388): `prebuilt-binary-in-sources` also reports ar archives whose first member is a linker symbol index (`/`, `/SYM64/`, `__.SYMDEF`, `__.SYMDEF SORTED`), PE images (`MZ`, with the `PE` signature at an in-bounds `e_lfanew`) and WebAssembly modules (magic `00 61 73 6D`, version 1). Thin and index-less ar archives, BSD `#1/<n>` symbol tables, WebAssembly components, Mach-O, RPM files and COFF objects stay quiet. Findings of the three added kinds are grouped per archive, directory and kind, with the file count; a lone member keeps the per-member detail, and bare Sources are not grouped. ELF, Java class, Python bytecode and jar findings are unchanged. The frozen 2.10.0 reference has no such check."
+since = "0.4.1"
+upstream = "https://github.com/plusky/rpmcrab/issues/1388"
+
+[[divergence]]
+case = "global"
 check = "buildarch-instead-of-exclusivearch-tag"
 kind = "behaviour"
 reason = "Fixed behaviour per rpmlint#1600 (fixes rpmlint#698): a trailing line-continuation backslash is stripped before comparing, so 'BuildArch: noarch \\' inside a multi-line macro is not reported as a real architecture. The frozen 2.10.0 reference reports it."
