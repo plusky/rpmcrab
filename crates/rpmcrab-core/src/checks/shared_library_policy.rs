@@ -84,6 +84,9 @@ pub struct SharedLibraryPolicyCheck {
     /// `shlib-fixed-dependency` candidates awaiting lockstep resolution
     /// in `after_checks`, in capture order.
     fixed_dep_candidates: Vec<FixedDepCandidate>,
+    /// `shlib-policy-etc-payload` candidates awaiting materialisation
+    /// resolution in `after_checks`, in capture order.
+    etc_payload_candidates: Vec<EtcPayloadCandidate>,
 }
 
 /// One binary package of the run, recorded for the cross-package `-devel`
@@ -110,12 +113,29 @@ struct FixedDepCandidate {
     detail: String,
 }
 
+/// One `shlib-policy-etc-payload` candidate, captured during
+/// `check_binary` and resolved in `after_checks`: the finding's
+/// package, the SONAME stem and number (bitness normalised away, as
+/// in the obsoletes-sibling arm), and the /etc or /usr/etc path.
+/// Emission is deferred (not decided at check time) because the
+/// conflict materialises only when a sibling generation ships the
+/// same path, which is visible only once the whole run's packages
+/// are seen.
+struct EtcPayloadCandidate {
+    pkg_name: String,
+    pkg_arch: String,
+    stem: String,
+    number: String,
+    path: String,
+}
+
 /// Cross-package state, exported per package and merged before
 /// `after_checks`: the `-devel` pairing records plus the fixed-dependency
 /// candidates awaiting lockstep resolution.
 struct DevelPairingState {
     seen: Vec<SeenPkg>,
     fixed_dep_candidates: Vec<FixedDepCandidate>,
+    etc_payload_candidates: Vec<EtcPayloadCandidate>,
 }
 
 /// Whether a dependency name is a virtual capability rather than a
@@ -170,6 +190,7 @@ impl SharedLibraryPolicyCheck {
             seen: Vec::new(),
             seen_index: HashMap::new(),
             fixed_dep_candidates: Vec::new(),
+            etc_payload_candidates: Vec::new(),
         }
     }
 
@@ -643,13 +664,21 @@ impl Check for SharedLibraryPolicyCheck {
         // package for the next SONAME generation, and the two conflict
         // at file level. Directory entries are shared by design and
         // %ghost entries are not shipped payload, so only
-        // non-directory, non-ghost entries fire. Two shapes stay quiet:
+        // non-directory, non-ghost entries are candidates. Two shapes stay quiet:
         // a scheme-shaped name on a package shipping no versioned
         // library is not a SONAME generation, and a file named after
         // the package itself (or its lib-stem) belongs to this
         // generation — the next generation's package has a different
         // name and ships a differently-named file.
-        if is_match(&self.re_soname_pkg, &pkg.name) && self.ships_versioned_library(pkg) {
+        // The finding itself is deferred to `after_checks`: the
+        // conflict the Warning describes materialises only when a
+        // sibling SONAME generation ships the same path, which a
+        // single package's payload cannot show. A lone generation
+        // shipping /etc payload stays quiet.
+        if is_match(&self.re_soname_pkg, &pkg.name)
+            && self.ships_versioned_library(pkg)
+            && let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name)
+        {
             let mut etc_files: Vec<&str> = pkg
                 .files
                 .iter()
@@ -667,14 +696,15 @@ impl Check for SharedLibraryPolicyCheck {
                 .map(|f| f.name.as_str())
                 .collect();
             etc_files.sort_unstable();
+            etc_files.dedup();
             for path in etc_files {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "shlib-policy-etc-payload",
-                    &[path],
-                );
+                self.etc_payload_candidates.push(EtcPayloadCandidate {
+                    pkg_name: pkg.name.clone(),
+                    pkg_arch: pkg.arch.clone(),
+                    stem: stem.clone(),
+                    number: number.clone(),
+                    path: path.to_string(),
+                });
             }
         }
 
@@ -941,6 +971,7 @@ impl Check for SharedLibraryPolicyCheck {
         self.seen.clear();
         self.seen_index.clear();
         self.fixed_dep_candidates.clear();
+        self.etc_payload_candidates.clear();
     }
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
@@ -952,6 +983,7 @@ impl Check for SharedLibraryPolicyCheck {
         Some(Box::new(DevelPairingState {
             seen: std::mem::take(&mut self.seen),
             fixed_dep_candidates: std::mem::take(&mut self.fixed_dep_candidates),
+            etc_payload_candidates: std::mem::take(&mut self.etc_payload_candidates),
         }))
     }
 
@@ -961,6 +993,8 @@ impl Check for SharedLibraryPolicyCheck {
                 self.record_seen(entry);
             }
             self.fixed_dep_candidates.extend(state.fixed_dep_candidates);
+            self.etc_payload_candidates
+                .extend(state.etc_payload_candidates);
         }
     }
 
@@ -1093,6 +1127,47 @@ impl Check for SharedLibraryPolicyCheck {
                     None,
                 ));
             }
+        }
+        // Etc-payload materialisation: a candidate fires only when
+        // another package in the run with the same SONAME stem but a
+        // different number ships the exact same path. A lone
+        // generation stays quiet — the conflict it warns about does
+        // not exist yet. Paths match exactly: /etc/X and /usr/etc/X
+        // are different paths (administrator overlay vs vendor
+        // default), not the same conflict. Bitness is normalised
+        // away by `soname_package_parts`, as in the obsoletes-sibling
+        // arm, so a cross-bitness generation pair counts. Each
+        // package in the conflicting set gets the finding, in
+        // capture order, deduplicated per (package, arch, path).
+        let candidates = std::mem::take(&mut self.etc_payload_candidates);
+        let mut numbers_by_stem_path: HashMap<(String, String), HashSet<String>> = HashMap::new();
+        for candidate in &candidates {
+            numbers_by_stem_path
+                .entry((candidate.stem.clone(), candidate.path.clone()))
+                .or_default()
+                .insert(candidate.number.clone());
+        }
+        let mut emitted: HashSet<(String, String, String)> = HashSet::new();
+        for candidate in candidates {
+            let numbers = &numbers_by_stem_path[&(candidate.stem.clone(), candidate.path.clone())];
+            if numbers.len() < 2 {
+                continue;
+            }
+            if !emitted.insert((
+                candidate.pkg_name.clone(),
+                candidate.pkg_arch.clone(),
+                candidate.path.clone(),
+            )) {
+                continue;
+            }
+            out.add_info(make_finding(
+                &candidate.pkg_name,
+                &candidate.pkg_arch,
+                Level::Warning,
+                "shlib-policy-etc-payload",
+                vec![candidate.path],
+                None,
+            ));
         }
     }
 }
@@ -3166,6 +3241,36 @@ mod tests {
     }
 
     #[test]
+    fn etc_payload_candidates_merge_across_workers() {
+        // The merge path must carry etc-payload candidates, not just
+        // seen records: a candidate dropped in export/import would
+        // diverge -j runs from sequential runs silently, so the
+        // firing shape is the load-bearing half.
+        let config = Config::default();
+        let (_d0, pkg0) = etc_pkg("libfoo1", vec![etc_file("/etc/foo/foo.conf")]);
+        let mut w0 = checker();
+        let mut out0 = Filter::new(&config, Color::for_tty(false)).unwrap();
+        w0.check_binary(&pkg0, &config, &mut out0);
+        let s0 = w0.export_state().expect("worker 0 exports");
+        let (_d1, pkg1) = etc_pkg("libfoo2", vec![etc_file("/etc/foo/foo.conf")]);
+        let mut w1 = checker();
+        let mut out1 = Filter::new(&config, Color::for_tty(false)).unwrap();
+        w1.check_binary(&pkg1, &config, &mut out1);
+        let s1 = w1.export_state().expect("worker 1 exports");
+        let mut main = checker();
+        main.import_state(s0);
+        main.import_state(s1);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        main.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            etc_lines(&results).len(),
+            2,
+            "merged candidates must still fire: {results:?}"
+        );
+    }
+
+    #[test]
     fn fixed_dependency_name_first_ignores_provides() {
         // Exclusive name-first lookup: an exact-name provider from a
         // different source beats a same-source provides-only provider,
@@ -3189,7 +3294,7 @@ mod tests {
         );
     }
 
-    fn etc_results(name: &str, extra: Vec<PkgFile>) -> Vec<(String, String)> {
+    fn etc_pkg(name: &str, extra: Vec<PkgFile>) -> (tempfile::TempDir, Pkg) {
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let so_path = dir.path().join("libfoo.so.1");
         std::fs::write(&so_path, minimal_elf("libfoo.so.1")).expect("write elf");
@@ -3208,11 +3313,28 @@ mod tests {
         files.extend(extra);
         pkg.files = files;
         pkg.requires = vec![];
+        (dir, pkg)
+    }
 
+    fn etc_results(name: &str, extra: Vec<PkgFile>) -> Vec<(String, String)> {
+        etc_results_many(vec![(name, extra)])
+    }
+
+    fn etc_results_many(pkgs: Vec<(&str, Vec<PkgFile>)>) -> Vec<(String, String)> {
+        let mut dirs = Vec::new();
+        let mut built = Vec::new();
+        for (name, extra) in pkgs {
+            let (dir, pkg) = etc_pkg(name, extra);
+            dirs.push(dir);
+            built.push(pkg);
+        }
         let config = Config::default();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         let mut check = checker();
-        check.check_binary(&pkg, &config, &mut out);
+        for pkg in &built {
+            check.check_binary(pkg, &config, &mut out);
+        }
+        check.after_checks(&config, &mut out);
         out.results().to_vec()
     }
 
@@ -3251,16 +3373,37 @@ mod tests {
 
     #[test]
     fn etc_config_file_in_versioned_shlib_warns() {
-        // The libsemanage shape: a versioned shlib package shipping an
-        // unversioned config file under /etc.
-        let results = etc_results("libsemanage1", vec![etc_file("/etc/selinux/semanage.conf")]);
+        // The libsemanage shape: both SONAME generations ship the
+        // unversioned config file under /etc, so the conflict is
+        // materialised and each generation warns.
+        let results = etc_results_many(vec![
+            ("libsemanage1", vec![etc_file("/etc/selinux/semanage.conf")]),
+            ("libsemanage2", vec![etc_file("/etc/selinux/semanage.conf")]),
+        ]);
         let lines = etc_lines(&results);
-        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert_eq!(lines.len(), 2, "one finding per generation: {results:?}");
         assert!(
-            lines[0].contains("/etc/selinux/semanage.conf"),
-            "detail names the shipped path: {}",
-            lines[0]
+            lines.iter().all(|l| l.contains(" W: ")),
+            "Warning level: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.contains("/etc/selinux/semanage.conf")),
+            "detail names the shipped path: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn etc_single_generation_payload_is_quiet() {
+        // The preventive shape that goes away: a lone generation
+        // shipping /etc payload warns about a sibling that might
+        // never exist, so it stays quiet until a sibling ships the
+        // same path.
+        let results = etc_results("libsemanage1", vec![etc_file("/etc/selinux/semanage.conf")]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "lone generation must stay quiet: {results:?}"
         );
     }
 
@@ -3269,14 +3412,19 @@ mod tests {
         // /usr/etc is the vendor-default counterpart of /etc (treated
         // as /etc elsewhere in the tree), so payload there conflicts
         // between SONAME generations in exactly the same way.
-        let results = etc_results("libfoo1", vec![etc_file("/usr/etc/foo/foo.conf")]);
+        let results = etc_results_many(vec![
+            ("libfoo1", vec![etc_file("/usr/etc/foo/foo.conf")]),
+            ("libfoo2", vec![etc_file("/usr/etc/foo/foo.conf")]),
+        ]);
         let lines = etc_lines(&results);
-        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert_eq!(lines.len(), 2, "one finding per generation: {results:?}");
         assert!(
-            lines[0].contains("/usr/etc/foo/foo.conf"),
-            "detail names the shipped path: {}",
-            lines[0]
+            lines.iter().all(|l| l.contains(" W: ")),
+            "Warning level: {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|l| l.contains("/usr/etc/foo/foo.conf")),
+            "detail names the shipped path: {lines:?}"
         );
     }
 
@@ -3310,16 +3458,19 @@ mod tests {
     #[test]
     fn etc_symlink_in_versioned_shlib_warns() {
         // A symlink occupies the path just like a regular file.
-        let link = PkgFile {
+        let link = || PkgFile {
             name: "/etc/selinux/semanage.conf".to_string(),
             mode: 0o120777,
             linkto: "/etc/selinux/semanage.conf.real".to_string(),
             ..Default::default()
         };
-        let results = etc_results("libfoo1", vec![link]);
+        let results = etc_results_many(vec![("libfoo1", vec![link()]), ("libfoo2", vec![link()])]);
         let lines = etc_lines(&results);
-        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
-        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert_eq!(lines.len(), 2, "one finding per generation: {results:?}");
+        assert!(
+            lines.iter().all(|l| l.contains(" W: ")),
+            "Warning level: {lines:?}"
+        );
     }
 
     #[test]
@@ -3394,12 +3545,60 @@ mod tests {
     #[test]
     fn etc_payload_in_32bit_shlib_warns() {
         // The naming scheme treats the -32bit form as the same
-        // versioned package name.
-        let results = etc_results("libfoo1-32bit", vec![etc_file("/etc/foo/foo.conf")]);
+        // versioned package name, and bitness is normalised away
+        // for the sibling pairing, so a 32bit first generation and
+        // a 64bit second generation sharing a path still conflict.
+        let results = etc_results_many(vec![
+            ("libfoo1-32bit", vec![etc_file("/etc/foo/foo.conf")]),
+            ("libfoo2", vec![etc_file("/etc/foo/foo.conf")]),
+        ]);
         assert_eq!(
             etc_lines(&results).len(),
-            1,
-            "exactly one finding: {results:?}"
+            2,
+            "one finding per generation: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_same_generation_two_arches_is_quiet() {
+        // libfoo1 and libfoo1-32bit are the same SONAME generation
+        // (the bitness suffix is normalised away), so their shared
+        // path is not a generation conflict.
+        let results = etc_results_many(vec![
+            ("libfoo1", vec![etc_file("/etc/foo/foo.conf")]),
+            ("libfoo1-32bit", vec![etc_file("/etc/foo/foo.conf")]),
+        ]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "same generation must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_different_paths_across_generations_is_quiet() {
+        // Two generations conflict only over a shared path; distinct
+        // payloads do not pair.
+        let results = etc_results_many(vec![
+            ("libfoo1", vec![etc_file("/etc/foo/a.conf")]),
+            ("libfoo2", vec![etc_file("/etc/foo/b.conf")]),
+        ]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "distinct paths must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn etc_usr_etc_vs_etc_is_quiet() {
+        // /etc/X and /usr/etc/X are different paths (administrator
+        // overlay vs vendor default), so they do not pair.
+        let results = etc_results_many(vec![
+            ("libfoo1", vec![etc_file("/etc/foo/foo.conf")]),
+            ("libfoo2", vec![etc_file("/usr/etc/foo/foo.conf")]),
+        ]);
+        assert!(
+            etc_lines(&results).is_empty(),
+            "cross-prefix paths must stay quiet: {results:?}"
         );
     }
 
@@ -3469,24 +3668,28 @@ mod tests {
 
     #[test]
     fn multiple_etc_files_each_warn_sorted() {
-        let results = etc_results(
-            "libfoo1",
+        // Both generations ship both paths, so each generation warns
+        // once per path; within a generation the findings stay sorted
+        // by path, and generations emit in capture order.
+        let files = || {
             vec![
                 etc_file("/etc/selinux/semanage.conf"),
                 etc_file("/etc/ld.so.conf.d/foo.conf"),
-            ],
-        );
+            ]
+        };
+        let results = etc_results_many(vec![("libfoo1", files()), ("libfoo2", files())]);
         let lines = etc_lines(&results);
-        assert_eq!(lines.len(), 2, "one finding per path: {results:?}");
-        assert!(
-            lines[0].contains("/etc/ld.so.conf.d/foo.conf"),
-            "findings sorted by path: {}",
-            lines[0]
+        assert_eq!(
+            lines.len(),
+            4,
+            "one finding per path per generation: {results:?}"
         );
         assert!(
-            lines[1].contains("/etc/selinux/semanage.conf"),
-            "findings sorted by path: {}",
-            lines[1]
+            lines[0].contains("/etc/ld.so.conf.d/foo.conf")
+                && lines[1].contains("/etc/selinux/semanage.conf")
+                && lines[2].contains("/etc/ld.so.conf.d/foo.conf")
+                && lines[3].contains("/etc/selinux/semanage.conf"),
+            "findings sorted by path within each generation: {lines:?}"
         );
     }
 
