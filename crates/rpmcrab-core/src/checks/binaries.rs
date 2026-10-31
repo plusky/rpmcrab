@@ -7816,6 +7816,7 @@ impl BinariesCheck {
         pkgfile: &PkgFile,
         info: &ReadelfInfo,
         daemon_exec: &DaemonExec,
+        ships_daemon: bool,
         out: &mut Filter,
     ) {
         // An archive charges only a reference:
@@ -8032,7 +8033,7 @@ impl BinariesCheck {
             // Factory corpus measurement recorded in the divergence
             // ledger (#967).
             if info.has_undefined_printed_function_matching(&self.gethostbyname_call_regex)
-                && (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg))
+                && (file_is_privileged(pkgfile) || ships_daemon)
             {
                 add_info(
                     out,
@@ -8124,7 +8125,7 @@ impl BinariesCheck {
                 .undefined_functions
                 .iter()
                 .any(|s| self.shell_call_regex.is_match(s).unwrap_or(false));
-        if (file_is_privileged(pkgfile) || pkg_ships_daemon_units(pkg)) && shell_call {
+        if (file_is_privileged(pkgfile) || ships_daemon) && shell_call {
             add_info(
                 out,
                 Level::Warning,
@@ -8571,6 +8572,11 @@ impl BinariesCheck {
         }
     }
 
+    // The per-file ELF check entry point: package, file, config, output
+    // filter, pre-pass analysis, daemon-exec context, and the hoisted
+    // per-package daemon flag. Eight arguments is the honest shape;
+    // bundling would obscure the four call sites for no behaviour gain.
+    #[allow(clippy::too_many_arguments)]
     fn run_elf_checks(
         &mut self,
         pkg: &Pkg,
@@ -8579,6 +8585,7 @@ impl BinariesCheck {
         out: &mut Filter,
         pre: Option<&ElfAnalysis>,
         daemon_exec: &DaemonExec,
+        ships_daemon: bool,
     ) {
         if self.is_archive && !self.is_standard_archive(pkg, pkgfile, out) {
             self.is_nonstandard_archive = true;
@@ -8626,7 +8633,7 @@ impl BinariesCheck {
             self.check_dependency(pkg, pkgfile, info, l, out);
             self.check_library_dependency_location(pkg, pkgfile, l, out);
         }
-        self.check_security_functions(pkg, pkgfile, info, daemon_exec, out);
+        self.check_security_functions(pkg, pkgfile, info, daemon_exec, ships_daemon, out);
         self.check_go_toolchain(pkg, pkgfile, info, out);
         self.check_bundled_library_provides(pkg, pkgfile, info, out);
         self.check_rpath(pkg, pkgfile, info, out);
@@ -8761,8 +8768,11 @@ impl Check for BinariesCheck {
         }
 
         // Daemon units are read from disk: resolve them once per
-        // package, not once per file.
+        // package, not once per file. The daemon-unit presence gate
+        // rides the same hoist: scanning the file list per file
+        // would make the gethostbyname and shell-call arms O(files).
         let daemon_exec = daemon_exec_binaries(pkg);
+        let ships_daemon = pkg_ships_daemon_units(pkg);
         for (idx, pkgfile) in pkg.files.iter().enumerate() {
             let fname: &str = &pkgfile.name;
             self.check_libtool_wrapper(pkg, fname, pkgfile, out);
@@ -8843,6 +8853,7 @@ impl Check for BinariesCheck {
                 out,
                 analyses[idx].as_ref(),
                 &daemon_exec,
+                ships_daemon,
             );
 
             if self.is_nonstandard_archive {
@@ -20334,6 +20345,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &mut out,
             analysis.as_ref(),
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
         );
         let results = out.results().to_vec();
         assert!(
@@ -20395,6 +20407,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &mut out,
             analysis.as_ref(),
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
         );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "readelf-failed");
@@ -20965,6 +20978,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 &mut out,
                 analysis.as_ref(),
                 &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
             );
             std::fs::remove_file(&path).ok();
             out.results().to_vec()
@@ -23363,6 +23377,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 &pkgfile,
                 info,
                 &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -23404,6 +23419,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 &pkgfile,
                 info,
                 &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -23450,6 +23466,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 &pkgfile,
                 info,
                 &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -23512,6 +23529,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 &pkgfile,
                 info,
                 &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -23566,6 +23584,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 pkgfile,
                 info,
                 &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -23827,6 +23846,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -23845,6 +23865,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -23864,6 +23885,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -23878,6 +23900,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -23898,6 +23921,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         assert!(
@@ -23919,6 +23943,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         assert!(
@@ -23940,6 +23965,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         assert!(
@@ -23960,6 +23986,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -23979,6 +24006,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &archive_file,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         assert!(
@@ -23995,6 +24023,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &archive_file,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -24018,6 +24047,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &archive_file,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         assert!(
@@ -24045,6 +24075,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         assert!(
@@ -24068,6 +24099,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -24087,6 +24119,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -24116,6 +24149,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &archive_file,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -24134,6 +24168,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &archive_file,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         assert!(
@@ -24161,6 +24196,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         assert!(
@@ -24181,6 +24217,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         assert!(
@@ -24202,6 +24239,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -24230,6 +24268,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 &pkgfile,
                 info,
                 &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -24251,6 +24290,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 &pkgfile,
                 &info,
                 &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -24548,6 +24588,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 pkgfile,
                 &info,
                 &daemon_exec_binaries(pkg),
+                pkg_ships_daemon_units(pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -24599,6 +24640,29 @@ description = "explicit priority string bypasses the system crypto policy"
         let bar = syn_file("/usr/bin/bar", "ELF 64-bit LSB executable");
         let bare_pkg = synthetic_pkg("testpkg", "x86_64", vec![bare_unit, bar_entry]);
         assert_eq!(count(&bare_pkg, &bar, &["rand"], &["rand"]), 1);
+
+        // Bare name resolves through a symlink to the unique
+        // executable it points at; the link itself is not a daemon
+        // binary and stays silent.
+        let bare_link_unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/barelink.service",
+            "[Service]\nExecStart=toollink\n",
+        );
+        let mut tool_link = syn_file("/usr/bin/toollink", "symbolic link");
+        tool_link.mode = 0o120777;
+        tool_link.linkto = "realtool".to_string();
+        let mut real_entry = syn_file("/usr/bin/realtool", "ELF 64-bit LSB executable");
+        real_entry.mode = 0o100755;
+        let real = syn_file("/usr/bin/realtool", "ELF 64-bit LSB executable");
+        let bare_link_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![bare_link_unit, tool_link, real_entry],
+        );
+        assert_eq!(count(&bare_link_pkg, &real, &["rand"], &["rand"]), 1);
+        let link_file = syn_file("/usr/bin/toollink", "symbolic link");
+        assert_eq!(count(&bare_link_pkg, &link_file, &["rand"], &["rand"]), 0);
 
         // Specifier in the path makes the unit unresolvable, so the
         // package-level arm survives (fail-open).
@@ -24734,6 +24798,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 pkgfile,
                 &info,
                 &daemon_exec_binaries(pkg),
+                pkg_ships_daemon_units(pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -24758,6 +24823,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &suid,
             &info,
             &daemon_exec_binaries(&bare_pkg),
+            pkg_ships_daemon_units(&bare_pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -24868,6 +24934,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 &pkgfile,
                 &info,
                 &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -24929,6 +24996,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 pkgfile,
                 &info,
                 &daemon_exec_binaries(pkg),
+                pkg_ships_daemon_units(pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -24951,6 +25019,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 pkgfile,
                 &info,
                 &daemon_exec_binaries(pkg),
+                pkg_ships_daemon_units(pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -25086,6 +25155,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 pkgfile,
                 &info,
                 &daemon_exec_binaries(pkg),
+                pkg_ships_daemon_units(pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -25215,6 +25285,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 &pkgfile,
                 info,
                 &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -25236,6 +25307,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 &pkgfile,
                 &info,
                 &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -25280,6 +25352,7 @@ description = "explicit priority string bypasses the system crypto policy"
             &pkgfile,
             &info,
             &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
             &mut out,
         );
         let results = out.results().to_vec();
@@ -25313,6 +25386,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 pkgfile,
                 &info,
                 &daemon_exec_binaries(pkg),
+                pkg_ships_daemon_units(pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -25334,6 +25408,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 pkgfile,
                 &info,
                 &daemon_exec_binaries(pkg),
+                pkg_ships_daemon_units(pkg),
                 &mut out,
             );
             let results = out.results().to_vec();
@@ -25457,6 +25532,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 pkgfile,
                 &info,
                 &daemon_exec_binaries(pkg),
+                pkg_ships_daemon_units(pkg),
                 &mut out,
             );
             let results = out.results().to_vec();

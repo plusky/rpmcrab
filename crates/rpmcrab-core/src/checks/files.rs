@@ -4356,52 +4356,57 @@ impl FilesCheck {
         if st.bindir_exes.is_empty() {
             return;
         }
-        // Ghost names once, not per executable per path: the
-        // per-path linear scan over the file list is the hot
-        // shape for packages with many bindir entries.
-        let ghost_names: HashSet<&str> = pkg
-            .files
-            .iter()
-            .filter(|f| f.is_ghost())
-            .map(|f| f.name.as_str())
-            .collect();
-        // Header digests by file path. Copies with identical digests
-        // cannot cause the reorder hazard the finding names: whichever
-        // bindir comes first in $PATH, the same bytes run. Only
-        // differing copies fire; a missing digest fails closed and
-        // still fires.
-        // Only bindir paths are ever looked up below, so the map is
-        // built over those paths rather than the whole package file list.
-        // And only when some name actually has duplicate paths: the
-        // identical check below is guarded on paths.len() > 1, so a
-        // duplicate-free package builds no map at all.
+        // Ghost membership reuses the package's precomputed set
+        // (`Pkg::ghost_files`, built once from the same
+        // `is_ghost` predicate) instead of rebuilding a fresh set
+        // per package here.
+        // Header digests and file capabilities by file path. Copies
+        // with identical digests and identical capabilities cannot
+        // cause the reorder hazard the finding names: whichever
+        // bindir comes first in $PATH, the same bytes run with the
+        // same privilege. Only differing copies fire; a missing
+        // digest fails closed and still fires, and a capability
+        // difference fires even when the bytes match.
+        // Only bindir paths are ever looked up below, so the maps
+        // are built over those paths rather than the whole package
+        // file list. And only when some name actually has duplicate
+        // paths: the identical check below is guarded on
+        // paths.len() > 1, so a duplicate-free package builds no
+        // maps at all.
         let has_duplicate_paths = st.bindir_exes.values().any(|paths| paths.len() > 1);
-        let digests: HashMap<&str, &str> = if has_duplicate_paths {
-            let bindir_paths: HashSet<&str> = st
-                .bindir_exes
-                .values()
-                .flat_map(|paths| paths.iter().map(|p| p.as_str()))
-                .collect();
-            pkg.files
-                .iter()
-                .filter(|f| bindir_paths.contains(f.name.as_str()))
-                .filter_map(|f| {
-                    f.md5
-                        .as_deref()
-                        .filter(|d| !d.is_empty())
-                        .map(|d| (f.name.as_str(), d))
-                })
-                .collect()
-        } else {
-            HashMap::new()
-        };
+        let (digests, caps): (HashMap<&str, &str>, HashMap<&str, Option<&str>>) =
+            if has_duplicate_paths {
+                let bindir_paths: HashSet<&str> = st
+                    .bindir_exes
+                    .values()
+                    .flat_map(|paths| paths.iter().map(|p| p.as_str()))
+                    .collect();
+                let mut digests = HashMap::new();
+                let mut caps = HashMap::new();
+                for f in pkg
+                    .files
+                    .iter()
+                    .filter(|f| bindir_paths.contains(f.name.as_str()))
+                {
+                    caps.insert(f.name.as_str(), f.filecaps.as_deref());
+                    if let Some(d) = f.md5.as_deref().filter(|d| !d.is_empty()) {
+                        digests.insert(f.name.as_str(), d);
+                    }
+                }
+                (digests, caps)
+            } else {
+                (HashMap::new(), HashMap::new())
+            };
         for (exe, paths) in &st.bindir_exes {
             // Symlink-only entries carry an empty path list; the
             // length guard short-circuits before any indexing.
             let identical = paths.len() > 1
                 && digests.get(paths[0].as_str()).is_some_and(|first| {
                     paths.iter().all(|p| digests.get(p.as_str()) == Some(first))
-                });
+                })
+                && paths
+                    .iter()
+                    .all(|p| caps.get(p.as_str()) == caps.get(paths[0].as_str()));
             if paths.len() > 1 && !identical {
                 // Rendered as a Python list repr, matching the reference
                 // passing `paths` (a list) through filter.py's f-string.
@@ -4431,11 +4436,17 @@ impl FilesCheck {
             // duplicate-executable (pinned by
             // non_executable_in_bin_ghost_executable_registers_for_duplicates).
             let all_ghost = !paths.is_empty()
-                && paths.iter().all(|path| ghost_names.contains(path.as_str()))
+                && paths
+                    .iter()
+                    .all(|path| pkg.ghost_files.contains(path.as_str()))
                 && st
                     .bindir_links
                     .get(exe)
-                    .map(|links| links.iter().all(|path| ghost_names.contains(path.as_str())))
+                    .map(|links| {
+                        links
+                            .iter()
+                            .all(|path| pkg.ghost_files.contains(path.as_str()))
+                    })
                     .unwrap_or(true);
             if !all_ghost
                 && !st.man_basenames.contains(exe)
@@ -17089,6 +17100,80 @@ print("hi")
     }
 
     #[test]
+    fn duplicate_executable_still_fires_for_same_digest_different_filecaps() {
+        // Same bytes but different capabilities run with different
+        // privilege, so the reorder hazard stands: the gate needs
+        // equal digests AND equal filecaps.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                filecaps: Some("cap_net_raw+ep".to_string()),
+                ..mkfile("/usr/bin/mytool", 0o100755, 81)
+            },
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/usr/sbin/mytool", 0o100755, 82)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results.iter().any(|(n, _)| n == "duplicate-executable"),
+            "same digest with different filecaps must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_executable_quiet_for_identical_copies_same_filecaps() {
+        // Same bytes and same capabilities: whichever bindir wins in
+        // $PATH, the same bytes run with the same privilege.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                filecaps: Some("cap_net_raw+ep".to_string()),
+                ..mkfile("/usr/bin/mytool", 0o100755, 83)
+            },
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                filecaps: Some("cap_net_raw+ep".to_string()),
+                ..mkfile("/usr/sbin/mytool", 0o100755, 84)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results.iter().any(|(n, _)| n == "duplicate-executable"),
+            "identical copies with identical filecaps must not fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_executable_still_fires_for_two_identical_one_differing_caps() {
+        // N=3 mixed: two identical copies (digest and caps) plus one
+        // copy with the same digest but different capabilities still
+        // fire, like the differing-digest and missing-digest N=3 pins.
+        let (pkg, _dir) = pkg_with_files(vec![
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                filecaps: Some("cap_net_raw+ep".to_string()),
+                ..mkfile("/usr/bin/mytool", 0o100755, 85)
+            },
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                filecaps: Some("cap_net_raw+ep".to_string()),
+                ..mkfile("/usr/sbin/mytool", 0o100755, 86)
+            },
+            PkgFile {
+                md5: Some("86e8d3af".to_string()),
+                ..mkfile("/bin/mytool", 0o100755, 87)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results.iter().any(|(n, _)| n == "duplicate-executable"),
+            "two identical plus one differing-caps must fire: {results:?}"
+        );
+    }
+
+    #[test]
     fn no_manual_page_still_fires_for_duplicate_executable() {
         // FilesCheck.py:559-564 uses two independent ifs: an exe that is both
         // duplicated and man-pageless must emit both findings. Reverting to
@@ -19291,6 +19376,15 @@ print("hi")
         let mut pkg = Pkg::open(std::path::Path::new(&rpm), std::path::Path::new("/"), true)
             .expect("open fixture header");
         pkg.files = files;
+        // Keep the precomputed ghost set faithful to the replaced
+        // file list: `check_bindir_exes` reuses `pkg.ghost_files`
+        // rather than rebuilding the set from the files.
+        pkg.ghost_files = pkg
+            .files
+            .iter()
+            .filter(|f| f.is_ghost())
+            .map(|f| f.name.clone())
+            .collect();
         let dir = tempfile::TempDir::new().expect("tmpdir");
         (pkg, dir)
     }
