@@ -8072,21 +8072,18 @@ impl BinariesCheck {
         out: &mut Filter,
     ) {
         let floor = go_toolchain_floor();
-        let below_floor: Vec<GoVersion> = info
-            .go_toolchains
-            .iter()
-            .copied()
-            .filter(|version| go_toolchain_below_floor(*version, floor))
-            .collect();
-        if below_floor.is_empty() {
-            return;
-        }
         // Every below-floor version fires, including a versioned
         // toolchain package own tools on a line the floor table
         // does not list: EOL lines fire like any other below-floor
         // version. When a file records several toolchains, the
         // finding reports the oldest below-floor version.
-        let Some(version) = below_floor.iter().copied().min() else {
+        let Some(version) = info
+            .go_toolchains
+            .iter()
+            .copied()
+            .filter(|version| go_toolchain_below_floor(*version, floor))
+            .min()
+        else {
             return;
         };
         let version_text = version.to_string();
