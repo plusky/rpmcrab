@@ -1424,16 +1424,21 @@ mod prebuilt {
         Some(v)
     }
 
-    /// A tar size field: GNU base-256 when the high bit of the first
-    /// byte is set (a big-endian number, for members of 8 GiB or
-    /// more), strict octal otherwise. Overflow past u64 is corrupt
-    /// and ends the walk.
-    fn parse_tar_size(field: &[u8]) -> Option<u64> {
+    /// A tar size field: GNU base-256 only when the first byte is
+    /// exactly `0x80` (positive; the remaining bytes are a big-endian
+    /// number, for members of 8 GiB or more), strict octal otherwise.
+    /// Any other high-bit first byte -- `0xFF` (two's-complement
+    /// negative) included -- is corrupt, not a huge positive.
+    /// Overflow past u64 is corrupt and ends the walk.
+    pub(crate) fn parse_tar_size(field: &[u8]) -> Option<u64> {
         if field.is_empty() {
             return None;
         }
         if field[0] & 0x80 != 0 {
-            let mut value = u64::from(field[0] & 0x7f);
+            if field[0] != 0x80 {
+                return None;
+            }
+            let mut value = 0u64;
             for &b in &field[1..] {
                 value = value.checked_mul(256)?.checked_add(u64::from(b))?;
             }
@@ -3583,6 +3588,53 @@ mod prebuilt_tests {
         );
     }
 
+    /// The bare-.jar seam of the shipped join: a top-level .jar
+    /// Source and a byte-identical binary payload join on digest
+    /// and fire `prebuilt-binary-shipped` (issue #1431). The nested
+    /// jar in `shipped_binaries_fire_and_quiet_shapes_stay_quiet`
+    /// covers the in-archive seam only; the bare-jar source test
+    /// covers the source side only.
+    #[test]
+    fn shipped_bare_jar_source_joins_identical_payload() {
+        use crate::color::Color;
+        let jar = zip_bytes(&[
+            ("com/example/A.class", CLASS),
+            ("com/example/B.class", CLASS),
+        ]);
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_pkg = fixture_src(vec![
+            payload_file(src_dir.path(), "fcprobe.spec", b"Name: fcprobe\n"),
+            payload_file(src_dir.path(), "app-1.0.jar", &jar),
+        ]);
+        let bin_dir = tempfile::tempdir().unwrap();
+        let bin_pkg = fixture_pkg(
+            "fcprobe",
+            vec![payload_file(
+                bin_dir.path(),
+                "/usr/share/shipexp/app-1.0.jar",
+                &jar,
+            )],
+        );
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(&config);
+        Check::check(&mut check, &src_pkg, &config, &mut out);
+        Check::check(&mut check, &bin_pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let findings: Vec<(String, String, Level)> = out
+            .results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect();
+        assert_eq!(
+            shipped_lines(&findings),
+            [
+                "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/share/shipexp/app-1.0.jar Java archive (jar) from app-1.0.jar"
+            ]
+        );
+    }
+
     #[test]
     fn setbadness_in_a_payload_rpmlintrc_fires_per_occurrence() {
         let (pkg, _src, _extract) = source_pkg(&[
@@ -4748,6 +4800,28 @@ mod prebuilt_tests {
         assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
         assert!(outcome.prebuilt[0].1.ends_with("after.o"));
         assert!(outcome.stops.lines().is_empty());
+    }
+
+    #[test]
+    fn base256_size_only_0x80_prefix_is_valid() {
+        // Only the 0x80-prefixed positive form is valid base-256:
+        // 0xFF (two's-complement negative) and any other high-bit
+        // first byte are corrupt, not a huge positive.
+        let mut field = [0u8; 12];
+        field[0] = 0xFF;
+        field[11] = 1;
+        assert_eq!(super::prebuilt::parse_tar_size(&field), None);
+        field[0] = 0x81;
+        assert_eq!(super::prebuilt::parse_tar_size(&field), None);
+        // A short field exposes the old mis-decode directly: the
+        // old seed (0x7f) times 256 plus 1 came out as a positive
+        // 32513 instead of corrupt.
+        assert_eq!(super::prebuilt::parse_tar_size(&[0xFF, 0x01]), None);
+        field[0] = 0x80;
+        field[11] = 5;
+        assert_eq!(super::prebuilt::parse_tar_size(&field), Some(5));
+        // The octal arm is untouched.
+        assert_eq!(super::prebuilt::parse_tar_size(b"000000000010"), Some(8));
     }
 
     #[test]
