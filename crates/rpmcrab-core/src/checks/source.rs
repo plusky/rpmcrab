@@ -990,17 +990,24 @@ mod prebuilt {
         }
     }
 
-    /// Cut a detail path to the storage limit, on a character boundary,
-    /// with a trailing ellipsis (issue #1387).
+    /// Cut a detail path to the storage limit, on character boundaries,
+    /// keeping the head and the most specific tail around one ellipsis
+    /// (issues #1387, #1416): for a long `outer:inner` chain the tail
+    /// is the inner member, so dropping the tail would drop exactly
+    /// the part that identifies the finding.
     fn cut_detail(path: &str) -> String {
         if path.len() <= DETAIL_PATH_LIMIT {
             return path.to_owned();
         }
-        let mut end = DETAIL_PATH_LIMIT;
-        while end > 0 && !path.is_char_boundary(end) {
-            end -= 1;
+        let mut head_end = DETAIL_PATH_LIMIT / 2;
+        while head_end > 0 && !path.is_char_boundary(head_end) {
+            head_end -= 1;
         }
-        format!("{}…", &path[..end])
+        let mut tail_start = path.len() - (DETAIL_PATH_LIMIT - head_end);
+        while tail_start < path.len() && !path.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        format!("{}…{}", &path[..head_end], &path[tail_start..])
     }
 
     /// The three names a buffered archive is known by: the name its
@@ -1135,6 +1142,9 @@ mod prebuilt {
             let Some(root) = vcs_root(name) else {
                 return;
             };
+            // Bound like the other tags store (issue #1416): an
+            // unbounded root would store a path of any length.
+            let root = cut_detail(&root);
             if let Some((entries, bytes)) = self.out.vcs.get_mut(&root) {
                 *entries = entries.saturating_add(1);
                 *bytes = bytes.saturating_add(size);
@@ -1259,6 +1269,14 @@ mod prebuilt {
                 return Ok(n);
             }
             self.rest.read(buf)
+        }
+    }
+
+    impl<R: Read> Peeked<R> {
+        /// Recover the wrapped reader after peeking. The prefix bytes
+        /// were consumed from it, so re-seek before re-reading.
+        fn into_inner(self) -> R {
+            self.rest
         }
     }
 
@@ -1832,6 +1850,11 @@ mod prebuilt {
                 Some(BinaryKind::JavaArchive) => {
                     if depth < MAX_DEPTH - 1 {
                         self.walk_zip_bytes(bytes, mctx, depth + 1, false);
+                    } else {
+                        self.out.stops.record(
+                            "depth-limit",
+                            format!("{mctx}: archive nested past 5 levels is not walked"),
+                        );
                     }
                 }
                 Some(_) => {
@@ -1867,10 +1890,16 @@ mod prebuilt {
                                     path: mctx.to_string(),
                                 });
                             }
+                        } else {
+                            self.out.stops.record(
+                                "depth-limit",
+                                format!("{mctx}: archive nested past 5 levels is not walked"),
+                            );
                         }
                         // Too deep: neither predicate walks in, and
                         // the archive's bytes are not scanned as text
-                        // either - the old walk refused here too.
+                        // either - the old walk refused here too; the
+                        // refusal itself is now logged, not silent.
                     } else {
                         self.scan_bidi(raw_name, bytes, mctx);
                     }
@@ -1905,16 +1934,21 @@ mod prebuilt {
                     self.walk_zip(archive, ctx, depth, prebuilt_active);
                 }
             } else if let Some(kind) = decoder_kind(data) {
-                if depth < MAX_DEPTH - 1
-                    && let Some(decoder) = decode(kind, io::Cursor::new(data))
-                {
-                    let counted = CountingReader::new(decoder, self.budget.clone());
-                    self.walk_streamed(
-                        Box::new(counted),
-                        names.stream,
-                        ctx,
-                        depth + 1,
-                        prebuilt_active,
+                if depth < MAX_DEPTH - 1 {
+                    if let Some(decoder) = decode(kind, io::Cursor::new(data)) {
+                        let counted = CountingReader::new(decoder, self.budget.clone());
+                        self.walk_streamed(
+                            Box::new(counted),
+                            names.stream,
+                            ctx,
+                            depth + 1,
+                            prebuilt_active,
+                        );
+                    }
+                } else {
+                    self.out.stops.record(
+                        "depth-limit",
+                        format!("{ctx}: archive nested past 5 levels is not walked"),
                     );
                 }
             } else {
@@ -1964,7 +1998,7 @@ mod prebuilt {
                         BufferNames {
                             classify: ctx,
                             bidi: stripped,
-                            stream: name,
+                            stream: stripped,
                         },
                         ctx,
                         depth,
@@ -2003,10 +2037,12 @@ mod prebuilt {
         /// anything else is classified from its first bytes and read
         /// no further.
         pub fn walk_file(&mut self, path: &std::path::Path, name: &str) {
-            let Ok(metadata) = std::fs::metadata(path) else {
+            let Ok(file) = std::fs::File::open(path) else {
                 return;
             };
-            let Ok(file) = std::fs::File::open(path) else {
+            // Stat the handle, not the path: the file is opened once,
+            // so the size belongs to the bytes actually walked.
+            let Ok(metadata) = file.metadata() else {
                 return;
             };
             let Some((prefix, peeked)) = peek(file) else {
@@ -2020,10 +2056,9 @@ mod prebuilt {
                     );
                     return;
                 }
-                let mut file = match std::fs::File::open(path) {
-                    Ok(file) => file,
-                    Err(_) => return,
-                };
+                // Reuse the peeked file: the peek consumed its first
+                // 512 bytes, so seek back before handing it to zip.
+                let mut file = peeked.into_inner();
                 if file.seek(SeekFrom::Start(0)).is_err() {
                     return;
                 }
@@ -3833,6 +3868,112 @@ mod prebuilt_tests {
         }
         let outcome = walk_buffer(&hundred, "chain.gz");
         assert!(outcome.prebuilt.is_empty(), "{:?}", outcome.prebuilt);
+    }
+
+    #[test]
+    fn prebuilt_gzip_zip_chain_fires() {
+        // A gzip-compressed zip is walked like a plain zip: its ELF
+        // member fires prebuilt (issue #1416).
+        let z = zip_bytes(&[("lib/foo.so", ELF)]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("outer.zip.gz", gzip_bytes(&z)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources outer.zip.gz: lib/foo.so ELF binary"
+            ]
+        );
+    }
+
+    #[test]
+    fn bidi_suffix_stripping_accumulates_across_layers() {
+        // A doubly-gzipped .txt stays quiet: stripping accumulates, so
+        // the second layer strips to the bare .txt stem, which the
+        // exclusion honors (issue #1416). A doubly-gzipped .md with
+        // the same content still fires: the exclusion is name-based.
+        let text = "x \u{202E}y\n".as_bytes();
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("notes.txt.gz.gz", gzip_bytes(&gzip_bytes(text))),
+            ("notes.md.gz.gz", gzip_bytes(&gzip_bytes(text))),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            archive_lines(&findings, "source-archive-contains-bidi-control"),
+            [
+                "prebuilt-test.src: W: source-archive-contains-bidi-control notes.md.gz.gz line 1, column 3 U+202E RIGHT-TO-LEFT OVERRIDE"
+            ],
+        );
+    }
+
+    #[test]
+    fn prebuilt_nesting_depth_boundary_plain_tars() {
+        // Five nested plain tars reach the ELF; a sixth level is
+        // refused, and the refusal itself is logged, not silent
+        // (issue #1416).
+        let mut five = ELF.to_vec();
+        for i in 0..5 {
+            five = tarball(&[(format!("level{i}.tar").as_str(), &five)]);
+        }
+        let outcome = walk_tar_stream_bytes(std::io::Cursor::new(five), "levels.tar");
+        assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
+        assert!(
+            outcome
+                .stops
+                .lines()
+                .iter()
+                .all(|l| !l.contains("nested past 5 levels")),
+            "{:?}",
+            outcome.stops.lines()
+        );
+        let mut six = ELF.to_vec();
+        for i in 0..6 {
+            six = tarball(&[(format!("level{i}.tar").as_str(), &six)]);
+        }
+        let outcome = walk_tar_stream_bytes(std::io::Cursor::new(six), "levels.tar");
+        assert!(outcome.prebuilt.is_empty(), "{:?}", outcome.prebuilt);
+        assert!(
+            outcome
+                .stops
+                .lines()
+                .iter()
+                .any(|l| l.contains("nested past 5 levels")),
+            "{:?}",
+            outcome.stops.lines()
+        );
+    }
+
+    #[test]
+    fn cut_detail_keeps_the_most_specific_tail() {
+        // A 1201-byte chain path keeps its head and its tail around
+        // one ellipsis; the old tail-drop shape would end in the
+        // middle of the chain instead (issue #1416).
+        let long = format!("{}:{}", "a".repeat(600), "b".repeat(600));
+        let outcome = walk_buffer(ELF, &long);
+        assert_eq!(outcome.prebuilt.len(), 1);
+        let expected = format!("{}…{}", "a".repeat(512), "b".repeat(512));
+        assert_eq!(outcome.prebuilt[0].1, expected);
+    }
+
+    #[test]
+    fn vcs_roots_are_bound_like_other_tags() {
+        // A pax path whose .git root runs past 1024 bytes stores the
+        // cut form, not the unbounded root (issue #1416).
+        let long = format!("{}/.git/config", "x".repeat(1100));
+        let mut x = Vec::new();
+        x.extend_from_slice(&pax_record("path", &long));
+        let tar = tarball_pax(&[PaxMember {
+            x: &x,
+            ..PaxMember::regular("short", b"vcs content\n")
+        }]);
+        let outcome = walk_buffer(&tar, "t.tar");
+        let expected = format!("{}…{}{}", "x".repeat(512), "x".repeat(507), "/.git");
+        assert_eq!(outcome.vcs.len(), 1, "{:?}", outcome.vcs);
+        assert_eq!(outcome.vcs.keys().next().unwrap(), &expected);
+        assert_eq!(outcome.vcs.values().next().unwrap(), &(1, 12));
     }
 
     #[test]
