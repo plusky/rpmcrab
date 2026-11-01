@@ -2358,16 +2358,16 @@ fn parse_bundled_c_witnesses(raw: &str) -> Vec<BundledCEntry> {
             let name = field("name");
             assert!(!name.is_empty(), "bundled C witness name is non-empty");
             assert!(
+                !accepted_names.is_empty(),
+                "bundled C witness accepted_names is non-empty"
+            );
+            assert!(
                 accepted_names.iter().all(|a| !a.is_empty()),
                 "bundled C witness accepted names are non-empty"
             );
             assert!(
                 accepted_names.contains(&srpm),
                 "bundled C witness accepted_names includes its srpm"
-            );
-            assert!(
-                !accepted_names.is_empty(),
-                "bundled C witness lists at least one accepted name"
             );
             let library_soname_prefix = field("library_soname_prefix");
             assert!(
@@ -2398,7 +2398,8 @@ fn parse_bundled_c_witnesses(raw: &str) -> Vec<BundledCEntry> {
 }
 
 /// Scan one ELF's read-only sections for the witness-table
-/// libraries' bytes. The scope is the same read-only scan the
+/// libraries' bytes (rpmcrab#1397). The scope is the same read-only
+/// scan the
 /// `.dep-v0` path uses (SHT_PROGBITS without SHF_WRITE): the same
 /// bytes in a writable section are runtime data and prove nothing.
 /// An ELF with a `.dep-v0` section stays silent here: the shipped
@@ -26970,14 +26971,44 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn bundled_c_witness_fires_for_sibling_without_provide() {
-        // The check sees one package at a time: a subpackage that
-        // declares nothing fires even when a sibling subpackage
-        // declares bundled(jemalloc).
+    fn bundled_c_witness_fires_for_lone_package_without_provide() {
+        // The check sees one package at a time: this lone package
+        // declares nothing and fires; no sibling subpackage is
+        // modeled here.
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
         let mut info = syn_info();
         info.bundled_c_witnesses = vec![witnessed("jemalloc")];
         assert_eq!(bundled_lines(&pkg, &info).len(), 1);
+    }
+
+    #[test]
+    fn bundled_c_witness_trailing_spaces_are_pinned() {
+        // Both witness strings end with a load-bearing space: the
+        // byte-substring match fails if an editor or linter strips
+        // it (issues #1422, #1426).
+        let entries = bundled_c_witnesses();
+        let jemalloc = entries
+            .iter()
+            .find(|e| e.name == "jemalloc")
+            .expect("jemalloc entry");
+        let mimalloc = entries
+            .iter()
+            .find(|e| e.name == "mimalloc")
+            .expect("mimalloc entry");
+        assert_eq!(jemalloc.witness, "<jemalloc>: ");
+        assert_eq!(mimalloc.witness, "mimalloc: warning: ");
+    }
+
+    fn witness_table(library_fields: &str) -> String {
+        format!("as_of = \"2026-01-01\"\n\n[[library]]\n{library_fields}")
+    }
+
+    #[test]
+    #[should_panic(expected = "bundled C witness accepted_names is non-empty")]
+    fn witness_table_rejects_an_empty_accepted_names_list() {
+        parse_bundled_c_witnesses(&witness_table(
+            "name = \"jemalloc\"\nsrpm = \"jemalloc\"\naccepted_names = []\nlibrary_soname_prefix = \"libjemalloc.so.\"\nwitness = \"<jemalloc>: \"\n",
+        ));
     }
 
     #[test]
@@ -27186,7 +27217,7 @@ description = "explicit priority string bypasses the system crypto policy"
             h[4..8].copy_from_slice(&1u32.to_le_bytes());
             h[16..20].copy_from_slice(&offs[i].to_le_bytes());
             h[20..24].copy_from_slice(&(data.len() as u32).to_le_bytes());
-            h[24..28].copy_from_slice(&1u32.to_le_bytes());
+            h[24..28].copy_from_slice(&0u32.to_le_bytes()); // sh_link: 0 for PROGBITS/STRTAB
             shdrs.extend(h);
         }
         {
@@ -27195,7 +27226,7 @@ description = "explicit priority string bypasses the system crypto policy"
             h[4..8].copy_from_slice(&3u32.to_le_bytes());
             h[16..20].copy_from_slice(&shstrtab_off.to_le_bytes());
             h[20..24].copy_from_slice(&(shstrtab.len() as u32).to_le_bytes());
-            h[24..28].copy_from_slice(&1u32.to_le_bytes());
+            h[24..28].copy_from_slice(&0u32.to_le_bytes()); // sh_link: 0 for PROGBITS/STRTAB
             shdrs.extend(h);
         }
         buf.extend(shdrs);
