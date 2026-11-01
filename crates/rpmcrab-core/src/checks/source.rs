@@ -3835,6 +3835,48 @@ mod prebuilt_tests {
         assert_eq!(super::sha256_reader(file), Some(sha256_hex(ELF)));
     }
 
+    /// Cross-hit pin (issue #1444): the self hit is one hit carrying
+    /// both the Source path and the file's digest. A path-only hit on
+    /// one member plus a digest-only hit on another must NOT suppress
+    /// the whole-file record: reverting to two disjoint `any()`s
+    /// suppresses it and fails this test. The fixture is a compressed
+    /// stream on purpose: only a decoder arm's hit covers decompressed
+    /// bytes, so the self-hit digest comes from hashing the file
+    /// rather than from hit reuse.
+    #[test]
+    fn shipped_self_hit_requires_same_hit_path_and_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let gz = gzip_bytes(ELF);
+        let f = payload_file(dir.path(), "single.gz", &gz);
+        let file_digest = sha256_hex(&gz);
+        let pkg = fixture_src(vec![]);
+        let mut state = ShippedState::default();
+        let hits = vec![
+            prebuilt::Hit {
+                kind: prebuilt::BinaryKind::Elf,
+                path: f.name.clone(),
+                sha256: sha256_hex(ELF),
+            },
+            prebuilt::Hit {
+                kind: prebuilt::BinaryKind::Elf,
+                path: "single.gz: inner.o".to_string(),
+                sha256: file_digest.clone(),
+            },
+        ];
+        record_shipped_source(&mut state, &pkg, &f, &hits, &[]);
+        let recs = state
+            .sources
+            .get("fcprobe-1-1.src.rpm")
+            .expect("source package key present");
+        let whole = recs
+            .get(&file_digest)
+            .expect("member record under the file digest");
+        assert!(
+            whole.iter().any(|r| r.display == f.name),
+            "cross hits must not suppress the whole-file record: {whole:?}"
+        );
+    }
+
     /// Run-scoped verdict through `Check::check` + `after_checks`:
     /// shipped files byte-identical to source binaries fire; test
     /// data, non-binaries, firmware paths, and binaries of a foreign
