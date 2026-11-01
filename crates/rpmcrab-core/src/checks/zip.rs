@@ -904,7 +904,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn unsupported_read_error_needs_the_method_message() {
         // Only the Unsupported-kind error carrying zip's own method
         // text maps to Unreadable: any other Unsupported source, or
@@ -927,6 +926,7 @@ mod tests {
         assert!(!is_unsupported_compression(&other_kind));
     }
 
+    #[test]
     fn unsupported_compression_method_is_unable_to_read_warning() {
         // Method 93 (zstd): the reader is built with stored and
         // deflate only, so the entry cannot be inflated and no CRC

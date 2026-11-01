@@ -102,11 +102,19 @@ fn sha256_hex(data: &[u8]) -> String {
 
 /// Hex sha256 of a file's bytes, or `None` when it cannot be read.
 fn sha256_file(path: &str) -> Option<String> {
-    let mut file = std::fs::File::open(path).ok()?;
+    let file = std::fs::File::open(path).ok()?;
+    sha256_reader(file)
+}
+
+/// Hex sha256 of a reader's bytes, or `None` on a read error: the
+/// handle form of `sha256_file`, so a caller that already opened
+/// the file hashes the open handle instead of resolving the path
+/// a second time (issue #1443).
+fn sha256_reader<R: std::io::Read>(mut r: R) -> Option<String> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
     loop {
-        let n = std::io::Read::read(&mut file, &mut buf).ok()?;
+        let n = std::io::Read::read(&mut r, &mut buf).ok()?;
         if n == 0 {
             break;
         }
@@ -119,17 +127,6 @@ fn sha256_file(path: &str) -> Option<String> {
             .map(|b| format!("{b:02x}"))
             .collect::<String>(),
     )
-}
-
-/// The digest a binary payload file joins on: the header digest when
-/// FILEDIGESTALGO is 8, else a sha256 computed over the file (a header
-/// digest under any other algorithm cannot join with sha256 source
-/// records). `None` when the file cannot be hashed.
-fn binary_digest(algo_is_8: bool, md5: &str, path: &str) -> Option<String> {
-    if algo_is_8 {
-        return Some(md5.to_string());
-    }
-    sha256_file(path)
 }
 
 /// Whether a payload file's first 512 bytes could match a source
@@ -444,10 +441,14 @@ impl SourceCheck {
                 &outcome.archives,
             );
             // Grouped kinds (ar, PE, wasm) collapse per archive chain
-            // (the full outer:inner chain, not the top-level archive alone),
+            // (the outer:inner chain, not the top-level archive alone),
             // directory and kind; every other hit keeps
             // its per-member line, as do bare Sources, which have no
-            // archive chain.
+            // archive chain. The chain, directory and first path are
+            // cut at storage (issue #1443): member names are
+            // attacker-controlled, so storing full chains up to the
+            // 25k cap retains unbounded bytes; distinct chains
+            // sharing a cut merge into one group.
             let mut groups: Vec<(String, String, prebuilt::BinaryKind, usize, String)> = Vec::new();
             for (kind, path) in &outcome.prebuilt {
                 let kind = *kind;
@@ -472,9 +473,9 @@ impl SourceCheck {
                     );
                     continue;
                 };
-                let archive = archive.to_string();
+                let archive = prebuilt::cut_detail(archive);
                 let dir = match member.rfind('/') {
-                    Some(i) => member[..i].to_string(),
+                    Some(i) => prebuilt::cut_detail(&member[..i]),
                     None => String::new(),
                 };
                 match groups
@@ -482,7 +483,7 @@ impl SourceCheck {
                     .find(|(a, d, k, _, _)| *a == archive && *d == dir && *k == kind)
                 {
                     Some(g) => g.3 += 1,
-                    None => groups.push((archive, dir, kind, 1, path.clone())),
+                    None => groups.push((archive, dir, kind, 1, prebuilt::cut_detail(path))),
                 }
             }
             for (archive, dir, kind, count, first_path) in groups {
@@ -511,7 +512,7 @@ impl SourceCheck {
                     );
                 }
             }
-            for (root, (entries, bytes)) in &outcome.vcs {
+            for ((root, _hash), (entries, bytes)) in &outcome.vcs {
                 add_info(
                     out,
                     Level::Warning,
@@ -671,7 +672,7 @@ mod prebuilt {
     /// that one closing line gives the count.
     const LOG_LINES_PER_KIND: usize = 10;
     /// Detail paths stored in findings are cut to this many bytes
-    /// (issue #1387), with a trailing ellipsis.
+    /// (issue #1387), keeping head and tail around one ellipsis.
     const DETAIL_PATH_LIMIT: usize = 1024;
     /// Bytes of a member's head kept for the git-lfs test.
     const HEAD_BYTES: usize = 1024;
@@ -797,7 +798,7 @@ mod prebuilt {
         if !(1..=32).contains(&n) {
             return false;
         }
-        let Some(table_end) = 8usize.checked_add(n.checked_mul(20).unwrap_or(usize::MAX)) else {
+        let Some(table_end) = 8usize.checked_add(n.saturating_mul(20)) else {
             return false;
         };
         if table_end > data.len() {
@@ -891,10 +892,10 @@ mod prebuilt {
     /// #1387): bytes left, plus whether a read already hit the end of
     /// it. The flag distinguishes a budget stop from a genuinely
     /// truncated stream, which ends the walk silently like today.
-    struct BudgetState {
-        left: u64,
-        hit: bool,
-        memlimit_hit: bool,
+    pub(crate) struct BudgetState {
+        pub(crate) left: u64,
+        pub(crate) hit: bool,
+        pub(crate) memlimit_hit: bool,
     }
 
     /// A reader that counts every byte toward the walk's budget and
@@ -902,13 +903,13 @@ mod prebuilt {
     /// outputs and top-level plain-tar streams only: buffer re-reads
     /// and zip metadata are not new bytes and are not counted, while
     /// zip entry bytes are charged by hand in the zip walk.
-    struct CountingReader<R: Read> {
+    pub(crate) struct CountingReader<R: Read> {
         inner: R,
         budget: Rc<RefCell<BudgetState>>,
     }
 
     impl<R: Read> CountingReader<R> {
-        fn new(inner: R, budget: Rc<RefCell<BudgetState>>) -> Self {
+        pub(crate) fn new(inner: R, budget: Rc<RefCell<BudgetState>>) -> Self {
             CountingReader { inner, budget }
         }
     }
@@ -929,7 +930,14 @@ mod prebuilt {
             };
             match self.inner.read(&mut buf[..want]) {
                 Ok(n) => {
-                    self.budget.borrow_mut().left -= n as u64;
+                    // Saturating: a reentrant inner layer (a
+                    // double-wrapped counting reader sharing this
+                    // budget) may have spent the budget already, so
+                    // the decrement must clamp at zero, never
+                    // underflow (issue #1443). No double-wrapped
+                    // call site exists today; this is defensive.
+                    let mut state = self.budget.borrow_mut();
+                    state.left = state.left.saturating_sub(n as u64);
                     Ok(n)
                 }
                 Err(e) => {
@@ -1005,7 +1013,7 @@ mod prebuilt {
         /// further findings nor further shipped records.
         pub shipped: Vec<Hit>,
         pub archives: Vec<ArchiveHits>,
-        pub vcs: BTreeMap<String, (usize, u64)>,
+        pub vcs: BTreeMap<(String, u64), (usize, u64)>,
         pub lfs: Vec<String>,
         pub bidi: Vec<BidiHit>,
         pub stops: StopLog,
@@ -1181,7 +1189,7 @@ mod prebuilt {
                 return;
             }
             self.caps.prebuilt += 1;
-            // Grouping works on full paths and cuts at emission; the
+            // Grouping works on cut chains and cuts at emission; the
             // shipped-join record keeps the cut path, as before.
             self.out.prebuilt.push((kind, ctx.to_string()));
             self.out.shipped.push(Hit {
@@ -1198,10 +1206,15 @@ mod prebuilt {
             let Some(root) = vcs_root(name) else {
                 return;
             };
-            // Bound like the other tags store (issue #1416): an
-            // unbounded root would store a path of any length.
-            let root = cut_detail(&root);
-            if let Some((entries, bytes)) = self.out.vcs.get_mut(&root) {
+            // Keyed by the cut form plus a hash of the full root
+            // (issue #1443): cutting before lookup merged distinct
+            // long roots sharing a 512-byte head+tail, summing their
+            // totals into one cap slot. The cut keeps the stored key
+            // bounded like the other tags store (issue #1416); the
+            // hash keeps distinct roots distinct. Emission shows the
+            // cut form.
+            let key = vcs_key(&root);
+            if let Some((entries, bytes)) = self.out.vcs.get_mut(&key) {
                 *entries = entries.saturating_add(1);
                 *bytes = bytes.saturating_add(size);
                 return;
@@ -1217,7 +1230,7 @@ mod prebuilt {
                 return;
             }
             self.caps.vcs_roots += 1;
-            self.out.vcs.insert(root, (1, size));
+            self.out.vcs.insert(key, (1, size));
         }
 
         fn test_lfs(&mut self, name: &str, head: &[u8]) {
@@ -1947,7 +1960,10 @@ mod prebuilt {
                     } else {
                         self.out.stops.record(
                             "depth-limit",
-                            format!("{mctx}: archive nested past 5 levels is not walked"),
+                            format!(
+                                "{}: archive nested past 5 levels is not walked",
+                                cut_detail(mctx)
+                            ),
                         );
                     }
                 }
@@ -1987,7 +2003,10 @@ mod prebuilt {
                         } else {
                             self.out.stops.record(
                                 "depth-limit",
-                                format!("{mctx}: archive nested past 5 levels is not walked"),
+                                format!(
+                                    "{}: archive nested past 5 levels is not walked",
+                                    cut_detail(mctx)
+                                ),
                             );
                         }
                         // Too deep: neither predicate walks in, and
@@ -2042,7 +2061,10 @@ mod prebuilt {
                 } else {
                     self.out.stops.record(
                         "depth-limit",
-                        format!("{ctx}: archive nested past 5 levels is not walked"),
+                        format!(
+                            "{}: archive nested past 5 levels is not walked",
+                            cut_detail(ctx)
+                        ),
                     );
                 }
             } else {
@@ -2239,6 +2261,18 @@ mod prebuilt {
     /// (`.gitignore`, `.gitmodules`, `.github/`) and a `sub/.git`
     /// gitlink file do not match: the tree component must be a
     /// directory.
+    /// The VCS map key for a full root: its cut form plus the
+    /// first 8 bytes of its SHA-256, so distinct long roots sharing
+    /// a head+tail stay distinct entries (issue #1443).
+    pub(crate) fn vcs_key(full_root: &str) -> (String, u64) {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(full_root.as_bytes());
+        let digest = hasher.finalize();
+        let hash = u64::from_be_bytes(digest[..8].try_into().unwrap());
+        (cut_detail(full_root), hash)
+    }
+
     fn vcs_root(name: &str) -> Option<String> {
         let prefixed = format!("/{name}");
         let mut best: Option<(usize, String)> = None;
@@ -2643,13 +2677,25 @@ impl Check for SourceCheck {
                 continue;
             };
             let mut head = [0u8; 512];
-            let head_len = std::fs::File::open(&f.path)
-                .and_then(|mut file| std::io::Read::read(&mut file, &mut head))
-                .unwrap_or(0);
+            let Ok(mut file) = std::fs::File::open(&f.path) else {
+                continue;
+            };
+            let head_len = std::io::Read::read(&mut file, &mut head).unwrap_or(0);
             if !payload_could_match(&f.name, &head[..head_len]) {
                 continue;
             }
-            let Some(digest) = binary_digest(algo_is_8, md5, &f.path) else {
+            // Reuse the opened handle for the hash (issue #1443):
+            // the file was already opened for the head read, so
+            // hashing resolves the path no second time -- and the
+            // hashed bytes are the opened file's, not a second
+            // lookup's.
+            let Some(digest) = (if algo_is_8 {
+                Some(md5.clone())
+            } else {
+                std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(0))
+                    .ok()
+                    .and_then(|_| sha256_reader(&mut file))
+            }) else {
                 continue;
             };
             self.shipped.binaries.push((
@@ -3533,23 +3579,17 @@ mod prebuilt_tests {
         assert!(!is_test_path("s.tar.gz"));
     }
 
-    /// The digest rule: algorithm 8 trusts the header digest without
-    /// touching disk; any other algorithm hashes the payload file.
+    /// The handle hash (issue #1443): sha256_reader hashes an open
+    /// handle's bytes. The header-digest-vs-hash rule itself now
+    /// lives inline in check_binary and is covered by the
+    /// shipped-join tests.
     #[test]
-    fn shipped_binary_digest_prefers_header_algo_8() {
+    fn sha256_reader_hashes_open_handle_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let disk = dir.path().join("blob.bin");
         std::fs::write(&disk, ELF).unwrap();
-        let path = disk.to_string_lossy().into_owned();
-        assert_eq!(
-            binary_digest(true, "deadbeef", "/nonexistent/path"),
-            Some("deadbeef".to_string())
-        );
-        assert_eq!(
-            binary_digest(false, "deadbeef", &path),
-            Some(sha256_hex(ELF))
-        );
-        assert_eq!(binary_digest(false, "deadbeef", "/nonexistent/path"), None);
+        let file = std::fs::File::open(&disk).unwrap();
+        assert_eq!(super::sha256_reader(file), Some(sha256_hex(ELF)));
     }
 
     /// Run-scoped verdict through `Check::check` + `after_checks`:
@@ -4088,6 +4128,65 @@ mod prebuilt_tests {
     }
 
     #[test]
+    fn grouped_chain_is_cut_at_storage() {
+        // Grouping stores cut chains (issue #1443): two ar members
+        // under a 1100-byte inner-archive chain group into one line
+        // whose chain is the head+tail cut, not the full name.
+        let ar = ar_archive("/", b"\x00\x00\x00\x01");
+        let inner = tarball(&[("m/libf.a", &ar), ("m/libg.a", &ar)]);
+        let long_inner = format!("d/{}.tar.gz", "x".repeat(1100));
+        let x = pax_record("path", &long_inner);
+        let outer = tarball_pax(&[PaxMember {
+            x: &x,
+            ..PaxMember::regular("short", &gzip_bytes(&inner))
+        }]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.tar.gz", gzip_bytes(&outer)),
+        ]);
+        let lines = prebuilt_lines(&run_source(&pkg));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("(2 files)"), "{}", lines[0]);
+        assert!(lines[0].contains('\u{2026}'), "{}", lines[0]);
+        assert!(lines[0].len() < 1300, "{}", lines[0]);
+        assert!(!lines[0].contains(&"x".repeat(1100)), "{}", lines[0]);
+    }
+
+    #[test]
+    fn depth_limit_stop_cuts_its_chain() {
+        // The depth-limit stop embeds the chain cut (issue #1443):
+        // a sixth nesting level under a 1100-byte pax name logs the
+        // head+tail cut, not the full chain.
+        let mut six = ELF.to_vec();
+        for i in 0..6 {
+            if i == 2 {
+                let long = format!("{}/level2.tar", "x".repeat(1100));
+                let x = pax_record("path", &long);
+                six = tarball_pax(&[PaxMember {
+                    x: &x,
+                    ..PaxMember::regular("short", &six)
+                }]);
+            } else {
+                six = tarball(&[(format!("level{i}.tar").as_str(), &six)]);
+            }
+        }
+        let outcome = walk_tar_stream_bytes(std::io::Cursor::new(six), "levels.tar");
+        let stop_lines = outcome.stops.lines();
+        let depth_lines: Vec<&String> = stop_lines
+            .iter()
+            .filter(|l| l.contains("nested past 5 levels"))
+            .collect();
+        assert_eq!(depth_lines.len(), 1, "{stop_lines:?}");
+        assert!(depth_lines[0].contains('\u{2026}'), "{}", depth_lines[0]);
+        assert!(depth_lines[0].len() < 1300, "{}", depth_lines[0]);
+        assert!(
+            !depth_lines[0].contains(&"x".repeat(1100)),
+            "{}",
+            depth_lines[0]
+        );
+    }
+
+    #[test]
     fn cut_detail_keeps_the_most_specific_tail() {
         // A 1201-byte chain path keeps its head and its tail around
         // one ellipsis; the old tail-drop shape would end in the
@@ -4114,9 +4213,64 @@ mod prebuilt_tests {
         }]);
         let outcome = walk_buffer(&tar, "t.tar");
         let expected = format!("{}…{}{}", "x".repeat(512), "x".repeat(507), "/.git");
+        let full_root = format!("{}/.git", "x".repeat(1100));
         assert_eq!(outcome.vcs.len(), 1, "{:?}", outcome.vcs);
-        assert_eq!(outcome.vcs.keys().next().unwrap(), &expected);
+        assert_eq!(
+            outcome.vcs.keys().next().unwrap(),
+            &super::prebuilt::vcs_key(&full_root)
+        );
+        assert_eq!(outcome.vcs.keys().next().unwrap().0, expected);
         assert_eq!(outcome.vcs.values().next().unwrap(), &(1, 12));
+    }
+
+    #[test]
+    fn vcs_distinct_long_roots_sharing_a_cut_stay_distinct() {
+        // Two roots sharing the 512-byte head+tail cut but differing
+        // in the middle must not merge their totals (issue #1443):
+        // the (cut, hash) key keeps them as two entries.
+        let root_a = format!("{}AAAA{}/.git", "x".repeat(512), "y".repeat(507));
+        let root_b = format!("{}BBBB{}/.git", "x".repeat(512), "y".repeat(507));
+        let path_a = format!("{root_a}/config");
+        let path_b = format!("{root_b}/config");
+        let xa = pax_record("path", &path_a);
+        let xb = pax_record("path", &path_b);
+        let tar = tarball_pax(&[
+            PaxMember {
+                x: &xa,
+                ..PaxMember::regular("short", b"vcs content\n")
+            },
+            PaxMember {
+                x: &xb,
+                ..PaxMember::regular("short", b"vcs content\n")
+            },
+        ]);
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert_eq!(outcome.vcs.len(), 2, "{:?}", outcome.vcs);
+        assert_eq!(outcome.vcs[&super::prebuilt::vcs_key(&root_a)], (1, 12));
+        assert_eq!(outcome.vcs[&super::prebuilt::vcs_key(&root_b)], (1, 12));
+    }
+
+    #[test]
+    fn counting_reader_double_wrap_saturates_instead_of_underflowing() {
+        // Defensive (issue #1443): no double-wrapped call site
+        // exists today, but if an inner counting layer spends the
+        // budget first, the outer decrement must saturate at zero
+        // instead of underflowing on `left -= n`.
+        use std::cell::RefCell;
+        use std::io::Read as _;
+        use std::rc::Rc;
+        let budget = Rc::new(RefCell::new(super::prebuilt::BudgetState {
+            left: 10,
+            hit: false,
+            memlimit_hit: false,
+        }));
+        let data = b"0123456789ABCDEF";
+        let inner = super::prebuilt::CountingReader::new(&data[..], budget.clone());
+        let mut outer = super::prebuilt::CountingReader::new(inner, budget.clone());
+        let mut buf = [0u8; 16];
+        let n = outer.read(&mut buf).unwrap();
+        assert_eq!(n, 10);
+        assert_eq!(budget.borrow().left, 0);
     }
 
     #[test]
@@ -4689,8 +4843,8 @@ mod prebuilt_tests {
         ]);
         let outcome = walk_buffer(&tar, "t.tar");
         assert_eq!(outcome.vcs.len(), 2);
-        assert_eq!(outcome.vcs["a/.git"], (1, 2));
-        assert_eq!(outcome.vcs["a/CVS"], (1, 1));
+        assert_eq!(outcome.vcs[&super::prebuilt::vcs_key("a/.git")], (1, 2));
+        assert_eq!(outcome.vcs[&super::prebuilt::vcs_key("a/CVS")], (1, 1));
         assert!(outcome.lfs.is_empty());
     }
 
@@ -4911,7 +5065,7 @@ mod prebuilt_tests {
         assert_eq!(super::prebuilt::parse_tar_size(&field), None);
         field[0] = 0x81;
         assert_eq!(super::prebuilt::parse_tar_size(&field), None);
-        // A short field exposes the old mis-decode directly: the
+        // A short field exposes the old incorrect decode directly: the
         // old seed (0x7f) times 256 plus 1 came out as a positive
         // 32513 instead of corrupt.
         assert_eq!(super::prebuilt::parse_tar_size(&[0xFF, 0x01]), None);
@@ -4951,7 +5105,10 @@ mod prebuilt_tests {
         .chain(std::io::Cursor::new(small));
         let outcome = walk_tar_stream_bytes(stream, "big.tar");
         assert_eq!(outcome.vcs.len(), 1);
-        assert_eq!(outcome.vcs["llama.cpp/.git"], (2, size + 5));
+        assert_eq!(
+            outcome.vcs[&super::prebuilt::vcs_key("llama.cpp/.git")],
+            (2, size + 5)
+        );
     }
 
     /// Patch one central-directory entry's uncompressed size: entry
@@ -5004,7 +5161,10 @@ mod prebuilt_tests {
         patch_central_uncompressed(&mut z, 1, 100);
         let outcome = walk_buffer(&z, "sat.zip");
         assert_eq!(outcome.vcs.len(), 1);
-        assert_eq!(outcome.vcs["repo/.git"], (2, u64::MAX));
+        assert_eq!(
+            outcome.vcs[&super::prebuilt::vcs_key("repo/.git")],
+            (2, u64::MAX)
+        );
     }
 
     #[test]
