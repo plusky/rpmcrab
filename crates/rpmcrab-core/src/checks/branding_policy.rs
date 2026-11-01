@@ -1146,6 +1146,17 @@ mod tests {
         assert!(excessive_suggests(&pkg).is_empty(), "{:?}", run(&pkg));
     }
 
+    // A rich Suggests naming only own-doc, without a version,
+    // pulls in nothing but the package's own docs, so it is quiet
+    // like the versioned form.
+    #[test]
+    fn rich_unversioned_own_doc_suggests_is_quiet() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.suggests = vec![dep("(bla-theme-openSUSE-doc)", 0)];
+        assert!(excessive_suggests(&pkg).is_empty(), "{:?}", run(&pkg));
+    }
+
     // A rich Suggests naming another package's docs with a version
     // is not the plain own-doc name, so it still fires.
     #[test]
