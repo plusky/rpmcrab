@@ -689,7 +689,7 @@ mod prebuilt {
     pub const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
     /// Cap on one archive entry's bytes: a member up to this size is
     /// buffered; a larger one is read through (see the module doc).
-    const MAX_ENTRY_BYTES: usize = 64 * 1024 * 1024;
+    pub const MAX_ENTRY_BYTES: usize = 64 * 1024 * 1024;
     /// Nesting limit for archives inside archives: the top-level archive
     /// is depth 0, and an archive nested inside a depth-3 archive is the
     /// deepest one opened, so five levels are walked in all.
@@ -2754,13 +2754,27 @@ impl Check for SourceCheck {
             if !payload_could_match(&f.name, &head) {
                 continue;
             }
+            // Mirror the source side's 64 MiB entry cap: a payload
+            // file above it can match no source record, so never hash
+            // it. The header size wins when known; otherwise the
+            // on-disk length decides (fixtures carry no header size).
+            let too_big = f
+                .size
+                .map(|size| size > prebuilt::MAX_ENTRY_BYTES as u64)
+                .unwrap_or(false)
+                || std::fs::metadata(&f.path)
+                    .map(|m| m.len() > prebuilt::MAX_ENTRY_BYTES as u64)
+                    .unwrap_or(false);
+            if too_big {
+                continue;
+            }
             // Reuse the opened handle for the hash (issue #1443):
             // the file was already opened for the head read, so
             // hashing resolves the path no second time -- and the
             // hashed bytes are the opened file's, not a second
             // lookup's.
             let Some(digest) = (if algo_is_8 {
-                Some(md5.clone())
+                Some(md5.to_string())
             } else {
                 std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(0))
                     .ok()
