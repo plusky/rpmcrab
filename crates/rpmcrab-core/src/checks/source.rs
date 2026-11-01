@@ -4941,6 +4941,33 @@ mod prebuilt_tests {
     }
 
     #[test]
+    fn doc_members_leave_findings_unchanged_in_either_order() {
+        // Doc files neither set nor fire the expectation: a doc
+        // tree alongside the binaries leaves the findings identical
+        // whether its members come first or last in the archive.
+        let ar = ar_archive("/", b"\x00\x00\x00\x01");
+        let docs: [(&str, &[u8]); 2] = [
+            ("doc/README.txt", b"documentation\n"),
+            ("doc/manual.md", b"# manual\n"),
+        ];
+        let binaries: [(&str, &[u8]); 2] = [("m/libf.a", &ar), ("m/libg.a", &ar)];
+        let expected = [
+            "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/* ar archive (2 files)",
+        ];
+        for members in [
+            [docs[0], docs[1], binaries[0], binaries[1]],
+            [binaries[0], binaries[1], docs[0], docs[1]],
+        ] {
+            let tar = tarball(&members);
+            let (pkg, _src, _extract) = source_pkg(&[
+                ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+                ("kinds.tar.gz", gzip_bytes(&tar)),
+            ]);
+            assert_eq!(prebuilt_lines(&run_source(&pkg)), expected);
+        }
+    }
+
+    #[test]
     fn ar_index_name_variants_fire() {
         let (pkg, _src, _extract) = source_pkg(&[
             ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
