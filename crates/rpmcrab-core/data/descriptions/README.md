@@ -135,7 +135,9 @@ Provenance, verified against the pinned reference (`84848c0`):
 - `SourceCheck.toml` — the reference file, minus the
   `multiple-specfiles` entry dropped with the deliberately-removed
   finding (issue #883), plus the port-only
-  `rpmlintrc-uses-setbadness` and `prebuilt-binary-shipped` entries.
+  `rpmlintrc-uses-setbadness`, `prebuilt-binary-shipped` and
+  `prebuilt-binary-in-sources` entries, and limits sentences added
+  to the `source-archive-contains-bidi-control` entry.
   The reference has no such findings, so `--explain` would print
   `Unknown message` for them there. Ledgered in
   `tests/parity/divergences.toml`.
