@@ -826,6 +826,26 @@ mod tests {
     }
 
     #[test]
+    fn doc_file_require_covered_by_requires_only_is_quiet() {
+        // The chain covers Requires alone: this pin breaks if the
+        // Requires arm of the chain is dropped, where the both-arms
+        // pin above cannot tell the arms apart.
+        use crate::pkg::dep::DepInfo;
+        let mut pkg = doc_dep_pkg(false);
+        pkg.requires.push(DepInfo {
+            name: "/bin/ksh".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        });
+        let config = Config::default();
+        let mut check = DocCheck::new(&config);
+        let results = run(&config, &mut check, &pkg);
+        assert!(results.is_empty(), "expected no findings, got {results:?}");
+    }
+
+    #[test]
     fn doc_file_require_covered_by_prereq_only_is_quiet() {
         // The chain covers prereq alone: this pin breaks if the
         // prereq arm of the chain is dropped, where the both-arms

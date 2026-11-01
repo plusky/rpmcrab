@@ -1249,7 +1249,7 @@ since = "0.4.1"
 case = "global"
 check = "doc-file-dependency"
 kind = "behaviour"
-reason = "doc-file-dependency fires for a dependency of a doc file that the requires side does not cover by exact name. The requires side is the package Provides, every shipped file path, the explicit package-level Requires chained with Prereq (find-requires-generated entries excluded, like the reference get_core_reqs), plus the requires of every non-doc file. Requires and Prereq cover identically: the chain makes no distinction between them. Coverage is by exact name only: a lookalike core entry, a dot-less core entry for a dotted dep, and a dotted core entry for a dot-less dep all leave the dep reported. Pinned by doc_file_dependencies_requires_side_lookalikes_do_not_cover, doc_file_require_covered_by_prereq_only_is_quiet and doc_file_require_covered_by_neither_still_fires in doc.rs."
+reason = "doc-file-dependency fires for a dependency of a doc file that the requires side does not cover by exact name. The requires side is the package Provides, every shipped file path, the explicit package-level Requires chained with Prereq (find-requires-generated entries excluded, like the reference get_core_reqs), plus the requires of every non-doc file. Requires and Prereq cover identically: the chain makes no distinction between them. Coverage is by exact name only: a lookalike core entry, a dot-less core entry for a dotted dep, and a dotted core entry for a dot-less dep all leave the dep reported. Pinned by doc_file_dependencies_requires_side_lookalikes_do_not_cover, doc_file_require_covered_by_requires_only_is_quiet, doc_file_require_covered_by_prereq_only_is_quiet and doc_file_require_covered_by_neither_still_fires in doc.rs."
 since = "0.4.1"
 
 [[divergence]]
