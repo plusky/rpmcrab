@@ -752,6 +752,8 @@ mod prebuilt {
     /// `__.SYMDEF SORTED`. The first member header's terminator is
     /// required, so text starting with the ar magic stays quiet; thin
     /// archives (`!<thin>`) never reach this test.
+    /// An indexed ar archive is reported as a unit: its members are
+    /// never walked, so an inner ELF stays silent.
     fn ar_indexed(data: &[u8]) -> bool {
         if !data.starts_with(b"!<arch>\n") || data.len() < 68 {
             return false;
