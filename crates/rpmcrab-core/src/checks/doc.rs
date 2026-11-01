@@ -826,6 +826,37 @@ mod tests {
     }
 
     #[test]
+    fn doc_file_require_covered_by_prereq_only_is_quiet() {
+        // The chain covers prereq alone: this pin breaks if the
+        // prereq arm of the chain is dropped, where the both-arms
+        // pin above cannot tell the arms apart.
+        use crate::pkg::dep::DepInfo;
+        let mut pkg = doc_dep_pkg(false);
+        pkg.prereq.push(DepInfo {
+            name: "/bin/ksh".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        });
+        let config = Config::default();
+        let mut check = DocCheck::new(&config);
+        let results = run(&config, &mut check, &pkg);
+        assert!(results.is_empty(), "expected no findings, got {results:?}");
+    }
+
+    #[test]
+    fn doc_file_require_covered_by_neither_still_fires() {
+        // Control for the prereq-only pin: with the dep in neither
+        // arm, the finding still fires.
+        let config = Config::default();
+        let mut check = DocCheck::new(&config);
+        let results = run(&config, &mut check, &doc_dep_pkg(false));
+        assert_eq!(results.len(), 1, "expected one finding, got {results:?}");
+        assert_eq!(results[0].0, "doc-file-dependency");
+    }
+
+    #[test]
     fn doc_file_require_covered_only_by_find_requires_require_still_fires() {
         let config = Config::default();
         let mut check = DocCheck::new(&config);
