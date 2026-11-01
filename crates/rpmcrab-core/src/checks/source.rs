@@ -133,8 +133,9 @@ fn sha256_reader<R: std::io::Read>(mut r: R) -> Option<String> {
 /// sha256 path: source whole-file records are capped at the 256 MiB
 /// archive cap on disk and member records at the 64 MiB entry cap, so
 /// a larger on-disk file matches neither. On the algo-8 path the join
-/// key is the free header digest and whole-file source records are uncapped, so
-/// the gate never applies there.
+/// key is the free header digest and archive whole-file records are
+/// uncapped, so the gate never applies there. Bare-file records are
+/// capped at the walk side on every path.
 fn payload_over_source_cap(algo_is_8: bool, len: u64) -> bool {
     !algo_is_8 && len > prebuilt::MAX_ARCHIVE_BYTES as u64
 }
@@ -142,7 +143,8 @@ fn payload_over_source_cap(algo_is_8: bool, len: u64) -> bool {
 /// short reads: a single `Read::read` may return fewer bytes than
 /// requested, which would leave the ustar arm of `payload_could_match`
 /// (needs 262 bytes) unreachable for a short-read file. Stops at EOF
-/// or on error with whatever was read.
+/// or on a non-transient error with whatever was read; an
+/// interrupted read is retried.
 fn read_payload_head<R: std::io::Read>(mut reader: R) -> Vec<u8> {
     let mut head = vec![0u8; 512];
     let mut len = 0;
@@ -2804,8 +2806,10 @@ impl Check for SourceCheck {
             // neither. The on-disk length decides: the header size
             // can disagree with the bytes actually hashed. On the
             // algo-8 path the join key is the free header digest
-            // and whole-file source records are uncapped, so the
-            // gate never applies there.
+            // and archive whole-file records are uncapped, so the
+            // gate never applies there. Bare-file records are capped
+            // at the walk side on every path, so the uncapped claim
+            // covers archive whole-file records only.
             let too_big = std::fs::metadata(&f.path)
                 .map(|m| payload_over_source_cap(algo_is_8, m.len()))
                 .unwrap_or(false);
@@ -4119,6 +4123,45 @@ mod prebuilt_tests {
             [
                 "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/libexec/big.bin ELF binary from bigblob.bin"
             ]
+        );
+    }
+
+    /// The missing-digest branch on the sha256 path, e2e: a payload
+    /// file whose bytes cannot be read still passes the name filter
+    /// (a `.pyc` name matches without a head) and the size gate, but
+    /// the hash fails, so no binary record is kept and nothing joins
+    /// -- even though the source side holds the record. The payload
+    /// file is replaced by a directory after the fixture is built:
+    /// opening a directory succeeds but reading it fails, so the
+    /// branch is reached deterministically and independently of
+    /// file permissions.
+    #[test]
+    fn shipped_payload_unreadable_on_sha256_path_stays_quiet() {
+        use crate::color::Color;
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_pkg = fixture_src(vec![payload_file(src_dir.path(), "mod.pyc", ELF)]);
+        let bin_dir = tempfile::tempdir().unwrap();
+        let bin_payload = payload_file(bin_dir.path(), "/usr/libexec/mod.pyc", ELF);
+        let disk = bin_dir.path().join("mod.pyc");
+        std::fs::remove_file(&disk).expect("remove binary payload");
+        std::fs::create_dir(&disk).expect("directory in place of payload");
+        let bin_pkg = fixture_pkg_non8(bin_dir.path(), "fcprobe", vec![bin_payload]);
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(&config);
+        Check::check(&mut check, &src_pkg, &config, &mut out);
+        Check::check(&mut check, &bin_pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let findings: Vec<(String, String, Level)> = out
+            .results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect();
+        assert!(shipped_lines(&findings).is_empty(), "{findings:?}");
+        assert_eq!(
+            prebuilt_lines(&findings),
+            ["fcprobe.x86_64: W: prebuilt-binary-in-sources mod.pyc ELF binary"]
         );
     }
 

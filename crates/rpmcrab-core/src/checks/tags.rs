@@ -5152,6 +5152,7 @@ mod rich_dep_emission_tests {
             let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
             pkg.name = "tags-missingdep-devel".to_string();
             pkg.files.push(so_file());
+            pkg.requires = vec![];
             pkg.prereq = vec![flagged_dep("tags-missingdep-libs", flags, "1")];
             let results = run(&pkg, &rich_test_config(&[], false));
             assert!(
@@ -5165,21 +5166,26 @@ mod rich_dep_emission_tests {
     fn missing_dependency_on_lower_bound_at_ancestor_version_mixed_arms_is_silent() {
         // A mixed set still chains: an unrelated Requires dep does
         // not stop the Prereq-routed ancestor bound from staying
-        // silent.
-        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
-        pkg.name = "tags-missingdep-devel".to_string();
-        pkg.files.push(so_file());
-        pkg.requires = vec![plain_dep("unrelated")];
-        pkg.prereq = vec![flagged_dep(
-            "tags-missingdep-libs",
-            RPMSENSE_GREATER | RPMSENSE_EQUAL,
-            "1",
-        )];
-        let results = run(&pkg, &rich_test_config(&[], false));
-        assert!(
-            named(&results, "missing-dependency-on").is_empty(),
-            "all: {results:?}"
-        );
+        // silent. Both operators, mirroring via_prereq_is_silent: the
+        // >= arm alone left the > arm unpinned, and the assertion
+        // covered only the versioned tag, so an unversioned leak
+        // would have passed.
+        for flags in [RPMSENSE_GREATER | RPMSENSE_EQUAL, RPMSENSE_GREATER] {
+            let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+            pkg.name = "tags-missingdep-devel".to_string();
+            pkg.files.push(so_file());
+            pkg.requires = vec![plain_dep("unrelated")];
+            pkg.prereq = vec![flagged_dep("tags-missingdep-libs", flags, "1")];
+            let results = run(&pkg, &rich_test_config(&[], false));
+            assert!(
+                named(&results, "missing-dependency-on").is_empty(),
+                "flags {flags}: {results:?}"
+            );
+            assert!(
+                named(&results, "no-version-dependency-on").is_empty(),
+                "flags {flags}: {results:?}"
+            );
+        }
     }
 
     #[test]
@@ -5192,6 +5198,7 @@ mod rich_dep_emission_tests {
         let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
         pkg.name = "tags-missingdep-devel".to_string();
         pkg.files.push(so_file());
+        pkg.requires = vec![];
         pkg.prereq = vec![flagged_dep("tags-missingdep-libs", RPMSENSE_GREATER, "1.0")];
         let results = run(&pkg, &rich_test_config(&[], false));
         let hits = named(&results, "missing-dependency-on");
@@ -5212,6 +5219,16 @@ mod rich_dep_emission_tests {
         let results = run(&pkg, &rich_test_config(&[], false));
         let hits = named(&results, "missing-dependency-on");
         assert_eq!(hits.len(), 1, "all: {results:?}");
+        // The count alone pins only the tag: the line must name the
+        // Prereq-routed bound, so a Requires-routed hit of the same
+        // tag cannot stand in for it.
+        assert!(
+            hits[0]
+                .1
+                .ends_with("tags-missingdep*/tags-missingdep-libs/libtags-missingdep* = 1.0"),
+            "line: {}",
+            hits[0].1
+        );
     }
 
     #[test]
