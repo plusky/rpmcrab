@@ -340,7 +340,7 @@ the bundled name in addition to the spec Provides.
 python-rust-extension-without-auditable-data="""
 The named file is a Python extension module written in Rust: it
 defines a PyInit_* entry point, was built by the Rust toolchain
-and is a shared object, but it carries no cargo-auditable
+and is an ET_DYN file (a shared object or PIE executable), but it carries no cargo-auditable
 .dep-v0 section, so no bundled(rust-crate:...) provides are
 generated for the crates it vendors. The module's crate graph
 is therefore invisible to the maintenance query for bundled
