@@ -1902,13 +1902,15 @@ mod prebuilt {
                     self.walk_zip(archive, ctx, depth, prebuilt_active);
                 }
             } else if let Some(kind) = decoder_kind(data) {
-                if let Some(decoder) = decode(kind, io::Cursor::new(data)) {
+                if depth < MAX_DEPTH - 1
+                    && let Some(decoder) = decode(kind, io::Cursor::new(data))
+                {
                     let counted = CountingReader::new(decoder, self.budget.clone());
                     self.walk_streamed(
                         Box::new(counted),
                         names.stream,
                         ctx,
-                        depth,
+                        depth + 1,
                         prebuilt_active,
                     );
                 }
@@ -1939,12 +1941,20 @@ mod prebuilt {
                 }
                 return;
             };
+            if self.budget_hit() {
+                self.note_budget_stop();
+                return;
+            }
             if is_tar(&prefix) {
                 self.walk_tar_stream(TarStream::new(peeked), ctx, depth, prebuilt_active);
                 return;
             }
             match read_up_to(peeked, MAX_ENTRY_BYTES as u64) {
                 Ok((buf, false)) => {
+                    if self.budget_hit() {
+                        self.note_budget_stop();
+                        return;
+                    }
                     let stripped = strip_compression_suffix(name);
                     self.walk_archive_buffer(
                         &buf,
@@ -2014,8 +2024,25 @@ mod prebuilt {
                 if file.seek(SeekFrom::Start(0)).is_err() {
                     return;
                 }
+                // A jar is a prebuilt unit: classify first, so a
+                // bare .jar Source reports the jar itself and its
+                // classes stay quiet; a plain zip keeps walking with
+                // prebuilt active.
+                let unit = classify(name, &prefix);
+                if let Some(k) = unit {
+                    // The jar unit is the file itself: hash the file, as
+                    // the bare-file case does; an unreadable file yields
+                    // an empty digest, which never matches a shipped
+                    // record. The hit's path is the Source name, so the
+                    // join records no second whole-file record for it.
+                    self.push_prebuilt(
+                        k,
+                        name,
+                        super::sha256_file(&path.to_string_lossy()).unwrap_or_default(),
+                    );
+                }
                 if let Ok(archive) = zip::ZipArchive::new(file) {
-                    self.walk_zip(archive, name, 0, true);
+                    self.walk_zip(archive, name, 0, unit.is_none());
                 }
                 return;
             }
@@ -3756,6 +3783,110 @@ mod prebuilt_tests {
             prebuilt_lines(&findings),
             ["prebuilt-test.src: W: prebuilt-binary-in-sources \
               prebuilt-test-1.0.tar.gz: lib/app.jar Java archive (jar)"]
+        );
+    }
+
+    #[test]
+    fn prebuilt_bare_jar_source_reports_unit_only() {
+        // A top-level .jar Source is the unit: the jar fires once
+        // and its classes do not fire individually.
+        let jar = zip_bytes(&[
+            ("com/example/A.class", CLASS),
+            ("com/example/B.class", CLASS),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("app-1.0.jar", jar),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            ["prebuilt-test.src: W: prebuilt-binary-in-sources app-1.0.jar Java archive (jar)"]
+        );
+    }
+
+    #[test]
+    fn prebuilt_decompression_depth_is_bounded() {
+        // Decompression layers count against the depth limit like
+        // nested archives: four gzip layers still reach the ELF, a
+        // fifth layer is refused, and a long chain terminates
+        // instead of recursing one frame-set per layer.
+        let mut four = ELF.to_vec();
+        for _ in 0..4 {
+            four = gzip_bytes(&four);
+        }
+        let outcome = walk_buffer(&four, "chain.gz");
+        assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
+        assert_eq!(outcome.prebuilt[0].1, "chain.gz");
+        let mut five = ELF.to_vec();
+        for _ in 0..5 {
+            five = gzip_bytes(&five);
+        }
+        let outcome = walk_buffer(&five, "chain.gz");
+        assert!(outcome.prebuilt.is_empty(), "{:?}", outcome.prebuilt);
+        let mut hundred = ELF.to_vec();
+        for _ in 0..100 {
+            hundred = gzip_bytes(&hundred);
+        }
+        let outcome = walk_buffer(&hundred, "chain.gz");
+        assert!(outcome.prebuilt.is_empty(), "{:?}", outcome.prebuilt);
+    }
+
+    #[test]
+    fn prebuilt_streamed_budget_stop_after_peek() {
+        // Budget spent while peeking a decompressed stream stops
+        // the walk with a logged budget stop instead of walking an
+        // empty buffer silently.
+        let tar = tarball(&[("a.o", ELF)]);
+        let gz = gzip_bytes(&tar);
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::with_limits(&mut caps, true, 100, usize::MAX);
+        walker.walk_archive_buffer(
+            &gz,
+            super::prebuilt::BufferNames {
+                classify: "small.tar.gz",
+                bidi: "small.tar.gz",
+                stream: "small.tar.gz",
+            },
+            "small.tar.gz",
+            0,
+            true,
+        );
+        let outcome = walker.take_outcome();
+        assert!(outcome.prebuilt.is_empty(), "{:?}", outcome.prebuilt);
+        assert!(
+            outcome.stops.lines().iter().any(|l| l.contains("budget")),
+            "{:?}",
+            outcome.stops.lines()
+        );
+    }
+
+    #[test]
+    fn prebuilt_streamed_budget_stop_mid_read() {
+        // Budget spent mid-buffer stops the walk instead of
+        // walking truncated bytes as a complete archive.
+        let mut content = ELF.to_vec();
+        content.resize(2000, 0);
+        let gz = gzip_bytes(&content);
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::with_limits(&mut caps, true, 1000, usize::MAX);
+        walker.walk_archive_buffer(
+            &gz,
+            super::prebuilt::BufferNames {
+                classify: "big.bin.gz",
+                bidi: "big.bin.gz",
+                stream: "big.bin.gz",
+            },
+            "big.bin.gz",
+            0,
+            true,
+        );
+        let outcome = walker.take_outcome();
+        assert!(outcome.prebuilt.is_empty(), "{:?}", outcome.prebuilt);
+        assert!(
+            outcome.stops.lines().iter().any(|l| l.contains("budget")),
+            "{:?}",
+            outcome.stops.lines()
         );
     }
 
