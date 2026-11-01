@@ -5362,6 +5362,73 @@ mod prebuilt_tests {
     }
 
     #[test]
+    fn indexed_ar_with_elf_member_reports_unit_only() {
+        // An indexed ar is the unit: its ELF member stays silent
+        // (issue #1429).
+        let mut ar = b"!<arch>\n".to_vec();
+        ar.extend_from_slice(&ar_member("/", b"\x00\x00\x00\x01"));
+        ar.extend_from_slice(&ar_member("lib.o/", ELF));
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("lib.a", ar),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            ["prebuilt-test.src: W: prebuilt-binary-in-sources lib.a ar archive"]
+        );
+    }
+
+    #[test]
+    fn grouped_kinds_split_across_outer_chains_in_tar() {
+        // Two ar units under different outer chains sharing one
+        // top-level archive must NOT merge: the grouping key is the
+        // full chain, not the top-level archive alone (issue #1429).
+        let tar = tarball(&[
+            (
+                "one.tar",
+                &tarball(&[("x.a", &ar_archive("/", b"\x00\x00\x00\x01"))]),
+            ),
+            (
+                "two.tar",
+                &tarball(&[("x.a", &ar_archive("/", b"\x00\x00\x00\x01"))]),
+            ),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: one.tar: x.a ar archive",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: two.tar: x.a ar archive",
+            ]
+        );
+    }
+
+    #[test]
+    fn grouped_kinds_split_across_outer_chains_in_zip() {
+        // Same full-chain key, through nested zips (issue #1429).
+        let inner1 = zip_bytes(&[("x.a", &ar_archive("/", b"\x00\x00\x00\x01"))]);
+        let inner2 = zip_bytes(&[("x.a", &ar_archive("/", b"\x00\x00\x00\x01"))]);
+        let z = zip_bytes(&[("one.zip", &inner1), ("two.zip", &inner2)]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.zip", z),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.zip: one.zip: x.a ar archive",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.zip: two.zip: x.a ar archive",
+            ]
+        );
+    }
+
+    #[test]
     fn root_level_ar_members_group_with_star() {
         let tar = tarball(&[
             ("a.a", &ar_archive("/", b"\x00\x00\x00\x01")),
