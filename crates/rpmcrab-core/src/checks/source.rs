@@ -4884,6 +4884,32 @@ mod prebuilt_tests {
     }
 
     #[test]
+    fn new_kinds_fire_regardless_of_member_extension() {
+        // ar, PE and WebAssembly need no name gate: the same bytes
+        // fire under extensions that match no kind, unlike .pyc/.pyo
+        // and .jar members, which need their names.
+        let pe = pe_dll();
+        let tar = tarball(&[
+            ("m/lib.bin", &ar_archive("/", b"\x00\x00\x00\x01")),
+            ("m/prog.dat", &pe),
+            ("m/mod.txt", WASM),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/lib.bin ar archive",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/mod.txt WebAssembly module",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/prog.dat PE executable or DLL",
+            ]
+        );
+    }
+
+    #[test]
     fn ar_index_name_variants_fire() {
         let (pkg, _src, _extract) = source_pkg(&[
             ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
