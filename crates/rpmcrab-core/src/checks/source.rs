@@ -3894,6 +3894,44 @@ mod prebuilt_tests {
         );
     }
 
+    /// A payload shipping a compressed single-file Source
+    /// byte-identical joins the top-level record: the hit digest
+    /// covers the decompressed bytes, so the path-only self-hit skip
+    /// used to drop the record the payload needs.
+    #[test]
+    fn shipped_compressed_single_file_self_hit_still_fires() {
+        use crate::color::Color;
+        let gz = gzip_bytes(ELF);
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_pkg = fixture_src(vec![
+            payload_file(src_dir.path(), "fcprobe.spec", b"Name: fcprobe\n"),
+            payload_file(src_dir.path(), "blob.bin.gz", &gz),
+        ]);
+        let bin_dir = tempfile::tempdir().unwrap();
+        let bin_pkg = fixture_pkg(
+            "fcprobe",
+            vec![payload_file(bin_dir.path(), "/usr/share/blob.bin.gz", &gz)],
+        );
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(&config);
+        Check::check(&mut check, &src_pkg, &config, &mut out);
+        Check::check(&mut check, &bin_pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let findings: Vec<(String, String, Level)> = out
+            .results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect();
+        assert_eq!(
+            shipped_lines(&findings),
+            [
+                "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/share/blob.bin.gz archive with 1 hit from blob.bin.gz"
+            ]
+        );
+    }
+
     #[test]
     fn setbadness_in_a_payload_rpmlintrc_fires_per_occurrence() {
         let (pkg, _src, _extract) = source_pkg(&[
