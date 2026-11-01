@@ -1257,8 +1257,11 @@ mod prebuilt {
     /// whether the stream holds at least one more byte past the limit
     /// (a one-byte probe, not a grow-past-the-limit read). A stream
     /// that ends early returns its bytes with `false`.
-    fn read_up_to<R: Read>(mut r: R, limit: u64) -> io::Result<(Vec<u8>, bool)> {
-        let mut buf = Vec::with_capacity(usize::try_from(limit).unwrap_or(usize::MAX));
+    pub(crate) fn read_up_to<R: Read>(mut r: R, limit: u64) -> io::Result<(Vec<u8>, bool)> {
+        // Lazy growth up to the limit, never an upfront allocation
+        // of it: the limit still bounds the buffer (the take below),
+        // so a huge limit cannot DoS the reader (issue #1416).
+        let mut buf = Vec::new();
         let mut limited = (&mut r).take(limit);
         limited.read_to_end(&mut buf)?;
         if (buf.len() as u64) < limit {
@@ -1369,12 +1372,17 @@ mod prebuilt {
     /// Build one decoder over a stream. The xz decoder carries the
     /// stated memlimit (issue #1387): a stream whose dictionary
     /// exceeds it fails the decode instead of allocating past it.
+    /// Concatenated members decode as one stream (issue #1416):
+    /// the flags carry LZMA_CONCATENATED, so a second stream after
+    /// the first is decoded, not dropped.
     fn decode<'a, R: Read + 'a>(kind: DecoderKind, r: R) -> Option<Box<dyn Read + 'a>> {
         match kind {
             DecoderKind::Gzip => Some(Box::new(flate2::read::GzDecoder::new(r))),
             DecoderKind::Xz => {
-                let Ok(stream) = liblzma::stream::Stream::new_stream_decoder(XZ_MEMLIMIT_BYTES, 0)
-                else {
+                let Ok(stream) = liblzma::stream::Stream::new_stream_decoder(
+                    XZ_MEMLIMIT_BYTES,
+                    liblzma::stream::CONCATENATED,
+                ) else {
                     return None;
                 };
                 Some(Box::new(liblzma::read::XzDecoder::new_stream(r, stream)))
@@ -1686,7 +1694,10 @@ mod prebuilt {
         /// or a read error: the caller checks the budget flag to tell
         /// a budget stop from a truncated stream.
         fn read_member(&mut self, size: u64) -> Option<Vec<u8>> {
-            let mut buf = Vec::with_capacity(usize::try_from(size).unwrap_or(usize::MAX));
+            // Lazy growth like read_up_to: the loop below is bounded
+            // by `size`, which the caller already checked against the
+            // entry cap, so the buffer never exceeds it (issue #1416).
+            let mut buf = Vec::new();
             let mut chunk = [0u8; 65536];
             let mut left = size;
             while left > 0 {
@@ -4159,6 +4170,51 @@ mod prebuilt_tests {
             ["prebuilt-test.src: W: prebuilt-binary-in-sources \
               prebuilt-test-1.0.tar.xz: src/prebuilt.o ELF binary"]
         );
+    }
+
+    #[test]
+    fn prebuilt_xz_concatenated_members_both_walk() {
+        // Concatenated xz streams decode as one stream (issue
+        // #1416): the second stream's member fires, not just the
+        // first stream's. The split falls between the two members,
+        // so a decoder that stops at the first stream sees only a.o.
+        let mut tar = Vec::new();
+        append_entry(&mut tar, "a.o", ELF.len(), b'0', ELF);
+        let split = tar.len();
+        append_entry(&mut tar, "b.o", ELF.len(), b'0', ELF);
+        tar.extend([0u8; 1024]);
+        let mut xz = Vec::new();
+        for half in [&tar[..split], &tar[split..]] {
+            use liblzma::write::XzEncoder;
+            let mut enc = XzEncoder::new(&mut xz, 6);
+            enc.write_all(half).unwrap();
+            enc.finish().unwrap();
+        }
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar.xz", xz),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources \
+                 prebuilt-test-1.0.tar.xz: a.o ELF binary",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources \
+                 prebuilt-test-1.0.tar.xz: b.o ELF binary",
+            ]
+        );
+    }
+
+    #[test]
+    fn read_up_to_grows_lazily_under_a_huge_limit() {
+        // The buffer grows with the bytes read, never preallocating
+        // the limit: a u64::MAX limit over a tiny stream used to
+        // request a usize::MAX capacity and abort (issue #1416).
+        let data = b"tiny";
+        let (buf, more) = super::prebuilt::read_up_to(&data[..], u64::MAX).unwrap();
+        assert_eq!(buf, b"tiny");
+        assert!(!more);
     }
 
     #[test]
