@@ -553,18 +553,27 @@ impl MenuXDGCheck {
 
     /// The merged-/usr counterpart of a legacy-directory absolute
     /// path, mirroring `binary_exists`: `/sbin/x` to `/usr/sbin/x`
-    /// and `/bin/x` to `/usr/bin/x`. `None` for any other path.
-    /// Sanitized like `binary_exists`, plus the normalization the
-    /// filesystem applies: the input is collapsed lexically first,
-    /// so `//`, `/.` and `..` segments in the prefix collapse the
-    /// way the filesystem collapses them, and a path normalizing
-    /// outside `/bin` or `/sbin`, or to an empty remainder,
-    /// resolves to nothing.
+    /// and `/bin/x` to `/usr/bin/x`. `None` for any other path, and
+    /// for any path carrying a `..` segment, mirroring
+    /// `binary_exists`' refusal: without this, a `..` spelling the
+    /// per-package verdict refuses would still gain build credit
+    /// through its normalized counterpart. Sanitized like
+    /// `binary_exists`, plus the normalization the filesystem
+    /// applies: the input is collapsed lexically first, so `//` and
+    /// `/.` segments in the prefix collapse the way the filesystem
+    /// collapses them, and a path normalizing outside `/bin` or
+    /// `/sbin`, or to an empty remainder, resolves to nothing.
     fn usrmerge_counterpart(path: &str) -> Option<String> {
+        // A `..` segment never names a binary, mirroring
+        // `binary_exists`: without this, a `..` spelling the
+        // per-package verdict refuses would still gain build credit
+        // through its normalized counterpart.
+        if path.split('/').any(|seg| seg == "..") {
+            return None;
+        }
         // Normalize lexically first, as the filesystem collapses
-        // the path: `//`, `/.` and `..` segments in the prefix
-        // collapse too, so `/sbin/../bin/x`, `//bin/x` and
-        // `/./bin/x` map like `/bin/x`.
+        // the path: `//` and `/.` segments in the prefix collapse
+        // too, so `//bin/x` and `/./bin/x` map like `/bin/x`.
         let path = Self::normalize_icon_path(path);
         let (base, rest) = path
             .strip_prefix("/sbin/")
@@ -2716,14 +2725,10 @@ mod tests {
             MenuXDGCheck::usrmerge_counterpart("/./bin/x"),
             Some("/usr/bin/x".to_string())
         );
-        assert_eq!(
-            MenuXDGCheck::usrmerge_counterpart("/sbin/../bin/x"),
-            Some("/usr/bin/x".to_string())
-        );
-        assert_eq!(
-            MenuXDGCheck::usrmerge_counterpart("/bin/../bin/x"),
-            Some("/usr/bin/x".to_string())
-        );
+        // A `..` segment never yields a counterpart, mirroring
+        // `binary_exists`: the spelling gains no build credit.
+        assert_eq!(MenuXDGCheck::usrmerge_counterpart("/sbin/../bin/x"), None);
+        assert_eq!(MenuXDGCheck::usrmerge_counterpart("/bin/../bin/x"), None);
         assert_eq!(MenuXDGCheck::usrmerge_counterpart("/bin/../x"), None);
         assert_eq!(MenuXDGCheck::usrmerge_counterpart("/bin/"), None);
         assert_eq!(MenuXDGCheck::usrmerge_counterpart("/usr/bin/x"), None);
