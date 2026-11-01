@@ -555,14 +555,17 @@ impl MenuXDGCheck {
     /// path, mirroring `binary_exists`: `/sbin/x` to `/usr/sbin/x`
     /// and `/bin/x` to `/usr/bin/x`. `None` for any other path.
     /// Sanitized like `binary_exists`, plus the normalization the
-    /// filesystem applies: the counterpart is a string key into
-    /// `file_owners`, so `//` and `/.` segments must collapse the
-    /// way the filesystem collapses them for `binary_exists`, and
-    /// a `..` segment or an empty remainder resolves to nothing.
+    /// filesystem applies: the input is collapsed lexically first,
+    /// so `//`, `/.` and `..` segments in the prefix collapse the
+    /// way the filesystem collapses them, and a path normalizing
+    /// outside `/bin` or `/sbin`, or to an empty remainder,
+    /// resolves to nothing.
     fn usrmerge_counterpart(path: &str) -> Option<String> {
-        if path.split('/').any(|seg| seg == "..") {
-            return None;
-        }
+        // Normalize lexically first, as the filesystem collapses
+        // the path: `//`, `/.` and `..` segments in the prefix
+        // collapse too, so `/sbin/../bin/x`, `//bin/x` and
+        // `/./bin/x` map like `/bin/x`.
+        let path = Self::normalize_icon_path(path);
         let (base, rest) = path
             .strip_prefix("/sbin/")
             .map(|r| ("/usr/sbin", r))
@@ -612,7 +615,7 @@ impl MenuXDGCheck {
                 return None;
             }
             current = if linkto.starts_with('/') {
-                linkto.clone()
+                Self::normalize_icon_path(linkto)
             } else {
                 let dir = current.rfind('/').map_or("", |i| &current[..i]);
                 if dir.is_empty() {
@@ -2705,6 +2708,22 @@ mod tests {
             MenuXDGCheck::usrmerge_counterpart("/bin/./x"),
             Some("/usr/bin/x".to_string())
         );
+        assert_eq!(
+            MenuXDGCheck::usrmerge_counterpart("//bin/x"),
+            Some("/usr/bin/x".to_string())
+        );
+        assert_eq!(
+            MenuXDGCheck::usrmerge_counterpart("/./bin/x"),
+            Some("/usr/bin/x".to_string())
+        );
+        assert_eq!(
+            MenuXDGCheck::usrmerge_counterpart("/sbin/../bin/x"),
+            Some("/usr/bin/x".to_string())
+        );
+        assert_eq!(
+            MenuXDGCheck::usrmerge_counterpart("/bin/../bin/x"),
+            Some("/usr/bin/x".to_string())
+        );
         assert_eq!(MenuXDGCheck::usrmerge_counterpart("/bin/../x"), None);
         assert_eq!(MenuXDGCheck::usrmerge_counterpart("/bin/"), None);
         assert_eq!(MenuXDGCheck::usrmerge_counterpart("/usr/bin/x"), None);
@@ -2741,6 +2760,32 @@ mod tests {
             MenuXDGCheck::resolve_in_build(&build, "/usr/bin/c"),
             Some("/usr/bin/real".to_string())
         );
+    }
+
+    #[test]
+    fn resolve_in_build_normalizes_absolute_targets() {
+        // An absolute symlink target spelled with `//`, `/.` or
+        // `..` segments resolves like its collapsed form, exactly
+        // as the relative arm already normalizes its joined path.
+        let mut build = DesktopBuild {
+            symlinks: HashMap::from([
+                ("/usr/bin/c".to_string(), "/usr/bin//real".to_string()),
+                ("/usr/bin/d".to_string(), "/usr/bin/./real".to_string()),
+                ("/usr/bin/e".to_string(), "/usr/bin/../bin/real".to_string()),
+            ]),
+            ..Default::default()
+        };
+        build.file_owners.insert(
+            "/usr/bin/real".to_string(),
+            HashSet::from(["owner".to_string()]),
+        );
+        for start in ["/usr/bin/c", "/usr/bin/d", "/usr/bin/e"] {
+            assert_eq!(
+                MenuXDGCheck::resolve_in_build(&build, start),
+                Some("/usr/bin/real".to_string()),
+                "{start}"
+            );
+        }
     }
 
     #[test]
