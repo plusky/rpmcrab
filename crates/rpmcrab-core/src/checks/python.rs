@@ -3701,6 +3701,34 @@ mod tests {
     }
 
     #[test]
+    fn pyc_multiple_versions_site_packages_mismatch_reversed_and_doc_interleaved_still_fires() {
+        // Firing side is order-pinned too: with the site files in
+        // reversed order the first site file sets the expectation
+        // and the second is reported, and a doc-tree file
+        // interleaved either side neither sets nor breaks it, so
+        // all three shapes report the same line.
+        let expected = "python-test.noarch: W: python-pyc-multiple-versions expected: 313 /usr/lib/python3.14/site-packages/mypy/__pycache__/api.cpython-314.pyc"
+            .to_string();
+        let got = pyc_multiple_version_lines(&[
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/__init__.cpython-313.pyc",
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/api.cpython-314.pyc",
+        ]);
+        assert_eq!(got, vec![expected.clone()]);
+        let got = pyc_multiple_version_lines(&[
+            "/usr/share/doc/packages/python314-mypy/docs/source/__pycache__/html_builder.cpython-313.pyc",
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/__init__.cpython-313.pyc",
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/api.cpython-314.pyc",
+        ]);
+        assert_eq!(got, vec![expected.clone()]);
+        let got = pyc_multiple_version_lines(&[
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/__init__.cpython-313.pyc",
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/api.cpython-314.pyc",
+            "/usr/share/doc/packages/python314-mypy/docs/source/__pycache__/html_builder.cpython-313.pyc",
+        ]);
+        assert_eq!(got, vec![expected]);
+    }
+
+    #[test]
     fn pyc_multiple_versions_doc_prefix_is_exact() {
         // Only the doc directory itself is exempt: a sibling directory
         // merely starting with `doc` keeps firing.
