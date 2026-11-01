@@ -3815,6 +3815,44 @@ mod prebuilt_tests {
         );
     }
 
+    /// The shipped display names the first non-test copy when a
+    /// digest has both test and non-test source copies: the test
+    /// copy walks first here, so a copies[0] display would name it.
+    #[test]
+    fn shipped_display_names_first_non_test_copy() {
+        use crate::color::Color;
+        let tar = tarball(&[("tests/data/dup.o", ELF), ("src/dup.o", ELF)]);
+        let tar_gz = gzip_bytes(&tar);
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_pkg = fixture_src(vec![
+            payload_file(src_dir.path(), "fcprobe.spec", b"Name: fcprobe\n"),
+            payload_file(src_dir.path(), "fcprobe-1-1.tar.gz", &tar_gz),
+        ]);
+        let bin_dir = tempfile::tempdir().unwrap();
+        let bin_pkg = fixture_pkg(
+            "fcprobe",
+            vec![payload_file(bin_dir.path(), "/usr/libexec/dup.o", ELF)],
+        );
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(&config);
+        Check::check(&mut check, &src_pkg, &config, &mut out);
+        Check::check(&mut check, &bin_pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let findings: Vec<(String, String, Level)> = out
+            .results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect();
+        assert_eq!(
+            shipped_lines(&findings),
+            [
+                "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/libexec/dup.o ELF binary from fcprobe-1-1.tar.gz: src/dup.o"
+            ]
+        );
+    }
+
     #[test]
     fn setbadness_in_a_payload_rpmlintrc_fires_per_occurrence() {
         let (pkg, _src, _extract) = source_pkg(&[
