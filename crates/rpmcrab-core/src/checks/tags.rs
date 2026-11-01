@@ -5183,6 +5183,38 @@ mod rich_dep_emission_tests {
     }
 
     #[test]
+    fn missing_dependency_on_lower_bound_at_package_version_via_prereq_still_fires() {
+        // The firing counterpart of via_prereq_is_silent: a strict
+        // `>` bound at the package version itself excludes the
+        // same-build library, so a Prereq-routed bound still fires.
+        // Without the Requires/Prereq chain this goes silent, so the
+        // test pins the prereq arm as evaluated, not just present.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.prereq = vec![flagged_dep("tags-missingdep-libs", RPMSENSE_GREATER, "1.0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "missing-dependency-on");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+    }
+
+    #[test]
+    fn missing_dependency_on_lower_bound_at_package_version_mixed_arms_still_fires() {
+        // The firing counterpart of mixed_arms_is_silent: an
+        // unrelated Requires dep never matches the family filter, so
+        // only the Prereq-routed firing bound can produce the hit.
+        // Without the chain this goes silent.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![plain_dep("unrelated")];
+        pkg.prereq = vec![flagged_dep("tags-missingdep-libs", RPMSENSE_GREATER, "1.0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "missing-dependency-on");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+    }
+
+    #[test]
     fn missing_dependency_first_regex_match_wins_over_exact() {
         // The libs dep is the first Requires matching the family
         // regex, not the exact-name one: a regex-matching lookalike
