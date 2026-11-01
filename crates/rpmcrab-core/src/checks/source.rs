@@ -177,7 +177,24 @@ fn record_shipped_source(
     if hits.is_empty() {
         return;
     }
-    let self_hit = hits.iter().any(|h| h.path == f.name);
+    // A hit naming the Source itself covers it only when its digest
+    // equals the source bytes' sha256: for a compressed single-file
+    // Source the hit digest covers the decompressed bytes, so a
+    // payload shipping the compressed file byte-identical still finds
+    // the top-level record below. (An uncompressed single file's
+    // digests coincide, so its top-level record stays suppressed as
+    // before.)
+    // Main's streaming walk holds no whole-source bytes (issue
+    // #1387), so the source digest is recomputed from the file on
+    // disk with the existing streaming hasher; an unreadable file
+    // keeps the top-level record rather than suppressing it.
+    let self_hit = if hits.iter().any(|h| h.path == f.name) {
+        sha256_file(&f.path)
+            .map(|digest| hits.iter().any(|h| h.sha256 == digest))
+            .unwrap_or(false)
+    } else {
+        false
+    };
     let mut by_digest: HashMap<String, Vec<SourceRecord>> = HashMap::new();
     for h in hits {
         by_digest
