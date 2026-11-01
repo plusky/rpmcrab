@@ -31,6 +31,10 @@
 #                         witness is present; the prefix only drops
 #                         the link remedy from the detail (absent: the
 #                         library has no system form the crate can link)
+#   additional_system_soname_prefix
+#                         a second DT_NEEDED prefix of the same system
+#                         library, same treatment (system OpenSSL
+#                         ships libssl.so.3 alongside libcrypto.so.3)
 #   link_soname           the soname the detail names for that remedy
 #   witness               byte string proving the C code is linked
 #   c_version_source      where the C version comes from:
@@ -143,6 +147,7 @@ name = "openssl-src"
 srpm = "openssl-3"
 accepted_names = ["openssl-3", "openssl"]
 system_soname_prefix = "libcrypto.so."
+additional_system_soname_prefix = "libssl.so."
 link_soname = "libcrypto.so.3"
 witness = "OpenSSL Default Provider"
 c_version_source = "crate-build-metadata"
