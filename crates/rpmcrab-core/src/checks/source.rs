@@ -2784,7 +2784,10 @@ impl Check for SourceCheck {
             {
                 continue;
             }
-            let first = &copies[0];
+            // Display the first non-test copy: an all-test digest
+            // stays quiet above, so one always exists here; the
+            // fallback keeps a display if that ever changes.
+            let first = copies.iter().find(|c| !c.test).unwrap_or(&copies[0]);
             out.add_info(make_finding(
                 &rec.pkg_name,
                 &rec.arch,
