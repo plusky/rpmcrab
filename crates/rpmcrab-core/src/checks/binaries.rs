@@ -1402,16 +1402,20 @@ impl ReadelfInfo {
         // file. The scope gates live here, at detection time:
         // only a linked executable or shared object (ET_EXEC or
         // ET_DYN) that is neither Rust nor Go output, with no Go
-        // buildinfo block, takes this path. The check re-applies
-        // the gates at emission, so an archive member that passes
-        // them still stays silent (an archive's merged type is
-        // ET_NONE).
+        // buildinfo block, and not a debug file, takes this path.
+        // The check re-applies the gates at emission, so an archive
+        // member that passes them still stays silent (an archive's
+        // merged type is ET_NONE). Only the name-suffix half of the
+        // debug exclusion lives here: parse carries no file path,
+        // so a /usr/lib/debug/ file without a .debug suffix is
+        // caught by the path half at emission instead.
         let c_in_scope = matches!(
             elf.header.e_type,
             goblin::elf::header::ET_EXEC | goblin::elf::header::ET_DYN
         ) && !self.is_rust_binary()
             && !self.is_go_binary()
-            && !self.go_buildinfo;
+            && !self.go_buildinfo
+            && !self.is_debug;
         if c_in_scope {
             for witness in detect_bundled_c_witnesses(elf, data) {
                 if !self.bundled_c_witnesses.contains(&witness) {
@@ -2302,7 +2306,11 @@ struct BundledCEntry {
 /// The witness-only C library table: baked in like the vendored C
 /// crate map so an installed binary needs no data dir next to it;
 /// the table's as-of date and admission rule are recorded in the
-/// file itself.
+/// file itself. A Rust ELF vendoring a table library through a
+/// crate the vendored-c-crates map does not cover stays silent
+/// here: the scanner returns nothing for any ELF carrying a .dep-v0
+/// section, so the witness-only path never sees it, and the crate
+/// path reports only mapped crates.
 const BUNDLED_C_WITNESSES_TOML: &str = include_str!("../../data/bundled-c-witnesses.toml");
 
 /// The parsed table, parsed once (the `defect_pattern::registry`
@@ -8455,7 +8463,10 @@ impl BinariesCheck {
         // read-only sections carry a witness-table library's bytes.
         // The scope gates are re-applied here so a record made for
         // an archive member, or a hand-built record, cannot emit
-        // outside ET_EXEC/ET_DYN, Rust, or Go output.
+        // outside ET_EXEC/ET_DYN, Rust, or Go output, or from a
+        // debug file: a -debuginfo carrier keeps its ET_EXEC/ET_DYN
+        // type and its .debug_str witness bytes, so without this
+        // guard it would fire on /usr/lib/debug/ paths.
         if !info.bundled_c_witnesses.is_empty()
             && matches!(
                 info.elf_type,
@@ -8464,6 +8475,8 @@ impl BinariesCheck {
             && !info.is_rust_binary()
             && !info.is_go_binary()
             && !info.go_buildinfo
+            && !info.is_debug
+            && !pkgfile.name.starts_with("/usr/lib/debug/")
         {
             let table = bundled_c_witnesses();
             // One finding per library per binary.
@@ -26662,9 +26675,13 @@ description = "explicit priority string bypasses the system crypto policy"
     /// Run `check_bundled_library_provides` over a synthetic package
     /// and file, returning the finding's rendered lines.
     fn bundled_lines(pkg: &Pkg, info: &ReadelfInfo) -> Vec<String> {
+        bundled_lines_at(pkg, info, "/usr/bin/probe")
+    }
+
+    fn bundled_lines_at(pkg: &Pkg, info: &ReadelfInfo, path: &str) -> Vec<String> {
         let config = test_config();
         let check = BinariesCheck::with_tool_dir(&config, None);
-        let pkgfile = syn_file("/usr/bin/probe", "ELF 64-bit LSB executable");
+        let pkgfile = syn_file(path, "ELF 64-bit LSB executable");
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_bundled_library_provides(pkg, &pkgfile, info, &mut out);
         let results = out.results().to_vec();
@@ -27025,6 +27042,21 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn bundled_c_witness_quiet_for_debug_files() {
+        // Both halves of the debug exclusion at emission: a
+        // .debug-suffixed carrier, and a carrier under
+        // /usr/lib/debug/ without a .debug suffix.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.is_debug = true;
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        assert!(bundled_lines(&pkg, &info).is_empty());
+        let mut info = syn_info();
+        info.bundled_c_witnesses = vec![witnessed("jemalloc")];
+        assert!(bundled_lines_at(&pkg, &info, "/usr/lib/debug/usr/bin/probe").is_empty());
+    }
+
+    #[test]
     fn bundled_c_witness_detected_in_readonly_sections() {
         // The valkey shape at detection level: jemalloc witness in
         // .rodata, no .dep-v0 anywhere.
@@ -27083,6 +27115,28 @@ description = "explicit priority string bypasses the system crypto policy"
         bytes[16..18].copy_from_slice(&goblin::elf::header::ET_REL.to_le_bytes());
         let info = parse_elf_bytes("bundled-c-rel", &bytes);
         assert!(info.bundled_c_witnesses.is_empty());
+    }
+
+    #[test]
+    fn bundled_c_witness_debug_carrier_stays_silent() {
+        // A -debuginfo carrier: the same witness bytes in .rodata,
+        // but a .debug name, so detection records nothing. The
+        // non-debug control proves the silence comes from the guard,
+        // not the fixture.
+        let bytes = craft_elf_sections(&[(".rodata", b"<jemalloc>: x\0")]);
+        let path =
+            std::env::temp_dir().join(format!("rpmcrab-debug-carrier-{}", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let info = ReadelfInfo::parse(path.to_str().unwrap(), "probe.debug");
+        assert!(info.failed.is_none(), "crafted ELF must parse");
+        std::fs::remove_file(&path).ok();
+        assert!(info.is_debug);
+        assert!(info.bundled_c_witnesses.is_empty());
+        let control = parse_crafted_sections(
+            "bundled-c-debug-control",
+            &[(".rodata", b"<jemalloc>: x\0")],
+        );
+        assert_eq!(control.bundled_c_witnesses, vec![witnessed("jemalloc")]);
     }
 
     #[test]
