@@ -27936,6 +27936,36 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn dep_v0_extraction_reads_onig_sys_witness_both_directions() {
+        // The onig_sys witness is the Oniguruma error string `too
+        // big wide-char value`; the .dep-v0 name carries the
+        // underscore spelling, which is what the map matches on.
+        let dep = dep_v0_bytes(&[("onig_sys", "69.9.3")]);
+        // Read-only: the witness proves the vendored copy is linked.
+        let info = parse_crafted_sections(
+            "depv0-onig-readonly",
+            &[(".rodata", b"too big wide-char value\0"), (".dep-v0", &dep)],
+        );
+        assert_eq!(info.vendored_crates.len(), 1);
+        assert_eq!(info.vendored_crates[0].name, "onig_sys");
+        assert!(info.vendored_crates[0].witness_present);
+        // Oniguruma has no version source: no version is named.
+        assert_eq!(info.vendored_crates[0].c_version, None);
+        // Writable section only: runtime data, not linked code.
+        let mut bytes =
+            craft_elf_sections(&[(".data", b"too big wide-char value\0"), (".dep-v0", &dep)]);
+        // SHF_WRITE on the first section (header entry index + 1,
+        // after the NULL entry; flags at +8).
+        let shoff = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
+        let flags_at = shoff + 64 + 8;
+        bytes[flags_at..flags_at + 8].copy_from_slice(&1u64.to_le_bytes());
+        let info = parse_elf_bytes("depv0-onig-writable", &bytes);
+        assert_eq!(info.vendored_crates.len(), 1);
+        assert_eq!(info.vendored_crates[0].name, "onig_sys");
+        assert!(!info.vendored_crates[0].witness_present);
+    }
+
+    #[test]
     fn vendored_crate_version_merge_needs_member_agreement() {
         // Archive members linking the same vendored crate: the C
         // version is named only while every member that names one
