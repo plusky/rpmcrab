@@ -2720,9 +2720,15 @@ impl Check for SourceCheck {
             if !is_reg(f.mode) || is_ghost_file(pkg, f) {
                 continue;
             }
-            let Some(md5) = f.md5.as_ref().filter(|s| !s.is_empty()) else {
+            // The header digest is the join key only on the algo-8
+            // path (binary_digest ignores it otherwise and hashes the
+            // file), so a missing or empty digest skips the file only
+            // there; otherwise the file is hashed below.
+            let md5 = f.md5.as_ref().filter(|s| !s.is_empty());
+            if algo_is_8 && md5.is_none() {
                 continue;
-            };
+            }
+            let md5 = md5.map(String::as_str).unwrap_or("");
             let mut head = [0u8; 512];
             let Ok(mut file) = std::fs::File::open(&f.path) else {
                 continue;
