@@ -86,8 +86,10 @@ enum CrcOutcome {
 /// `UnsupportedArchive(PASSWORD_REQUIRED)` (zip 9 reports it at open,
 /// not at read); like the reference's `RuntimeError` path it aborts
 /// the file instead of naming an entry. An entry whose compression
-/// method the reader cannot inflate aborts the file the same way
-/// (see `map_open_error`).
+/// method the reader cannot inflate aborts the file the same way:
+/// since lazy decompression that failure surfaces on first read and
+/// is mapped below, while `map_open_error` keeps the open-time
+/// branch for readers that still fail at open.
 fn read_entry(
     archive: &mut ZipArchive<File>,
     index: usize,
@@ -95,7 +97,22 @@ fn read_entry(
     sink: &mut Vec<u8>,
 ) -> Result<std::io::Result<usize>, CrcOutcome> {
     match archive.by_index(index) {
-        Ok(entry) => Ok(entry.take(MAX_ENTRY_BYTES as u64 + 1).read_to_end(sink)),
+        Ok(entry) => {
+            // zip 9.1 instantiates decompressors lazily, so an
+            // unsupported compression method no longer fails at open:
+            // it surfaces on first read as an Unsupported-kind io
+            // error carrying zip's own "compression method not
+            // supported: {id}" text. Map that to the same Unreadable
+            // outcome the open-time branch used to produce, so the
+            // entry still aborts the CRC pass as unable-to-read-zip
+            // instead of a bad entry.
+            match entry.take(MAX_ENTRY_BYTES as u64 + 1).read_to_end(sink) {
+                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                    Err(CrcOutcome::Unreadable(e.to_string()))
+                }
+                other => Ok(other),
+            }
+        }
         Err(err) => Err(map_open_error(err, name)),
     }
 }
@@ -106,7 +123,8 @@ fn read_entry(
 /// the whole CRC pass — and with it the file's remaining checks — as
 /// `unable-to-read-zip` (W): no CRC verdict exists for such an entry,
 /// and the pass names no entry for it. The unsupported-method branch
-/// is decided at open, before any data is read, so a corrupt entry
+/// is decided before any data is read (at open on older readers, on
+/// first read since lazy decompression), so a corrupt entry
 /// behind an unsupported method is W here regardless of its stored
 /// CRC. Against the reference that is a codec-dependent split: on a
 /// Python without the codec, `testzip()` raises `NotImplementedError`
