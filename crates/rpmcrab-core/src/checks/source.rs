@@ -150,6 +150,10 @@ fn read_payload_head<R: std::io::Read>(mut reader: R) -> Vec<u8> {
         match reader.read(&mut head[len..]) {
             Ok(0) => break,
             Ok(n) => len += n,
+            // An interrupted read is transient, not a short file:
+            // retry it rather than truncating the head, as the
+            // spawn retry does for interrupted spawns.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
     }
@@ -216,12 +220,20 @@ fn record_shipped_source(
     // #1387), so the source digest is recomputed from the file on
     // disk with the existing streaming hasher; an unreadable file
     // keeps the top-level record rather than suppressing it.
-    let self_hit = if hits.iter().any(|h| h.path == f.name) {
+    // The self hit is one hit, not two independent facts: a hit on
+    // this same path carrying the file's own digest. Two disjoint
+    // scans would let a path-only hit on one member suppress the
+    // record a digest-only hit on another member needs. The digest
+    // is computed once here and reused for the whole-file record
+    // below, so a large Source is not hashed twice.
+    let self_digest = if hits.iter().any(|h| h.path == f.name) {
         sha256_file(&f.path)
-            .map(|digest| hits.iter().any(|h| h.sha256 == digest))
-            .unwrap_or(false)
     } else {
-        false
+        None
+    };
+    let self_hit = match &self_digest {
+        Some(digest) => hits.iter().any(|h| h.path == f.name && &h.sha256 == digest),
+        None => false,
     };
     let mut by_digest: HashMap<String, Vec<SourceRecord>> = HashMap::new();
     for h in hits {
@@ -256,7 +268,17 @@ fn record_shipped_source(
                 let capped = std::fs::metadata(&f.path)
                     .map(|m| m.len() <= prebuilt::MAX_ARCHIVE_BYTES as u64)
                     .unwrap_or(false);
-                if capped { sha256_file(&f.path) } else { None }
+                if capped {
+                    // The self-hit digest hashes these same bytes in
+                    // the form this arm produces, so reuse it instead
+                    // of a second streamed pass over the file.
+                    match &self_digest {
+                        Some(digest) => Some(digest.clone()),
+                        None => sha256_file(&f.path),
+                    }
+                } else {
+                    None
+                }
             }
         };
         if let Some(digest) = digest {
@@ -2774,26 +2796,27 @@ impl Check for SourceCheck {
                 continue;
             }
             let md5 = md5.map(String::as_str).unwrap_or("");
+            // The size gate first: a payload file that can join no
+            // source record needs no head read either. On the sha256
+            // path, source whole-file records are capped at the
+            // 256 MiB archive cap on disk and member records at the
+            // 64 MiB entry cap, so a larger on-disk file matches
+            // neither. The on-disk length decides: the header size
+            // can disagree with the bytes actually hashed. On the
+            // algo-8 path the join key is the free header digest
+            // and whole-file source records are uncapped, so the
+            // gate never applies there.
+            let too_big = std::fs::metadata(&f.path)
+                .map(|m| payload_over_source_cap(algo_is_8, m.len()))
+                .unwrap_or(false);
+            if too_big {
+                continue;
+            }
             let Ok(mut file) = std::fs::File::open(&f.path) else {
                 continue;
             };
             let head = read_payload_head(&mut file);
             if !payload_could_match(&f.name, &head) {
-                continue;
-            }
-            // Skip hashing a payload file that can join no source
-            // record: on the sha256 path, source whole-file records
-            // are capped at the 256 MiB archive cap on disk and
-            // member records at the 64 MiB entry cap, so a larger
-            // on-disk file matches neither. The on-disk length
-            // decides: the header size can disagree with the bytes
-            // actually hashed. On the algo-8 path the join key is
-            // the free header digest and whole-file source records
-            // are uncapped, so the gate never applies there.
-            let too_big = std::fs::metadata(&f.path)
-                .map(|m| payload_over_source_cap(algo_is_8, m.len()))
-                .unwrap_or(false);
-            if too_big {
                 continue;
             }
             // Reuse the opened handle for the hash (issue #1443):
@@ -2843,10 +2866,13 @@ impl Check for SourceCheck {
             {
                 continue;
             }
-            // Display the first non-test copy: an all-test digest
-            // stays quiet above, so one always exists here; the
-            // fallback keeps a display if that ever changes.
-            let first = copies.iter().find(|c| !c.test).unwrap_or(&copies[0]);
+            // Display the first non-test copy. The all-test guard
+            // above makes this infallible in practice; the let-else
+            // keeps the verdict off an eager index if that ever
+            // changes.
+            let Some(first) = copies.iter().find(|c| !c.test) else {
+                continue;
+            };
             out.add_info(make_finding(
                 &rec.pkg_name,
                 &rec.arch,
