@@ -4956,11 +4956,27 @@ mod prebuilt_tests {
 
     #[test]
     fn near_miss_members_stay_quiet() {
+        // A thin Mach-O object: neither 32- nor 64-bit magic is a
+        // kind classify() knows, so it stays quiet (a FAT Mach-O is
+        // a different shape: its CAFEBABE prefix reads as a Java
+        // class, which issue #1411 holds out for a ruling).
+        let macho64: &[u8] = b"\xfe\xed\xfa\xcf\x00\x00\x00\x00";
+        let macho32: &[u8] = b"\xfe\xed\xfa\xce\x00\x00\x00\x00";
+        // An RPM file and a COFF object: no kind matches their
+        // magics, and neither is a walked archive shape.
+        let rpm_file: &[u8] = b"\xed\xab\xee\xdb\x00\x00\x00\x00";
+        let coff_obj: &[u8] =
+            b"\x64\x86\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
         let tar = tarball(&[
             ("thin.a", &thin_archive()),
             ("text.a", &ar_archive("a.txt", b"a\n")),
             ("pkg.deb", &deb_package()),
             ("noidx.a", &ar_archive("hello.o/", ELF)),
+            ("bsd1.a", &ar_archive("#1/20", b"hello.o/\n")),
+            ("macho64.o", macho64),
+            ("macho32.o", macho32),
+            ("pkg.rpm", rpm_file),
+            ("obj.obj", coff_obj),
             ("mzstub.exe", &mz_stub()),
             ("mzpast.exe", &mz_past()),
             ("mz.txt", &mz_txt()),
