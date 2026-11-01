@@ -27936,6 +27936,31 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn dep_v0_extraction_reads_libgit2_witness_both_directions() {
+        // Positive pin for the libgit2 witness (issue #1419): the
+        // negative direction lives in
+        // dep_v0_scans_readonly_sections_only (witness in a writable
+        // section only); here the witness in .rodata proves the
+        // vendored copy linked, and the C version rides the crate
+        // build metadata.
+        let dep = dep_v0_bytes(&[("libgit2-sys", "0.18.8+1.9.7")]);
+        let info = parse_crafted_sections(
+            "depv0-libgit2-readonly",
+            &[
+                (
+                    ".rodata",
+                    b"the index is locked; this might be due to a concurrent or crashed process\0",
+                ),
+                (".dep-v0", &dep),
+            ],
+        );
+        assert_eq!(info.vendored_crates.len(), 1);
+        assert_eq!(info.vendored_crates[0].name, "libgit2-sys");
+        assert!(info.vendored_crates[0].witness_present);
+        assert_eq!(info.vendored_crates[0].c_version.as_deref(), Some("1.9.7"));
+    }
+
+    #[test]
     fn dep_v0_extraction_reads_onig_sys_witness_both_directions() {
         // The onig_sys witness is the Oniguruma error string `too
         // big wide-char value`; the .dep-v0 name carries the
