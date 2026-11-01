@@ -5304,6 +5304,37 @@ mod rich_dep_emission_tests {
     }
 
     #[test]
+    fn missing_dependency_first_regex_match_wins_over_exact_cross_arm() {
+        // The cross-arm half of the chain-order rule: Requires arms
+        // are evaluated before Prereq arms, so a Requires lookalike
+        // listed first wins over a Prereq bound that would fire on
+        // its own. The Prereq dep is the firing shape from the
+        // via-Prereq pin (a strict > bound at the package version);
+        // only the Requires lookalike's no-version finding may
+        // appear, never the Prereq arm's missing-dependency finding.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![DepInfo {
+            name: "libtags-missingdep".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }];
+        pkg.prereq = vec![flagged_dep("tags-missingdep-libs", RPMSENSE_GREATER, "1.0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            !named(&results, "no-version-dependency-on").is_empty(),
+            "Requires lookalike listed first is evaluated: {results:?}"
+        );
+        assert!(
+            named(&results, "missing-dependency-on").is_empty(),
+            "the Prereq arm must not be evaluated after a Requires match: {results:?}"
+        );
+    }
+
+    #[test]
     fn missing_dependency_on_lower_bound_tilde_ancestor_is_silent() {
         // A tilde-suffixed bound sorts below its base under rpm
         // vercmp, so the package version sits above it even though

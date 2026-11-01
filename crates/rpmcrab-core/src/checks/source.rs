@@ -135,7 +135,11 @@ fn sha256_reader<R: std::io::Read>(mut r: R) -> Option<String> {
 /// a larger on-disk file matches neither. On the algo-8 path the join
 /// key is the free header digest and archive whole-file records are
 /// uncapped, so the gate never applies there. Bare-file records are
-/// capped at the walk side on every path.
+/// capped at the walk side on every path. Gate soundness rests on
+/// same-build same-algo: the caps agree only when the source and
+/// binary RPMs share FILEDIGESTALGO, true for one build's src+bin
+/// pair; the mixed-algo corner cannot join today, which is
+/// fail-closed and untestable with real headers.
 fn payload_over_source_cap(algo_is_8: bool, len: u64) -> bool {
     !algo_is_8 && len > prebuilt::MAX_ARCHIVE_BYTES as u64
 }
@@ -219,17 +223,38 @@ fn record_shipped_source(
     // digests coincide, so its top-level record stays suppressed as
     // before.)
     // Main's streaming walk holds no whole-source bytes (issue
-    // #1387), so the source digest is recomputed from the file on
-    // disk with the existing streaming hasher; an unreadable file
+    // #1387), so the self-hit digest comes from the cheapest source
+    // that already knows the file's sha256, and the file itself is
+    // hashed only when no such source exists; an unreadable file
     // keeps the top-level record rather than suppressing it.
     // The self hit is one hit, not two independent facts: a hit on
     // this same path carrying the file's own digest. Two disjoint
     // scans would let a path-only hit on one member suppress the
     // record a digest-only hit on another member needs. The digest
-    // is computed once here and reused for the whole-file record
+    // is resolved once here and reused for the whole-file record
     // below, so a large Source is not hashed twice.
-    let self_digest = if hits.iter().any(|h| h.path == f.name) {
-        sha256_file(&f.path)
+    // Digest sources, cheapest first: on the algo-8 path the header
+    // digest IS the file's sha256, so it is reused outright. Otherwise
+    // the walk already hashed the file itself for the bare and jar
+    // arms, so the path hit's digest is the file's digest and is
+    // reused; only a compressed stream's hit covers decompressed
+    // bytes, so a decoder magic in the file's head falls back to
+    // hashing the file (a 512-byte head read, not a full pass).
+    let self_digest = if let Some(hit) = hits.iter().find(|h| h.path == f.name) {
+        match (pkg.tag_i64(librpm::Tag::FILEDIGESTALGO), f.md5.as_ref()) {
+            (Some(8), Some(md5)) if !md5.is_empty() => Some(md5.clone()),
+            _ => {
+                let is_stream = std::fs::File::open(&f.path)
+                    .map(read_payload_head)
+                    .map(|head| prebuilt::decoder_kind(&head).is_some())
+                    .unwrap_or(true);
+                if is_stream {
+                    sha256_file(&f.path)
+                } else {
+                    Some(hit.sha256.clone())
+                }
+            }
+        }
     } else {
         None
     };
@@ -271,7 +296,7 @@ fn record_shipped_source(
                     .map(|m| m.len() <= prebuilt::MAX_ARCHIVE_BYTES as u64)
                     .unwrap_or(false);
                 if capped {
-                    // The self-hit digest hashes these same bytes in
+                    // The self-hit digest is the file's sha256 in
                     // the form this arm produces, so reuse it instead
                     // of a second streamed pass over the file.
                     match &self_digest {
@@ -1504,7 +1529,7 @@ mod prebuilt {
         ))
     }
 
-    enum DecoderKind {
+    pub enum DecoderKind {
         Gzip,
         Xz,
         Zstd,
@@ -1513,7 +1538,7 @@ mod prebuilt {
 
     /// Stream magics for the four decoders, matching today's
     /// `decompress_*` dispatch. Bzip2 needs its level digit too.
-    fn decoder_kind(prefix: &[u8]) -> Option<DecoderKind> {
+    pub fn decoder_kind(prefix: &[u8]) -> Option<DecoderKind> {
         if prefix.starts_with(b"\x1f\x8b") {
             Some(DecoderKind::Gzip)
         } else if prefix.starts_with(b"\xfd7zXZ\x00") {
@@ -6133,6 +6158,32 @@ mod prebuilt_tests {
         assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
         assert_eq!(outcome.prebuilt[0].1, "huge.bin");
         assert!(outcome.shipped.is_empty(), "{:?}", outcome.shipped);
+    }
+
+    #[test]
+    fn bare_source_at_archive_cap_keeps_shipped_record() {
+        // The walk-side boundary of the cap above: a bare ELF Source
+        // at exactly 256 MiB still hashes into a shipped record; only
+        // above the cap does the finding go record-less. A sparse file
+        // keeps the hash cheap: only the ELF head is real content.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.bin");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(ELF).unwrap();
+        f.set_len(256 * 1024 * 1024).unwrap();
+        drop(f);
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::new(&mut caps, true);
+        walker.walk_file(&path, "huge.bin");
+        let outcome = walker.take_outcome();
+        assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
+        assert_eq!(outcome.shipped.len(), 1, "{:?}", outcome.shipped);
+        assert_eq!(outcome.shipped[0].path, "huge.bin");
+        assert_eq!(
+            outcome.shipped[0].sha256,
+            super::sha256_file(&path.to_string_lossy()).unwrap(),
+            "the at-cap record carries the file digest, not a placeholder"
+        );
     }
 
     #[test]

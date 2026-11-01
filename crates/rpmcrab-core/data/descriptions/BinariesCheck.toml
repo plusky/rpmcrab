@@ -342,7 +342,9 @@ The named file is a Python extension module written in Rust: it
 defines a PyInit_* entry point, was built by the Rust toolchain
 and is an ET_DYN file (a shared object or PIE executable), but it carries no cargo-auditable
 .dep-v0 section, so no bundled(rust-crate:...) provides are
-generated for the crates it vendors. The module's crate graph
+generated for the crates it vendors. Debug files stay quiet: a
+file flagged as debug output, or one under /usr/lib/debug/,
+never fires even when it meets the conditions above. The module's crate graph
 is therefore invisible to the maintenance query for bundled
 code, and it cannot be checked against later advisories the
 way a .dep-v0 section can. Python extension modules are built
