@@ -443,8 +443,9 @@ impl SourceCheck {
                 &outcome.shipped,
                 &outcome.archives,
             );
-            // Grouped kinds (ar, PE, wasm) collapse per archive,
-            // directory and kind, as on main; every other hit keeps
+            // Grouped kinds (ar, PE, wasm) collapse per archive chain
+            // (the full outer:inner chain, not the top-level archive alone),
+            // directory and kind; every other hit keeps
             // its per-member line, as do bare Sources, which have no
             // archive chain.
             let mut groups: Vec<(String, String, prebuilt::BinaryKind, usize, String)> = Vec::new();
