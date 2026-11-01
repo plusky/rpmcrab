@@ -3725,6 +3725,22 @@ mod tests {
             "/usr/lib/python3.14/site-packages/mypy/__pycache__/api.cpython-314.pyc",
             "/usr/share/doc/packages/python314-mypy/docs/source/__pycache__/html_builder.cpython-313.pyc",
         ]);
+        assert_eq!(got, vec![expected.clone()]);
+        // A doc file whose version differs from the expectation
+        // neither sets it (doc-first) nor breaks it (interleaved):
+        // both shapes report the same line, which they would not if
+        // the doc file took part in the expectation logic.
+        let got = pyc_multiple_version_lines(&[
+            "/usr/share/doc/packages/python314-mypy/docs/source/__pycache__/html_builder.cpython-314.pyc",
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/__init__.cpython-313.pyc",
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/api.cpython-314.pyc",
+        ]);
+        assert_eq!(got, vec![expected.clone()]);
+        let got = pyc_multiple_version_lines(&[
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/__init__.cpython-313.pyc",
+            "/usr/share/doc/packages/python314-mypy/docs/source/__pycache__/html_builder.cpython-314.pyc",
+            "/usr/lib/python3.14/site-packages/mypy/__pycache__/api.cpython-314.pyc",
+        ]);
         assert_eq!(got, vec![expected]);
     }
 
