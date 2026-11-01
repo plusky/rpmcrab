@@ -685,6 +685,7 @@ mod prebuilt {
     pub enum BinaryKind {
         Elf,
         JavaClass,
+        FatMachO,
         PythonBytecode,
         JavaArchive,
         Ar,
@@ -697,6 +698,7 @@ mod prebuilt {
             match self {
                 BinaryKind::Elf => "ELF binary",
                 BinaryKind::JavaClass => "Java class file",
+                BinaryKind::FatMachO => "FAT Mach-O binary",
                 BinaryKind::PythonBytecode => "Python bytecode",
                 BinaryKind::JavaArchive => "Java archive (jar)",
                 BinaryKind::Ar => "ar archive",
@@ -778,9 +780,49 @@ mod prebuilt {
         }
     }
 
+    /// Whether bytes are a validated 32-bit big-endian FAT Mach-O:
+    /// the CAFEBABE magic, a sane fat-arch count (1..=32, so a real
+    /// Java class -- major version 45 and up -- never qualifies),
+    /// a table that fits, and every entry's offset+size in bounds
+    /// (checked arithmetic). Anything failing validation falls
+    /// through to the Java-class arm below.
+    fn is_fat_macho(data: &[u8]) -> bool {
+        if !data.starts_with(b"\xca\xfe\xba\xbe") {
+            return false;
+        }
+        let Some(count_bytes) = data.get(4..8) else {
+            return false;
+        };
+        let n = u32::from_be_bytes(count_bytes.try_into().unwrap()) as usize;
+        if !(1..=32).contains(&n) {
+            return false;
+        }
+        let Some(table_end) = 8usize.checked_add(n.checked_mul(20).unwrap_or(usize::MAX)) else {
+            return false;
+        };
+        if table_end > data.len() {
+            return false;
+        }
+        for i in 0..n {
+            let entry = &data[8 + 20 * i..8 + 20 * (i + 1)];
+            let offset = u32::from_be_bytes(entry[8..12].try_into().unwrap()) as usize;
+            let size = u32::from_be_bytes(entry[12..16].try_into().unwrap()) as usize;
+            let Some(end) = offset.checked_add(size) else {
+                return false;
+            };
+            if end > data.len() {
+                return false;
+            }
+        }
+        true
+    }
+
     fn classify(name: &str, data: &[u8]) -> Option<BinaryKind> {
         if data.starts_with(b"\x7fELF") {
             return Some(BinaryKind::Elf);
+        }
+        if is_fat_macho(data) {
+            return Some(BinaryKind::FatMachO);
         }
         if data.starts_with(b"\xca\xfe\xba\xbe") {
             return Some(BinaryKind::JavaClass);
@@ -5582,9 +5624,10 @@ mod prebuilt_tests {
     #[test]
     fn near_miss_members_stay_quiet() {
         // A thin Mach-O object: neither 32- nor 64-bit magic is a
-        // kind classify() knows, so it stays quiet (a FAT Mach-O is
-        // a different shape: its CAFEBABE prefix reads as a Java
-        // class, which issue #1411 holds out for a ruling).
+        // kind classify() knows, so it stays quiet. A FAT Mach-O is
+        // a different shape: classify() validates its fat-arch
+        // table and fires it labeled (issue #1411), so it no longer
+        // misfires as a Java class.
         let macho64: &[u8] = b"\xfe\xed\xfa\xcf\x00\x00\x00\x00";
         let macho32: &[u8] = b"\xfe\xed\xfa\xce\x00\x00\x00\x00";
         // An RPM file and a COFF object: no kind matches their
@@ -5617,6 +5660,35 @@ mod prebuilt_tests {
             prebuilt_lines(&findings).is_empty(),
             "unexpected: {:?}",
             prebuilt_lines(&findings)
+        );
+    }
+
+    #[test]
+    fn fat_macho_fires_labeled_not_as_java_class() {
+        // A validated 32-bit big-endian FAT Mach-O fires as its own
+        // kind (issue #1411); a Java class keeps its label, and a
+        // CAFEBABE file failing FAT validation falls back to it.
+        let mut fat = b"\xca\xfe\xba\xbe\x00\x00\x00\x01".to_vec();
+        fat.extend_from_slice(&0x01000007u32.to_be_bytes()); // x86_64
+        fat.extend_from_slice(&3u32.to_be_bytes());
+        fat.extend_from_slice(&28u32.to_be_bytes());
+        fat.extend_from_slice(&4u32.to_be_bytes());
+        fat.extend_from_slice(&0u32.to_be_bytes());
+        fat.extend_from_slice(b"thin");
+        let not_fat = b"\xca\xfe\xba\xbe\x00\x00\x00\x00\x00\x00\x00\x34".to_vec();
+        let tar = tarball(&[("fat.o", &fat), ("A.class", CLASS), ("bogus.o", &not_fat)]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: A.class Java class file",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: bogus.o Java class file",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: fat.o FAT Mach-O binary",
+            ]
         );
     }
 
