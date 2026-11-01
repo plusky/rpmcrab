@@ -4912,6 +4912,35 @@ mod prebuilt_tests {
     }
 
     #[test]
+    fn pe_and_wasm_group_per_directory_and_split_across_directories() {
+        // The ar-only grouping tests pin one kind; PE and Wasm
+        // group the same way, and one kind across two directories
+        // is two grouped findings, not one.
+        let pe = pe_dll();
+        let tar = tarball(&[
+            ("m/a.dll", &pe),
+            ("m/b.dll", &pe),
+            ("m/c.wasm", WASM),
+            ("m/d.wasm", WASM),
+            ("n/e.dll", &pe),
+            ("n/f.dll", &pe),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/* PE executable or DLL (2 files)",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/* WebAssembly module (2 files)",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: n/* PE executable or DLL (2 files)",
+            ]
+        );
+    }
+
+    #[test]
     fn ar_index_name_variants_fire() {
         let (pkg, _src, _extract) = source_pkg(&[
             ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
