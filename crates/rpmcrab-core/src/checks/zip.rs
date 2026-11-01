@@ -90,6 +90,16 @@ enum CrcOutcome {
 /// since lazy decompression that failure surfaces on first read and
 /// is mapped below, while `map_open_error` keeps the open-time
 /// branch for readers that still fail at open.
+/// Whether a read-time io error is the lazy-decompression form of an
+/// unsupported compression method: kind `Unsupported` carrying zip's
+/// own "compression method not supported" text. Any other
+/// `Unsupported` source falls through to the caller's bad-entry
+/// outcome instead of downgrading to unable-to-read (issue #1425).
+fn is_unsupported_compression(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::Unsupported
+        && e.to_string().contains("compression method not supported")
+}
+
 fn read_entry(
     archive: &mut ZipArchive<File>,
     index: usize,
@@ -105,9 +115,11 @@ fn read_entry(
             // supported: {id}" text. Map that to the same Unreadable
             // outcome the open-time branch used to produce, so the
             // entry still aborts the CRC pass as unable-to-read-zip
-            // instead of a bad entry.
+            // instead of a bad entry. The message check matters: a
+            // future or other Unsupported source must not be
+            // downgraded from a bad entry (E) to unable-to-read (W).
             match entry.take(MAX_ENTRY_BYTES as u64 + 1).read_to_end(sink) {
-                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                Err(e) if is_unsupported_compression(&e) => {
                     Err(CrcOutcome::Unreadable(e.to_string()))
                 }
                 other => Ok(other),
@@ -892,6 +904,29 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn unsupported_read_error_needs_the_method_message() {
+        // Only the Unsupported-kind error carrying zip's own method
+        // text maps to Unreadable: any other Unsupported source, or
+        // the text under another kind, stays a plain read error for
+        // the caller to report as a bad entry (issue #1425).
+        let method_err = std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "compression method not supported: 93",
+        );
+        assert!(is_unsupported_compression(&method_err));
+        let other_unsupported = std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "some other unsupported operation",
+        );
+        assert!(!is_unsupported_compression(&other_unsupported));
+        let other_kind = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "compression method not supported: 93",
+        );
+        assert!(!is_unsupported_compression(&other_kind));
+    }
+
     fn unsupported_compression_method_is_unable_to_read_warning() {
         // Method 93 (zstd): the reader is built with stored and
         // deflate only, so the entry cannot be inflated and no CRC
