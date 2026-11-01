@@ -7,8 +7,12 @@
 # C++ binaries with no .dep-v0 at all, where the witness bytes alone
 # prove the library's code is linked in. The two paths are disjoint
 # by construction: an ELF with a .dep-v0 section never takes this
-# path, so a Rust binary's vendored copy is reported once, through
-# the crate map.
+# path, so a vendored copy of a crate-map library is reported once,
+# through the crate map. Rust binaries vendoring a witness-table
+# library (jemalloc, mimalloc) via -sys are out of scope: they carry
+# a .dep-v0, so this path stays silent, and no crate-map entry
+# covers them, so the crate path stays silent too. This table is the
+# witness-only path of rpmcrab#1397.
 #
 # Each entry names one library the openSUSE bundled software policy
 # wants declared as bundled(<srpm>). A library joins this table one
