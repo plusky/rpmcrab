@@ -778,6 +778,34 @@ mod tests {
     }
 
     #[test]
+    fn mixed_group_identical_pair_fires_differing_and_digest_less_excluded() {
+        // N=3 mixed-copy group: an identical pair, a same-digest copy
+        // differing by mode, and a digest-less copy sharing the pair's
+        // inode. Only the identical pair fires: the differing copy is
+        // excluded by the (digest, mode, filecaps) gate, and the
+        // digest-less copy never groups, so it earns neither a
+        // duplicate nor a hardlink finding.
+        let a = pkgfile("/usr/bin/a", "aaa", 100, 1);
+        let b = pkgfile("/usr/bin/b", "aaa", 100, 2);
+        let mut c = pkgfile("/usr/bin/c", "aaa", 100, 3);
+        c.mode = 0o100755;
+        let mut d = pkgfile("/usr/bin/d", "aaa", 100, 1);
+        d.md5 = None;
+        let files = [a, b, c, d];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        let findings =
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist);
+        assert_eq!(
+            findings,
+            vec![DuplicateFinding::FilesDuplicate(
+                "/usr/bin/b".into(),
+                "/usr/bin/a".into(),
+            )],
+            "only the identical pair fires: {findings:?}"
+        );
+    }
+
+    #[test]
     fn digest_less_hardlink_pair_stays_quiet() {
         // The digest-less skip runs before inode grouping, so a
         // hardlink pair with unknown digests earns neither a
