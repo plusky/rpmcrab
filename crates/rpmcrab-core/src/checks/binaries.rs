@@ -8400,26 +8400,30 @@ impl BinariesCheck {
     /// witness proves the C code is linked, the file does not link
     /// the system library instead, and the package declares none of
     /// the accepted names.
-    fn check_bundled_library_provides(
-        &self,
-        pkg: &Pkg,
-        pkgfile: &PkgFile,
-        info: &ReadelfInfo,
-        out: &mut Filter,
-    ) {
-        // The package's declared bundled() names, collected once
-        // for every (file, library) pair: a versioned provide's name
-        // is the same `bundled(<name>)` string, its version a
-        // separate field.
-        let declared_names: std::collections::HashSet<&str> = pkg
-            .provides
+    /// The package's declared bundled() names: a versioned
+    /// provide's name is the same `bundled(<name>)` string, its
+    /// version a separate field. Computed once per package by the
+    /// caller and passed down, not rebuilt per file (issue #1422):
+    /// the set depends only on the package's provides.
+    fn declared_bundled_names(pkg: &Pkg) -> std::collections::HashSet<&str> {
+        pkg.provides
             .iter()
             .filter_map(|p| {
                 p.name
                     .strip_prefix("bundled(")
                     .and_then(|rest| rest.strip_suffix(')'))
             })
-            .collect();
+            .collect()
+    }
+
+    fn check_bundled_library_provides(
+        &self,
+        pkg: &Pkg,
+        pkgfile: &PkgFile,
+        info: &ReadelfInfo,
+        out: &mut Filter,
+        declared_names: &std::collections::HashSet<&str>,
+    ) {
         let is_declared = |accepted: &[String]| {
             accepted
                 .iter()
@@ -8914,6 +8918,7 @@ impl BinariesCheck {
         pre: Option<&ElfAnalysis>,
         daemon_exec: &DaemonExec,
         ships_daemon: bool,
+        declared_names: &std::collections::HashSet<&str>,
     ) {
         if self.is_archive && !self.is_standard_archive(pkg, pkgfile, out) {
             self.is_nonstandard_archive = true;
@@ -8963,7 +8968,7 @@ impl BinariesCheck {
         }
         self.check_security_functions(pkg, pkgfile, info, daemon_exec, ships_daemon, out);
         self.check_go_toolchain(pkg, pkgfile, info, out);
-        self.check_bundled_library_provides(pkg, pkgfile, info, out);
+        self.check_bundled_library_provides(pkg, pkgfile, info, out, declared_names);
         self.check_python_rust_extension_auditable_data(pkg, pkgfile, info, out);
         self.check_rpath(pkg, pkgfile, info, out);
         self.check_rpath_runpath(pkg, pkgfile, info, out);
@@ -9102,6 +9107,10 @@ impl Check for BinariesCheck {
         // would make the gethostbyname and shell-call arms O(files).
         let daemon_exec = daemon_exec_binaries(pkg);
         let ships_daemon = pkg_ships_daemon_units(pkg);
+        // The declared bundled() set rides the same hoist: it
+        // depends only on the package's provides, so building it
+        // per file would redo identical work for every file.
+        let declared_names = Self::declared_bundled_names(pkg);
         for (idx, pkgfile) in pkg.files.iter().enumerate() {
             let fname: &str = &pkgfile.name;
             self.check_libtool_wrapper(pkg, fname, pkgfile, out);
@@ -9183,6 +9192,7 @@ impl Check for BinariesCheck {
                 analyses[idx].as_ref(),
                 &daemon_exec,
                 ships_daemon,
+                &declared_names,
             );
 
             if self.is_nonstandard_archive {
@@ -20678,6 +20688,7 @@ description = "explicit priority string bypasses the system crypto policy"
             analysis.as_ref(),
             &daemon_exec_binaries(&pkg),
             pkg_ships_daemon_units(&pkg),
+            &BinariesCheck::declared_bundled_names(&pkg),
         );
         let results = out.results().to_vec();
         assert!(
@@ -20740,6 +20751,7 @@ description = "explicit priority string bypasses the system crypto policy"
             analysis.as_ref(),
             &daemon_exec_binaries(&pkg),
             pkg_ships_daemon_units(&pkg),
+            &BinariesCheck::declared_bundled_names(&pkg),
         );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "readelf-failed");
@@ -21311,6 +21323,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 analysis.as_ref(),
                 &daemon_exec_binaries(&pkg),
                 pkg_ships_daemon_units(&pkg),
+                &BinariesCheck::declared_bundled_names(&pkg),
             );
             std::fs::remove_file(&path).ok();
             out.results().to_vec()
@@ -26704,7 +26717,8 @@ description = "explicit priority string bypasses the system crypto policy"
         let check = BinariesCheck::with_tool_dir(&config, None);
         let pkgfile = syn_file(path, "ELF 64-bit LSB executable");
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        check.check_bundled_library_provides(pkg, &pkgfile, info, &mut out);
+        let declared_names = BinariesCheck::declared_bundled_names(pkg);
+        check.check_bundled_library_provides(pkg, &pkgfile, info, &mut out, &declared_names);
         let results = out.results().to_vec();
         lines_for(&results, "bundled-library-without-provides")
             .into_iter()
