@@ -457,7 +457,7 @@ impl SourceCheck {
                         Level::Warning,
                         pkg,
                         "prebuilt-binary-in-sources",
-                        &[path, kind.as_str()],
+                        &[&prebuilt::cut_detail(path), kind.as_str()],
                     );
                     continue;
                 }
@@ -468,7 +468,7 @@ impl SourceCheck {
                         Level::Warning,
                         pkg,
                         "prebuilt-binary-in-sources",
-                        &[path, kind.as_str()],
+                        &[&prebuilt::cut_detail(path), kind.as_str()],
                     );
                     continue;
                 };
@@ -492,7 +492,7 @@ impl SourceCheck {
                         Level::Warning,
                         pkg,
                         "prebuilt-binary-in-sources",
-                        &[&first_path, kind.as_str()],
+                        &[&prebuilt::cut_detail(&first_path), kind.as_str()],
                     );
                 } else {
                     let path = if dir.is_empty() {
@@ -500,6 +500,7 @@ impl SourceCheck {
                     } else {
                         format!("{archive}: {dir}/*")
                     };
+                    let path = prebuilt::cut_detail(&path);
                     let label = format!("{} ({count} files)", kind.as_str());
                     add_info(
                         out,
@@ -621,15 +622,6 @@ fn has_url_scheme(s: &str) -> bool {
 /// Prebuilt-binary detection inside source archives (issue #150).
 ///
 /// The walker is deliberately small: magic-byte archive detection, a minimal
-/// ustar reader, and capped in-memory decompression.
-///
-/// Scope choices: only ustar tarballs are recognized - pre-POSIX V7 format
-/// has no magic bytes and is skipped - and of the zip-based Java archives
-/// only `.jar` is reported as a unit; `.war`/`.ear`/`.aar` are walked like
-/// plain zips, their classes listed individually.
-/// Prebuilt-binary detection inside source archives (issue #150).
-///
-/// The walker is deliberately small: magic-byte archive detection, a minimal
 /// ustar reader, and streaming decompression.
 ///
 /// Scope choices: only ustar tarballs are recognized - pre-POSIX V7 format
@@ -683,6 +675,11 @@ mod prebuilt {
     const DETAIL_PATH_LIMIT: usize = 1024;
     /// Bytes of a member's head kept for the git-lfs test.
     const HEAD_BYTES: usize = 1024;
+    /// Peek extension cap for MZ files (issue #1428): a bare PE image
+    /// is classified from the peek, but `e_lfanew` can lie past the
+    /// 512-byte peek for a large DOS header; the peek extends up to
+    /// this many bytes so `e_lfanew + 4` is in hand, never more.
+    const MAX_MZ_PEEK_BYTES: usize = 64 * 1024;
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum BinaryKind {
@@ -835,10 +832,6 @@ mod prebuilt {
         vcs_roots: usize,
         lfs: usize,
         bidi: usize,
-        prebuilt_tripped: bool,
-        vcs_tripped: bool,
-        lfs_tripped: bool,
-        bidi_tripped: bool,
     }
 
     impl CapState {
@@ -848,10 +841,6 @@ mod prebuilt {
                 vcs_roots: 0,
                 lfs: 0,
                 bidi: 0,
-                prebuilt_tripped: false,
-                vcs_tripped: false,
-                lfs_tripped: false,
-                bidi_tripped: false,
             }
         }
     }
@@ -884,17 +873,21 @@ mod prebuilt {
 
     impl<R: Read> Read for CountingReader<R> {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let mut state = self.budget.borrow_mut();
-            if state.left == 0 {
-                state.hit = true;
-                return Ok(0);
-            }
-            let want = buf
-                .len()
-                .min(usize::try_from(state.left).unwrap_or(usize::MAX));
+            // The borrow is held only to size the read: an inner
+            // reader touching the same budget (e.g. a double-wrapped
+            // counting layer) must not meet a borrowed RefCell.
+            let want = {
+                let mut state = self.budget.borrow_mut();
+                if state.left == 0 {
+                    state.hit = true;
+                    return Ok(0);
+                }
+                buf.len()
+                    .min(usize::try_from(state.left).unwrap_or(usize::MAX))
+            };
             match self.inner.read(&mut buf[..want]) {
                 Ok(n) => {
-                    state.left -= n as u64;
+                    self.budget.borrow_mut().left -= n as u64;
                     Ok(n)
                 }
                 Err(e) => {
@@ -902,7 +895,7 @@ mod prebuilt {
                     // memlimit surfaces here; anything else (a corrupt
                     // stream, a short file) stays silent downstream.
                     if is_memlimit(&e) {
-                        state.memlimit_hit = true;
+                        self.budget.borrow_mut().memlimit_hit = true;
                     }
                     Err(e)
                 }
@@ -992,7 +985,7 @@ mod prebuilt {
 
     /// Cut a detail path to the storage limit, on a character boundary,
     /// with a trailing ellipsis (issue #1387).
-    fn cut_detail(path: &str) -> String {
+    pub fn cut_detail(path: &str) -> String {
         if path.len() <= DETAIL_PATH_LIMIT {
             return path.to_owned();
         }
@@ -1025,6 +1018,10 @@ mod prebuilt {
         out: WalkOutcome,
         budget_stop_recorded: bool,
         memlimit_stop_recorded: bool,
+        prebuilt_cap_stop_recorded: bool,
+        vcs_cap_stop_recorded: bool,
+        lfs_cap_stop_recorded: bool,
+        bidi_cap_stop_recorded: bool,
     }
 
     impl<'a> Walker<'a> {
@@ -1041,6 +1038,10 @@ mod prebuilt {
                 out: WalkOutcome::new(),
                 budget_stop_recorded: false,
                 memlimit_stop_recorded: false,
+                prebuilt_cap_stop_recorded: false,
+                vcs_cap_stop_recorded: false,
+                lfs_cap_stop_recorded: false,
+                bidi_cap_stop_recorded: false,
             }
         }
 
@@ -1065,6 +1066,10 @@ mod prebuilt {
                 out: WalkOutcome::new(),
                 budget_stop_recorded: false,
                 memlimit_stop_recorded: false,
+                prebuilt_cap_stop_recorded: false,
+                vcs_cap_stop_recorded: false,
+                lfs_cap_stop_recorded: false,
+                bidi_cap_stop_recorded: false,
             }
         }
 
@@ -1113,8 +1118,12 @@ mod prebuilt {
 
         fn push_prebuilt(&mut self, kind: BinaryKind, ctx: &str, sha256: String) {
             if self.caps.prebuilt >= self.limits.finding_cap {
-                if !self.caps.prebuilt_tripped {
-                    self.caps.prebuilt_tripped = true;
+                // The cap counts per source package, but the stop is
+                // logged per Source walk: a later Source in the same
+                // package must record its own stop instead of staying
+                // silent behind the first Source's trip.
+                if !self.prebuilt_cap_stop_recorded {
+                    self.prebuilt_cap_stop_recorded = true;
                     self.out.stops.record(
                         "finding-cap",
                         "prebuilt-binary-in-sources reached the finding cap".to_owned(),
@@ -1123,9 +1132,14 @@ mod prebuilt {
                 return;
             }
             self.caps.prebuilt += 1;
-            let path = cut_detail(ctx);
-            self.out.prebuilt.push((kind, path.clone()));
-            self.out.shipped.push(Hit { kind, path, sha256 });
+            // Grouping works on full paths and cuts at emission; the
+            // shipped-join record keeps the cut path, as before.
+            self.out.prebuilt.push((kind, ctx.to_string()));
+            self.out.shipped.push(Hit {
+                kind,
+                path: cut_detail(ctx),
+                sha256,
+            });
         }
 
         fn count_vcs(&mut self, name: &str, size: u64) {
@@ -1141,8 +1155,8 @@ mod prebuilt {
                 return;
             }
             if self.caps.vcs_roots >= self.limits.finding_cap {
-                if !self.caps.vcs_tripped {
-                    self.caps.vcs_tripped = true;
+                if !self.vcs_cap_stop_recorded {
+                    self.vcs_cap_stop_recorded = true;
                     self.out.stops.record(
                         "finding-cap",
                         "source-archive-contains-vcs-metadata reached the finding cap".to_owned(),
@@ -1178,8 +1192,8 @@ mod prebuilt {
                 return;
             }
             if self.caps.lfs >= self.limits.finding_cap {
-                if !self.caps.lfs_tripped {
-                    self.caps.lfs_tripped = true;
+                if !self.lfs_cap_stop_recorded {
+                    self.lfs_cap_stop_recorded = true;
                     self.out.stops.record(
                         "finding-cap",
                         "source-archive-contains-lfs-pointer reached the finding cap".to_owned(),
@@ -1193,8 +1207,8 @@ mod prebuilt {
 
         fn push_bidi(&mut self, hit: BidiHit) {
             if self.caps.bidi >= self.limits.finding_cap {
-                if !self.caps.bidi_tripped {
-                    self.caps.bidi_tripped = true;
+                if !self.bidi_cap_stop_recorded {
+                    self.bidi_cap_stop_recorded = true;
                     self.out.stops.record(
                         "finding-cap",
                         "source-archive-contains-bidi-control reached the finding cap".to_owned(),
@@ -1274,6 +1288,28 @@ mod prebuilt {
                 Ok(0) => break,
                 Ok(n) => got += n,
                 Err(_) => return None,
+            }
+        }
+        // A bare PE image is classified from this peek, but `is_pe`
+        // needs `PE\0\0` at `e_lfanew`, which can lie past 512 bytes
+        // for a large DOS header: extend the peek for MZ files up to
+        // `e_lfanew + 4`, bounded so the streaming path never buffers
+        // a whole file for one header field. Best-effort: a short or
+        // failed extension keeps the 512 bytes already read.
+        if got >= 64 && prefix.starts_with(b"MZ") {
+            let off = u32::from_le_bytes([prefix[60], prefix[61], prefix[62], prefix[63]]) as usize;
+            if let Some(end) = off
+                .checked_add(4)
+                .filter(|&end| end > got && end <= MAX_MZ_PEEK_BYTES)
+            {
+                prefix.resize(end, 0);
+                while got < end {
+                    match r.read(&mut prefix[got..]) {
+                        Ok(0) => break,
+                        Ok(n) => got += n,
+                        Err(_) => break,
+                    }
+                }
             }
         }
         prefix.truncate(got);
@@ -1974,7 +2010,7 @@ mod prebuilt {
                 Ok((_, true)) => {
                     self.out.stops.record(
                         "single-over-64",
-                        format!("{ctx}: decompressed stream over 64 MiB is not walked"),
+                        "decompressed stream over 64 MiB is not walked".to_owned(),
                     );
                 }
                 Err(_) => {
@@ -2016,7 +2052,7 @@ mod prebuilt {
                 if metadata.len() > MAX_ARCHIVE_BYTES as u64 {
                     self.out.stops.record(
                         "zip-skipped",
-                        format!("{name}: zip Source over 256 MiB on disk is skipped"),
+                        "zip Source over 256 MiB on disk is skipped".to_owned(),
                     );
                     return;
                 }
@@ -4603,6 +4639,59 @@ mod prebuilt_tests {
         assert_eq!(outcome.vcs["llama.cpp/.git"], (2, size + 5));
     }
 
+    /// Patch one central-directory entry's uncompressed size: entry
+    /// `which` (0-based, in central order) gets `size`; a size over
+    /// u32 rides a zip64 extra field carrying the full value.
+    fn patch_central_uncompressed(z: &mut Vec<u8>, which: usize, size: u64) {
+        let mut pos = z
+            .windows(4)
+            .position(|w| w == b"PK\x01\x02")
+            .expect("central directory present");
+        for _ in 0..which {
+            let name_len = u16::from_le_bytes([z[pos + 28], z[pos + 29]]) as usize;
+            let extra_len = u16::from_le_bytes([z[pos + 30], z[pos + 31]]) as usize;
+            let comment_len = u16::from_le_bytes([z[pos + 32], z[pos + 33]]) as usize;
+            pos += 46 + name_len + extra_len + comment_len;
+            assert_eq!(&z[pos..pos + 4], b"PK\x01\x02", "central entry {which}");
+        }
+        if size <= u32::MAX as u64 {
+            z[pos + 24..pos + 28].copy_from_slice(&(size as u32).to_le_bytes());
+            return;
+        }
+        z[pos + 24..pos + 28].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        let name_len = u16::from_le_bytes([z[pos + 28], z[pos + 29]]) as usize;
+        let extra_len = u16::from_le_bytes([z[pos + 30], z[pos + 31]]) as usize;
+        let extra_end = pos + 46 + name_len + extra_len;
+        let mut field = vec![0x01, 0x00, 0x08, 0x00];
+        field.extend_from_slice(&size.to_le_bytes());
+        z.splice(extra_end..extra_end, field);
+        z[pos + 30..pos + 32].copy_from_slice(&((extra_len + 12) as u16).to_le_bytes());
+        let eocd = z
+            .windows(4)
+            .position(|w| w == b"PK\x05\x06")
+            .expect("end of central directory present");
+        let old_size = u32::from_le_bytes([z[eocd + 12], z[eocd + 13], z[eocd + 14], z[eocd + 15]]);
+        z[eocd + 12..eocd + 16].copy_from_slice(&(old_size + 12).to_le_bytes());
+    }
+
+    #[test]
+    fn vcs_byte_totals_saturate() {
+        // Byte totals saturate at u64::MAX instead of wrapping: two
+        // .git members under one root with declared sizes summing
+        // past the boundary (issue #1428). Declared sizes are patched
+        // into the central directory (zip64 for the huge one); actual
+        // content stays tiny.
+        let mut z = zip_bytes(&[
+            ("repo/.git/objects/pack/a.pack", b"xxxxx"),
+            ("repo/.git/objects/pack/b.pack", b"yyyyy"),
+        ]);
+        patch_central_uncompressed(&mut z, 0, u64::MAX - 10);
+        patch_central_uncompressed(&mut z, 1, 100);
+        let outcome = walk_buffer(&z, "sat.zip");
+        assert_eq!(outcome.vcs.len(), 1);
+        assert_eq!(outcome.vcs["repo/.git"], (2, u64::MAX));
+    }
+
     #[test]
     fn base256_size_members_are_walked() {
         // Both members carry GNU base-256 size fields: the walk reads
@@ -4684,6 +4773,70 @@ mod prebuilt_tests {
     }
 
     #[test]
+    fn finding_cap_stop_logged_for_later_sources() {
+        // One CapState per source package, shared across its payload
+        // files: a Source capped after the first trip must still log
+        // its own finding-cap stop (issue #1428).
+        let tar = tarball(&[("a.o", ELF), ("b.o", ELF)]);
+        let mut caps = super::prebuilt::CapState::new();
+        let mut first = super::prebuilt::Walker::with_limits(&mut caps, true, u64::MAX, 1);
+        first.walk_archive_buffer(
+            &tar,
+            super::prebuilt::BufferNames {
+                classify: "one.tar",
+                bidi: "one.tar",
+                stream: "one.tar",
+            },
+            "one.tar",
+            0,
+            true,
+        );
+        let first_outcome = first.take_outcome();
+        assert_eq!(
+            first_outcome.prebuilt.len(),
+            1,
+            "{:?}",
+            first_outcome.prebuilt
+        );
+        assert!(
+            first_outcome
+                .stops
+                .lines()
+                .iter()
+                .any(|l| l.contains("finding cap")),
+            "{:?}",
+            first_outcome.stops.lines()
+        );
+        let mut second = super::prebuilt::Walker::with_limits(&mut caps, true, u64::MAX, 1);
+        second.walk_archive_buffer(
+            &tar,
+            super::prebuilt::BufferNames {
+                classify: "two.tar",
+                bidi: "two.tar",
+                stream: "two.tar",
+            },
+            "two.tar",
+            0,
+            true,
+        );
+        let second_outcome = second.take_outcome();
+        assert!(
+            second_outcome.prebuilt.is_empty(),
+            "{:?}",
+            second_outcome.prebuilt
+        );
+        assert!(
+            second_outcome
+                .stops
+                .lines()
+                .iter()
+                .any(|l| l.contains("finding cap")),
+            "later Source must log its own cap stop: {:?}",
+            second_outcome.stops.lines()
+        );
+    }
+
+    #[test]
     fn compressed_single_elf_over_64_mib_not_walked() {
         let mut plain = ELF.to_vec();
         plain.resize(64 * 1024 * 1024 + 1, 0);
@@ -4699,6 +4852,15 @@ mod prebuilt_tests {
             "{:?}",
             outcome.stops.lines()
         );
+        assert!(
+            outcome
+                .stops
+                .lines()
+                .iter()
+                .any(|l| l == "decompressed stream over 64 MiB is not walked"),
+            "{:?}",
+            outcome.stops.lines()
+        );
     }
 
     #[test]
@@ -4707,6 +4869,31 @@ mod prebuilt_tests {
         let outcome = walk_buffer(&gz, "small.elf.gz");
         assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
         assert_eq!(outcome.prebuilt[0].1, "small.elf.gz");
+    }
+
+    #[test]
+    fn bare_pe_with_large_header_fires() {
+        // e_lfanew past the 512-byte peek: the bare-file classify
+        // must still see PE\0\0 (issue #1428).
+        let mut pe = Vec::new();
+        pe.extend_from_slice(b"MZ");
+        pe.extend(std::iter::repeat_n(0, 58));
+        pe.extend_from_slice(&1024u32.to_le_bytes());
+        pe.resize(1024, 0);
+        pe.extend_from_slice(b"PE\0\0");
+        pe.extend_from_slice(&0x8664u16.to_le_bytes());
+        pe.extend(std::iter::repeat_n(0, 14));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.dll");
+        std::fs::write(&path, &pe).unwrap();
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::new(&mut caps, true);
+        walker.walk_file(&path, "big.dll");
+        let outcome = walker.take_outcome();
+        assert_eq!(
+            outcome.prebuilt,
+            [(super::prebuilt::BinaryKind::Pe, "big.dll".to_string())]
+        );
     }
 
     #[test]
@@ -4756,6 +4943,17 @@ mod prebuilt_tests {
         assert!(outcome.prebuilt.is_empty());
         assert!(
             outcome.stops.lines().iter().any(|l| l.contains("256 MiB")),
+            "{:?}",
+            outcome.stops.lines()
+        );
+        // The log prefix already carries the Source name, so the stop
+        // itself must not repeat it (issue #1428).
+        assert!(
+            outcome
+                .stops
+                .lines()
+                .iter()
+                .any(|l| l == "zip Source over 256 MiB on disk is skipped"),
             "{:?}",
             outcome.stops.lines()
         );
@@ -4938,6 +5136,37 @@ mod prebuilt_tests {
                 "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: n/* PE executable or DLL (2 files)",
             ]
         );
+    }
+
+    #[test]
+    fn long_path_pe_members_split_across_directories() {
+        // Paths over 1024 bytes used to group on their truncated
+        // form: two PE members in different directories sharing a
+        // long common prefix merged into one group. Grouping works
+        // on full paths now, so they stay two findings (issue #1428).
+        let pe = pe_dll();
+        let dir_a = format!("{}/subA", "e".repeat(1020));
+        let dir_b = format!("{}/subB", "e".repeat(1020));
+        let name_a = format!("{dir_a}/x.dll");
+        let name_b = format!("{dir_b}/y.dll");
+        let tar = tarball_pax(&[
+            PaxMember {
+                long: Some(&name_a),
+                ..PaxMember::regular("cut.dll", &pe)
+            },
+            PaxMember {
+                long: Some(&name_b),
+                ..PaxMember::regular("cut.dll", &pe)
+            },
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        let lines = prebuilt_lines(&findings);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().all(|l| !l.contains("(2 files)")), "{lines:?}");
     }
 
     #[test]
