@@ -325,7 +325,17 @@ byte pattern is present in the binary's read-only sections; a
 crate that was resolved but not linked stays silent. A binary that links the system
 library and carries the vendored code as well fires: the linked
 copy does not replace the vendored one, which is declared (or
-patched out) like any other.
+patched out) like any other.A second path covers C and C++ binaries with no .dep-v0 at all:
+when such a binary carries the measured witness bytes of a library
+from the bundled-C witness table in its read-only sections, the
+same finding fires, naming the library and prescribing only the
+declaration: add Provides: bundled(<source package>). The
+vendored copies behind this path are modified upstream, so no
+link-the-system-library remedy is prescribed for it. The system
+library itself is exempt by its SONAME. Generated flavours
+(-32bit, -x86-64-vN) do not inherit spec Provides, so a flavour
+carrying the same copy needs a baselibs.conf provides line for
+the bundled name in addition to the spec Provides.
 """
 python-rust-extension-without-auditable-data="""
 The named file is a Python extension module written in Rust: it

@@ -1,0 +1,67 @@
+# Witness-only vendored C libraries for BinariesCheck's
+# bundled-library-without-provides finding.
+#
+# The shipped path maps Rust -sys crates (data/vendored-c-crates.toml):
+# it reads the crate graph from .dep-v0 and fires when the library's
+# witness bytes are present. This table covers the other side: C and
+# C++ binaries with no .dep-v0 at all, where the witness bytes alone
+# prove the library's code is linked in. The two paths are disjoint
+# by construction: an ELF with a .dep-v0 section never takes this
+# path, so a Rust binary's vendored copy is reported once, through
+# the crate map.
+#
+# Each entry names one library the openSUSE bundled software policy
+# wants declared as bundled(<srpm>). A library joins this table one
+# at a time, with a measured witness: a byte string the library's
+# code leaves in a binary that actually links it, which the
+# library's own headers do not reproduce -- a consumer compiled
+# against the headers carries none of these bytes, so the witness
+# separates "links the library" from "includes the header". The
+# witness is read from SHT_PROGBITS sections without SHF_WRITE only:
+# the same bytes in a writable section are runtime data and prove
+# nothing. It is a one-sided test: a copy whose messages are
+# compiled out or reworded stays silent.
+#
+# Fields:
+#   name                  the library name the detail leads with
+#   srpm                  the source RPM name the detail prescribes
+#   accepted_names        bundled() names that satisfy the finding
+#   library_soname_prefix SONAME prefix of the system library: an
+#                         ELF whose SONAME starts with it is the
+#                         system library itself and stays silent
+#   witness               byte string proving the C code is linked
+#
+# The detail prescribes only the declaration for this path: the
+# vendored copies behind it are modified upstream (valkey's jemalloc
+# is patched for active defragmentation and configured with
+# --with-lg-quantum=3; CPython's mimalloc is patched per
+# cpython#113141), so no link-the-system-library remedy is named,
+# even where a build could link the system library.
+#
+# The jemalloc witness is the library's message prefix, compiled
+# into release builds (the assert.h form is behind config_debug):
+# jemalloc's malloc_conf_error prints "<jemalloc>: ..." from the
+# initialization path, so the string stays reachable from malloc's
+# initialization even under --gc-sections.
+#
+# The mimalloc witness is _mi_warning_message's prefix in CPython's
+# Objects/mimalloc/options.c: a consumer that calls only mi_malloc
+# and mi_free keeps it under --gc-sections, as does a
+# -DMI_MALLOC_OVERRIDE build whose consumer calls only malloc and
+# free.
+
+as_of = "2026-10-31"
+
+[[library]]
+name = "jemalloc"
+srpm = "jemalloc"
+accepted_names = ["jemalloc"]
+library_soname_prefix = "libjemalloc.so."
+witness = "<jemalloc>: "
+
+[[library]]
+name = "mimalloc"
+srpm = "mimalloc"
+accepted_names = ["mimalloc"]
+library_soname_prefix = "libmimalloc.so."
+witness = "mimalloc: warning: "

@@ -443,8 +443,9 @@ impl SourceCheck {
                 &outcome.shipped,
                 &outcome.archives,
             );
-            // Grouped kinds (ar, PE, wasm) collapse per archive,
-            // directory and kind, as on main; every other hit keeps
+            // Grouped kinds (ar, PE, wasm) collapse per archive chain
+            // (the full outer:inner chain, not the top-level archive alone),
+            // directory and kind; every other hit keeps
             // its per-member line, as do bare Sources, which have no
             // archive chain.
             let mut groups: Vec<(String, String, prebuilt::BinaryKind, usize, String)> = Vec::new();
@@ -751,6 +752,8 @@ mod prebuilt {
     /// `__.SYMDEF SORTED`. The first member header's terminator is
     /// required, so text starting with the ar magic stays quiet; thin
     /// archives (`!<thin>`) never reach this test.
+    /// An indexed ar archive is reported as a unit: its members are
+    /// never walked, so an inner ELF stays silent.
     fn ar_indexed(data: &[u8]) -> bool {
         if !data.starts_with(b"!<arch>\n") || data.len() < 68 {
             return false;
@@ -4883,6 +4886,88 @@ mod prebuilt_tests {
     }
 
     #[test]
+    fn new_kinds_fire_regardless_of_member_extension() {
+        // ar, PE and WebAssembly need no name gate: the same bytes
+        // fire under extensions that match no kind, unlike .pyc/.pyo
+        // and .jar members, which need their names.
+        let pe = pe_dll();
+        let tar = tarball(&[
+            ("m/lib.bin", &ar_archive("/", b"\x00\x00\x00\x01")),
+            ("m/prog.dat", &pe),
+            ("m/mod.txt", WASM),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/lib.bin ar archive",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/mod.txt WebAssembly module",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/prog.dat PE executable or DLL",
+            ]
+        );
+    }
+
+    #[test]
+    fn pe_and_wasm_group_per_directory_and_split_across_directories() {
+        // The ar-only grouping tests pin one kind; PE and Wasm
+        // group the same way, and one kind across two directories
+        // is two grouped findings, not one.
+        let pe = pe_dll();
+        let tar = tarball(&[
+            ("m/a.dll", &pe),
+            ("m/b.dll", &pe),
+            ("m/c.wasm", WASM),
+            ("m/d.wasm", WASM),
+            ("n/e.dll", &pe),
+            ("n/f.dll", &pe),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("kinds.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/* PE executable or DLL (2 files)",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/* WebAssembly module (2 files)",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: n/* PE executable or DLL (2 files)",
+            ]
+        );
+    }
+
+    #[test]
+    fn doc_members_leave_findings_unchanged_in_either_order() {
+        // Doc files neither set nor fire the expectation: a doc
+        // tree alongside the binaries leaves the findings identical
+        // whether its members come first or last in the archive.
+        let ar = ar_archive("/", b"\x00\x00\x00\x01");
+        let docs: [(&str, &[u8]); 2] = [
+            ("doc/README.txt", b"documentation\n"),
+            ("doc/manual.md", b"# manual\n"),
+        ];
+        let binaries: [(&str, &[u8]); 2] = [("m/libf.a", &ar), ("m/libg.a", &ar)];
+        let expected = [
+            "prebuilt-test.src: W: prebuilt-binary-in-sources kinds.tar.gz: m/* ar archive (2 files)",
+        ];
+        for members in [
+            [docs[0], docs[1], binaries[0], binaries[1]],
+            [binaries[0], binaries[1], docs[0], docs[1]],
+        ] {
+            let tar = tarball(&members);
+            let (pkg, _src, _extract) = source_pkg(&[
+                ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+                ("kinds.tar.gz", gzip_bytes(&tar)),
+            ]);
+            assert_eq!(prebuilt_lines(&run_source(&pkg)), expected);
+        }
+    }
+
+    #[test]
     fn ar_index_name_variants_fire() {
         let (pkg, _src, _extract) = source_pkg(&[
             ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
@@ -4927,11 +5012,27 @@ mod prebuilt_tests {
 
     #[test]
     fn near_miss_members_stay_quiet() {
+        // A thin Mach-O object: neither 32- nor 64-bit magic is a
+        // kind classify() knows, so it stays quiet (a FAT Mach-O is
+        // a different shape: its CAFEBABE prefix reads as a Java
+        // class, which issue #1411 holds out for a ruling).
+        let macho64: &[u8] = b"\xfe\xed\xfa\xcf\x00\x00\x00\x00";
+        let macho32: &[u8] = b"\xfe\xed\xfa\xce\x00\x00\x00\x00";
+        // An RPM file and a COFF object: no kind matches their
+        // magics, and neither is a walked archive shape.
+        let rpm_file: &[u8] = b"\xed\xab\xee\xdb\x00\x00\x00\x00";
+        let coff_obj: &[u8] =
+            b"\x64\x86\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
         let tar = tarball(&[
             ("thin.a", &thin_archive()),
             ("text.a", &ar_archive("a.txt", b"a\n")),
             ("pkg.deb", &deb_package()),
             ("noidx.a", &ar_archive("hello.o/", ELF)),
+            ("bsd1.a", &ar_archive("#1/20", b"hello.o/\n")),
+            ("macho64.o", macho64),
+            ("macho32.o", macho32),
+            ("pkg.rpm", rpm_file),
+            ("obj.obj", coff_obj),
             ("mzstub.exe", &mz_stub()),
             ("mzpast.exe", &mz_past()),
             ("mz.txt", &mz_txt()),
