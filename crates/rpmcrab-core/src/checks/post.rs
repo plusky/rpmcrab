@@ -3734,6 +3734,9 @@ mod tests {
         // no-separate-argument `--default-signal` /
         // `--block-signal`, and the `-` / `--` terminators (with
         // assignments still preceding the command after them).
+        // `-C` in its separate, attached and bundled forms and
+        // separate `--unset` are pinned here too (separate
+        // `--chdir` is already pinned in the still-fires test).
         for script in [
             "env -a MYNAME sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env --argv0 MYNAME sh <<'EOF'\nrm -rf /foo\nEOF\n",
@@ -3750,6 +3753,10 @@ mod tests {
             "env - sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env - FOO=bar sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env -- FOO=bar sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -C /tmp sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -C/tmp sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -iC /tmp sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --unset FOO sh <<'EOF'\nrm -rf /foo\nEOF\n",
         ] {
             let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
             assert!(
