@@ -133,7 +133,7 @@ fn sha256_reader<R: std::io::Read>(mut r: R) -> Option<String> {
 /// sha256 path: source whole-file records are capped at the 256 MiB
 /// archive cap on disk and member records at the 64 MiB entry cap, so
 /// a larger on-disk file matches neither. On the algo-8 path the join
-/// key is the free header digest and source records are uncapped, so
+/// key is the free header digest and whole-file source records are uncapped, so
 /// the gate never applies there.
 fn payload_over_source_cap(algo_is_8: bool, len: u64) -> bool {
     !algo_is_8 && len > prebuilt::MAX_ARCHIVE_BYTES as u64
@@ -1222,6 +1222,19 @@ mod prebuilt {
         }
 
         fn push_prebuilt(&mut self, kind: BinaryKind, ctx: &str, sha256: String) {
+            self.push_prebuilt_record(kind, ctx, Some(sha256));
+        }
+
+        /// A bare Source over the archive cap keeps its finding but
+        /// drops its shipped record: the payload gate promises a
+        /// payload above the cap matches no source record, and an
+        /// uncapped bare-file record would break that promise. The
+        /// digest is skipped too: it exists only for the join.
+        fn push_prebuilt_finding_only(&mut self, kind: BinaryKind, ctx: &str) {
+            self.push_prebuilt_record(kind, ctx, None);
+        }
+
+        fn push_prebuilt_record(&mut self, kind: BinaryKind, ctx: &str, sha256: Option<String>) {
             if self.caps.prebuilt >= self.limits.finding_cap {
                 // The cap counts per source package, but the stop is
                 // logged per Source walk: a later Source in the same
@@ -1237,14 +1250,11 @@ mod prebuilt {
                 return;
             }
             self.caps.prebuilt += 1;
-            // Grouping works on cut chains and cuts at emission; the
-            // shipped-join record keeps the cut path, as before.
-            self.out.prebuilt.push((kind, ctx.to_string()));
-            self.out.shipped.push(Hit {
-                kind,
-                path: cut_detail(ctx),
-                sha256,
-            });
+            let path = cut_detail(ctx);
+            self.out.prebuilt.push((kind, path.clone()));
+            if let Some(sha256) = sha256 {
+                self.out.shipped.push(Hit { kind, path, sha256 });
+            }
         }
 
         fn count_vcs(&mut self, name: &str, size: u64) {
@@ -2292,12 +2302,20 @@ mod prebuilt {
                 return;
             }
             if let Some(k) = classify(name, &prefix, metadata.len() as usize) {
-                // A bare file has no member bytes in hand: hash the
-                // file itself, as the old whole-file walk did; an
-                // unreadable file yields an empty digest, which never
-                // matches a shipped record.
-                let digest = super::sha256_file(&path.to_string_lossy()).unwrap_or_default();
-                self.push_prebuilt(k, name, digest);
+                if metadata.len() > MAX_ARCHIVE_BYTES as u64 {
+                    // Over the archive cap the shipped record would
+                    // break the payload gate's premise (a larger
+                    // payload matches no source record), so only the
+                    // finding is kept and the file is not hashed.
+                    self.push_prebuilt_finding_only(k, name);
+                } else {
+                    // A bare file has no member bytes in hand: hash the
+                    // file itself, as the old whole-file walk did; an
+                    // unreadable file yields an empty digest, which never
+                    // matches a shipped record.
+                    let digest = super::sha256_file(&path.to_string_lossy()).unwrap_or_default();
+                    self.push_prebuilt(k, name, digest);
+                }
             }
         }
 
@@ -2770,8 +2788,8 @@ impl Check for SourceCheck {
             // on-disk file matches neither. The on-disk length
             // decides: the header size can disagree with the bytes
             // actually hashed. On the algo-8 path the join key is
-            // the free header digest and source records are
-            // uncapped, so the gate never applies there.
+            // the free header digest and whole-file source records
+            // are uncapped, so the gate never applies there.
             let too_big = std::fs::metadata(&f.path)
                 .map(|m| payload_over_source_cap(algo_is_8, m.len()))
                 .unwrap_or(false);
@@ -3603,6 +3621,104 @@ mod prebuilt_tests {
         pkg
     }
 
+    /// Rewrite the FILEDIGESTALGO tag (5011, one INT32) of an RPM
+    /// main header inside a copy of its bytes. The signature
+    /// header's digests go stale, so the result must be opened with
+    /// verification skipped, as `Pkg::open_no_extract` does.
+    fn patch_filedigestalgo(bytes: &[u8], algo: i32) -> Vec<u8> {
+        fn be32(bytes: &[u8], off: usize) -> u32 {
+            u32::from_be_bytes(bytes[off..off + 4].try_into().expect("header bounds"))
+        }
+        let mut out = bytes.to_vec();
+        // Lead (96 bytes), then the signature header; the main
+        // header follows it, padded to an 8-byte boundary.
+        assert_eq!(
+            &bytes[96..99],
+            &[0x8e, 0xad, 0xe8],
+            "signature header magic"
+        );
+        let sig_count = be32(bytes, 96 + 8) as usize;
+        let sig_size = be32(bytes, 96 + 12) as usize;
+        let mut main = 96 + 16 + sig_count * 16 + sig_size;
+        main = main.div_ceil(8) * 8;
+        assert_eq!(
+            &bytes[main..main + 3],
+            &[0x8e, 0xad, 0xe8],
+            "main header magic"
+        );
+        let count = be32(bytes, main + 8) as usize;
+        let index = main + 16;
+        let store = index + count * 16;
+        for i in 0..count {
+            let entry = index + i * 16;
+            let tag = be32(bytes, entry);
+            if tag == 5011 {
+                assert_eq!(be32(bytes, entry + 4), 4, "FILEDIGESTALGO is INT32");
+                assert_eq!(be32(bytes, entry + 12), 1, "one FILEDIGESTALGO value");
+                let offset = be32(bytes, entry + 8) as usize;
+                out[store + offset..store + offset + 4].copy_from_slice(&algo.to_be_bytes());
+                return out;
+            }
+        }
+        panic!("FILEDIGESTALGO tag not found in header");
+    }
+
+    /// A binary package whose header carries FILEDIGESTALGO 1, so
+    /// `check_binary` takes the sha256 path: no committed header
+    /// qualifies (every header under tests/parity carries 8), so a
+    /// copy of the fcprobe header is patched in place and opened
+    /// with verification skipped. Its SOURCERPM survives, so the
+    /// package still pairs with a `fixture_src` source package. The
+    /// assert guards the path: if the patch ever stops taking
+    /// effect, tests using this helper fail loudly instead of
+    /// silently re-covering the algo-8 path.
+    fn fixture_pkg_non8(
+        dir: &std::path::Path,
+        name: &str,
+        files: Vec<crate::pkg::pkgfile::PkgFile>,
+    ) -> Pkg {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let bytes = std::fs::read(&src).expect("read fcprobe header");
+        let patched = patch_filedigestalgo(&bytes, 1);
+        let path = dir.join("non8.noarch.rpm");
+        std::fs::write(&path, &patched).expect("write patched header");
+        let mut pkg = Pkg::open_no_extract(&path).expect("open patched header");
+        assert_ne!(
+            pkg.tag_i64(librpm::Tag::FILEDIGESTALGO),
+            Some(8),
+            "patched header must not take the algo-8 path"
+        );
+        pkg.name = name.to_string();
+        pkg.arch = "x86_64".to_string();
+        pkg.files = files;
+        pkg
+    }
+
+    /// A sparse payload file: an ELF head followed by zeros out to
+    /// `len`, without materialising `len` bytes. Its header digest
+    /// is the true sha256 of those bytes, read back off disk.
+    fn sparse_payload_file(
+        dir: &std::path::Path,
+        name: &str,
+        len: u64,
+    ) -> crate::pkg::pkgfile::PkgFile {
+        use std::io::Write;
+        let disk = dir.join(name.rsplit('/').next().unwrap_or(name));
+        let mut f = std::fs::File::create(&disk).expect("create sparse payload");
+        f.write_all(ELF).expect("write ELF head");
+        f.set_len(len).expect("sparse length");
+        drop(f);
+        let digest = super::sha256_file(&disk.to_string_lossy()).expect("hash sparse payload");
+        crate::pkg::pkgfile::PkgFile {
+            name: name.to_string(),
+            path: disk.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            md5: Some(digest),
+            ..Default::default()
+        }
+    }
+
     /// A regular file whose bytes live at `dir` and whose header
     /// digest is the true sha256 of those bytes, as a real RPM header
     /// would carry for that payload.
@@ -3937,6 +4053,90 @@ mod prebuilt_tests {
             [
                 "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/libexec/big.bin ELF binary from bigblob.bin"
             ]
+        );
+    }
+
+    /// The gate wiring on the sha256 path, e2e: the 65 MiB test above
+    /// runs the algo-8 path (fcprobe carries FILEDIGESTALGO=8), where
+    /// the gate is dead code and the join uses the free header digest
+    /// -- a hardcoded-true gate passes it. This twin runs the same
+    /// bare payload through a non-8 header, so the join must hash the
+    /// payload file and the gate must let a 65 MiB file through; with
+    /// the gate forced on, this test goes quiet.
+    #[test]
+    fn shipped_payload_between_caps_fires_on_sha256_path() {
+        use crate::color::Color;
+        let mut big = vec![0u8; 65 * 1024 * 1024];
+        big[..ELF.len()].copy_from_slice(ELF);
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_pkg = fixture_src(vec![payload_file(src_dir.path(), "bigblob.bin", &big)]);
+        let bin_dir = tempfile::tempdir().unwrap();
+        let bin_pkg = fixture_pkg_non8(
+            bin_dir.path(),
+            "fcprobe",
+            vec![payload_file(bin_dir.path(), "/usr/libexec/big.bin", &big)],
+        );
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(&config);
+        Check::check(&mut check, &src_pkg, &config, &mut out);
+        Check::check(&mut check, &bin_pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let findings: Vec<(String, String, Level)> = out
+            .results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect();
+        assert_eq!(
+            shipped_lines(&findings),
+            [
+                "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/libexec/big.bin ELF binary from bigblob.bin"
+            ]
+        );
+    }
+
+    /// A bare payload over the 256 MiB cap stays quiet even on the
+    /// algo-8 path, where the gate is dead code: with the shipped
+    /// record dropped, no join exists for the header digest to meet
+    /// -- while `prebuilt-binary-in-sources` still fires for the
+    /// oversize Source itself. Sparse files keep the test cheap:
+    /// the walk and the gate hash nothing on either side.
+    #[test]
+    fn shipped_payload_over_archive_cap_stays_quiet() {
+        use crate::color::Color;
+        let len = 256 * 1024 * 1024 + 1;
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_pkg = fixture_src(vec![sparse_payload_file(
+            src_dir.path(),
+            "hugeblob.bin",
+            len,
+        )]);
+        let bin_dir = tempfile::tempdir().unwrap();
+        let bin_pkg = fixture_pkg(
+            "fcprobe",
+            vec![sparse_payload_file(
+                bin_dir.path(),
+                "/usr/libexec/huge.bin",
+                len,
+            )],
+        );
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(&config);
+        Check::check(&mut check, &src_pkg, &config, &mut out);
+        Check::check(&mut check, &bin_pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let findings: Vec<(String, String, Level)> = out
+            .results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect();
+        assert!(shipped_lines(&findings).is_empty(), "{findings:?}");
+        assert_eq!(
+            prebuilt_lines(&findings),
+            ["fcprobe.x86_64: W: prebuilt-binary-in-sources hugeblob.bin ELF binary"]
         );
     }
 
@@ -5799,6 +5999,29 @@ mod prebuilt_tests {
             "{:?}",
             outcome.stops.lines()
         );
+    }
+
+    #[test]
+    fn bare_source_over_archive_cap_keeps_finding_drops_shipped_record() {
+        // A bare ELF Source over 256 MiB used to hash the whole file
+        // into a shipped record, breaking the payload gate's premise
+        // that a payload above the cap matches no source record. The
+        // finding itself stays; only the join record goes, and the
+        // file is never hashed (a sparse file proves the skip: no
+        // digest is computed at all).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.bin");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(ELF).unwrap();
+        f.set_len(256 * 1024 * 1024 + 1).unwrap();
+        drop(f);
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::new(&mut caps, true);
+        walker.walk_file(&path, "huge.bin");
+        let outcome = walker.take_outcome();
+        assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
+        assert_eq!(outcome.prebuilt[0].1, "huge.bin");
+        assert!(outcome.shipped.is_empty(), "{:?}", outcome.shipped);
     }
 
     #[test]
