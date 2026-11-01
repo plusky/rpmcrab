@@ -24606,6 +24606,53 @@ description = "explicit priority string bypasses the system crypto policy"
         let (bins, ok) = service_exec_binaries(&pkg, unit, &empty_names, &empty_targets);
         assert!(!ok, "drop-in ExecStart must not resolve");
         assert!(bins.is_empty());
+
+        // An ExecStart line naming no program at all (only env
+        // assignments) is unresolvable (fail-open), not
+        // resolved-empty.
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/noprog.service",
+            "[Service]\nExecStart=env FOO=bar\n",
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit]);
+        let exec = daemon_exec_binaries(&pkg);
+        assert!(exec.has_unresolvable, "{exec:?}");
+        assert!(exec.binaries.is_empty(), "{exec:?}");
+
+        // A bare name resolving only through a dangling in-package
+        // symlink chain (a symlink with no recorded target) is
+        // unresolvable (fail-open).
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/dangle.service",
+            "[Service]\nExecStart=dangle\n",
+        );
+        let mut link = syn_file("/usr/bin/dangle", "symbolic link");
+        link.mode = 0o120777;
+        link.linkto = String::new();
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit, link]);
+        let exec = daemon_exec_binaries(&pkg);
+        assert!(exec.has_unresolvable, "{exec:?}");
+        assert!(exec.binaries.is_empty(), "{exec:?}");
+
+        // A bare name resolving through a looping in-package
+        // symlink chain is unresolvable (fail-open).
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/loop.service",
+            "[Service]\nExecStart=linka\n",
+        );
+        let mut linka = syn_file("/usr/bin/linka", "symbolic link");
+        linka.mode = 0o120777;
+        linka.linkto = "linkb".to_string();
+        let mut linkb = syn_file("/usr/bin/linkb", "symbolic link");
+        linkb.mode = 0o120777;
+        linkb.linkto = "linka".to_string();
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit, linka, linkb]);
+        let exec = daemon_exec_binaries(&pkg);
+        assert!(exec.has_unresolvable, "{exec:?}");
+        assert!(exec.binaries.is_empty(), "{exec:?}");
     }
 
     #[test]
