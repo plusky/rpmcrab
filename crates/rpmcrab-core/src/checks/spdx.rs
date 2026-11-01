@@ -8,7 +8,7 @@
 /// Non-deprecated SPDX license IDs: the suggestion pool for
 /// `invalid-license-spellcheck`.
 ///
-/// SPDX license list version: 3.29.0
+/// SPDX license list version: 8791eda
 /// Regenerate with `scripts/generate-spdx-list.py`; do not edit the list by hand.
 pub const SPDX_LICENSE_IDS: &[&str] = &[
     // BEGIN GENERATED SPDX IDs
