@@ -5,10 +5,12 @@ name: spdx-sync
 # - Manual trigger: refresh on demand (workflow_dispatch)
 # - Monthly schedule: the list ships a few releases a year; monthly is plenty
 # On drift the job opens a refresh PR; when the data is current it is a
-# green no-op. The generated file stamps only the SPDX release version (no
-# fetch date), so a plain git diff is the drift signal: the version is read
-# from the same JSON as the IDs, therefore a diff means the data changed
-# and no diff means nothing did -- no no-op PRs.
+# green no-op. The generated file stamps only the SPDX version (no fetch
+# date). Drift means the license ID set changed: upstream main now stamps
+# licenseListVersion with a commit SHA, so the stamp moves on every
+# upstream commit even when the IDs are identical -- a plain git diff
+# would open a stamp-only PR on every sync. The drift check therefore
+# compares only the generated ID block, ignoring the stamp line.
 #
 # The checked-in file stays the build's source of truth; the generator never
 # runs at build time.
@@ -39,7 +41,17 @@ jobs:
       - name: Check for drift
         id: diff
         run: |
-          if git diff --quiet -- crates/rpmcrab-core/src/checks/spdx.rs; then
+          # Drift means the license ID set changed. Upstream main now stamps
+          # licenseListVersion with a commit SHA, so the stamp moves on every
+          # upstream commit even when the IDs are identical -- comparing
+          # the whole file opened a stamp-only PR on every sync. Compare
+          # only the generated ID block, ignoring the stamp line.
+          old_ids=$(git show HEAD:crates/rpmcrab-core/src/checks/spdx.rs \
+            | sed -n '/BEGIN GENERATED SPDX IDs/,/END GENERATED SPDX IDs/p' \
+            | grep '^    "' | sort)
+          new_ids=$(sed -n '/BEGIN GENERATED SPDX IDs/,/END GENERATED SPDX IDs/p' \
+            crates/rpmcrab-core/src/checks/spdx.rs | grep '^    "' | sort)
+          if [ "$old_ids" = "$new_ids" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
