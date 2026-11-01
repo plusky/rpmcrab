@@ -29,7 +29,7 @@ file's real content: a small text file starting with the git-lfs
 version line and an oid sha256: line. Whatever reads the file during
 the build gets the pointer text, not the content, and fails. Report
 the stubs upstream and remove them (and the tests that need them), or
-ship the real files.
+ship the real files. Pointer names are cut to 1024 bytes, keeping head and tail around one ellipsis.
 """
 
 source-archive-contains-bidi-control="""
@@ -40,7 +40,7 @@ make source code render differently from how it executes
 intentional (e.g. a test demonstrating the attack). The finding names
 the first control in the member and its line and column; one finding
 per member. Plain payload files, including the spec, are covered by
-the bidi-control-character scan instead. Archive nesting is capped at 5 levels; a decompression budget of 16 GiB applies per Source, and a zip Source over 256 MiB on disk is skipped; a compressed single file is scanned as itself when decompression yields text, up to 64 MiB decompressed, while a decompressed payload that itself forms an archive is walked as archive members; compression suffixes are stripped case-insensitively. Findings are capped at 25,000 per tag per source package; the stop log keeps 10 lines per kind per Source. Finding paths are cut to 1024 bytes, keeping head and tail around one ellipsis.
+the bidi-control-character scan instead. Archive nesting is capped at 5 levels; a decompression budget of 16 GiB applies per Source, and a zip Source over 256 MiB on disk is skipped; a compressed single file is scanned as itself when decompression yields text, up to 64 MiB decompressed, while a decompressed payload that itself forms an archive is walked as archive members; a compressed zip over 64 MiB decompressed is not walked; compression suffixes are stripped case-insensitively. Findings are capped at 25,000 per tag per source package; the stop log keeps 10 lines per kind per Source. Finding paths are cut to 1024 bytes, keeping head and tail around one ellipsis.
 """
 
 prebuilt-binary-in-sources="""
@@ -54,7 +54,7 @@ file or a compressed zip over 64 MiB decompressed is not walked.
 Findings are capped at 25,000 per tag per source package; the stop
 log keeps 10 lines per kind per Source. Finding paths are cut to
 1024 bytes, keeping head and tail around one ellipsis; ar, PE and WebAssembly findings
-group per archive and directory.
+group per archive chain, directory and kind.
 """
 
 prebuilt-binary-shipped="""
