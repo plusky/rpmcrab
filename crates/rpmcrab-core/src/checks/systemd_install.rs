@@ -1672,6 +1672,30 @@ mod tests {
     }
 
     #[test]
+    fn bare_requires_container_does_not_credit() {
+        // A link in a bare `.requires` container -- no unit stem before
+        // the suffix -- is not directly in a unit's requires directory,
+        // so it earns no credit even though its target is shipped.
+        let pkg = alias_pkg(Some(vec![
+            reg(&format!("{UNIT}/want720.service")),
+            link(
+                &format!("{UNIT}/.requires/want720.service"),
+                "../want720.service",
+            ),
+        ]));
+        let results = run(&pkg);
+        assert_eq!(results.len(), 4, "{results:?}");
+        assert_eq!(
+            on_tag(
+                &results,
+                "systemd-service-without-service_add_post",
+                "want720.service"
+            ),
+            1
+        );
+    }
+
+    #[test]
     fn manual_comment_line_does_not_credit() {
         let post = "# systemctl enable foo.service";
         let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
