@@ -129,6 +129,25 @@ fn sha256_reader<R: std::io::Read>(mut r: R) -> Option<String> {
     )
 }
 
+/// Read up to the first 512 bytes of a payload file, looping past
+/// short reads: a single `Read::read` may return fewer bytes than
+/// requested, which would leave the ustar arm of `payload_could_match`
+/// (needs 262 bytes) unreachable for a short-read file. Stops at EOF
+/// or on error with whatever was read.
+fn read_payload_head<R: std::io::Read>(mut reader: R) -> Vec<u8> {
+    let mut head = vec![0u8; 512];
+    let mut len = 0;
+    while len < 512 {
+        match reader.read(&mut head[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(_) => break,
+        }
+    }
+    head.truncate(len);
+    head
+}
+
 /// Whether a payload file's first 512 bytes could match a source
 /// record: a hit-kind header, a `.pyc`/`.pyo` name, or a compression
 /// or ustar header the source walk opens. The bytes are read from the
@@ -2721,20 +2740,18 @@ impl Check for SourceCheck {
                 continue;
             }
             // The header digest is the join key only on the algo-8
-            // path (binary_digest ignores it otherwise and hashes the
-            // file), so a missing or empty digest skips the file only
+            // path, so a missing or empty digest skips the file only
             // there; otherwise the file is hashed below.
             let md5 = f.md5.as_ref().filter(|s| !s.is_empty());
             if algo_is_8 && md5.is_none() {
                 continue;
             }
             let md5 = md5.map(String::as_str).unwrap_or("");
-            let mut head = [0u8; 512];
             let Ok(mut file) = std::fs::File::open(&f.path) else {
                 continue;
             };
-            let head_len = std::io::Read::read(&mut file, &mut head).unwrap_or(0);
-            if !payload_could_match(&f.name, &head[..head_len]) {
+            let head = read_payload_head(&mut file);
+            if !payload_could_match(&f.name, &head) {
                 continue;
             }
             // Reuse the opened handle for the hash (issue #1443):
