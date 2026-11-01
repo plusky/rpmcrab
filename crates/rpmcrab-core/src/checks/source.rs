@@ -784,10 +784,13 @@ mod prebuilt {
     /// Whether bytes are a validated 32-bit big-endian FAT Mach-O:
     /// the CAFEBABE magic, a sane fat-arch count (1..=32, so a real
     /// Java class -- major version 45 and up -- never qualifies),
-    /// a table that fits, and every entry's offset+size in bounds
-    /// (checked arithmetic). Anything failing validation falls
-    /// through to the Java-class arm below.
-    fn is_fat_macho(data: &[u8]) -> bool {
+    /// a table that fits in `data`, and every entry's offset+size
+    /// within `total_len` (checked arithmetic): members are classified
+    /// from their whole bytes, while a bare file is classified from
+    /// its peek, so slice bounds are judged against the file length.
+    /// Anything failing validation falls through to the Java-class
+    /// arm below.
+    fn is_fat_macho(data: &[u8], total_len: usize) -> bool {
         if !data.starts_with(b"\xca\xfe\xba\xbe") {
             return false;
         }
@@ -811,18 +814,18 @@ mod prebuilt {
             let Some(end) = offset.checked_add(size) else {
                 return false;
             };
-            if end > data.len() {
+            if end > total_len {
                 return false;
             }
         }
         true
     }
 
-    fn classify(name: &str, data: &[u8]) -> Option<BinaryKind> {
+    fn classify(name: &str, data: &[u8], total_len: usize) -> Option<BinaryKind> {
         if data.starts_with(b"\x7fELF") {
             return Some(BinaryKind::Elf);
         }
-        if is_fat_macho(data) {
+        if is_fat_macho(data, total_len) {
             return Some(BinaryKind::FatMachO);
         }
         if data.starts_with(b"\xca\xfe\xba\xbe") {
@@ -1377,6 +1380,30 @@ mod prebuilt {
             if let Some(end) = off
                 .checked_add(4)
                 .filter(|&end| end > got && end <= MAX_MZ_PEEK_BYTES)
+            {
+                prefix.resize(end, 0);
+                while got < end {
+                    match r.read(&mut prefix[got..]) {
+                        Ok(0) => break,
+                        Ok(n) => got += n,
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        // A bare FAT Mach-O is classified from this peek, but
+        // `is_fat_macho` needs the whole fat-arch table, which can
+        // lie past 512 bytes for many architectures: extend the
+        // peek for CAFEBABE files up to the table end. The 32-arch
+        // count bound caps the extension at 648 bytes, so no
+        // separate cap is needed. Best-effort like the MZ case: a
+        // short or failed extension keeps the bytes already read.
+        if got >= 8 && prefix.starts_with(b"\xca\xfe\xba\xbe") {
+            let n = u32::from_be_bytes([prefix[4], prefix[5], prefix[6], prefix[7]]) as usize;
+            if (1..=32).contains(&n)
+                && let Some(end) = 8usize
+                    .checked_add(n.saturating_mul(20))
+                    .filter(|&end| end > got)
             {
                 prefix.resize(end, 0);
                 while got < end {
@@ -1948,7 +1975,7 @@ mod prebuilt {
             }
             let mut kind = None;
             if prebuilt_active {
-                kind = classify(raw_name, bytes);
+                kind = classify(raw_name, bytes, bytes.len());
                 if let Some(k) = kind {
                     self.push_prebuilt(k, mctx, super::sha256_hex(bytes));
                 }
@@ -2068,7 +2095,7 @@ mod prebuilt {
                     );
                 }
             } else {
-                if prebuilt_active && let Some(k) = classify(names.classify, data) {
+                if prebuilt_active && let Some(k) = classify(names.classify, data, data.len()) {
                     self.push_prebuilt(k, ctx, super::sha256_hex(data));
                 }
                 self.scan_bidi(names.bidi, data, ctx);
@@ -2124,7 +2151,10 @@ mod prebuilt {
                 Ok((_, true)) => {
                     self.out.stops.record(
                         "single-over-64",
-                        "decompressed stream over 64 MiB is not walked".to_owned(),
+                        format!(
+                            "{}: decompressed stream over 64 MiB is not walked",
+                            cut_detail(ctx)
+                        ),
                     );
                 }
                 Err(_) => {
@@ -2182,7 +2212,7 @@ mod prebuilt {
                 // bare .jar Source reports the jar itself and its
                 // classes stay quiet; a plain zip keeps walking with
                 // prebuilt active.
-                let unit = classify(name, &prefix);
+                let unit = classify(name, &prefix, metadata.len() as usize);
                 if let Some(k) = unit {
                     // The jar unit is the file itself: hash the file, as
                     // the bare-file case does; an unreadable file yields
@@ -2216,7 +2246,7 @@ mod prebuilt {
                 self.walk_tar_stream(TarStream::new(counted), name, 0, true);
                 return;
             }
-            if let Some(k) = classify(name, &prefix) {
+            if let Some(k) = classify(name, &prefix, metadata.len() as usize) {
                 // A bare file has no member bytes in hand: hash the
                 // file itself, as the old whole-file walk did; an
                 // unreadable file yields an empty digest, which never
@@ -5332,7 +5362,7 @@ mod prebuilt_tests {
                 .stops
                 .lines()
                 .iter()
-                .any(|l| l == "decompressed stream over 64 MiB is not walked"),
+                .any(|l| l == "big.elf.gz: decompressed stream over 64 MiB is not walked"),
             "{:?}",
             outcome.stops.lines()
         );
@@ -5368,6 +5398,87 @@ mod prebuilt_tests {
         assert_eq!(
             outcome.prebuilt,
             [(super::prebuilt::BinaryKind::Pe, "big.dll".to_string())]
+        );
+    }
+
+    #[test]
+    fn nested_single_over_64_stop_keeps_outer_inner_chain() {
+        // An inner member overflowing 64 MiB keeps the nested
+        // outer:inner chain in its stop log (issue #1447).
+        let mut plain = ELF.to_vec();
+        plain.resize(64 * 1024 * 1024 + 1, 0);
+        let tar = tarball(&[("inner.elf.gz", &gzip_bytes(&plain))]);
+        let outcome = walk_buffer(&tar, "t.tar");
+        assert!(outcome.prebuilt.is_empty());
+        assert!(
+            outcome
+                .stops
+                .lines()
+                .iter()
+                .any(|l| l == "t.tar: inner.elf.gz: decompressed stream over 64 MiB is not walked"),
+            "{:?}",
+            outcome.stops.lines()
+        );
+    }
+
+    #[test]
+    fn bare_fat_macho_with_many_arches_fires() {
+        // A FAT table past the 512-byte peek: the bare-file
+        // classify must still see the whole table, and slice
+        // bounds are judged against the file length, not the
+        // peek (issue #1447).
+        let n = 30usize;
+        let table_end = 8 + 20 * n;
+        let mut fat = b"\xca\xfe\xba\xbe".to_vec();
+        fat.extend_from_slice(&(n as u32).to_be_bytes());
+        for i in 0..n {
+            fat.extend_from_slice(&0x01000007u32.to_be_bytes()); // x86_64
+            fat.extend_from_slice(&3u32.to_be_bytes());
+            fat.extend_from_slice(&((table_end + 4 * i) as u32).to_be_bytes());
+            fat.extend_from_slice(&4u32.to_be_bytes());
+            fat.extend_from_slice(&0u32.to_be_bytes());
+        }
+        fat.extend(std::iter::repeat_n(0u8, 4 * n));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fat.o");
+        std::fs::write(&path, &fat).unwrap();
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::new(&mut caps, true);
+        walker.walk_file(&path, "fat.o");
+        let outcome = walker.take_outcome();
+        assert_eq!(
+            outcome.prebuilt,
+            [(super::prebuilt::BinaryKind::FatMachO, "fat.o".to_string())]
+        );
+        // A Java class still fires as Java class, and a FAT table
+        // truncated short of its declared arches falls back to it.
+        let class_path = dir.path().join("A.class");
+        std::fs::write(&class_path, CLASS).unwrap();
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::new(&mut caps, true);
+        walker.walk_file(&class_path, "A.class");
+        let outcome = walker.take_outcome();
+        assert_eq!(
+            outcome.prebuilt,
+            [(
+                super::prebuilt::BinaryKind::JavaClass,
+                "A.class".to_string()
+            )]
+        );
+        let mut truncated = fat.clone();
+        truncated.truncate(512);
+        let trunc_path = dir.path().join("trunc.o");
+        std::fs::write(&trunc_path, &truncated).unwrap();
+        let mut caps = super::prebuilt::CapState::new();
+        let mut walker = super::prebuilt::Walker::new(&mut caps, true);
+        walker.walk_file(&trunc_path, "trunc.o");
+        let outcome = walker.take_outcome();
+        assert_eq!(
+            outcome.prebuilt,
+            [(
+                super::prebuilt::BinaryKind::JavaClass,
+                "trunc.o".to_string()
+            )]
         );
     }
 
