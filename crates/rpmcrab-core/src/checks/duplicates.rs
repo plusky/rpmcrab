@@ -801,6 +801,25 @@ mod tests {
     }
 
     #[test]
+    fn digest_less_asymmetric_hardlink_pair_stays_quiet() {
+        // Asymmetry changes nothing: the digest-carrying file forms
+        // a singleton group (skipped) and the digest-less file never
+        // groups, so the same-inode pair earns neither a duplicate
+        // nor a hardlink finding.
+        let a = pkgfile("/usr/bin/a", "aaa", 100, 1);
+        let mut b = pkgfile("/opt/bin/b", "aaa", 100, 1);
+        b.md5 = None;
+        let files = [a, b];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        let findings =
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist);
+        assert!(
+            findings.is_empty(),
+            "asymmetric digest-less hardlink pair must stay quiet: {findings:?}"
+        );
+    }
+
+    #[test]
     fn get_topdir_cases() {
         assert_eq!(DuplicatesCheck::get_topdir("/usr/bin/foo"), "/usr");
         assert_eq!(
