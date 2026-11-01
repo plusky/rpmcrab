@@ -26774,6 +26774,28 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn python_rust_extension_fires_for_pie_executable() {
+        // The widened scope is ET_DYN, not shared-object-ness: a PIE
+        // executable (ET_DYN, no .so suffix, not a shared object)
+        // carrying the Rust markers and a module entry point fires
+        // like the .so shape above, while ET_EXEC stays quiet in
+        // quiet_shapes. syn_info defaults is_shlib to false, so
+        // this info is already the PIE shape; only the path changes.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/jiter", "ELF 64-bit LSB pie executable");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_python_rust_extension_auditable_data(&pkg, &pkgfile, &py_ext_info(), &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            lines_for(&results, "python-rust-extension-without-auditable-data"),
+            ["testpkg.x86_64: W: python-rust-extension-without-auditable-data /usr/bin/jiter"],
+            "lines: {results:?}"
+        );
+    }
+
+    #[test]
     fn python_rust_extension_quiet_for_debug_path_without_suffix() {
         // The two-part debuginfo gate: a build-id debuginfo file
         // under /usr/lib/debug/ without the .debug suffix stays

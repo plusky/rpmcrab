@@ -1177,6 +1177,18 @@ mod tests {
         assert_eq!(excessive_suggests(&pkg).len(), 1, "{:?}", run(&pkg));
     }
 
+    #[test]
+    fn rich_unversioned_own_doc_multi_target_suggests_still_fires() {
+        // The unversioned arm of the "still fires, versioned or not"
+        // multi-target claim: own-doc plus anything else fires
+        // without a version too. The behaviour is shared with
+        // rich_own_doc_suggests_still_fires; the name is the pin.
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.suggests = vec![dep("(bla-theme-openSUSE-doc and bar)", 0)];
+        assert_eq!(excessive_suggests(&pkg).len(), 1, "{:?}", run(&pkg));
+    }
+
     // Near misses: a Suggests on a documentation package that is not
     // exactly the package's own -doc companion, a Suggests on the
     // package itself, and a versioned Suggests on another package's

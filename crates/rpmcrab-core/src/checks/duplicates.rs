@@ -887,6 +887,30 @@ mod tests {
     }
 
     #[test]
+    fn waste_total_follows_mode_split_grouping() {
+        // The mode dimension of the (digest, mode, filecaps) key
+        // reaches the waste total: two 644 copies of 60_000 bytes
+        // group together for a 60_000 total, under the threshold,
+        // while the 755 copy with the same digest groups apart.
+        // Digest-only grouping would total 120_000 over all three
+        // and fire files-duplicated-waste.
+        let a = pkgfile("/usr/bin/x", "aaa", 60_000, 1);
+        let b = pkgfile("/usr/lib/y", "aaa", 60_000, 2);
+        let mut c = pkgfile("/usr/share/z", "aaa", 60_000, 3);
+        c.mode = 0o100755;
+        let files = [a, b, c];
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        assert_eq!(
+            DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist),
+            vec![DuplicateFinding::FilesDuplicate(
+                "/usr/lib/y".into(),
+                "/usr/bin/x".into(),
+            )],
+            "no waste finding: the 755 copy must not join the total"
+        );
+    }
+
+    #[test]
     fn distinfo_license_pair_is_whitelisted() {
         // Issue #510: the *.dist-info/licenses embed (PEP 639) and the
         // %license copy in /usr/share/licenses are both mandated, so the

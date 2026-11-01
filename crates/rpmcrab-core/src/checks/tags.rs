@@ -5249,6 +5249,44 @@ mod rich_dep_emission_tests {
     }
 
     #[test]
+    fn missing_dependency_first_regex_match_wins_over_exact_via_prereq() {
+        // The Prereq arm of the chain-order rule: the libs dep is the
+        // first Prereq in chain order matching the family regex, not
+        // the exact-name one -- a regex-matching lookalike listed
+        // first in Prereq is evaluated instead of the exact dep, even
+        // when the exact dep would be silent on its own. Requires
+        // carries only an unrelated dep, so the finding can only
+        // come from the Prereq arm.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![plain_dep("unrelated")];
+        pkg.prereq = vec![
+            DepInfo {
+                name: "libtags-missingdep".to_string(),
+                flags: 0,
+                epoch: None,
+                version: None,
+                release: None,
+            },
+            flagged_dep(
+                "tags-missingdep-libs",
+                RPMSENSE_GREATER | RPMSENSE_EQUAL,
+                "1",
+            ),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            !named(&results, "no-version-dependency-on").is_empty(),
+            "unversioned lookalike listed first in Prereq is evaluated: {results:?}"
+        );
+        assert!(
+            named(&results, "missing-dependency-on").is_empty(),
+            "the unversioned branch fires no-version only: {results:?}"
+        );
+    }
+
+    #[test]
     fn missing_dependency_on_lower_bound_tilde_ancestor_is_silent() {
         // A tilde-suffixed bound sorts below its base under rpm
         // vercmp, so the package version sits above it even though
