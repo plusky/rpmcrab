@@ -3932,6 +3932,42 @@ mod prebuilt_tests {
         );
     }
 
+    /// The head reader loops past short reads: a reader yielding
+    /// one byte per call still delivers the full 512 bytes (so the
+    /// ustar arm stays reachable), and a short file ends the loop at
+    /// EOF with a partial head.
+    #[test]
+    fn shipped_head_read_loops_past_short_reads() {
+        use std::io::Read;
+        struct OneByteReader<'a> {
+            data: &'a [u8],
+            pos: usize,
+        }
+        impl Read for OneByteReader<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.pos >= self.data.len() || buf.is_empty() {
+                    return Ok(0);
+                }
+                buf[0] = self.data[self.pos];
+                self.pos += 1;
+                Ok(1)
+            }
+        }
+        let mut full = vec![0u8; 512];
+        full[257..262].copy_from_slice(b"ustar");
+        let head = read_payload_head(OneByteReader {
+            data: &full,
+            pos: 0,
+        });
+        assert_eq!(head, full);
+        assert!(payload_could_match("a.tar", &head));
+        let head = read_payload_head(OneByteReader {
+            data: b"tiny",
+            pos: 0,
+        });
+        assert_eq!(head, b"tiny");
+    }
+
     #[test]
     fn setbadness_in_a_payload_rpmlintrc_fires_per_occurrence() {
         let (pkg, _src, _extract) = source_pkg(&[
