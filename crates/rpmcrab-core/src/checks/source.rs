@@ -129,6 +129,15 @@ fn sha256_reader<R: std::io::Read>(mut r: R) -> Option<String> {
     )
 }
 
+/// Whether a payload file is too big to join any source record on the
+/// sha256 path: source whole-file records are capped at the 256 MiB
+/// archive cap on disk and member records at the 64 MiB entry cap, so
+/// a larger on-disk file matches neither. On the algo-8 path the join
+/// key is the free header digest and source records are uncapped, so
+/// the gate never applies there.
+fn payload_over_source_cap(algo_is_8: bool, len: u64) -> bool {
+    !algo_is_8 && len > prebuilt::MAX_ARCHIVE_BYTES as u64
+}
 /// Read up to the first 512 bytes of a payload file, looping past
 /// short reads: a single `Read::read` may return fewer bytes than
 /// requested, which would leave the ustar arm of `payload_could_match`
@@ -689,7 +698,7 @@ mod prebuilt {
     pub const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
     /// Cap on one archive entry's bytes: a member up to this size is
     /// buffered; a larger one is read through (see the module doc).
-    pub const MAX_ENTRY_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_ENTRY_BYTES: usize = 64 * 1024 * 1024;
     /// Nesting limit for archives inside archives: the top-level archive
     /// is depth 0, and an archive nested inside a depth-3 archive is the
     /// deepest one opened, so five levels are walked in all.
@@ -2754,17 +2763,18 @@ impl Check for SourceCheck {
             if !payload_could_match(&f.name, &head) {
                 continue;
             }
-            // Mirror the source side's 64 MiB entry cap: a payload
-            // file above it can match no source record, so never hash
-            // it. The header size wins when known; otherwise the
-            // on-disk length decides (fixtures carry no header size).
-            let too_big = f
-                .size
-                .map(|size| size > prebuilt::MAX_ENTRY_BYTES as u64)
-                .unwrap_or(false)
-                || std::fs::metadata(&f.path)
-                    .map(|m| m.len() > prebuilt::MAX_ENTRY_BYTES as u64)
-                    .unwrap_or(false);
+            // Skip hashing a payload file that can join no source
+            // record: on the sha256 path, source whole-file records
+            // are capped at the 256 MiB archive cap on disk and
+            // member records at the 64 MiB entry cap, so a larger
+            // on-disk file matches neither. The on-disk length
+            // decides: the header size can disagree with the bytes
+            // actually hashed. On the algo-8 path the join key is
+            // the free header digest and source records are
+            // uncapped, so the gate never applies there.
+            let too_big = std::fs::metadata(&f.path)
+                .map(|m| payload_over_source_cap(algo_is_8, m.len()))
+                .unwrap_or(false);
             if too_big {
                 continue;
             }
@@ -3890,6 +3900,42 @@ mod prebuilt_tests {
             shipped_lines(&findings),
             [
                 "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/libexec/plain.bin ELF binary from fcprobe-1-1.tar.gz: src/prebuilt.o"
+            ]
+        );
+    }
+
+    /// A payload file between the old 64 MiB entry cap and the
+    /// 256 MiB source cap still joins: the old skip dropped any
+    /// payload above 64 MiB even when a bare source record of the
+    /// same bytes existed (plusky CHANGES_REQUESTED on #1427).
+    #[test]
+    fn shipped_payload_between_entry_and_archive_caps_still_fires() {
+        use crate::color::Color;
+        let mut big = vec![0u8; 65 * 1024 * 1024];
+        big[..ELF.len()].copy_from_slice(ELF);
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_pkg = fixture_src(vec![payload_file(src_dir.path(), "bigblob.bin", &big)]);
+        let bin_dir = tempfile::tempdir().unwrap();
+        let bin_pkg = fixture_pkg(
+            "fcprobe",
+            vec![payload_file(bin_dir.path(), "/usr/libexec/big.bin", &big)],
+        );
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SourceCheck::new(&config);
+        Check::check(&mut check, &src_pkg, &config, &mut out);
+        Check::check(&mut check, &bin_pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let findings: Vec<(String, String, Level)> = out
+            .results()
+            .iter()
+            .zip(out.result_levels().iter())
+            .map(|((n, line), l)| (n.clone(), line.clone(), *l))
+            .collect();
+        assert_eq!(
+            shipped_lines(&findings),
+            [
+                "fcprobe.x86_64: W: prebuilt-binary-shipped /usr/libexec/big.bin ELF binary from bigblob.bin"
             ]
         );
     }
@@ -6525,5 +6571,15 @@ mod prebuilt_tests {
         ]);
         let findings = run_source(&pkg);
         assert!(archive_lines(&findings, "source-archive-contains-bidi-control").is_empty());
+    }
+
+    #[test]
+    fn payload_over_source_cap_boundaries() {
+        let cap = super::prebuilt::MAX_ARCHIVE_BYTES as u64;
+        assert!(!super::payload_over_source_cap(false, 65 * 1024 * 1024));
+        assert!(!super::payload_over_source_cap(false, cap));
+        assert!(super::payload_over_source_cap(false, cap + 1));
+        assert!(!super::payload_over_source_cap(true, cap + 1));
+        assert!(!super::payload_over_source_cap(true, u64::MAX));
     }
 }
