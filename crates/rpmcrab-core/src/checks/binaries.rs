@@ -5863,7 +5863,6 @@ fn socket_exec_binaries(
     unit: &PkgFile,
     symlink_names: &HashSet<String>,
     symlink_targets: &HashMap<String, String>,
-    ghost_names: &HashSet<&str>,
 ) -> (Vec<String>, bool) {
     const UNIT_PRECEDENCE: [&str; 5] = [
         "/etc/systemd/system/",
@@ -5932,7 +5931,7 @@ fn socket_exec_binaries(
             }
         }
         let Some(svc) = found else { continue };
-        if svc.is_ghost() || ghost_names.contains(svc.name.as_str()) {
+        if svc.is_ghost() || pkg.ghost_files.contains(svc.name.as_str()) {
             return (vec![], false);
         }
         if is_symlink(svc.mode) && svc.linkto == "/dev/null" {
@@ -5966,19 +5965,18 @@ fn daemon_exec_binaries(pkg: &Pkg) -> DaemonExec {
             }
         }
     }
-    let ghost_names: HashSet<&str> = pkg.ghost_files.iter().map(|g| g.as_str()).collect();
     let is_daemon_unit = |f: &PkgFile| {
         UNIT_DIRS.iter().any(|dir| f.name.starts_with(dir))
             && (f.name.ends_with(".service") || f.name.ends_with(".socket"))
             && !f.is_ghost()
-            && !ghost_names.contains(f.name.as_str())
+            && !pkg.ghost_files.contains(f.name.as_str())
             && !(is_symlink(f.mode) && f.linkto == "/dev/null")
     };
     for unit in pkg.files.iter().filter(|f| is_daemon_unit(f)) {
         let (bins, ok) = if unit.name.ends_with(".service") {
             service_exec_binaries(pkg, unit, &symlink_names, &symlink_targets)
         } else {
-            socket_exec_binaries(pkg, unit, &symlink_names, &symlink_targets, &ghost_names)
+            socket_exec_binaries(pkg, unit, &symlink_names, &symlink_targets)
         };
         if !ok {
             has_unresolvable = true;
@@ -24434,7 +24432,6 @@ description = "explicit priority string bypasses the system crypto policy"
         let empty_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         let empty_targets: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        let empty_ghosts: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
         // W1: lexical normalization precedes usrmerge, so
         // /usr/bin/../bin/x resolves to the usrmerged /usr/bin/x,
@@ -24548,8 +24545,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 .iter()
                 .find(|f| f.name.ends_with("w5.socket"))
                 .unwrap();
-            let (bins, ok) =
-                socket_exec_binaries(&pkg, sock, &empty_names, &empty_targets, &empty_ghosts);
+            let (bins, ok) = socket_exec_binaries(&pkg, sock, &empty_names, &empty_targets);
             assert!(ok, "Accept={accept} must resolve");
             assert_eq!(bins, vec!["/usr/bin/foobar".to_string()], "Accept={accept}");
         }
@@ -24579,8 +24575,7 @@ description = "explicit priority string bypasses the system crypto policy"
                 .iter()
                 .find(|f| f.name.ends_with("w5b.socket"))
                 .unwrap();
-            let (bins, ok) =
-                socket_exec_binaries(&pkg, sock, &empty_names, &empty_targets, &empty_ghosts);
+            let (bins, ok) = socket_exec_binaries(&pkg, sock, &empty_names, &empty_targets);
             assert!(ok, "{label} must resolve");
             assert_eq!(bins, vec!["/usr/bin/foo".to_string()], "{label}");
         }
