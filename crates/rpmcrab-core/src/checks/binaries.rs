@@ -2032,6 +2032,11 @@ struct VendoredCCrate {
     /// without the link remedy. `None` when there is no
     /// system form the crate can link.
     system_soname_prefix: Option<String>,
+    /// A second DT_NEEDED prefix of the same system library, for
+    /// libraries shipped as two sonames: system OpenSSL ships
+    /// libssl.so.3 alongside libcrypto.so.3, so a carrier of either
+    /// fires without the link remedy while the witness is present.
+    additional_system_soname_prefix: Option<String>,
     /// The soname the detail names for the link-the-system remedy;
     /// present exactly when `system_soname_prefix` is.
     link_soname: Option<String>,
@@ -2128,6 +2133,17 @@ fn parse_vendored_c_crates(raw: &str) -> Vec<VendoredCCrate> {
                     "vendored C crate soname prefix is non-empty"
                 );
             }
+            let additional_system_soname_prefix = opt_field("additional_system_soname_prefix");
+            if let Some(prefix) = &additional_system_soname_prefix {
+                assert!(
+                    !prefix.is_empty(),
+                    "vendored C crate additional soname prefix is non-empty"
+                );
+                assert!(
+                    system_soname_prefix.is_some(),
+                    "vendored C crate additional soname prefix needs a primary prefix"
+                );
+            }
             if let (Some(prefix), Some(link)) = (&system_soname_prefix, &link_soname) {
                 assert!(
                     link.starts_with(prefix.as_str()),
@@ -2151,6 +2167,7 @@ fn parse_vendored_c_crates(raw: &str) -> Vec<VendoredCCrate> {
                 srpm,
                 accepted_names,
                 system_soname_prefix,
+                additional_system_soname_prefix,
                 link_soname,
                 witness,
                 c_version_source,
@@ -8437,10 +8454,13 @@ impl BinariesCheck {
             // remove the vendored copy, so the link is no exemption.
             // It only drops the link remedy from the detail: the
             // binary already links the library named there.
-            let links_system = entry
-                .system_soname_prefix
-                .as_ref()
-                .is_some_and(|prefix| info.needed.iter().any(|n| n.starts_with(prefix.as_str())));
+            let links_system = [
+                &entry.system_soname_prefix,
+                &entry.additional_system_soname_prefix,
+            ]
+            .iter()
+            .filter_map(|prefix| prefix.as_ref())
+            .any(|prefix| info.needed.iter().any(|n| n.starts_with(prefix.as_str())));
             let mut detail = format!("{} {}", vc.name, vc.crate_version);
             detail.push_str(": ");
             if !links_system {
@@ -26848,6 +26868,12 @@ description = "explicit priority string bypasses the system crypto policy"
             openssl.system_soname_prefix.as_deref(),
             Some("libcrypto.so.")
         );
+        // System OpenSSL ships libssl.so.3 alongside libcrypto.so.3:
+        // a libssl carrier gets the same no-link-remedy treatment.
+        assert_eq!(
+            openssl.additional_system_soname_prefix.as_deref(),
+            Some("libssl.so.")
+        );
         assert_eq!(openssl.link_soname.as_deref(), Some("libcrypto.so.3"));
         assert_eq!(
             openssl.c_version_source,
@@ -27397,6 +27423,60 @@ description = "explicit priority string bypasses the system crypto policy"
             ],
             "openssl-src dual-link firing line: {lines:?}"
         );
+    }
+
+    #[test]
+    fn bundled_library_openssl_src_libssl_link_drops_link_remedy() {
+        // Mirror of the libcrypto pin: with libssl.so.3 NEEDED the
+        // finding still fires (the vendored copy is carried
+        // alongside), prescribing only the declaration.
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.needed = vec!["libssl.so.3".to_string()];
+        info.vendored_crates = vec![vendored(
+            "openssl-src",
+            "300.6.1+3.6.3",
+            Some("3.6.3"),
+            true,
+        )];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe openssl-src 300.6.1+3.6.3: add Provides: bundled(openssl-3) = 3.6.3"
+            ],
+            "openssl-src libssl-link firing line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn bundled_library_openssl_alias_does_not_mask_distinct_provider() {
+        // The lenient `openssl` accepted name silences only its own
+        // entry: a package declaring bundled(openssl) still fires
+        // for a distinct provider's vendored crate carried alongside.
+        let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        pkg.provides = vec![bundled_provide("openssl")];
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored("libgit2-sys", "0.18.8+1.9.7", Some("1.9.7"), true)];
+        let lines = bundled_lines(&pkg, &info);
+        assert_eq!(
+            lines,
+            [
+                "testpkg.x86_64: W: bundled-library-without-provides /usr/bin/probe libgit2-sys 0.18.8+1.9.7: link the system libgit2.so.1.9 or add Provides: bundled(libgit2) = 1.9.7"
+            ],
+            "openssl alias must not silence libgit2-sys: {lines:?}"
+        );
+        // And the alias does silence its own entry.
+        let mut pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        pkg.provides = vec![bundled_provide("openssl")];
+        let mut info = syn_info();
+        info.vendored_crates = vec![vendored(
+            "openssl-src",
+            "300.6.1+3.6.3",
+            Some("3.6.3"),
+            true,
+        )];
+        assert!(bundled_lines(&pkg, &info).is_empty());
     }
 
     #[test]
