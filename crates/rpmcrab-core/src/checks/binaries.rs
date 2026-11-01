@@ -8572,7 +8572,12 @@ impl BinariesCheck {
         if info.is_go_binary() || info.go_buildinfo {
             return;
         }
-        if info.is_debug {
+        // The two-part debuginfo gate sibling finders already use: a
+        // build-id debuginfo file under /usr/lib/debug/ without the
+        // .debug suffix keeps its symtab (and its PyInit_* and Rust
+        // markers) but not .dep-v0, so it would fire on the suffix
+        // alone.
+        if info.is_debug || pkgfile.name.starts_with("/usr/lib/debug/") {
             return;
         }
         if info.elf_type != goblin::elf::header::ET_DYN {
@@ -26765,6 +26770,27 @@ description = "explicit priority string bypasses the system crypto policy"
                 "testpkg.x86_64: W: python-rust-extension-without-auditable-data /usr/lib64/python3.14/site-packages/jiter/jiter.cpython-314-x86_64-linux-gnu.so"
             ],
             "firing line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn python_rust_extension_quiet_for_debug_path_without_suffix() {
+        // The two-part debuginfo gate: a build-id debuginfo file
+        // under /usr/lib/debug/ without the .debug suffix stays
+        // quiet like a .debug file.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file(
+            "/usr/lib/debug/usr/lib64/python3.14/site-packages/jiter/jiter.cpython-314-x86_64-linux-gnu.so",
+            "ELF 64-bit LSB shared object",
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_python_rust_extension_auditable_data(&pkg, &pkgfile, &py_ext_info(), &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            lines_for(&results, "python-rust-extension-without-auditable-data").is_empty(),
+            "lines: {results:?}"
         );
     }
 
