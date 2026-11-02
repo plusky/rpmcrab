@@ -110,7 +110,29 @@ fn coerce_scoring(check: &str, v: &toml::Value) -> Result<i64, FilterError> {
     };
     match v {
         toml::Value::Integer(i) => Ok(*i),
-        toml::Value::String(s) => s.trim().parse::<i64>().map_err(|_| invalid()),
+        toml::Value::String(s) => {
+            // Python `int()` accepts PEP 515 underscores between digits
+            // (`int("1_0") == 10`); Rust `parse` rejects them. Accept
+            // exactly that shape (single underscores, digits on both
+            // sides) and let everything else take the plain parse path,
+            // which rejects leading/trailing/doubled underscores as
+            // `int()` does.
+            let trimmed = s.trim();
+            let digits = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
+            let underscored = !digits.is_empty()
+                && digits.chars().all(|c| c.is_ascii_digit() || c == '_')
+                && !digits.starts_with('_')
+                && !digits.ends_with('_')
+                && !digits.contains("__");
+            if underscored {
+                trimmed
+                    .replace('_', "")
+                    .parse::<i64>()
+                    .map_err(|_| invalid())
+            } else {
+                trimmed.parse::<i64>().map_err(|_| invalid())
+            }
+        }
         toml::Value::Float(f) => {
             // Rust `as` saturates on float-to-int conversion (NaN becomes
             // 0, infinities and out-of-range values clamp to the extremes),
@@ -780,6 +802,26 @@ mod tests {
             Filter::new(&c, Color::for_tty(false)),
             Err(FilterError::Scoring { .. })
         ));
+    }
+
+    #[test]
+    fn scoring_underscore_grouped_string_coerces_like_python_int() {
+        // PEP 515: `int("1_0") == 10`; leading, trailing, and doubled
+        // underscores stay errors, exactly as `int()` rejects them.
+        assert_eq!(
+            coerce_scoring("some-check", &toml::Value::String("1_0".to_string())).unwrap(),
+            10
+        );
+        assert_eq!(
+            coerce_scoring("some-check", &toml::Value::String("+1_000".to_string())).unwrap(),
+            1000
+        );
+        for bad in ["_10", "10_", "1__0", "1__"] {
+            assert!(
+                coerce_scoring("some-check", &toml::Value::String(bad.to_string())).is_err(),
+                "{bad} must stay an error"
+            );
+        }
     }
 
     #[test]
