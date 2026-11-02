@@ -80,9 +80,12 @@ impl TmpFilesCheck {
     }
 
     /// Whether the `%pre` scriptlet calls `systemd-tmpfiles --create` for `basename`.
+    /// The basename must appear as a path component (`/` before it,
+    /// whitespace or end after it): a suffix match would credit a
+    /// `%pre` creating `xfoo.conf` for `foo.conf`.
     fn pre_creates_tmpfile(pre: &str, basename: &str) -> bool {
         let pattern = format!(
-            r"systemd-tmpfiles --create .*{}",
+            r"systemd-tmpfiles --create .*/{}(?:\s|$)",
             fancy_regex::escape(basename)
         );
         let re = Regex::new(&pattern).expect("tmpfile pattern");
@@ -240,6 +243,17 @@ mod tests {
         let pre = "systemd-tmpfiles --create /usr/lib/tmpfiles.d/foo.conf";
         assert!(TmpFilesCheck::pre_creates_tmpfile(pre, "foo.conf"));
         assert!(!TmpFilesCheck::pre_creates_tmpfile("", "foo.conf"));
+    }
+
+    #[test]
+    fn pre_suffix_match_does_not_credit() {
+        // Creating a longer-named conf sharing the suffix is not
+        // creating this conf.
+        let pre = "systemd-tmpfiles --create /usr/lib/tmpfiles.d/xfoo.conf";
+        assert!(!TmpFilesCheck::pre_creates_tmpfile(pre, "foo.conf"));
+        // A following argument on the same line still credits.
+        let pre = "systemd-tmpfiles --create /usr/lib/tmpfiles.d/foo.conf /other/path";
+        assert!(TmpFilesCheck::pre_creates_tmpfile(pre, "foo.conf"));
     }
     use crate::pkg::pkgfile::{PkgFile, RPMFILE_GHOST};
 

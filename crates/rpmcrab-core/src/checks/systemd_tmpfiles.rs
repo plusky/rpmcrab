@@ -117,12 +117,52 @@ impl TmpfilesEntry {
         fields
     }
 
+    /// Count the line's fields with the same quote-aware scan as
+    /// `split_line`, but without its 7-field cap: `split_line` folds
+    /// everything past the sixth field into one argument, so a raw
+    /// `len() > 7` test on its output can never fire.
+    fn field_count(line: &str) -> usize {
+        let chars: Vec<char> = line.chars().collect();
+        let n = chars.len();
+        let mut i = 0;
+        let mut count = 0;
+        while i < n {
+            while i < n && chars[i].is_whitespace() {
+                i += 1;
+            }
+            if i >= n {
+                break;
+            }
+            count += 1;
+            let mut in_quote: Option<char> = None;
+            while i < n {
+                let c = chars[i];
+                if let Some(q) = in_quote {
+                    if c == q {
+                        in_quote = None;
+                    }
+                    i += 1;
+                } else if c == '"' || c == '\'' {
+                    in_quote = Some(c);
+                    i += 1;
+                } else if c.is_whitespace() {
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        count
+    }
+
     fn parse_fields(&mut self) {
-        let fields = Self::split_line(&self.line);
-        if fields.len() > 7 {
+        // `split_line` caps at 7 fields, so the overflow test must
+        // run on the raw field count, not on its output.
+        if Self::field_count(&self.line) > 7 {
             self.warn("Too many fields encountered");
             return;
         }
+        let fields = Self::split_line(&self.line);
         if fields.len() < 2 {
             self.warn("Too few fields encountered");
             return;
@@ -309,7 +349,12 @@ impl SystemdTmpfilesCheck {
     }
 
     fn is_in_safe_location(&self, entry: &TmpfilesEntry) -> bool {
-        WELL_KNOWN_PATHS.iter().any(|k| entry.target.starts_with(k))
+        // Segment boundary, like the `b` arm's `/dev` test: a target
+        // that merely starts with a well-known path (`/var/logfoo`)
+        // is not inside it.
+        WELL_KNOWN_PATHS
+            .iter()
+            .any(|k| entry.target == *k || entry.target.starts_with(&format!("{k}/")))
     }
 
     /// Whether the entry is security-sensitive (needs whitelisting).
@@ -453,6 +498,24 @@ mod tests {
     }
 
     #[test]
+    fn too_many_fields_is_invalid() {
+        let entry = TmpfilesEntry::parse("test.conf", "d /run/foo 0755 root root - extra1 extra2");
+        assert!(!entry.valid);
+        assert!(
+            entry
+                .warnings
+                .iter()
+                .any(|w| w.contains("Too many fields")),
+            "warnings: {:?}",
+            entry.warnings
+        );
+        // A quoted multi-word argument is one field, not an overflow.
+        let entry =
+            TmpfilesEntry::parse("test.conf", "f /run/foo 0644 root root - \"some argument\"");
+        assert!(entry.valid, "warnings: {:?}", entry.warnings);
+    }
+
+    #[test]
     fn too_few_fields_is_invalid() {
         let entry = TmpfilesEntry::parse("test.conf", "d");
         assert!(!entry.valid);
@@ -522,6 +585,30 @@ mod tests {
         let check = SystemdTmpfilesCheck::new(&Config::default());
         let entry = TmpfilesEntry::parse("t.conf", "d /opt/foo - - - -");
         assert!(check.is_sensitive_entry(&entry));
+    }
+
+    #[test]
+    fn sibling_prefix_of_safe_location_is_not_safe() {
+        let check = SystemdTmpfilesCheck::new(&Config::default());
+        // Restrictive-mode entries at sibling-prefix targets are
+        // outside the safe location, hence sensitive.
+        for line in [
+            "d /var/logfoo 0755 root root -",
+            "d /etcfoo 0755 root root -",
+            "d /srv2 0755 root root -",
+            "d /var/runaway 0755 root root -",
+        ] {
+            let entry = TmpfilesEntry::parse("t.conf", line);
+            assert!(check.is_sensitive_entry(&entry), "{line}");
+        }
+        // The safe location itself and paths below it stay safe.
+        for line in [
+            "d /var/log 0755 root root -",
+            "d /var/log/foo 0755 root root -",
+        ] {
+            let entry = TmpfilesEntry::parse("t.conf", line);
+            assert!(!check.is_sensitive_entry(&entry), "{line}");
+        }
     }
 
     #[test]

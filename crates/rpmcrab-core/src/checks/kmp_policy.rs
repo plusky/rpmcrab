@@ -36,56 +36,135 @@ impl KMPPolicyCheck {
         Some(format!("kernel-{kernel}"))
     }
 
+    /// Split `s` on top-level occurrences of `sep` only: separators
+    /// nested inside parentheses do not split.
+    fn split_top_level<'a>(s: &'a str, sep: &str) -> Vec<&'a str> {
+        let mut parts = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0;
+        let mut i = 0;
+        let bytes = s.as_bytes();
+        while i < bytes.len() {
+            match bytes[i] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {
+                    if depth == 0 && s[i..].starts_with(sep) {
+                        parts.push(&s[start..i]);
+                        i += sep.len();
+                        start = i;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        parts.push(&s[start..]);
+        parts
+    }
+
+    /// True when `piece` is wrapped in one balanced pair of parentheses.
+    fn is_wrapped(piece: &str) -> bool {
+        if !piece.starts_with('(') || !piece.ends_with(')') {
+            return false;
+        }
+        let mut depth = 0i32;
+        for (i, c) in piece.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 && i + 1 < piece.len() {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        depth == 0
+    }
+
+    /// The bare package name a conjunction member names: a version
+    /// constraint after the name (`kernel-default >= 1`, attached
+    /// `kernel-default>=1`) does not change which package it names.
+    /// Anything else keeps its full text, so it compares unequal to
+    /// a bare flavor name.
+    fn member_base(member: &str) -> &str {
+        let words: Vec<&str> = member.split_whitespace().collect();
+        match words.as_slice() {
+            [name] => name.split(['<', '>', '=']).next().unwrap_or(name),
+            [name, op, _version]
+                if matches!(*op, "<" | ">" | "<=" | ">=" | "=" | "==") =>
+            {
+                name
+            }
+            _ => member,
+        }
+    }
+
+    /// Flatten a supplement's conjunction members into bare names:
+    /// nested parenthesised conjunctions recurse, so `(foo and
+    /// (kernel-default and bar))` yields all three members, and
+    /// versioned members reduce to their package name. Returns
+    /// `None` for supplements that are not a `(...)` conjunction
+    /// or a `packageand(...)` form.
+    fn conjunction_members(supplement: &str) -> Option<Vec<String>> {
+        let (inner, sep) = if let Some(inner) = supplement.strip_prefix('(') {
+            (inner.strip_suffix(')').unwrap_or(inner), " and ")
+        } else if let Some(inner) = supplement.strip_prefix("packageand(") {
+            (inner.strip_suffix(')').unwrap_or(inner), ":")
+        } else {
+            return None;
+        };
+        let mut out = Vec::new();
+        Self::flatten_members(inner, sep, &mut out);
+        Some(out)
+    }
+
+    fn flatten_members(expr: &str, sep: &str, out: &mut Vec<String>) {
+        for piece in Self::split_top_level(expr, sep) {
+            let piece = piece.trim();
+            if Self::is_wrapped(piece) {
+                Self::flatten_members(&piece[1..piece.len() - 1], " and ", out);
+            } else if let Some(inner) = piece.strip_prefix("packageand(") {
+                Self::flatten_members(inner.strip_suffix(')').unwrap_or(inner), ":", out);
+            } else if !piece.is_empty() {
+                out.push(Self::member_base(piece).to_string());
+            }
+        }
+    }
+
     /// Whether the kernel flavor appears as a non-first member of a
     /// conjunction supplement: `(a and kernel-flavor ...)` or
     /// `packageand(a:kernel-flavor ...)`. Conjunctions commute, so the
-    /// flavor counts in any position. Members compare exactly, so
-    /// lookalikes such as `(kernel-flavorfoo and a)` do not credit.
+    /// flavor counts in any position, including inside a nested
+    /// conjunction. Members compare by bare name, so lookalikes such
+    /// as `(kernel-flavorfoo and a)` do not credit.
     /// First-member forms are handled by
     /// `has_kernel_flavor_first_member`.
     fn has_kernel_flavor_later_member(supplement: &str, kernel_flavor: &str) -> bool {
-        if let Some(inner) = supplement.strip_prefix('(') {
-            let inner = inner.strip_suffix(')').unwrap_or(inner);
-            let members: Vec<&str> = inner.split(" and ").map(str::trim).collect();
-            if members.len() > 1 && members[1..].contains(&kernel_flavor) {
-                return true;
-            }
-        }
-        if let Some(inner) = supplement.strip_prefix("packageand(") {
-            let inner = inner.strip_suffix(')').unwrap_or(inner);
-            let members: Vec<&str> = inner.split(':').map(str::trim).collect();
-            if members.len() > 1 && members[1..].contains(&kernel_flavor) {
-                return true;
-            }
-        }
-        false
+        Self::conjunction_members(supplement).is_some_and(|members| {
+            members.len() > 1 && members[1..].contains(&kernel_flavor.to_string())
+        })
     }
 
     /// Whether the kernel flavor is the first member of a conjunction
     /// supplement: `(kernel-flavor and ...)` or
-    /// `packageand(kernel-flavor:...)`. The first member compares
-    /// exactly, so prefix lookalikes such as
+    /// `packageand(kernel-flavor:...)`. The first member compares by
+    /// bare name, so prefix lookalikes such as
     /// `packageand(kernel-flavorfoo:...)` or `(kernel-flavor andfoo)`
     /// do not credit. The parenthesised form still requires a
     /// conjunction (more than one member), matching the previous
     /// prefix arm; the `packageand` form keeps crediting an exact
     /// single member, as the previous prefix arm did.
     fn has_kernel_flavor_first_member(supplement: &str, kernel_flavor: &str) -> bool {
-        if let Some(inner) = supplement.strip_prefix('(') {
-            let inner = inner.strip_suffix(')').unwrap_or(inner);
-            let members: Vec<&str> = inner.split(" and ").map(str::trim).collect();
-            if members.len() > 1 && members[0] == kernel_flavor {
-                return true;
-            }
+        let Some(members) = Self::conjunction_members(supplement) else {
+            return false;
+        };
+        if supplement.starts_with('(') && members.len() <= 1 {
+            return false;
         }
-        if let Some(inner) = supplement.strip_prefix("packageand(") {
-            let inner = inner.strip_suffix(')').unwrap_or(inner);
-            let members: Vec<&str> = inner.split(':').map(str::trim).collect();
-            if !members.is_empty() && members[0] == kernel_flavor {
-                return true;
-            }
-        }
-        false
+        !members.is_empty() && members[0] == kernel_flavor
     }
 }
 
@@ -405,6 +484,22 @@ mod tests {
         pkg.supplements = vec![
             dep("packageand(foo:kernel-default)"),
             dep("packageand(kernel-default:foo)"),
+        ];
+        let results = run(&pkg);
+        assert!(results.is_empty(), "{results:?}");
+    }
+
+    #[test]
+    fn kmp_nested_conjunction_and_versioned_member_are_quiet() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "supplements-kmp-default".to_string();
+        pkg.requires = vec![dep("kernel-default")];
+        pkg.enhances = vec![dep("kernel-default")];
+        pkg.supplements = vec![
+            dep("(foo and (kernel-default and bar))"),
+            dep("((kernel-default and foo))"),
+            dep("(kernel-default >= 1 and foo)"),
+            dep("(foo and kernel-default >= 1)"),
         ];
         let results = run(&pkg);
         assert!(results.is_empty(), "{results:?}");

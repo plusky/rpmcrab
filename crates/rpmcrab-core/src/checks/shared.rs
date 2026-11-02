@@ -335,10 +335,16 @@ pub fn python_str_list(items: &[&str]) -> String {
     format!("[{}]", inner.join(", "))
 }
 
-/// Python `str()` of a tuple of strings: `('a', 'b')`.
+/// Python `str()` of a tuple of strings: `('a', 'b')`, with the
+/// trailing comma a singleton needs (`('a',)`).
 pub fn python_str_tuple(items: &[&str]) -> String {
     let inner: Vec<String> = items.iter().map(|s| python_str_repr(s)).collect();
-    format!("({})", inner.join(", "))
+    let joined = inner.join(", ");
+    if items.len() == 1 {
+        format!("({joined},)")
+    } else {
+        format!("({joined})")
+    }
 }
 
 /// Whether `name` belongs to the MinGW cross family: `mingw32-*` or
@@ -671,6 +677,8 @@ mod tests {
     fn python_str_tuple_matches_python_repr() {
         // B9: the reference prints str of a tuple (('a', 'ad')).
         assert_eq!(python_str_tuple(&["a", "ad"]), "('a', 'ad')");
+        assert_eq!(python_str_tuple(&["a"]), "('a',)");
+        assert_eq!(python_str_tuple(&[]), "()");
     }
 
     #[test]
