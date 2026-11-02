@@ -172,7 +172,13 @@ impl DuplicatesCheck {
             .configuration
             .get("DuplicatesMinSize")
             .and_then(|v| v.as_integer())
-            .unwrap_or(0) as u64;
+            .unwrap_or(0);
+        // A negative threshold must fail loudly: casting it to `u64`
+        // would wrap to `u64::MAX` and silently disable the check.
+        if min_size < 0 {
+            panic!("DuplicatesCheck: DuplicatesMinSize must not be negative, got {min_size}");
+        }
+        let min_size = min_size as u64;
         Self {
             min_size,
             whitelist_pairs: Self::parse_whitelist_pairs(config),
@@ -560,6 +566,18 @@ mod tests {
 
     fn is_whitelisted(pairs: &[WhitelistPair]) -> impl Fn(&str, &str) -> bool + '_ {
         move |a, b| pairs.iter().any(|p| p.matches(a, b))
+    }
+
+    #[test]
+    #[should_panic(expected = "must not be negative")]
+    fn negative_min_size_panics_at_construction() {
+        let table: toml::Table =
+            toml::from_str("DuplicatesMinSize = -1").expect("parse config");
+        let config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        let _ = DuplicatesCheck::new(&config);
     }
 
     #[test]
