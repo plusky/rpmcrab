@@ -1180,8 +1180,18 @@ def latest_upstream_sha(branch):
 
 def known_findings():
     """Finding names rpmcrab can emit: staged description keys plus in-code
-    set_error_detail registrations."""
+    set_error_detail registrations.
+
+    Returns (names, dynamic_prefixes): literal registrations give names,
+    while format!-constructed registrations (e.g.
+    `&format!("dir-or-file-in-{}", ...)`) give only the literal prefix
+    up to the first placeholder -- the placeholder values are runtime
+    data (a DisallowedDirs entry, a locale code), so the family can
+    never be enumerated statically, and the pruner must match on the
+    prefix instead of dropping the whole family as stale.
+    """
     findings = set()
+    prefixes = set()
     key_re = re.compile(r'^(?:"([^"]+)"|([A-Za-z0-9_.\-%]+))\s*=')
     for toml_file in DESCRIPTIONS_DIR.glob("*.toml"):
         for line in toml_file.read_text(encoding="utf-8").splitlines():
@@ -1192,9 +1202,18 @@ def known_findings():
             if m:
                 findings.add(m.group(1) or m.group(2))
     detail_re = re.compile(r'set_error_detail\(\s*"([^"]+)"')
+    format_re = re.compile(r'set_error_detail\(\s*&\s*format!\(\s*"([^"]+)"')
     for rs_file in CHECKS_DIR.glob("*.rs"):
-        findings.update(detail_re.findall(rs_file.read_text(encoding="utf-8")))
-    return findings
+        text = rs_file.read_text(encoding="utf-8")
+        findings.update(detail_re.findall(text))
+        for template in format_re.findall(text):
+            if "{" in template:
+                prefix = template.split("{", 1)[0]
+                if prefix:
+                    prefixes.add(prefix)
+            else:
+                findings.add(template)
+    return findings, prefixes
 
 
 def pure_finding_pattern(entry):
@@ -1270,6 +1289,15 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
     together with one adjacent blank line, so the surviving groups keep
     the file's spacing. A block that still heads a retained entry stays.
     """
+    # `known` is either a plain set of names (the historical call
+    # shape, kept for tests) or the (names, dynamic_prefixes)
+    # pair from `known_findings()`: a Filters entry naming a
+    # member of a format!-constructed family is live even though
+    # its full name is never a literal in the tree.
+    if isinstance(known, tuple):
+        known_names, dynamic_prefixes = known
+    else:
+        known_names, dynamic_prefixes = known, ()
     lines = text.splitlines(keepends=True)
     out = []
     in_list = None
@@ -1318,7 +1346,10 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
             if (
                 finding is not None
                 and finding in PRUNE_CANDIDATES
-                and finding not in known
+                and finding not in known_names
+                and not any(
+                    finding.startswith(prefix) for prefix in dynamic_prefixes
+                )
             ):
                 pruned_log.append(
                     f"{in_list}: dropped {finding!r} ({PRUNE_CANDIDATES[finding]})"
@@ -2256,7 +2287,10 @@ def append_extra_filters(text, filters):
             out.append(line)
             continue
         out.append(line)
-    assert done, "no Filters list found to append to"
+    # Explicit raise, not bare assert: bare asserts vanish under
+    # `python -O`, silently shipping a config without the extras.
+    if not done:
+        raise AssertionError("no Filters list found to append to")
     return "".join(out)
 
 
@@ -2290,7 +2324,9 @@ def append_extra_checks(text, checks):
             out.append(line)
             continue
         out.append(line)
-    assert done, "no Checks list found to append to"
+    # Explicit raise, not bare assert (see append_extra_filters).
+    if not done:
+        raise AssertionError("no Checks list found to append to")
     return "".join(out)
 
 
@@ -2324,7 +2360,9 @@ def append_extra_atomic_allowed_dirs(text, dirs):
             out.append(line)
             continue
         out.append(line)
-    assert done, "no AtomicAllowedDirs list found to append to"
+    # Explicit raise, not bare assert (see append_extra_filters).
+    if not done:
+        raise AssertionError("no AtomicAllowedDirs list found to append to")
     return "".join(out)
 
 
@@ -2435,9 +2473,11 @@ def remove_excluded_checks(text, checks):
             )
             continue
         out.append(line)
-    assert not wanted, "excluded checks not in Checks list: %s" % sorted(
-        wanted.values()
-    )
+    # Explicit raise, not bare assert (see append_extra_filters).
+    if wanted:
+        raise AssertionError(
+            "excluded checks not in Checks list: %s" % sorted(wanted.values())
+        )
     return "".join(out)
 
 
@@ -2939,13 +2979,6 @@ def main():
         if not m or m.group(1) not in PINS:
             ap.error(f"bad --pin {pin!r}, want FLAVOR=SHA:DATE")
         pins[m.group(1)] = (m.group(2), m.group(3))
-    if args.refresh:
-        # The refresh PR must carry the final pins: --check regenerates from
-        # PINS, so file-only pins would fail the PR's own drift gate.
-        # Rewritten after --pin overrides so combined flags cannot diverge
-        # the file from the in-memory pins used below.
-        rewrite_pins(Path(__file__).resolve(), pins)
-
     ref_dir = Path(args.ref_dir) if args.ref_dir else None
     try:
         result, provenance, pruned_log, pkg_pruned_log, pie_pruned_log, files_out, dropped_log, retargeted_log, scoped_log, deduped_filters_log, threshold_log, changelog_log, added_log, adjudicated_log = generate(
@@ -2958,6 +2991,15 @@ def main():
             file=sys.stderr,
         )
         return EXIT_FETCH_EXHAUSTED
+
+    if args.refresh:
+        # The refresh PR must carry the final pins: --check regenerates from
+        # PINS, so file-only pins would fail the PR's own drift gate.
+        # Rewritten only after generate() succeeds, and after --pin
+        # overrides so combined flags cannot diverge the file from the
+        # in-memory pins used above: a generation failure (e.g.
+        # FetchExhausted) must not leave pins advanced with files stale.
+        rewrite_pins(Path(__file__).resolve(), pins)
 
     if args.check:
         failures = []
@@ -3016,6 +3058,28 @@ def main():
                                     want.read_text(encoding="utf-8"),
                                 ),
                             )
+                        )
+            # `write_all` deletes vendored files and flavour directories
+            # the regeneration no longer produces, so --check must flag
+            # them too: iterating only generated filenames lets a stale
+            # file or directory pass as clean tree litter.
+            if DISTRO_DIR.exists():
+                for flavor, data in result.items():
+                    flavor_dir = DISTRO_DIR / flavor
+                    if flavor_dir.is_dir():
+                        for existing in flavor_dir.glob("*.toml"):
+                            if existing.name not in data["files"]:
+                                failures.append(
+                                    f"stale vendored file: {flavor}/{existing.name}"
+                                )
+                for existing in DISTRO_DIR.iterdir():
+                    if (
+                        existing.is_dir()
+                        and existing.name not in result
+                        and not (existing / "PROVENANCE").exists()
+                    ):
+                        failures.append(
+                            f"stale vendored flavour directory: {existing.name}"
                         )
             want_prov = tmpdir / "PROVENANCE"
             have_prov = DISTRO_DIR / "PROVENANCE"
