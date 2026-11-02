@@ -553,11 +553,15 @@ impl<'a> Extractor<'a> {
             S_IFIFO => {
                 if !self.ensure_parent(&path)? || is_existing_dir(&path) {
                     self.warn_skip_collision(e);
-                    return Ok(());
+                    return skip_data(r, e.size);
                 }
                 let _ = fs::remove_file(&path);
                 nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o644 as _))
                     .map_err(|e| io_error(&path, e.into()))?;
+                // A FIFO carries no data in a well-formed archive, but a
+                // nonzero size must still be consumed like every other arm
+                // does, or the next entry would be parsed from data bytes.
+                skip_data(r, e.size)?;
                 // No mtime: opening a fifo for writing (as set_modified does)
                 // blocks until a reader appears.
                 self.record(path, e.mode & 0o7777, None, false);

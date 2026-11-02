@@ -723,7 +723,7 @@ impl Pkg {
         let noreplace_files = names(PkgFile::is_noreplace);
         let missingok_files = names(PkgFile::is_missingok);
 
-        // A NoSource package is a source package whose files are all ghosts.
+        // A NoSource package is a source package with at least one ghost file.
         let is_no_source = is_source && !ghost_files.is_empty();
         let arch = if is_no_source {
             "nosrc".to_string()
@@ -794,7 +794,7 @@ impl Pkg {
         matches!(self.source, PkgSource::Installed | PkgSource::LiveRoot)
     }
 
-    /// True for a NoSource package (source whose files are all ghosts).
+    /// True for a NoSource package (source with at least one ghost file).
     pub fn is_no_source(&self) -> bool {
         self.is_source && !self.ghost_files.is_empty()
     }
