@@ -1586,10 +1586,15 @@ impl PostCheck {
             // it (a known approximation).
             fn split_attached_payload(val: &str) -> Vec<&str> {
                 let val = trim(val);
-                if val.matches('\'').count() % 2 == 1 || val.matches('"').count() % 2 == 1 {
+                // Fall back on a genuinely unclosed quote, not on
+                // global parity: a single quote inside double quotes
+                // is literal, so counting it breaks the quoted group
+                // (issue #1457).
+                let (words, unclosed) = split_words(val);
+                if unclosed {
                     return val.split_whitespace().map(trim).collect();
                 }
-                split_words(val).0.into_iter().map(trim).collect()
+                words.into_iter().map(trim).collect()
             }
             let (outer, unclosed) = split_words(last);
             if unclosed {
@@ -4253,6 +4258,22 @@ mod tests {
                 "shell-fed body must fire: {script}"
             );
         }
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_env_split_string_nested_quote_still_fires() {
+        // A single quote inside double quotes is literal, so it must
+        // not trip the attached-payload fallback: the quoted group
+        // stays one word and the shell word after the assignment
+        // still feeds the shell (issue #1457).
+        let script = "env -SFOO=\"don't stop\"x sh <<'EOF'\nrm -rf /foo\nEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["rm".to_string()]),
+            "shell-fed body must fire: {script}"
+        );
     }
 
     #[test]
