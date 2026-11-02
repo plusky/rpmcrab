@@ -2125,10 +2125,13 @@ mod prebuilt {
                             );
                             let hits = self.out.shipped.len() - before;
                             if hits > 0 {
+                                // Cut like Hit (issue #1448): the
+                                // chain is attacker-controlled, so a
+                                // full chain retains unbounded bytes.
                                 self.out.archives.push(ArchiveHits {
                                     sha256: super::sha256_hex(bytes),
                                     hits,
-                                    path: mctx.to_string(),
+                                    path: cut_detail(mctx),
                                 });
                             }
                         } else {
@@ -4693,6 +4696,33 @@ mod prebuilt_tests {
         }
         let outcome = walk_buffer(&hundred, "chain.gz");
         assert!(outcome.prebuilt.is_empty(), "{:?}", outcome.prebuilt);
+    }
+
+    #[test]
+    fn nested_archive_shipped_record_carries_cut_chain() {
+        // A nested archive holding hits joins the shipped records
+        // with the cut chain (issue #1448): like Hit, ArchiveHits.path
+        // is cut at emission, keeping head and tail around one
+        // ellipsis, instead of retaining the full member chain.
+        let inner = zip_bytes(&[("inner.o", ELF)]);
+        let mid_name = format!("{}.zip", "m".repeat(600));
+        let mid = zip_bytes(&[(mid_name.as_str(), &inner)]);
+        let outer_name = format!("{}.zip", "o".repeat(600));
+        let outer = zip_bytes(&[(outer_name.as_str(), &mid)]);
+        let outcome = walk_buffer(&outer, "t.zip");
+        let full = format!("t.zip: {outer_name}: {mid_name}");
+        assert!(full.len() > 1024, "fixture chain must exceed the cut");
+        let cut = super::prebuilt::cut_detail(&full);
+        assert!(
+            outcome.archives.iter().any(|a| a.path == cut),
+            "no archive record carries the cut chain: {:?}",
+            outcome.archives
+        );
+        assert!(
+            !outcome.archives.iter().any(|a| a.path == full),
+            "an archive record keeps the full chain: {:?}",
+            outcome.archives
+        );
     }
 
     #[test]
