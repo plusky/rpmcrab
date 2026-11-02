@@ -1056,6 +1056,32 @@ def test_prune_stale_filters_keeps_shared_group_comment():
     assert len(pruned) == 1, pruned
 
 
+def test_prune_stale_filters_keeps_format_constructed_family_member():
+    """A PRUNE_CANDIDATES entry naming a format!-constructed finding
+    family member survives: `known_findings` can only report the
+    family's literal prefix (e.g. `dir-or-file-in-`), never the full
+    name, so prefix membership is what keeps a live filter from being
+    pruned as stale."""
+    text = (
+        'Filters = [\n'
+        "    '.*dir-or-file-in-opt.*',\n"
+        ']\n'
+    )
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(
+        text, (set(), {"dir-or-file-in-"}), pruned, dropped, retargeted
+    )
+    assert out == text, out
+    assert pruned == [], pruned
+    # Control: without the prefix, the same entry prunes.
+    pruned, dropped, retargeted = [], [], []
+    out = gen.prune_stale_filters(
+        text, (set(), set()), pruned, dropped, retargeted
+    )
+    assert "dir-or-file-in-opt" not in out, out
+    assert len(pruned) == 1, pruned
+
+
 def test_prune_stale_filters_drops_filter_error_titles():
     """FilterErrorTitles lines referencing killed findings are pruned
     like Filters lines: the cross-directory-hard-link suppression
@@ -2255,9 +2281,17 @@ def test_main_other_errors_are_not_neutral():
 
 
 def _generate_return(provenance):
+    # The --check stale scan compares the disk against the generated
+    # flavour set, so the stub must return that set (disk-backed here):
+    # an empty result would make every vendored flavour directory read
+    # as stale, and the clean test would fail for the wrong reason.
     empty = []
+    files = {}
+    for name in gen.FILES["opensuse"]:
+        path = gen.DISTRO_DIR / "opensuse" / name
+        files[name] = path.read_text(encoding="utf-8") if path.exists() else ""
     return (
-        {},
+        {"opensuse": {"files": files}},
         provenance,
         empty, empty, empty,
         list(gen.FILES["opensuse"]),

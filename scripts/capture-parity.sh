@@ -124,6 +124,14 @@ if grep -RInE "$venv|$xdg|$ref_dir|$HOME|/home/[^ ]+|/var/tmp/[^ ]+|$(id -un)" \
 fi
 
 # --- provenance ---------------------------------------------------------------
+# The reference check count under the openSUSE overlay at capture time,
+# read from the reference's own session header in the captured output
+# (`checks: N, packages: M`) — never a hardcoded constant, so a re-pinned
+# reference that changes the check set updates the provenance itself.
+# A missing header means the capture did not run to a session, so fail
+# instead of recording an unverified count.
+check_count="$(sed -n 's/^checks: \([0-9][0-9]*\), packages: .*/\1/p' "$case_dir/expected/stdout" | head -1)"
+[ -n "$check_count" ] || { echo "capture: reference header did not report a check count" >&2; exit 1; }
 version="$("$rpmlint" --version 2>/dev/null | head -1)"
 # The pinned reference commit this capture came from (set by setup-rpmlint-ref.sh).
 ref_sha="$(cat "$ref_dir/REF_SHA" 2>/dev/null || echo UNKNOWN)"
@@ -142,10 +150,10 @@ tools_joined="$(IFS=', '; echo "${present_tools[*]}")"
     # Distinct from the rpmcrab `Flavor` TOML key (the flavor selector).
     echo 'flavour = "openSUSE"'
     # The reference check count under the openSUSE overlay at capture time
-    # (see tests/parity/README.md "The overlay trap"). A port-side runner
-    # must reproduce this check set; update the number if the overlay's
-    # check list changes.
-    echo 'checks = 43'
+    # (see tests/parity/README.md "The overlay trap"), verified above from
+    # the reference's own session header. A port-side runner must
+    # reproduce this check set.
+    echo "checks = $check_count"
     # argv: extra args then input basenames, each quoted, joined by ", ".
     argv_items=()
     for a in ${extra[@]+"${extra[@]}"}; do argv_items+=("\"$a\""); done
