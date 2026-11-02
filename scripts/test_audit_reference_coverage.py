@@ -113,6 +113,54 @@ def test_reference_grep_missing_shapes():
 
 
 # ---------------------------------------------------------------------------
+# E-R13: a parameter with no resolvable call-site argument is
+# UNRESOLVED, never silently resolved-empty
+# ---------------------------------------------------------------------------
+
+def _param_module_src(with_call_site):
+    call = """
+    def check(self):
+        self._emit('foo')
+""" if with_call_site else ""
+    return f"""class SynCheck:
+    def _emit(self, tag):
+        self.output.add_info('E', 'pkg', 'prefix-' + tag)
+        self.output.add_info('E', 'pkg', tag)
+{call}"""
+
+
+def _resolve_emit_names(src):
+    import ast
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "checks", "SynCheck.py")
+        _write(path, src)
+        mod = audit.RefModule(path, "SynCheck", d)
+        func = mod.funcs["_emit"]
+        out = []
+        for node in ast.walk(func):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and node.func.attr == "add_info":
+                names, ok = audit.resolve_add_info_name(mod, node, func)
+                out.append((tuple(sorted(names)), ok))
+        return sorted(out)
+
+
+def test_parameter_without_call_site_is_unresolved():
+    # Synthetic module only (the finding's mechanism; live pinned-tree
+    # incidence is unverified): both the 'prefix-' + tag form and the
+    # bare-parameter form resolve to (set(), False), so audit_reference
+    # records an UNRESOLVED entry instead of dropping the site.
+    results = _resolve_emit_names(_param_module_src(False))
+    assert results == [((), False), ((), False)], results
+
+
+def test_parameter_with_call_site_still_resolves():
+    results = _resolve_emit_names(_param_module_src(True))
+    assert results == [(("foo",), True), (("prefix-foo",), True)], results
+
+
+# ---------------------------------------------------------------------------
 # Port side: the closure-template format! shape (PostCheck)
 # ---------------------------------------------------------------------------
 
@@ -448,6 +496,49 @@ def test_aliased_check_is_no_longer_reported_as_unscoped():
     mods = {"FileMetadataCheck", "BuildRootAndDateCheck", "PostCheck"}
     cmap = {"PostCheck": "post"}
     assert audit.unscoped_modules(mods, cmap) == {"BuildRootAndDateCheck"}
+
+
+def test_main_exits_1_when_only_unscoped_modules_remain():
+    # E-R11: an UNSCOPED section with no gaps and nothing unresolved
+    # must still fail the audit -- exit-code-only CI judgement
+    # otherwise passes a run whose wildcard masking is undisclosed.
+    # Every collaborator is stubbed so the test pins the exit
+    # condition, not the resolvers; the recorded KNOWN_DRIFT entries
+    # are returned by the stubbed reconcile_missing so drift stays
+    # clean.
+    saved = {}
+    names = ["resolve_ref_dir", "repo_root", "audit_reference",
+             "audit_port", "port_config_family_names", "port_check_map",
+             "load_ledger", "census_missing", "port_severity_inventory",
+             "reconcile_emissions", "reconcile_missing",
+             "reconcile_severity"]
+    for n in names:
+        saved[n] = getattr(audit, n)
+    try:
+        audit.resolve_ref_dir = lambda path: "/ref"
+        audit.repo_root = lambda: os.path.dirname(HERE)
+        audit.audit_reference = lambda ref: (
+            {("MenuCheck", "menu-foo")}, [], 1)
+        audit.audit_port = lambda port_dir: ({"post": {"menu-foo"}}, [])
+        audit.port_config_family_names = lambda data_dir: set()
+        audit.port_check_map = lambda path: {"PostCheck": "post"}
+        audit.load_ledger = lambda ledger_path: []
+        audit.census_missing = lambda *a: ([], set())
+        audit.port_severity_inventory = lambda path: {}
+        audit.reconcile_emissions = lambda *a: []
+        audit.reconcile_missing = lambda entries, findings: [
+            "lengthy-symlink", "post-without-tmpfile-creation"]
+        audit.reconcile_severity = lambda *a: ([], [], 0)
+        assert audit.main(["audit-reference-coverage.py", "/ref"]) == 1
+        # And with the check mapped, the same run is clean.
+        audit.port_check_map = lambda path: {
+            "PostCheck": "post", "MenuCheck": "menu"}
+        audit.audit_port = lambda port_dir: (
+            {"post": {"menu-foo"}, "menu": {"menu-foo"}}, [])
+        assert audit.main(["audit-reference-coverage.py", "/ref"]) == 0
+    finally:
+        for n, v in saved.items():
+            setattr(audit, n, v)
 
 
 def test_alias_covers_nothing_when_its_modules_emit_nothing():

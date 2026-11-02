@@ -10,7 +10,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -694,9 +694,13 @@ pub fn run() -> ExitCode {
     let make_checks = move || rpmcrab_core::check::load(&worker_config, selected.as_deref());
 
     // `Lint.validate_files`: expand the arguments, then sort so the output is
-    // stable regardless of the order they were given in.
+    // stable regardless of the order they were given in. Dedupe after
+    // sorting: the same package reached twice (a file passed alongside
+    // its directory, overlapping directories) must be checked once, not
+    // once per path that reached it.
     let mut inputs = expand_filelist(&files);
     inputs.sort();
+    inputs.dedup();
     let file_tasks: Vec<rpmcrab_core::worker::Task> = inputs
         .into_iter()
         .map(rpmcrab_core::worker::Task::File)
@@ -924,20 +928,49 @@ fn dedup_files(files: &[PathBuf]) -> Vec<PathBuf> {
 
 /// `Lint._expand_filelist`: a directory expands to the packages beneath it, and
 /// only `.rpm`, `.spm` and `.spec` files are kept.
+///
+/// Symlinked subdirectories are not descended (the reference's `os.walk`
+/// with `followlinks=False`): a symlink cycle inside an input tree
+/// otherwise re-adds every package once per level until `read_dir`
+/// starts failing past PATH_MAX, duplicating findings and inflating
+/// counts. A directory passed directly as an argument is still
+/// descended even when it is a symlink, as `os.walk` lists its top
+/// argument regardless. A visited set of canonicalised directories
+/// additionally guards against the same real directory reached twice
+/// (overlapping arguments, bind mounts).
 fn expand_filelist(files: &[PathBuf]) -> Vec<PathBuf> {
     let mut packages = Vec::new();
+    let mut visited = HashSet::new();
+    expand_filelist_into(files, &mut packages, &mut visited, true);
+    packages
+}
+
+fn expand_filelist_into(
+    files: &[PathBuf],
+    packages: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+    top_level: bool,
+) {
     for path in files {
         if path.is_file() && has_package_suffix(path) {
             packages.push(path.clone());
         } else if path.is_dir() {
+            if !top_level
+                && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+            {
+                continue;
+            }
+            let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            if !visited.insert(canonical) {
+                continue;
+            }
             let Ok(entries) = std::fs::read_dir(path) else {
                 continue;
             };
             let nested: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-            packages.extend(expand_filelist(&nested));
+            expand_filelist_into(&nested, packages, visited, false);
         }
     }
-    packages
 }
 
 fn has_package_suffix(path: &Path) -> bool {
@@ -1104,6 +1137,46 @@ mod tests {
             );
         }
         assert!(!names.iter().any(|n| n == "notes.txt" || n == "Makefile"));
+    }
+
+    /// A symlinked subdirectory is not descended, and a symlink cycle
+    /// terminates with each package listed once.
+    #[test]
+    fn expand_filelist_skips_symlinked_subdirectories_and_cycles() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rpm"), b"x").unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("b.rpm"), b"x").unwrap();
+        symlink(&real, dir.path().join("alias")).unwrap();
+        symlink(dir.path(), dir.path().join("cycle")).unwrap();
+
+        let found = expand_filelist(&[dir.path().to_path_buf()]);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "got {names:?}");
+        assert!(names.iter().any(|n| n == "a.rpm"));
+        assert!(names.iter().any(|n| n == "b.rpm"));
+    }
+
+    /// A directory passed directly as an argument is descended even
+    /// when it is itself a symlink.
+    #[test]
+    fn expand_filelist_descends_a_symlinked_top_level_directory() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("a.rpm"), b"x").unwrap();
+        let link = dir.path().join("link");
+        symlink(&real, &link).unwrap();
+
+        let found = expand_filelist(&[link]);
+        assert_eq!(found.len(), 1, "got {found:?}");
+        assert_eq!(found[0].file_name().unwrap(), "a.rpm");
     }
 
     #[test]
