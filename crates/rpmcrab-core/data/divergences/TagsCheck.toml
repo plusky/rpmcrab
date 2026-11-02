@@ -483,7 +483,7 @@ since = "0.4.1"
 case = "global"
 check = "missing-dependency-on"
 kind = "behaviour"
-reason = "The libs dependency is the first Requires-or-Prereq in chain order matching the family regex (an optional lib prefix, the devel base, an optional -libs infix, a digit/underscore/dash tail, and an optional parenthesised arch suffix), not the exact-name one: a regex-matching lookalike listed first is evaluated instead of the exact dep, even when the exact dep would be silent on its own. The unversioned branch then fires no-version-dependency-on on the lookalike. Pinned by missing_dependency_first_regex_match_wins_over_exact, missing_dependency_first_regex_match_wins_over_exact_via_prereq and missing_dependency_first_regex_match_wins_over_exact_cross_arm in tags.rs."
+reason = "The libs dependency is the first Requires-or-Prereq in chain order matching the family regex (an optional lib prefix, the devel base, an optional -libs infix, a digit/underscore/dash tail, and an optional parenthesised arch suffix), not the exact-name one: a regex-matching lookalike listed first is evaluated instead of the exact dep, even when the exact dep would be silent on its own. The unversioned branch then fires no-version-dependency-on on the lookalike. Pinned by missing_dependency_first_regex_match_wins_over_exact, missing_dependency_first_regex_match_wins_over_exact_via_prereq, missing_dependency_first_regex_match_wins_over_exact_cross_arm, missing_dependency_first_regex_match_wins_over_exact_silent_first, missing_dependency_first_regex_match_wins_over_exact_silent_first_via_prereq and missing_dependency_first_regex_match_wins_over_exact_silent_first_cross_arm in tags.rs."
 since = "0.4.1"
 
 [[divergence]]
