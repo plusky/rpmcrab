@@ -363,7 +363,9 @@ impl Check for BrandingPolicyCheck {
         // is not installed by default. The exemption covers every
         // form whose leaves are exactly `<pkg>-doc`: the plain name,
         // a versioned plain name, and a rich Suggests naming only
-        // own-doc in any versioned form. A rich Suggests naming
+        // own-doc in any versioned form. Conditional if/unless forms naming only own-doc
+        // are quiet (the condition is a predicate, not a leaf); with/without forms name
+        // both sides and still fire. A rich Suggests naming
         // own-doc plus anything else still fires, as does any other
         // Suggests.
         let own_doc = format!("{}-doc", pkg.name);
@@ -1155,6 +1157,33 @@ mod tests {
         pkg.name = "bla-theme-openSUSE".to_string();
         pkg.suggests = vec![dep("(bla-theme-openSUSE-doc)", 0)];
         assert!(excessive_suggests(&pkg).is_empty(), "{:?}", run(&pkg));
+    }
+
+    // Conditional if/unless forms naming only own-doc are quiet: the
+    // condition is a predicate, not a leaf, so the leaves are exactly
+    // own-doc (issue #1406).
+    #[test]
+    fn rich_conditional_if_unless_own_doc_suggests_is_quiet() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.suggests = vec![
+            dep("(bla-theme-openSUSE-doc if bar)", 0),
+            dep("(bla-theme-openSUSE-doc unless bar)", 0),
+        ];
+        assert!(excessive_suggests(&pkg).is_empty(), "{:?}", run(&pkg));
+    }
+
+    // Conditional with/without forms name both sides, so they are
+    // not own-doc-only and still fire (issue #1406).
+    #[test]
+    fn rich_conditional_with_without_own_doc_suggests_still_fires() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "bla-theme-openSUSE".to_string();
+        pkg.suggests = vec![
+            dep("(bla-theme-openSUSE-doc with bar)", 0),
+            dep("(bla-theme-openSUSE-doc without bar)", 0),
+        ];
+        assert_eq!(excessive_suggests(&pkg).len(), 2, "{:?}", run(&pkg));
     }
 
     // A rich Suggests naming another package's docs with a version
