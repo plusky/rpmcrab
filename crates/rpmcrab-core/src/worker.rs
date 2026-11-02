@@ -125,9 +125,14 @@ impl<'a> Worker<'a> {
                 // As on the guarded-error path, drop state accumulated
                 // before the failure and reset, so the next package on
                 // this worker starts clean instead of reusing the
-                // panicked package's unexported state.
+                // panicked package's unexported state. An export that
+                // panics again here must not escape: the fatal result
+                // is the established handling for a panicking check,
+                // and reset must still run for every check.
                 for check in &mut self.checks {
-                    let _ = check.export_state();
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _ = check.export_state();
+                    }));
                     check.reset();
                 }
                 TaskResult::fatal(
