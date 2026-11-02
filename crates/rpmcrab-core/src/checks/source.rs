@@ -2274,13 +2274,19 @@ mod prebuilt {
                     );
                 }
                 Ok((_, true)) => {
-                    self.out.stops.record(
-                        "single-over-64",
-                        format!(
-                            "{}: decompressed stream over 64 MiB is not walked",
-                            cut_detail(ctx)
-                        ),
-                    );
+                    // The log prefix already carries the Source name,
+                    // so the stop drops the first cut segment rather
+                    // than repeating it: a top-level stop is bare, a
+                    // nested stop keeps its remaining chain (issue
+                    // #1428, item 5e-single).
+                    let detail = cut_detail(ctx);
+                    let line = match detail.split_once(": ") {
+                        Some((_, rest)) => {
+                            format!("{rest}: decompressed stream over 64 MiB is not walked")
+                        }
+                        None => "decompressed stream over 64 MiB is not walked".to_string(),
+                    };
+                    self.out.stops.record("single-over-64", line);
                 }
                 Err(_) => {
                     // A corrupt stream ends the walk silently, like
@@ -6055,7 +6061,7 @@ mod prebuilt_tests {
                 .stops
                 .lines()
                 .iter()
-                .any(|l| l == "big.elf.gz: decompressed stream over 64 MiB is not walked"),
+                .any(|l| l == "decompressed stream over 64 MiB is not walked"),
             "{:?}",
             outcome.stops.lines()
         );
@@ -6095,9 +6101,10 @@ mod prebuilt_tests {
     }
 
     #[test]
-    fn nested_single_over_64_stop_keeps_outer_inner_chain() {
-        // An inner member overflowing 64 MiB keeps the nested
-        // outer:inner chain in its stop log (issue #1447).
+    fn nested_single_over_64_stop_keeps_inner_chain() {
+        // An inner member overflowing 64 MiB keeps its remaining chain in
+        // its stop log: the Source name is dropped because the log prefix
+        // already carries it (issues #1428, #1447).
         let mut plain = ELF.to_vec();
         plain.resize(64 * 1024 * 1024 + 1, 0);
         let tar = tarball(&[("inner.elf.gz", &gzip_bytes(&plain))]);
@@ -6108,7 +6115,7 @@ mod prebuilt_tests {
                 .stops
                 .lines()
                 .iter()
-                .any(|l| l == "t.tar: inner.elf.gz: decompressed stream over 64 MiB is not walked"),
+                .any(|l| l == "inner.elf.gz: decompressed stream over 64 MiB is not walked"),
             "{:?}",
             outcome.stops.lines()
         );
