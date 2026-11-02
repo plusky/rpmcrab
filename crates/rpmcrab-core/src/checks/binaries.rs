@@ -14214,6 +14214,8 @@ description = "explicit priority string bypasses the system crypto policy"
             size: 100,
             sh_type: if name == ".symtab" {
                 goblin::elf::section_header::SHT_SYMTAB
+            } else if name == ".dynsym" {
+                goblin::elf::section_header::SHT_DYNSYM
             } else {
                 0
             },

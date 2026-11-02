@@ -13334,7 +13334,12 @@ print("hi")
     }
 
     #[test]
-    fn normal_not_utf8_compressed_doc_flagged() {
+    fn file_not_utf8_removal_pinned_for_non_utf8_compressed_doc() {
+        // Removal pin (issue #883, see the divergences entry):
+        // `file-not-utf8` is deliberately not emitted anywhere --
+        // `check_utf8` emits only `filename-not-utf8` -- so this
+        // non-UTF8 compressed doc stays silent. The old name claimed
+        // the file was "flagged" while asserting absence.
         // .zip has no decompressor so raw non-UTF8 bytes fail; NUL keeps the text path silent.
         let config = test_config();
         let dir = tempfile::TempDir::new().expect("tmpdir");
