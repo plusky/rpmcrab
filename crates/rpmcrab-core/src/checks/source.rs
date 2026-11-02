@@ -2316,7 +2316,13 @@ mod prebuilt {
                 // bare .jar Source reports the jar itself and its
                 // classes stay quiet; a plain zip keeps walking with
                 // prebuilt active.
-                let unit = classify(name, &prefix, metadata.len() as usize);
+                // Saturate on 32-bit: a >4 GiB file's length must not
+                // truncate into a wrong FAT-table bound (issue #1449).
+                let unit = classify(
+                    name,
+                    &prefix,
+                    usize::try_from(metadata.len()).unwrap_or(usize::MAX),
+                );
                 if let Some(k) = unit {
                     // The jar unit is the file itself: hash the open
                     // handle, not the path, so the digest covers the
@@ -2354,7 +2360,13 @@ mod prebuilt {
                 self.walk_tar_stream(TarStream::new(counted), name, 0, true);
                 return;
             }
-            if let Some(k) = classify(name, &prefix, metadata.len() as usize) {
+            // Saturate on 32-bit: a >4 GiB file's length must not
+            // truncate into a wrong FAT-table bound (issue #1449).
+            if let Some(k) = classify(
+                name,
+                &prefix,
+                usize::try_from(metadata.len()).unwrap_or(usize::MAX),
+            ) {
                 if metadata.len() > MAX_ARCHIVE_BYTES as u64 {
                     // Over the archive cap the shipped record would
                     // break the payload gate's premise (a larger
