@@ -8,16 +8,15 @@
 # prove the library's code is linked in. The two paths are disjoint
 # by construction: an ELF with a .dep-v0 section never takes this
 # path, so a vendored copy of a crate-map library is reported once,
-# through the crate map. Rust binaries vendoring a witness-table
-# library (jemalloc, mimalloc) via -sys are out of scope only when
-# they carry a .dep-v0, so this path stays silent for those;
-# without one, they take this path like any C or C++ binary.
-# tikv-jemalloc-sys is covered by the
+# through the crate map. Rust binaries never take this path: the
+# emission gate excludes Rust output, and an ELF carrying a .dep-v0
+# never takes it either, so this path stays silent for Rust binaries
+# vendoring a witness-table library (jemalloc, mimalloc) via -sys
+# regardless of .dep-v0. tikv-jemalloc-sys is covered by the
 # crate map, so a Rust binary vendoring tikv-jemalloc-sys
 # fires through the crate path when the witness is present;
 # mimalloc has no crate-map entry, so a Rust binary vendoring it
-# stays silent on both paths only when it carries a .dep-v0;
-# without one, it fires on this path when the witness is present.
+# stays silent on both paths.
 # This table is the
 # witness-only path of rpmcrab#1397.
 #
