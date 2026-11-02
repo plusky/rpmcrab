@@ -49,7 +49,11 @@ impl KMPPolicyCheck {
                 b'(' => depth += 1,
                 b')' => depth -= 1,
                 _ => {
-                    if depth == 0 && s[i..].starts_with(sep) {
+                    // `i` advances one byte at a time and can land
+                    // on a UTF-8 continuation byte; `s[i..]` would
+                    // panic there, so slice through `get` instead
+                    // (a non-boundary yields `None` and skips).
+                    if depth == 0 && s.get(i..).is_some_and(|rest| rest.starts_with(sep)) {
                         parts.push(&s[start..i]);
                         i += sep.len();
                         start = i;
@@ -507,6 +511,32 @@ mod tests {
         pkg.requires = vec![dep("kernel-default")];
         pkg.enhances = vec![dep("kernel-default")];
         pkg.supplements = vec![dep("(foo and bar)")];
+        let results = run(&pkg);
+        assert_eq!(
+            has(&results, "kmp-excessive-supplements").len(),
+            1,
+            "{results:?}"
+        );
+    }
+
+    // A multibyte member must not panic the top-level split: the
+    // byte loop lands on UTF-8 continuation bytes, which are not
+    // char boundaries, so the separator test must slice through
+    // `get` rather than indexing directly.
+    #[test]
+    fn kmp_multibyte_member_does_not_panic() {
+        let mut pkg = fixture_pkg();
+        pkg.name = "supplements-kmp-default".to_string();
+        pkg.requires = vec![dep("kernel-default")];
+        pkg.enhances = vec![dep("kernel-default")];
+        pkg.supplements = vec![dep("(café and kernel-default)")];
+        let results = run(&pkg);
+        assert!(results.is_empty(), "{results:?}");
+        let mut pkg = fixture_pkg();
+        pkg.name = "supplements-kmp-default".to_string();
+        pkg.requires = vec![dep("kernel-default")];
+        pkg.enhances = vec![dep("kernel-default")];
+        pkg.supplements = vec![dep("(café and bar)")];
         let results = run(&pkg);
         assert_eq!(
             has(&results, "kmp-excessive-supplements").len(),

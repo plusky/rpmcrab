@@ -1297,13 +1297,21 @@ fn scan_scriptlet(body: &str) -> Vec<String> {
                         // `-` and is already excluded from `plain`.)
                         // Other every-arg commands keep their following
                         // argument: `rm -r` is a flag, not a reference.
+                        // A `--` ends option parsing: a `-r` after it
+                        // is a filename operand, not a flag, so it
+                        // must not swallow the following operand.
                         let mut skip_next = false;
+                        let mut ended_opts = false;
                         for a in &args {
                             if skip_next {
                                 skip_next = false;
                                 continue;
                             }
-                            if a.text == "-r" || a.text == "--reference" {
+                            if a.text == "--" {
+                                ended_opts = true;
+                                continue;
+                            }
+                            if !ended_opts && (a.text == "-r" || a.text == "--reference") {
                                 skip_next = true;
                                 continue;
                             }
@@ -2562,6 +2570,9 @@ fi
                 "touch --reference=/var/lib/ref /var/lib/new",
                 &["/var/lib/new"],
             ),
+            // A `-r` after `--` is a filename, not a flag: it must
+            // not swallow the following operand.
+            ("touch -- -r /var/lib/new", &["/var/lib/new"]),
             (
                 "tee /var/log/x /var/log/y < /dev/null",
                 &["/var/log/x", "/var/log/y"],
