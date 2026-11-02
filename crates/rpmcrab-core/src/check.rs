@@ -390,8 +390,34 @@ fn errors_only_skips(check: &dyn Check, config: &Config) -> bool {
 /// How many checks `--errors-only` would drop from this selection. The CLI
 /// warns instead of silently running nothing when the whole selection is
 /// dropped.
+/// Split a `--checks` selection on `,`, trimming whitespace and
+/// dropping empty items, so `"TagsCheck, FilesCheck"` narrows to both
+/// checks instead of silently running only the first.
+fn parse_selected(selected: Option<&str>) -> Vec<&str> {
+    selected
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Selected names that match no configured check. The caller warns
+/// about these instead of silently running a subset of what was asked
+/// for (a typo'd name, or a name with stray whitespace, used to narrow
+/// the run with no signal at all).
+pub fn unmatched_checks(config: &Config, selected: Option<&str>) -> Vec<String> {
+    parse_selected(selected)
+        .into_iter()
+        .filter(|name| !config.checks.iter().any(|c| c == name))
+        .map(str::to_string)
+        .collect()
+}
+
 pub fn errors_only_dropped(config: &Config, selected: Option<&str>) -> usize {
-    let selected: Vec<&str> = selected.map(|s| s.split(',').collect()).unwrap_or_default();
+    let selected = parse_selected(selected);
     config
         .checks
         .iter()
@@ -408,7 +434,7 @@ pub fn load_with(
     selected: Option<&str>,
     mut make: impl FnMut(&str) -> Option<Box<dyn Check>>,
 ) -> Vec<Box<dyn Check>> {
-    let selected: Vec<&str> = selected.map(|s| s.split(',').collect()).unwrap_or_default();
+    let selected = parse_selected(selected);
     let mut built: Vec<Box<dyn Check>> = Vec::new();
     for name in &config.checks {
         if built.iter().any(|c| c.name() == name.as_str()) {
@@ -696,6 +722,30 @@ mod tests {
         });
         let names: Vec<&str> = built.iter().map(|c| c.name()).collect();
         assert_eq!(names, vec!["FilesCheck", "TagsCheck"]);
+    }
+
+    #[test]
+    fn checks_selection_trims_whitespace_and_reports_unknown_names() {
+        let config = cfg_with(&["TagsCheck", "FilesCheck"]);
+        let built = load_with(&config, Some("TagsCheck, FilesCheck"), |name| {
+            Some(Box::new(SyntheticCheck::new(
+                match name {
+                    "TagsCheck" => "TagsCheck",
+                    _ => "FilesCheck",
+                },
+                "p",
+                None,
+                vec![],
+            )) as Box<dyn Check>)
+        });
+        let names: Vec<&str> = built.iter().map(|c| c.name()).collect();
+        assert_eq!(names, vec!["TagsCheck", "FilesCheck"]);
+        assert_eq!(
+            unmatched_checks(&config, Some("TagsCheck, NopeCheck")),
+            vec!["NopeCheck".to_string()]
+        );
+        assert!(unmatched_checks(&config, Some("TagsCheck")).is_empty());
+        assert!(unmatched_checks(&config, None).is_empty());
     }
 
     #[test]

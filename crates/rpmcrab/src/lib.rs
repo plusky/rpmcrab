@@ -663,6 +663,16 @@ pub fn run() -> ExitCode {
     let start = Instant::now();
     let width = term::terminal_width();
     let checks = rpmcrab_core::check::load(&cfg, cli.checks.as_deref());
+    // A `--checks` name matching no configured check used to narrow the
+    // run silently; warn instead of running a subset with no signal.
+    let unmatched = rpmcrab_core::check::unmatched_checks(&cfg, cli.checks.as_deref());
+    if !unmatched.is_empty() {
+        warn!(
+            color,
+            "(none): W: --checks names no configured check: {}",
+            unmatched.join(", ")
+        );
+    }
     // `--errors-only` (upstream rpmlint#134): an all-warning-only selection
     // would silently run nothing at exit 0; warn instead of staying quiet.
     if checks.is_empty()
