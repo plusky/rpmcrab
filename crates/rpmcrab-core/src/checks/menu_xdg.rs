@@ -387,7 +387,11 @@ impl MenuXDGCheck {
                             // (`env -iu NAME prog` is `-i`,
                             // `-u NAME`, program `prog`).
                             if tok.starts_with("--") {
-                                idx += if tok == "--unset" || tok == "--chdir" { 2 } else { 1 };
+                                idx += if tok == "--unset" || tok == "--chdir" {
+                                    2
+                                } else {
+                                    1
+                                };
                                 continue;
                             }
                             let cluster = &tok[1..];

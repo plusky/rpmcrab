@@ -606,9 +606,7 @@ impl Canonicalizer {
                     }
                     let value = &inner[vstart..i];
                     if i >= bytes.len() {
-                        return Err(
-                            "XML parse error: unterminated entity value".to_string()
-                        );
+                        return Err("XML parse error: unterminated entity value".to_string());
                     }
                     i += 1;
                     if !name.is_empty() {

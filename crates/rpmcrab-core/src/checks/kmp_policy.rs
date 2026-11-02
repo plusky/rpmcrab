@@ -93,11 +93,7 @@ impl KMPPolicyCheck {
         let words: Vec<&str> = member.split_whitespace().collect();
         match words.as_slice() {
             [name] => name.split(['<', '>', '=']).next().unwrap_or(name),
-            [name, op, _version]
-                if matches!(*op, "<" | ">" | "<=" | ">=" | "=" | "==") =>
-            {
-                name
-            }
+            [name, op, _version] if matches!(*op, "<" | ">" | "<=" | ">=" | "=" | "==") => name,
             _ => member,
         }
     }

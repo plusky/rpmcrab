@@ -502,10 +502,7 @@ mod tests {
         let entry = TmpfilesEntry::parse("test.conf", "d /run/foo 0755 root root - extra1 extra2");
         assert!(!entry.valid);
         assert!(
-            entry
-                .warnings
-                .iter()
-                .any(|w| w.contains("Too many fields")),
+            entry.warnings.iter().any(|w| w.contains("Too many fields")),
             "warnings: {:?}",
             entry.warnings
         );
