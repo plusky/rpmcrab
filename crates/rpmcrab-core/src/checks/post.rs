@@ -1792,7 +1792,9 @@ impl PostCheck {
                         // left-to-right. A takes-argument short
                         // consumes the rest of the bundle, or the
                         // next word when last in the bundle; `-S`
-                        // prepends its attached value's words.
+                        // prepends its attached value's words; known
+                        // no-argument shorts are skipped and an unknown
+                        // short ends recognition.
                         let bundle = &word[1..];
                         let chars: Vec<(usize, char)> = bundle.char_indices().collect();
                         let mut skip_next = false;
@@ -1829,7 +1831,12 @@ impl PostCheck {
                                     }
                                     break;
                                 }
-                                _ => {}
+                                // Known no-argument shorts are
+                                // skipped; an unknown short ends
+                                // recognition, since env rejects it
+                                // and the body is never executed.
+                                'i' | '0' | 'v' => {}
+                                _ => return false,
                             }
                         }
                         for w in prepend.into_iter().rev() {
@@ -4299,6 +4306,39 @@ mod tests {
                 .any(|(_, f, _)| f == "dangerous-command-in-%post"),
             "argument-on-no-argument-flag body stays blanked: {script}"
         );
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_env_unknown_short_stays_blanked() {
+        // Known no-argument shorts still feed the shell; an unknown
+        // short ends recognition (env rejects it, so the body is
+        // never executed) and the body stays blanked (issue #1457).
+        for script in [
+            "env -i sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -0 sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -v sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -iv sh <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "known-short shell-fed body must fire: {script}"
+            );
+        }
+        for script in [
+            "env -Z sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -iZ sh <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "unknown-short body stays blanked: {script}"
+            );
+        }
     }
 
     #[test]
