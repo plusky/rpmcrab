@@ -5208,8 +5208,9 @@ mod rich_dep_emission_tests {
         let hits = named(&results, "missing-dependency-on");
         assert_eq!(hits.len(), 1, "all: {results:?}");
         // The count alone pins only the tag: the line must name the
-        // Prereq-routed bound, so a Requires-routed hit of the same
-        // tag cannot stand in for it.
+        // exact firing bound, not the arm — the detail carries no
+        // arm marker, so a Requires-routed hit of the same bound
+        // would emit the identical line.
         assert!(
             hits[0]
                 .1
@@ -5234,8 +5235,9 @@ mod rich_dep_emission_tests {
         let hits = named(&results, "missing-dependency-on");
         assert_eq!(hits.len(), 1, "all: {results:?}");
         // The count alone pins only the tag: the line must name the
-        // Prereq-routed bound, so a Requires-routed hit of the same
-        // tag cannot stand in for it.
+        // exact firing bound, not the arm — the detail carries no
+        // arm marker, so a Requires-routed hit of the same bound
+        // would emit the identical line.
         assert!(
             hits[0]
                 .1
