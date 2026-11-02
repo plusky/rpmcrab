@@ -735,8 +735,15 @@ fn load_inner(
 /// `\x0b`, `\x0c`, `\x1c`-`\x1e`, `\x85`, `\u2028`, `\u2029` (Rust's
 /// `str::lines` only handles `\n` and `\r\n`).
 fn splitlines(text: &str) -> Vec<&str> {
-    text.split(|c| {
-        matches!(
+    // Python `str.splitlines()`: `\r\n` is a single break (not two),
+    // and a trailing break leaves no phantom empty line. Splitting on
+    // every break character would yield an empty slice between `\r`
+    // and `\n`, drifting every later line number by one per CRLF line.
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let is_break = matches!(
             c,
             '\n' | '\r'
                 | '\x0b'
@@ -747,9 +754,20 @@ fn splitlines(text: &str) -> Vec<&str> {
                 | '\u{85}'
                 | '\u{2028}'
                 | '\u{2029}'
-        )
-    })
-    .collect()
+        );
+        if !is_break {
+            continue;
+        }
+        if c == '\r' && chars.peek().is_some_and(|(_, next)| *next == '\n') {
+            chars.next();
+        }
+        lines.push(&text[start..i]);
+        start = chars.peek().map_or(text.len(), |(j, _)| *j);
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
 }
 
 /// The directive a rpmlintrc line attempts but does not parse as: the
@@ -813,9 +831,9 @@ pub fn setbadness_occurrences(text: &str) -> Vec<(usize, String)> {
 /// also recorded in `Config::rpmlintrc_setbadness`, one entry per
 /// occurrence, for the `rpmlintrc-uses-setbadness` report.
 pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
-    let re_filter =
-        Regex::new(r#"^\s*addFilter\s*\(\s*r?["\'](.*)["\']\s*\)"#).expect("static regex");
-    let re_badness = Regex::new(r#"\s*setBadness\s*\([\'"](.*)[\'"],\s*[\'"]?(\d+)[\'"]?\)"#)
+    let re_filter = Regex::new(r#"^\s*addFilter\s*\(\s*r?["\'](.*?)["\']\s*\)\s*(?:#.*)?$"#)
+        .expect("static regex");
+    let re_badness = Regex::new(r#"^\s*setBadness\s*\([\'"](.*)[\'"],\s*[\'"]?(\d+)[\'"]?\)"#)
         .expect("static regex");
     let text = std::fs::read_to_string(path)?;
 
@@ -1479,6 +1497,17 @@ mod tests {
     }
 
     #[test]
+    fn splitlines_treats_crlf_as_one_break() {
+        // Python `str.splitlines()` parity: `\r\n` is one break, a
+        // trailing break leaves no phantom line, a lone `\r` breaks.
+        assert_eq!(splitlines("a\r\nb"), vec!["a", "b"]);
+        assert_eq!(splitlines("a\r\nb\r\n"), vec!["a", "b"]);
+        assert_eq!(splitlines("a\n\nb"), vec!["a", "", "b"]);
+        assert_eq!(splitlines("a\rb"), vec!["a", "b"]);
+        assert_eq!(splitlines(""), Vec::<&str>::new());
+    }
+
+    #[test]
     fn rpmlintrc_load_records_every_setbadness_occurrence() {
         // One entry per matching line, well-formed or not, in load
         // order; comment lines and `addFilter` lines record nothing.
@@ -1621,6 +1650,19 @@ mod tests {
             cfg.rpmlintrc_filters,
             vec!["first-pattern".to_string(), "second-pattern".to_string()]
         );
+    }
+
+    #[test]
+    fn rpmlintrc_addfilter_trailing_comment_with_quote_paren_keeps_pattern() {
+        // A trailing comment containing `")` must not corrupt the
+        // captured pattern: the capture stops at the first closing
+        // quote-paren, not the last one on the line.
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join("pkg-rpmlintrc");
+        std::fs::write(&rc, "addFilter(\"some-pattern\")  # see \"x\")\n").unwrap();
+        let mut cfg = load_inner(&[], &[], false).unwrap();
+        load_rpmlintrc(&mut cfg, &rc).unwrap();
+        assert_eq!(cfg.rpmlintrc_filters, vec!["some-pattern".to_string()]);
     }
 
     #[test]
