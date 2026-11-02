@@ -308,7 +308,6 @@ impl Spellchecker {
             if self.accepts(word) {
                 continue;
             }
-            warned.insert(word.to_string());
 
             // Skip capitalized words not at sentence start.
             if starts_uppercase(word) && !at_sentence_start(&normalized, *byte_offset) {
@@ -326,13 +325,24 @@ impl Spellchecker {
                 continue;
             }
 
-            // Skip package name matches. The possessive of a name part
-            // is a match too ("django's" for the django package): the
-            // reference adds each part's possessive to its skip list.
+            // Skip package name matches: exact parts and their
+            // possessives only ("django's" for the django package).
+            // A substring match would additionally skip any
+            // non-dictionary word that merely occurs inside the full
+            // hyphenated name — a truncated fragment like "somethin"
+            // for "something", or any single letter occurring in the
+            // name — so it is deliberately not used.
             let bare = upper.strip_suffix("'S").unwrap_or(&upper);
-            if upper_name.contains(&upper) || upper_parts.iter().any(|p| p == &upper || p == bare) {
+            if upper_parts.iter().any(|p| p == &upper || p == bare) {
                 continue;
             }
+
+            // Only words that survive every skip are recorded: inserting
+            // earlier would let a positional skip (capitalized, not at
+            // sentence start) poison the dedup set, so a later
+            // reportable occurrence of the same word at a sentence
+            // start would be dropped.
+            warned.insert(word.to_string());
 
             let mut suggestions = Vec::new();
             if self.ngram_suggestions {
@@ -582,6 +592,22 @@ SFX N 0 en [^ey]\n";
     }
 
     #[test]
+    fn package_name_substring_is_not_skipped() {
+        // The finding's shape: "somethin" is a truncation, not the
+        // package name "something", so it must be reported; the exact
+        // name itself is still skipped.
+        let checker = test_checker();
+        let result = checker.check("hello somethin world", "something", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "somethin");
+        assert!(
+            checker
+                .check("hello something world", "something", &[])
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn repeated_word_reported_once() {
         let checker = test_checker();
         let result = checker.check("wrld wrld wrld", "testpkg", &[]);
@@ -805,6 +831,18 @@ SFX N 0 en [^ey]\n";
         // "Wrld" follows ". ": at sentence start, must be reported.
         let checker = test_checker();
         let result = checker.check("hello world. Wrld test", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "Wrld");
+    }
+
+    #[test]
+    fn capitalized_misspelling_reported_after_mid_sentence_skip() {
+        // The finding's shape: the first "Wrld" is mid-sentence and
+        // skipped, but the skip must not poison the dedup set — the
+        // second "Wrld", at a sentence start, is reportable and is
+        // reported exactly once.
+        let checker = test_checker();
+        let result = checker.check("hello Wrld test. Wrld test", "testpkg", &[]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "Wrld");
     }
