@@ -291,7 +291,7 @@ pub fn first_dep_token(line: &str) -> Option<&str> {
             }
             _ if (c.is_whitespace() || c == ',') && depth == 0 => {
                 if let Some(s) = start.take() {
-                    return Some(&line[s..i]);
+                    return strip_if_sole_token(&line[s..i], &line[i..]);
                 }
             }
             _ => {
@@ -299,7 +299,30 @@ pub fn first_dep_token(line: &str) -> Option<&str> {
             }
         }
     }
-    start.map(|s| &line[s..])
+    // A single-token line is also the full tokenizer's last token, so its
+    // trailing line-continuation backslash is stripped the same way.
+    start.and_then(|s| match line[s..].strip_suffix('\\') {
+        Some("") => None,
+        Some(trimmed) => Some(trimmed),
+        None => Some(&line[s..]),
+    })
+}
+
+/// `split_dep_tokens` strips a trailing backslash from its *last* token
+/// only. A first token followed by further tokens is therefore returned
+/// verbatim, but a first token with nothing but separators after it is
+/// the last token too, so it gets the same strip (a lone `\` strips to
+/// no token at all, matching the full tokenizer popping it).
+fn strip_if_sole_token<'a>(tok: &'a str, rest: &'a str) -> Option<&'a str> {
+    let sole = !rest.chars().any(|c| !(c.is_whitespace() || c == ','));
+    if !sole {
+        return Some(tok);
+    }
+    match tok.strip_suffix('\\') {
+        Some("") => None,
+        Some(trimmed) => Some(trimmed),
+        None => Some(tok),
+    }
 }
 
 pub fn parse_deps(line: &str) -> Vec<(String, Option<String>)> {
@@ -1500,6 +1523,15 @@ mod rich_dep_tests {
             "libfoo.so.1()(64bit) >= 2.0, other",
             "name-with-dash_and.dot:plus~tilde",
             "tab\tseparated",
+            // Trailing line-continuation backslash: the full tokenizer
+            // strips it from its last token, so a sole token matches only
+            // if the fast path strips it too; a non-sole token keeps it.
+            "foo\\",
+            "\\",
+            "(a or b)\\",
+            "foo\\ ",
+            "foo\\, ",
+            "foo\\, bar",
         ];
         for line in lines {
             assert_eq!(
