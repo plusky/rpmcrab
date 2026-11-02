@@ -14,7 +14,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -272,6 +272,25 @@ fn io_error(path: &Path, source: std::io::Error) -> ExtractError {
     ))
 }
 
+/// Remove a non-regular occupant before a `File::create`.
+///
+/// `File::create` opens `O_WRONLY`, which blocks forever on a FIFO
+/// occupant, and a FIFO entry followed by a regular-file entry at the
+/// same path is a duplicate-path replace this extractor supports.
+/// Regular files truncate in place as before; directories never reach
+/// here (the `is_existing_dir` gate skips them) and symlink occupants
+/// are excluded earlier by `goes_through_symlink`, so only FIFOs,
+/// sockets and device nodes are unlinked.
+fn remove_non_regular_occupant(path: &Path) -> Result<(), ExtractError> {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        let ft = meta.file_type();
+        if ft.is_fifo() || ft.is_socket() || ft.is_block_device() || ft.is_char_device() {
+            fs::remove_file(path).map_err(|e| io_error(path, e))?;
+        }
+    }
+    Ok(())
+}
+
 /// Whether two paths name the same file on disk. On a case-insensitive
 /// filesystem, two payload paths differing only in case (`Blender.png` /
 /// `blender.png`) are one directory entry, so bookkeeping that treats them
@@ -483,6 +502,7 @@ impl<'a> Extractor<'a> {
                 if e.nlink > 1 {
                     self.materialize_hardlink(r, e, &path)?;
                 } else {
+                    remove_non_regular_occupant(&path)?;
                     let mut f = File::create(&path).map_err(|e| io_error(&path, e))?;
                     std::io::copy(&mut r.by_ref().take(e.size), &mut f)
                         .map_err(|e| io_error(&path, e))?;
@@ -581,6 +601,7 @@ impl<'a> Extractor<'a> {
                     String::from_utf8_lossy(&e.name)
                 )));
             }
+            remove_non_regular_occupant(path)?;
             let mut f = File::create(path).map_err(|e| io_error(path, e))?;
             std::io::copy(&mut r.by_ref().take(e.size), &mut f).map_err(|e| io_error(path, e))?;
             f.flush().map_err(|e| io_error(path, e))?;
@@ -658,6 +679,7 @@ impl<'a> Extractor<'a> {
                 // Data carrier not seen yet: placeholder, re-linked above when
                 // it arrives.
                 None => {
+                    remove_non_regular_occupant(path)?;
                     File::create(path).map_err(|e| io_error(path, e))?;
                 }
             }
@@ -706,6 +728,23 @@ impl<'a> Extractor<'a> {
             fs::set_permissions(&f.path, fs::Permissions::from_mode(perm))
                 .map_err(|e| io_error(&f.path, e))?;
             if let Some(mtime) = f.mtime {
+                // A FIFO (or socket/device) occupant — e.g. a case-variant
+                // FIFO entry that replaced this file on a case-insensitive
+                // filesystem — blocks on a read open (FIFO) or fails it;
+                // a FIFO's own mtime is None by construction, so there is
+                // nothing to restore here.
+                if !f.is_dir {
+                    if let Ok(meta) = fs::symlink_metadata(&f.path) {
+                        let ft = meta.file_type();
+                        if ft.is_fifo()
+                            || ft.is_socket()
+                            || ft.is_block_device()
+                            || ft.is_char_device()
+                        {
+                            continue;
+                        }
+                    }
+                }
                 let time = UNIX_EPOCH + Duration::from_secs(mtime as u64);
                 if f.is_dir {
                     OpenOptions::new()
@@ -1213,6 +1252,80 @@ mod tests {
         assert!(
             !outside.path().join("b").exists(),
             "nothing may be written outside the extraction root"
+        );
+    }
+
+    /// A FIFO entry followed by a regular-file entry at the same path
+    /// replaces the FIFO: `File::create` on the FIFO occupant would
+    /// block forever waiting for a reader, so the occupant is unlinked
+    /// first and the file lands with its bytes.
+    #[test]
+    fn fifo_then_file_replaces_fifo() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(root.path());
+        let fifo = cpio_entry(b"a", S_IFIFO | 0o644, 0);
+        let mut empty = &[][..];
+        ex.materialize(&mut empty, &fifo).unwrap();
+        assert!(
+            std::fs::symlink_metadata(root.path().join("a"))
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        let reg = cpio_entry(b"a", S_IFREG | 0o644, 5);
+        let raw = padded(b"hello");
+        let mut fdata = &raw[..];
+        ex.materialize(&mut fdata, &reg).unwrap();
+        assert_eq!(std::fs::read(root.path().join("a")).unwrap(), b"hello");
+        assert!(
+            std::fs::symlink_metadata(root.path().join("a"))
+                .unwrap()
+                .is_file()
+        );
+    }
+
+    /// Same hang, via the hardlink placeholder path: a FIFO occupant at
+    /// a placeholder's path must be unlinked, not opened for writing.
+    #[test]
+    fn fifo_then_hardlink_placeholder_replaces_fifo() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ex = extractor_for(root.path());
+        let fifo = cpio_entry(b"a", S_IFIFO | 0o644, 0);
+        let mut empty = &[][..];
+        ex.materialize(&mut empty, &fifo).unwrap();
+        let mut entry = cpio_entry(b"a", S_IFREG | 0o644, 0);
+        entry.nlink = 2;
+        entry.ino = 42;
+        let mut empty2 = &[][..];
+        ex.materialize(&mut empty2, &entry).unwrap();
+        assert!(
+            std::fs::symlink_metadata(root.path().join("a"))
+                .unwrap()
+                .is_file()
+        );
+    }
+
+    /// `fixup` must not open a FIFO occupant for read to restore an
+    /// mtime: that open blocks until a writer appears. The permission
+    /// restore still runs; only the mtime restore is skipped.
+    #[test]
+    fn fixup_skips_mtime_on_fifo_occupant() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("a");
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o644 as _)).unwrap();
+        let mut ex = extractor_for(root.path());
+        ex.fixups.push(Fixup {
+            path: path.clone(),
+            perm: 0o644,
+            mtime: Some(1_577_922_245),
+            is_dir: false,
+        });
+        ex.fixup().unwrap();
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_fifo()
         );
     }
 
