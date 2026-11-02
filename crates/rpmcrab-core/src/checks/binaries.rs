@@ -4115,6 +4115,13 @@ impl ElfAnalysis {
     }
 }
 
+/// The largest DWARF section payload inflated: the bound exists so a
+/// corrupt or crafted compressed section cannot inflate without limit,
+/// mirroring the `.dep-v0` bound. A section inflating past it fails
+/// the read (like a section of bad zlib), so it is never parsed from
+/// a truncated prefix.
+const MAX_DWARF_SECTION_INFLATE: u64 = 16 * 1024 * 1024;
+
 /// Raw bytes of a DWARF section, with linker compression undone.
 ///
 /// gimli never decompresses debug sections: the crate contains no inflate,
@@ -4184,11 +4191,28 @@ fn dwarf_section_bytes(
                 use std::io::Read;
                 let mut out = Vec::new();
                 flate2::read::ZlibDecoder::new(stream)
+                    .take(MAX_DWARF_SECTION_INFLATE + 1)
                     .read_to_end(&mut out)
                     .map_err(|_| gimli::Error::Io)?;
+                if out.len() as u64 > MAX_DWARF_SECTION_INFLATE {
+                    return Err(gimli::Error::Io);
+                }
                 Ok(out)
             }
-            ELFCOMPRESS_ZSTD => zstd::decode_all(stream).map_err(|_| gimli::Error::Io),
+            ELFCOMPRESS_ZSTD => {
+                use std::io::Read;
+                let decoder =
+                    zstd::stream::read::Decoder::new(stream).map_err(|_| gimli::Error::Io)?;
+                let mut out = Vec::new();
+                decoder
+                    .take(MAX_DWARF_SECTION_INFLATE + 1)
+                    .read_to_end(&mut out)
+                    .map_err(|_| gimli::Error::Io)?;
+                if out.len() as u64 > MAX_DWARF_SECTION_INFLATE {
+                    return Err(gimli::Error::Io);
+                }
+                Ok(out)
+            }
             // Unknown to us is unknown to objdump too: surface the failure
             // instead of guessing at the bytes.
             _ => Err(gimli::Error::Io),
@@ -4206,8 +4230,12 @@ fn dwarf_section_bytes(
         use std::io::Read;
         let mut out = Vec::new();
         flate2::read::ZlibDecoder::new(stream)
+            .take(MAX_DWARF_SECTION_INFLATE + 1)
             .read_to_end(&mut out)
             .map_err(|_| gimli::Error::Io)?;
+        if out.len() as u64 > MAX_DWARF_SECTION_INFLATE {
+            return Err(gimli::Error::Io);
+        }
         return Ok(out);
     }
     Ok(raw.to_vec())

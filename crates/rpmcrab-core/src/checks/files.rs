@@ -5926,11 +5926,15 @@ fn versioned_dep_in(lists: &DepLists, name: &str, version: &str) -> bool {
         if !dep_name_matches(&d.name, name) {
             continue;
         }
+        // A name-matching entry that is not the pinned one does not
+        // settle the question: keep searching for a later entry that
+        // pins `name` to `version` (the docstring promises existence,
+        // not first-match).
         if d.flags & RPMSENSE_EQUAL != RPMSENSE_EQUAL {
-            return false;
+            continue;
         }
         if d.version.as_deref() != Some(version) {
-            return false;
+            continue;
         }
         return true;
     }
@@ -13141,6 +13145,35 @@ print("hi")
         let lines = nodep_lines(&results);
         assert_eq!(lines.len(), 1, "got: {lines:?}");
         assert!(lines[0].starts_with("foo-lang.noarch"), "got: {}", lines[0]);
+    }
+
+    #[test]
+    fn versioned_dep_in_skips_non_pinned_entry_first() {
+        // A non-pinned (or wrong-version) entry on the same name must
+        // not shadow a later pinned entry: the search is for
+        // existence, not first match.
+        let requires = vec![
+            dep_flagged("perl-base", 4, Some("5.40")),
+            dep_flagged("perl-base", 8, Some("5.38")),
+            dep_flagged("perl-base", 8, Some("5.40")),
+        ];
+        let lists = DepLists {
+            requires: &requires,
+            prereq: &[],
+            recommends: &[],
+            suggests: &[],
+        };
+        assert!(versioned_dep_in(&lists, "perl-base", "5.40"));
+        assert!(!versioned_dep_in(&lists, "perl-base", "5.42"));
+        // And with no pinned entry at all, the answer stays false.
+        let requires = vec![dep_flagged("perl-base", 4, Some("5.40"))];
+        let lists = DepLists {
+            requires: &requires,
+            prereq: &[],
+            recommends: &[],
+            suggests: &[],
+        };
+        assert!(!versioned_dep_in(&lists, "perl-base", "5.40"));
     }
 
     #[test]

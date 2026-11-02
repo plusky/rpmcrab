@@ -539,6 +539,31 @@ impl PythonCheck {
                 _ => true,
             };
         }
+        // Reversed form, e.g. `"3.10" == python_version`: the
+        // ordering operators flip (`"3.10" < python_version`
+        // holds exactly when `python_version > "3.10"` does).
+        // Without this the atom falls through to `true`, so a
+        // requirement gated on a non-holding reversed comparison
+        // is wrongly treated as holding.
+        static PV_REV_RE: OnceLock<Regex> = OnceLock::new();
+        let pv_rev_re = PV_REV_RE.get_or_init(|| {
+            Regex::new(r#"["']([\d.]+)["']\s*(==|!=|<=|>=|<|>)\s*python_version"#)
+                .expect("static regex")
+        });
+        if let Some(caps) = pv_rev_re.captures(atom).ok().flatten() {
+            let want = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let op = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let cmp = compare_versions(python_version, want);
+            return match op {
+                "==" => cmp == 0,
+                "!=" => cmp != 0,
+                "<" => cmp > 0,
+                "<=" => cmp >= 0,
+                ">" => cmp < 0,
+                ">=" => cmp <= 0,
+                _ => true,
+            };
+        }
         // `python_version in "..."` / `not in`: `packaging` does a string
         // containment check, e.g. `python_version in "2.6 2.7"` is false on
         // 3.13.
@@ -3249,6 +3274,45 @@ mod tests {
         let reqs = PythonCheck::parse_requirements(content, true, "3.12");
         let findings = check_requirements_findings(&reqs, &["python3-w6ext"]);
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+    }
+
+    #[test]
+    fn marker_reversed_python_version_comparisons() {
+        // Verified against `packaging`: `"3.10" == python_version`
+        // is false on 3.12, and the ordering operators flip
+        // rather than falling through to true.
+        assert!(!PythonCheck::marker_atom_holds(
+            "\"3.10\" == python_version",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "\"3.12\" == python_version",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "\"3.10\" != python_version",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "\"3.10\" < python_version",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds(
+            "\"3.13\" < python_version",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "\"3.13\" > python_version",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "\"3.12\" <= python_version",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "\"3.12\" >= python_version",
+            "3.12"
+        ));
     }
 
     #[test]
