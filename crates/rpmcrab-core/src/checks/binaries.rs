@@ -331,11 +331,6 @@ fn so_regex() -> &'static Regex {
     SO_REGEX.get_or_init(|| Regex::new(r"/lib(64)?/[^/]+\.so(\.[0-9]+)*$").expect("static regex"))
 }
 
-static BIN_REGEX: OnceLock<Regex> = OnceLock::new();
-fn bin_regex() -> &'static Regex {
-    BIN_REGEX.get_or_init(|| Regex::new(r"^(/usr(/X11R6)?)?/s?bin/").expect("static regex"))
-}
-
 static LA_FILE_REGEX: OnceLock<Regex> = OnceLock::new();
 fn la_file_regex() -> &'static Regex {
     LA_FILE_REGEX.get_or_init(|| Regex::new(r"\.la$").expect("static regex"))
@@ -6461,9 +6456,12 @@ impl BinariesCheck {
         // under /home or /tmp).
         if la_file_regex().is_match(fname).unwrap_or(false) {
             // Find the matching line number via grep on the extracted file.
-            // Non-UTF8 .la files are skipped: read_to_string rejects
-            // invalid UTF-8, while the reference reads raw bytes.
-            if let Ok(content) = std::fs::read_to_string(&pkgfile.path) {
+            // The reference reads raw bytes, so a non-UTF8 .la file
+            // must not be skipped: read lossily (the directory
+            // reference pattern is ASCII, so lossy decoding cannot
+            // hide or invent a match on an ASCII line).
+            if let Ok(bytes) = std::fs::read(&pkgfile.path) {
+                let content = String::from_utf8_lossy(&bytes);
                 for (idx, line) in content.lines().enumerate() {
                     if invalid_dir_ref_regex().is_match(line).unwrap_or(false) {
                         add_info(
@@ -7007,20 +7005,16 @@ impl BinariesCheck {
         out: &mut Filter,
     ) {
         use goblin::elf::header::{ET_DYN, ET_EXEC, ET_REL};
+        // No anchored fallback: the unanchored match above already
+        // accepts every string an anchored fullmatch would, so a
+        // second, per-file compiled regex could never change this
+        // gate's outcome.
         if pkg.arch.is_empty()
             || !default_executable_stack_archs()
                 .is_match(&pkg.arch)
                 .unwrap_or(false)
         {
-            // fullmatch semantics via anchored regex
-            let arch_re = Regex::new(&format!(
-                "^(?:{})$",
-                r"aarch64|alpha|arm.*|hppa|i.86|m68k|microblaze|mips|ppc|s390|s390x|sh|sparc|x86_64"
-            ))
-            .expect("static regex");
-            if !arch_re.is_match(&pkg.arch).unwrap_or(false) {
-                return;
-            }
+            return;
         }
         if self.is_archive
             || KERNEL_MODULES_PATHS
@@ -7484,175 +7478,6 @@ impl BinariesCheck {
     /// or the whole tail for one admitted by the tail rule of
     /// issue #1029 (the rule takes only a non-empty tail starting
     /// with a letter or a digit).
-    fn check_shlib_name(
-        &self,
-        pkg: &Pkg,
-        pkgfile: &PkgFile,
-        soname: &str,
-        pkgversion: &str,
-        soversion: &str,
-        out: &mut Filter,
-    ) {
-        let parts: Vec<String> = [pkgversion, soversion]
-            .iter()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.replace('.', "_"))
-            .collect();
-        let soversion_str = parts.join("-");
-        let mut pkgname = pkg.name.as_str();
-        if let Some(idx) = pkgname.rfind('.') {
-            pkgname = &pkgname[..idx];
-        }
-        // A baselibs package carries the version
-        // before a trailing -32bit or -64bit.
-        let pkgname = pkgname
-            .strip_suffix("-32bit")
-            .or_else(|| pkgname.strip_suffix("-64bit"))
-            .unwrap_or(pkgname);
-        // A name matches when either limb accepts
-        // it:
-        //
-        // (A) It equals a name derived from the
-        // SONAME itself, per the SLPP construction:
-        // the stem ('.' folded to '_') plus the
-        // version, glued (libfoo.so.1 -> libfoo1)
-        // or dash-separated (libbz2.so.1 ->
-        // libbz2-1); stem + '-' + soversion when
-        // the SONAME carries a -<pkgversion>
-        // (libgame2-1.9.so.10.0.0 ->
-        // libgame2-1_9-10_0_0). Comparing whole
-        // derived names is what tells a digit that
-        // belongs to the stem (libx11.so.1 ->
-        // libx111) from a longer version run
-        // (libkdecorations3private11 for .so.1,
-        // bsc#1237372).
-        //
-        // (B) It ends with the expected suffix at a
-        // non-digit boundary: the trailing version
-        // run matches as a whole, but the stem is
-        // not policed. A package legitimately ships
-        // libraries whose stems its name does not
-        // derive from (libopenssl3 ships
-        // libssl.so.3, libicu73 ships
-        // libicuuc.so.73), and the reference stays
-        // quiet there.
-        //
-        // Both limbs are tried on the name as-is and
-        // once more with a trailing
-        // -<letters><digits> flavour segment
-        // (libgfortran5-gcc15, libnetcdf22-openmpi5)
-        // stripped: the version sits before the
-        // flavour tail, which is not part of the
-        // name.
-        //
-        // Two further derived forms are credited on
-        // limb A only (the stripped or reduced name
-        // must equal a SONAME-derived name exactly;
-        // limb B's stem-blind suffix is not enough):
-        //
-        // (C) A trailing flavour segment of letters
-        // only (-opencl, -mini, -dummy): the same
-        // flavour shape as above with no digit in
-        // the tail (libarmnn36-opencl ships
-        // libarmnn.so.36, libuna1-mini ships
-        // libuna.so.1). Limb A only, so a name whose
-        // own stem merely ends in the version
-        // (libqt5-qtwebengine for libQt5WebEngine.so.5)
-        // still fires.
-        //
-        // (D) A SONAME version whose trailing
-        // components are all zero, with the zeros
-        // elided: libprotobuf.so.3.21.12.0 is
-        // packaged as libprotobuf3_21_12 and
-        // libCppMicroServices.so.4.0.0 as
-        // libCppMicroServices4. A dropped zero
-        // carries no ABI discrimination — any
-        // non-zero change to the elided components
-        // re-fires — while a partially elided form
-        // (libfoo4_0 for libfoo.so.4.0.0) still
-        // fires.
-        let stem = match soname.split_once(".so") {
-            Some((head, _)) => head,
-            None => soname,
-        }
-        .replace('.', "_");
-        let soversion_pkgform = soversion.replace('.', "_");
-        let mut expected: Vec<String> = if pkgversion.is_empty() {
-            vec![
-                format!("{stem}{soversion_pkgform}"),
-                format!("{stem}-{soversion_pkgform}"),
-            ]
-        } else if soversion.is_empty() {
-            vec![stem.clone()]
-        } else {
-            vec![format!("{stem}-{soversion_pkgform}")]
-        };
-        // (D) The trailing-zero-elided derived
-        // names: drop trailing ".0" components of
-        // the SONAME version (keeping at least one)
-        // and derive again by the same construction.
-        let mut reduced: Vec<&str> = soversion.split('.').collect();
-        while reduced.len() > 1 && reduced.last() == Some(&"0") {
-            reduced.pop();
-        }
-        let reduced_form = reduced.join("_");
-        if reduced_form != soversion_pkgform {
-            if pkgversion.is_empty() {
-                expected.push(format!("{stem}{reduced_form}"));
-                expected.push(format!("{stem}-{reduced_form}"));
-            } else if !soversion.is_empty() {
-                expected.push(format!("{stem}-{reduced_form}"));
-            }
-        }
-        fn strip_flavour(name: &str) -> Option<&str> {
-            let (head, tail) = name.rsplit_once('-')?;
-            if !head.is_empty()
-                && tail.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-                && tail.chars().last().is_some_and(|c| c.is_ascii_digit())
-                && tail.chars().all(|c| c.is_ascii_alphanumeric())
-            {
-                Some(head)
-            } else {
-                None
-            }
-        }
-        fn strip_alpha_flavour(name: &str) -> Option<&str> {
-            let (head, tail) = name.rsplit_once('-')?;
-            if !head.is_empty() && !tail.is_empty() && tail.chars().all(|c| c.is_ascii_alphabetic())
-            {
-                Some(head)
-            } else {
-                None
-            }
-        }
-        fn whole_suffix(name: &str, suffix: &str) -> bool {
-            name.strip_suffix(suffix).is_some_and(|prefix| {
-                prefix
-                    .chars()
-                    .next_back()
-                    .is_none_or(|c| !c.is_ascii_digit())
-            })
-        }
-        let accepts =
-            |name: &str| expected.iter().any(|e| e == name) || whole_suffix(name, &soversion_str);
-        let derived_only = |name: &str| expected.iter().any(|e| e == name);
-        let name_matches = accepts(pkgname)
-            || strip_flavour(pkgname).is_some_and(accepts)
-            || strip_alpha_flavour(pkgname).is_some_and(derived_only);
-        if !soversion_str.is_empty() && !name_matches {
-            add_info(
-                out,
-                Level::Error,
-                pkg,
-                "shlib-policy-name-error",
-                &[&format!(
-                    "SONAME: {} ({}), expected package suffix: {}",
-                    soname, pkgfile.name, soversion_str
-                )],
-            );
-        }
-    }
-
     /// The two SONAME arms of the shared-library policy: the
     /// ldconfig-symlink arm and the package-name arm. They run for
     /// a SONAME that passes the validity gate, and -- since issue
@@ -7671,14 +7496,25 @@ impl BinariesCheck {
                 .iter()
                 .any(|p| pkgfile.name.starts_with(p))
         {
-            if validso_regex().is_match(soname).unwrap_or(false) {
-                if let Ok(Some(caps)) = soversion_regex().captures(soname) {
-                    let pkgversion = caps.name("pkgversion").map(|m| m.as_str()).unwrap_or("");
-                    let soversion = caps.name("soversion").map(|m| m.as_str()).unwrap_or("");
-                    self.check_shlib_name(pkg, pkgfile, soname, pkgversion, soversion, out);
+            // The name arm is the shared matcher: `soname_name_match`
+            // performs the validity/tail extraction and the limb
+            // comparison itself, so a widening moves this check and
+            // `SharedLibraryPolicyCheck` together. It returns `None`
+            // exactly when the old arm stayed quiet (no capturable
+            // version, or an empty derived suffix).
+            if let Some((name_matches, soversion_str)) = soname_name_match(&pkg.name, soname) {
+                if !name_matches {
+                    add_info(
+                        out,
+                        Level::Error,
+                        pkg,
+                        "shlib-policy-name-error",
+                        &[&format!(
+                            "SONAME: {} ({}), expected package suffix: {}",
+                            soname, pkgfile.name, soversion_str
+                        )],
+                    );
                 }
-            } else if let Some(tail) = soname_tail(soname) {
-                self.check_shlib_name(pkg, pkgfile, soname, "", tail, out);
             }
         }
     }
@@ -8650,12 +8486,14 @@ impl BinariesCheck {
             }
             for runpath in runpaths.split(':') {
                 let mut rp = runpath.to_string();
-                if rp.contains("$ORIGIN") {
+                if rp.contains("$ORIGIN") || rp.contains("${ORIGIN}") {
                     let parent = Path::new(&pkgfile.name)
                         .parent()
                         .and_then(|p| p.to_str())
                         .unwrap_or("");
-                    rp = rp.replace("$ORIGIN", parent);
+                    // Braced first, mirroring `expand_search_dirs`: a
+                    // bare replacement would leave the braces behind.
+                    rp = rp.replace("${ORIGIN}", parent).replace("$ORIGIN", parent);
                     // Mirror the reference `Path(runpath).resolve()`: collapse
                     // `.` and `..` lexically, without touching the filesystem.
                     rp = normalize_dotdot(&rp);
@@ -9247,16 +9085,11 @@ impl Check for BinariesCheck {
                 continue;
             }
 
-            let mut is_exec = self.is_exec;
-            if self.is_shobj
-                && !self.is_exec
-                && !fname.contains(".so")
-                && bin_regex().is_match(fname).unwrap_or(false)
-            {
-                is_exec = true;
-            }
-
-            if is_exec {
+            // No bindir-shobj promotion here: `check_non_pie` is a
+            // no-op for shared objects (its gate requires
+            // `!self.is_shobj`), so promoting one could never
+            // change its output.
+            if self.is_exec {
                 self.check_non_pie(pkg, fname, analyses[idx].as_ref().map(|a| &a.info), out);
             }
         }
@@ -9543,7 +9376,6 @@ mod tests {
         // The factories must return the same static, not recompile.
         assert!(std::ptr::eq(usr_lib_regex(), usr_lib_regex()));
         assert!(std::ptr::eq(so_regex(), so_regex()));
-        assert!(std::ptr::eq(bin_regex(), bin_regex()));
     }
 
     #[test]
@@ -9554,7 +9386,6 @@ mod tests {
         for _ in 0..10_000 {
             let _ = usr_lib_regex().is_match("/usr/lib64/foo.so");
             let _ = so_regex().is_match("/usr/lib64/foo.so.1");
-            let _ = bin_regex().is_match("/usr/bin/foo");
         }
         assert!(
             start.elapsed() < std::time::Duration::from_secs(1),
@@ -10728,10 +10559,23 @@ mod tests {
             let results = run("/usr/bin/adios2_remote_server", vec![rp.to_string()]);
             assert_lacks(&results, "binary-or-shlib-defines-rpath");
         }
+        // The braced form expands the same way: `${ORIGIN}/../lib64`
+        // from /usr/bin/* resolves to /usr/lib64, a system path.
+        for rp in ["${ORIGIN}/../lib64", "${ORIGIN}/../lib"] {
+            let results = run("/usr/bin/adios2_remote_server", vec![rp.to_string()]);
+            assert_lacks(&results, "binary-or-shlib-defines-rpath");
+        }
         // Empty RUNPATH entry (meson links -rpath with an empty value): silent.
         let results = run("/usr/libexec/x.so", vec!["".to_string()]);
         assert_lacks(&results, "binary-or-shlib-defines-rpath");
 
+        // Bare ${ORIGIN} resolving outside system paths still fires.
+        let results = run("/usr/bin/foo", vec!["${ORIGIN}".to_string()]);
+        assert_eq!(
+            lines_for(&results, "binary-or-shlib-defines-rpath").len(),
+            1,
+            "bare ${{ORIGIN}} under /usr/bin should fire: {results:?}"
+        );
         // Bare $ORIGIN resolving outside system paths still fires.
         let results = run("/usr/bin/foo", vec!["$ORIGIN".to_string()]);
         assert_eq!(
@@ -26130,6 +25974,36 @@ description = "explicit priority string bypasses the system crypto policy"
             lines[0].contains(" E: "),
             "invalid-la-file is Error: {}",
             lines[0]
+        );
+    }
+
+    #[test]
+    fn invalid_la_file_fires_on_non_utf8_content() {
+        // A .la file carrying non-UTF8 bytes is read lossily, not
+        // skipped: its /tmp reference still fires.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let la_path = dir.path().join("libnonutf8.la");
+        std::fs::write(
+            &la_path,
+            b"libdir='/usr/lib64'\n# \xff\xfe comment\ndependency_libs=' /tmp/foo'\n",
+        )
+        .expect("write la");
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = PkgFile {
+            name: "/usr/lib64/libnonutf8.la".to_string(),
+            path: la_path.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_invalid_la_file(&pkg, "/usr/lib64/libnonutf8.la", &pkgfile, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            lines_for(&results, "invalid-la-file").len(),
+            1,
+            "non-UTF8 .la with /tmp ref must fire: {results:?}"
         );
     }
 
