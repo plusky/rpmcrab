@@ -853,7 +853,12 @@ pub fn load_rpmlintrc(config: &mut Config, path: &Path) -> std::io::Result<()> {
                 .collect(),
         ),
     );
-    config.rpmlintrc_filters = filters;
+    // Like `Filters`, `rpmlintrc_setbadness` and `rpmlintrc_display`
+    // above, the per-file filter list accumulates across loads: the
+    // caller loads every discovered rpmlintrc into one config, and
+    // the unused-filter audit reads exactly this list, so replacing
+    // it per file would hide every file but the last from the audit.
+    config.rpmlintrc_filters.extend(filters);
     config.rpmlintrc_display.push(path.display().to_string());
     config
         .finalize()
@@ -1583,6 +1588,25 @@ mod tests {
         );
         let warnings = cfg.take_load_warnings();
         assert!(warnings.is_empty(), "warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn rpmlintrc_filters_accumulate_across_files() {
+        // Two rpmlintrc files loaded into one config (the caller's
+        // loop over every discovered file): the audit list must hold
+        // both files' patterns, not just the last file's.
+        let tmp = tempfile::tempdir().unwrap();
+        let rc1 = tmp.path().join("first-rpmlintrc");
+        let rc2 = tmp.path().join("second-rpmlintrc");
+        std::fs::write(&rc1, "addFilter('first-pattern')\n").unwrap();
+        std::fs::write(&rc2, "addFilter('second-pattern')\n").unwrap();
+        let mut cfg = load_inner(&[], &[], false).unwrap();
+        load_rpmlintrc(&mut cfg, &rc1).unwrap();
+        load_rpmlintrc(&mut cfg, &rc2).unwrap();
+        assert_eq!(
+            cfg.rpmlintrc_filters,
+            vec!["first-pattern".to_string(), "second-pattern".to_string()]
+        );
     }
 
     #[test]
