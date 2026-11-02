@@ -2553,10 +2553,7 @@ fi
             ("rmdir /var/lib/foodir", &["/var/lib/foodir"]),
             ("touch /var/lib/flag", &["/var/lib/flag"]),
             // `touch -r` / `--reference` values are read, not written.
-            (
-                "touch -r /var/lib/ref /var/lib/new",
-                &["/var/lib/new"],
-            ),
+            ("touch -r /var/lib/ref /var/lib/new", &["/var/lib/new"]),
             (
                 "touch --reference /var/lib/ref /var/lib/new",
                 &["/var/lib/new"],

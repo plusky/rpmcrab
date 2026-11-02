@@ -257,8 +257,10 @@ impl PolkitCheck {
                         // document-order slot like a Start immediately
                         // followed by End.
                         actions.push((Self::action_id(e.attributes()), HashMap::new()));
-                    } else if matches!(e.name().as_ref(), "allow_any" | "allow_inactive" | "allow_active")
-                        && open.last().is_some_and(|top| top.in_defaults)
+                    } else if matches!(
+                        e.name().as_ref(),
+                        "allow_any" | "allow_inactive" | "allow_active"
+                    ) && open.last().is_some_and(|top| top.in_defaults)
                     {
                         // A self-closing setting is the paired-empty
                         // spelling: it inserts the empty value, exactly

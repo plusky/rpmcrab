@@ -571,8 +571,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "must not be negative")]
     fn negative_min_size_panics_at_construction() {
-        let table: toml::Table =
-            toml::from_str("DuplicatesMinSize = -1").expect("parse config");
+        let table: toml::Table = toml::from_str("DuplicatesMinSize = -1").expect("parse config");
         let config = Config {
             configuration: table,
             ..Default::default()

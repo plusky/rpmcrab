@@ -799,9 +799,7 @@ mod menu_icon_xdg_tests {
         let mut check = MenuCheck::new(&config);
         crate::check::Check::check_binary(&mut check, &pkg, &config, &mut out);
         assert!(
-            out.results()
-                .iter()
-                .any(|(n, _)| n == "menu-in-wrong-dir"),
+            out.results().iter().any(|(n, _)| n == "menu-in-wrong-dir"),
             "unexpected: {:?}",
             out.results()
         );

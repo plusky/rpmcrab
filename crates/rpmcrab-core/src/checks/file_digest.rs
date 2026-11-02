@@ -469,9 +469,7 @@ impl FileDigestCheck {
             // mid-run on the first restricted file of this type.
             if let Some(content_check) = &content_check {
                 if content_check != "VarlinkServiceCheck" {
-                    panic!(
-                        "FileDigestCheck: no matching type for ContentCheck={content_check}"
-                    );
+                    panic!("FileDigestCheck: no matching type for ContentCheck={content_check}");
                 }
             }
 

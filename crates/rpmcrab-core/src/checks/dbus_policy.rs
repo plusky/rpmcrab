@@ -165,8 +165,7 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
             // reference raises on it instead of ignoring it.
             Ok(Event::GeneralRef(ref e)) => {
                 let name: &str = e;
-                if !name.starts_with('#')
-                    && !matches!(name, "amp" | "lt" | "gt" | "quot" | "apos")
+                if !name.starts_with('#') && !matches!(name, "amp" | "lt" | "gt" | "quot" | "apos")
                 {
                     return Err(format!("undefined entity {name:?}"));
                 }

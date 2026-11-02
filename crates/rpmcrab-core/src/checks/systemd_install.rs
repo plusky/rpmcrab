@@ -918,14 +918,8 @@ mod tests {
     fn sibling_prefix_path_is_not_a_unit() {
         let check = SystemdInstallCheck::new(&Config::default());
         let re = check.unit_regex();
-        assert!(!is_match(
-            re,
-            "/usr/lib/systemd/systemfoo.service"
-        ));
-        assert!(!is_match(
-            re,
-            "/usr/lib/systemd/system.d/foo.service"
-        ));
+        assert!(!is_match(re, "/usr/lib/systemd/systemfoo.service"));
+        assert!(!is_match(re, "/usr/lib/systemd/system.d/foo.service"));
     }
 
     #[test]
@@ -1798,8 +1792,7 @@ mod tests {
     fn redirection_target_verb_is_not_credited() {
         // `remove-system-units` here is a redirection target (a
         // filename), not the helper's verb, so it credits nothing.
-        let missing =
-            missing_with("systemd-update-helper > remove-system-units foo || :");
+        let missing = missing_with("systemd-update-helper > remove-system-units foo || :");
         assert!(
             missing.contains(&"systemd-service-without-service_del_preun"),
             "{missing:?}"
