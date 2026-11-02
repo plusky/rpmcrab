@@ -62,7 +62,6 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("tmpfiles.rs", "Regex::new(&pattern)", "package"),
     ("binaries.rs", "f_name", "package"),
     ("binaries.rs", "Regex::new(gp)", "package"),
-    ("binaries.rs", "arch_re", "package"),
     // Compiled once in constructor, stored in struct.
     ("systemd_install.rs", "unit_regex", "ctor-once"),
     // Struct fields with constant patterns (compile once per check instance).
