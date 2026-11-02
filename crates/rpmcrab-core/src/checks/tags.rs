@@ -5159,6 +5159,10 @@ mod rich_dep_emission_tests {
                 named(&results, "missing-dependency-on").is_empty(),
                 "flags {flags}: {results:?}"
             );
+            assert!(
+                named(&results, "no-version-dependency-on").is_empty(),
+                "flags {flags}: {results:?}"
+            );
         }
     }
 
@@ -5203,6 +5207,16 @@ mod rich_dep_emission_tests {
         let results = run(&pkg, &rich_test_config(&[], false));
         let hits = named(&results, "missing-dependency-on");
         assert_eq!(hits.len(), 1, "all: {results:?}");
+        // The count alone pins only the tag: the line must name the
+        // Prereq-routed bound, so a Requires-routed hit of the same
+        // tag cannot stand in for it.
+        assert!(
+            hits[0]
+                .1
+                .ends_with("tags-missingdep*/tags-missingdep-libs/libtags-missingdep* = 1.0"),
+            "line: {}",
+            hits[0].1
+        );
     }
 
     #[test]
@@ -5266,6 +5280,35 @@ mod rich_dep_emission_tests {
     }
 
     #[test]
+    fn missing_dependency_first_regex_match_wins_over_exact_silent_first() {
+        // Silent-first variant of the first-match rule: the first
+        // Requires dep matching the family regex is an ancestor lower
+        // bound, silent on its own, and a later bound that would fire
+        // on its own must never be evaluated once the first match is
+        // taken, so neither missing-dependency tag fires.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![
+            flagged_dep(
+                "tags-missingdep-libs",
+                RPMSENSE_GREATER | RPMSENSE_EQUAL,
+                "1",
+            ),
+            flagged_dep("tags-missingdep-libs", RPMSENSE_GREATER, "1.0"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "missing-dependency-on").is_empty(),
+            "silent first match must win: {results:?}"
+        );
+        assert!(
+            named(&results, "no-version-dependency-on").is_empty(),
+            "silent first match must win: {results:?}"
+        );
+    }
+
+    #[test]
     fn missing_dependency_first_regex_match_wins_over_exact_via_prereq() {
         // The Prereq arm of the chain-order rule: the libs dep is the
         // first Prereq in chain order matching the family regex, not
@@ -5304,6 +5347,36 @@ mod rich_dep_emission_tests {
     }
 
     #[test]
+    fn missing_dependency_first_regex_match_wins_over_exact_silent_first_via_prereq() {
+        // The Prereq arm of the silent-first rule: Requires carries
+        // only an unrelated dep, so the finding can only come from
+        // the Prereq arm, where the first match is the silent
+        // ancestor bound and the later firing bound must never be
+        // evaluated.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![plain_dep("unrelated")];
+        pkg.prereq = vec![
+            flagged_dep(
+                "tags-missingdep-libs",
+                RPMSENSE_GREATER | RPMSENSE_EQUAL,
+                "1",
+            ),
+            flagged_dep("tags-missingdep-libs", RPMSENSE_GREATER, "1.0"),
+        ];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "missing-dependency-on").is_empty(),
+            "silent first match must win: {results:?}"
+        );
+        assert!(
+            named(&results, "no-version-dependency-on").is_empty(),
+            "silent first match must win: {results:?}"
+        );
+    }
+
+    #[test]
     fn missing_dependency_first_regex_match_wins_over_exact_cross_arm() {
         // The cross-arm half of the chain-order rule: Requires arms
         // are evaluated before Prereq arms, so a Requires lookalike
@@ -5331,6 +5404,31 @@ mod rich_dep_emission_tests {
         assert!(
             named(&results, "missing-dependency-on").is_empty(),
             "the Prereq arm must not be evaluated after a Requires match: {results:?}"
+        );
+    }
+
+    #[test]
+    fn missing_dependency_first_regex_match_wins_over_exact_silent_first_cross_arm() {
+        // The cross-arm half of the silent-first rule: Requires arms
+        // are evaluated before Prereq arms, so a silent Requires
+        // match wins over a Prereq bound that would fire on its own.
+        let mut pkg = rich_fixture_pkg("i18n-two-locale-1.0-1.noarch.rpm");
+        pkg.name = "tags-missingdep-devel".to_string();
+        pkg.files.push(so_file());
+        pkg.requires = vec![flagged_dep(
+            "tags-missingdep-libs",
+            RPMSENSE_GREATER | RPMSENSE_EQUAL,
+            "1",
+        )];
+        pkg.prereq = vec![flagged_dep("tags-missingdep-libs", RPMSENSE_GREATER, "1.0")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        assert!(
+            named(&results, "missing-dependency-on").is_empty(),
+            "silent first match must win: {results:?}"
+        );
+        assert!(
+            named(&results, "no-version-dependency-on").is_empty(),
+            "silent first match must win: {results:?}"
         );
     }
 
