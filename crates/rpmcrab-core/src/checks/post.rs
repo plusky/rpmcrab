@@ -1682,8 +1682,9 @@ impl PostCheck {
                                         | "--ignore-signal"
                                 ) {
                                     // A no-argument long flag
-                                    // (`--ignore-environment`, `--null`,
-                                    // `--debug`, `--help`, `--version`)
+                                    // (`--ignore-environment`, `--debug`,
+                                    // `--list-signal-handling`, `--null`,
+                                    // `--help`, `--version`)
                                     // rejects `=value`, as does an unknown
                                     // long flag: env errors, so the command
                                     // never runs and the body is never
