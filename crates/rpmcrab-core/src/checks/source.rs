@@ -2318,16 +2318,20 @@ mod prebuilt {
                 // prebuilt active.
                 let unit = classify(name, &prefix, metadata.len() as usize);
                 if let Some(k) = unit {
-                    // The jar unit is the file itself: hash the file, as
-                    // the bare-file case does; an unreadable file yields
-                    // an empty digest, which never matches a shipped
-                    // record. The hit's path is the Source name, so the
-                    // join records no second whole-file record for it.
-                    self.push_prebuilt(
-                        k,
-                        name,
-                        super::sha256_file(&path.to_string_lossy()).unwrap_or_default(),
-                    );
+                    // The jar unit is the file itself: hash the open
+                    // handle, not the path, so the digest covers the
+                    // bytes walked even if the path is swapped
+                    // mid-walk; an unreadable file yields an empty
+                    // digest, which never matches a shipped record.
+                    // The hit's path is the Source name, so the join
+                    // records no second whole-file record for it.
+                    // Hashing consumes the handle: seek back before
+                    // handing it to zip.
+                    let digest = super::sha256_reader(&mut file).unwrap_or_default();
+                    self.push_prebuilt(k, name, digest);
+                    if file.seek(SeekFrom::Start(0)).is_err() {
+                        return;
+                    }
                 }
                 if let Ok(archive) = zip::ZipArchive::new(file) {
                     self.walk_zip(archive, name, 0, unit.is_none());
@@ -2359,10 +2363,16 @@ mod prebuilt {
                     self.push_prebuilt_finding_only(k, name);
                 } else {
                     // A bare file has no member bytes in hand: hash the
-                    // file itself, as the old whole-file walk did; an
-                    // unreadable file yields an empty digest, which never
-                    // matches a shipped record.
-                    let digest = super::sha256_file(&path.to_string_lossy()).unwrap_or_default();
+                    // open handle, not the path, so the digest covers
+                    // the bytes walked even if the path is swapped
+                    // mid-walk; an unreadable file yields an empty
+                    // digest, which never matches a shipped record.
+                    let mut file = peeked.into_inner();
+                    let digest = if file.seek(SeekFrom::Start(0)).is_ok() {
+                        super::sha256_reader(file).unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     self.push_prebuilt(k, name, digest);
                 }
             }

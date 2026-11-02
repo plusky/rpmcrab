@@ -92,12 +92,14 @@ enum CrcOutcome {
 /// branch for readers that still fail at open.
 /// Whether a read-time io error is the lazy-decompression form of an
 /// unsupported compression method: kind `Unsupported` carrying zip's
-/// own "compression method not supported" text. Any other
+/// own "compression method not supported: {id}" text. Any other
 /// `Unsupported` source falls through to the caller's bad-entry
 /// outcome instead of downgrading to unable-to-read (issue #1425).
 fn is_unsupported_compression(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::Unsupported
-        && e.to_string().contains("compression method not supported")
+        && e.to_string()
+            .strip_prefix("compression method not supported: ")
+            .is_some_and(|id| !id.is_empty())
 }
 
 fn read_entry(
@@ -924,6 +926,13 @@ mod tests {
             "compression method not supported: 93",
         );
         assert!(!is_unsupported_compression(&other_kind));
+        // The match is anchored at the message start: the method text
+        // carried mid-message does not map.
+        let wrapped = std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "wrapped: compression method not supported: 93",
+        );
+        assert!(!is_unsupported_compression(&wrapped));
     }
 
     #[test]
