@@ -1404,7 +1404,8 @@ impl PostCheck {
         // last command segment's first word (after `env` with flags,
         // `VAR=` prefixes, `time` with flags and shell keywords
         // including `if`, with any directory stripped)
-        // names a POSIX shell. Piped-to-a-shell (`cat <<EOF | sh`),
+        // names a POSIX shell. Segment separators inside quotes do not split.
+        // Piped-to-a-shell (`cat <<EOF | sh`),
         // sudo-wrapped and substitution shapes are not recognised
         // here and stay blanked.
         fn line_feeds_shell(line: &str) -> bool {
@@ -1412,7 +1413,29 @@ impl PostCheck {
                 Some(i) => &line[..i],
                 None => return false,
             };
-            let last = before.split([';', '|', '&', '(']).next_back().unwrap_or("");
+            // The last command segment: separators outside quotes do
+            // not split, so `FOO='a;b' sh` reads its last segment as
+            // the assignment plus `sh`, not the stray `b`.
+            fn last_segment(s: &str) -> &str {
+                let mut start = 0;
+                let mut quote: Option<char> = None;
+                for (i, c) in s.char_indices() {
+                    match quote {
+                        Some(q) => {
+                            if c == q {
+                                quote = None;
+                            }
+                        }
+                        None => match c {
+                            '\'' | '"' => quote = Some(c),
+                            ';' | '|' | '&' | '(' => start = i + 1,
+                            _ => {}
+                        },
+                    }
+                }
+                &s[start..]
+            }
+            let last = last_segment(before);
             fn trim(w: &str) -> &str {
                 w.trim_matches(['"', '\''].as_slice())
             }
@@ -3902,6 +3925,28 @@ mod tests {
                     && f == "dangerous-command-in-%post"
                     && d == &vec!["rm".to_string()]),
                 "quoted-assignment shell-fed body must fire: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_quoted_separator_still_fires() {
+        // A separator inside quotes does not split the segment:
+        // `FOO='a;b' sh` feeds the shell, so the body fires; the
+        // quoted separator must not misread the tail as the command
+        // word (issue #1406, W5 residual).
+        for script in [
+            "FOO='a;b' sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "FOO='a|b' sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "FOO='a&b' sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "FOO='a(b' sh <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "quoted-separator shell-fed body must fire: {script}"
             );
         }
     }
