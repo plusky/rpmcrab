@@ -467,10 +467,10 @@ impl FileDigestCheck {
             // Fail fast on an unknown value here, like every other
             // malformed-config case in this file, instead of panicking
             // mid-run on the first restricted file of this type.
-            if let Some(content_check) = &content_check {
-                if content_check != "VarlinkServiceCheck" {
-                    panic!("FileDigestCheck: no matching type for ContentCheck={content_check}");
-                }
+            if let Some(content_check) = &content_check
+                && content_check != "VarlinkServiceCheck"
+            {
+                panic!("FileDigestCheck: no matching type for ContentCheck={content_check}");
             }
 
             for loc in &locations {

@@ -107,10 +107,9 @@ impl KMPPolicyCheck {
     fn conjunction_members(supplement: &str) -> Option<Vec<String>> {
         let (inner, sep) = if let Some(inner) = supplement.strip_prefix('(') {
             (inner.strip_suffix(')').unwrap_or(inner), " and ")
-        } else if let Some(inner) = supplement.strip_prefix("packageand(") {
-            (inner.strip_suffix(')').unwrap_or(inner), ":")
         } else {
-            return None;
+            let inner = supplement.strip_prefix("packageand(")?;
+            (inner.strip_suffix(')').unwrap_or(inner), ":")
         };
         let mut out = Vec::new();
         Self::flatten_members(inner, sep, &mut out);
