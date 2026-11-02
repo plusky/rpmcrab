@@ -2114,21 +2114,23 @@ mod prebuilt {
                             // for the compressed form, so a compressed
                             // member enters at this depth and a plain
                             // member at depth + 1 (issue #1428).
-                            let nested_depth = if decoder_kind(bytes).is_some() {
-                                depth
-                            } else {
+                            // Zero cost only when the callee takes
+                            // the decoder arm: a tar (or zip) with
+                            // decoder-magic leading bytes walks as
+                            // tar (or zip) at depth + 1, not at this
+                            // depth (issue #1454).
+                            let nested_depth = if is_tar(bytes)
+                                || bytes.starts_with(b"PK\x03\x04")
+                                || decoder_kind(bytes).is_none()
+                            {
                                 depth + 1
+                            } else {
+                                depth
                             };
                             // A nested archive that holds hits joins
                             // the run-scoped shipped records (issue
                             // #1389) with its own bytes' digest, like
                             // the old inspect_entry did.
-                            // A member-nested compressed archive
-                            // costs one depth level, not two: the
-                            // decoder arm below supplies the level
-                            // for the compressed form, so a compressed
-                            // member enters at this depth and a plain
-                            // member at depth + 1 (issue #1428).
                             let before = self.out.shipped.len();
                             self.walk_archive_buffer(
                                 bytes,
@@ -4842,6 +4844,52 @@ mod prebuilt_tests {
         let mut six = ELF.to_vec();
         for i in 0..6 {
             six = tarball(&[(format!("level{i}.tar").as_str(), &six)]);
+        }
+        let outcome = walk_tar_stream_bytes(std::io::Cursor::new(six), "levels.tar");
+        assert!(outcome.prebuilt.is_empty(), "{:?}", outcome.prebuilt);
+        assert!(
+            outcome
+                .stops
+                .lines()
+                .iter()
+                .any(|l| l.contains("nested past 5 levels")),
+            "{:?}",
+            outcome.stops.lines()
+        );
+    }
+
+    #[test]
+    fn prebuilt_magic_tar_depth_costs_one_level() {
+        // A tar with decoder-magic leading bytes and ustar at 257
+        // walks as tar, so each such level costs one depth level
+        // like a plain tar: five nested magic tars reach the ELF
+        // and a sixth is refused. Before the fix the caller passed
+        // zero cost for any decoder-magic member, so all six
+        // reached it (issue #1454).
+        fn magic_tarball(name: &str, inner: &[u8]) -> Vec<u8> {
+            let mut t = tarball(&[(name, inner)]);
+            t[0] = 0x1f;
+            t[1] = 0x8b;
+            t
+        }
+        let mut five = ELF.to_vec();
+        for i in 0..5 {
+            five = magic_tarball(&format!("level{i}.tar"), &five);
+        }
+        let outcome = walk_tar_stream_bytes(std::io::Cursor::new(five), "levels.tar");
+        assert_eq!(outcome.prebuilt.len(), 1, "{:?}", outcome.prebuilt);
+        assert!(
+            outcome
+                .stops
+                .lines()
+                .iter()
+                .all(|l| !l.contains("nested past 5 levels")),
+            "{:?}",
+            outcome.stops.lines()
+        );
+        let mut six = ELF.to_vec();
+        for i in 0..6 {
+            six = magic_tarball(&format!("level{i}.tar"), &six);
         }
         let outcome = walk_tar_stream_bytes(std::io::Cursor::new(six), "levels.tar");
         assert!(outcome.prebuilt.is_empty(), "{:?}", outcome.prebuilt);
