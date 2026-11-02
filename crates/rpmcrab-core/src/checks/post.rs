@@ -1761,10 +1761,13 @@ impl PostCheck {
                                 // flags: `--default-signal`,
                                 // `--block-signal` and `--ignore-signal`
                                 // take only an attached `=value`, and
-                                // `--ignore-environment`, `--null`, `--debug`
-                                // and `--list-signal-handling` take none. `--help` and
-                                // `--version` print and exit without
-                                // executing. Any other long flag is
+                                // `--ignore-environment`, `--debug`
+                                // and `--list-signal-handling` take none.
+                                // `--null`, `--help` and `--version` end
+                                // recognition: env rejects `--null` with
+                                // a command, and `--help`/`--version`
+                                // print and exit without executing.
+                                // Any other long flag is
                                 // not a GNU env flag: env rejects it,
                                 // so the command never runs and the
                                 // body is never executed.
@@ -1772,7 +1775,6 @@ impl PostCheck {
                                 | "--block-signal"
                                 | "--ignore-signal"
                                 | "--ignore-environment"
-                                | "--null"
                                 | "--debug"
                                 | "--list-signal-handling" => {
                                     word = match words.pop_front() {
@@ -1780,10 +1782,12 @@ impl PostCheck {
                                         None => return false,
                                     };
                                 }
-                                // `--help` and `--version` print and exit
-                                // without executing: the body is never
-                                // executed.
-                                "--help" | "--version" => return false,
+                                // `--null`, `--help` and `--version` end
+                                // recognition: env rejects `--null` with
+                                // a command, and `--help`/`--version`
+                                // print and exit without executing, so
+                                // the body is never executed.
+                                "--null" | "--help" | "--version" => return false,
                                 _ => return false,
                             }
                             continue;
@@ -1832,10 +1836,10 @@ impl PostCheck {
                                     break;
                                 }
                                 // Known no-argument shorts are
-                                // skipped; an unknown short ends
-                                // recognition, since env rejects it
+                                // skipped; `-0` and an unknown short end
+                                // recognition, since env rejects them
                                 // and the body is never executed.
-                                'i' | '0' | 'v' => {}
+                                'i' | 'v' => {}
                                 _ => return false,
                             }
                         }
@@ -4095,22 +4099,18 @@ mod tests {
 
     #[test]
     fn dangerous_command_in_shell_fed_heredoc_env_unknown_long_flag_stays_blanked() {
-        // Known no-separate-argument long flags still feed the
+        // A known no-separate-argument long flag still feeds the
         // shell; an unknown long flag ends recognition (env rejects
         // it, so the body is never executed) and the body stays
-        // blanked.
-        for script in [
-            "env --ignore-environment sh <<'EOF'\nrm -rf /foo\nEOF\n",
-            "env --null sh <<'EOF'\nrm -rf /foo\nEOF\n",
-        ] {
-            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
-            assert!(
-                found.iter().any(|(l, f, d)| *l == Level::Warning
-                    && f == "dangerous-command-in-%post"
-                    && d == &vec!["rm".to_string()]),
-                "known-long-flag shell-fed body must fire: {script}"
-            );
-        }
+        // blanked, as does `--null` (env rejects it with a command).
+        let script = "env --ignore-environment sh <<'EOF'\nrm -rf /foo\nEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["rm".to_string()]),
+            "known-long-flag shell-fed body must fire: {script}"
+        );
         for script in [
             "env --unknown sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env --unknown=foo sh <<'EOF'\nrm -rf /foo\nEOF\n",
@@ -4149,12 +4149,14 @@ mod tests {
 
     #[test]
     fn dangerous_command_in_shell_fed_heredoc_env_help_version_stay_blanked() {
-        // `--help`/`--version` print and exit without executing, so
-        // the body stays blanked, as does `=value` on a no-argument
+        // `--help`/`--version` print and exit without executing,
+        // `--null` cannot be combined with a command, so the body
+        // stays blanked, as does `=value` on a no-argument
         // long flag (issue #1454).
         for script in [
             "env --help sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env --version sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --null sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env --help=x sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env --version=x sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env --null=x sh <<'EOF'\nrm -rf /foo\nEOF\n",
@@ -4310,12 +4312,12 @@ mod tests {
 
     #[test]
     fn dangerous_command_in_shell_fed_heredoc_env_unknown_short_stays_blanked() {
-        // Known no-argument shorts still feed the shell; an unknown
-        // short ends recognition (env rejects it, so the body is
-        // never executed) and the body stays blanked (issue #1457).
+        // Known no-argument shorts still feed the shell; `-0` and
+        // an unknown short end recognition (env rejects them, so the
+        // body is never executed) and the body stays blanked
+        // (issue #1457).
         for script in [
             "env -i sh <<'EOF'\nrm -rf /foo\nEOF\n",
-            "env -0 sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env -v sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env -iv sh <<'EOF'\nrm -rf /foo\nEOF\n",
         ] {
@@ -4328,6 +4330,8 @@ mod tests {
             );
         }
         for script in [
+            "env -0 sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -i0 sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env -Z sh <<'EOF'\nrm -rf /foo\nEOF\n",
             "env -iZ sh <<'EOF'\nrm -rf /foo\nEOF\n",
         ] {
