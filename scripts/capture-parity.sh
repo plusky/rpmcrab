@@ -49,6 +49,22 @@ while [ $# -gt 0 ]; do
   inputs+=("$1"); shift
 done
 
+# Two distinct inputs sharing a basename would silently collapse to one
+# staged file below (the second copy overwrites the first, the sha list
+# records the second file's sha twice, and rpmlint runs one file twice).
+# Fail before the case directory exists, so a corrected retry is not
+# blocked by the case-already-exists check. The ${seen[@]+"..."} form
+# keeps this safe under `set -u` on bash 3.2 (empty-array expansion).
+seen=()
+for f in "${inputs[@]}"; do
+  base="$(basename "$f")"
+  for prev in ${seen[@]+"${seen[@]}"}; do
+    [ "$prev" = "$base" ] || continue
+    echo "duplicate input basename: $base" >&2; exit 2
+  done
+  seen+=("$base")
+done
+
 case_dir="$repo_root/tests/parity/cases/$case_name"
 [ ! -e "$case_dir" ] || { echo "case already exists: $case_dir" >&2; exit 1; }
 mkdir -p "$case_dir/input" "$case_dir/expected"

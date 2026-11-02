@@ -99,6 +99,20 @@ def test_all_blocklisted_stanza_dropped_reports_only_blocklisted():
     assert skipped == []
 
 
+def test_changed_stanza_counts_as_updated_not_added():
+    """Same (table, packages) identity, new content: the summary must
+    report one update and zero additions, not both."""
+    local = SYSCTL_HEADER + SURVIVOR
+    changed_stanza = SURVIVOR.replace('"/y"', '"/z"')
+    changed, new, added, updated, removed, skipped = sync.plan_merge(
+        local, SYSCTL_HEADER + changed_stanza, set())
+    assert changed
+    assert added == 0
+    assert updated == ["[[FileDigestGroup]] for kept (content updated)"]
+    assert removed == []
+    assert '"/z"' in new
+
+
 def test_package_re_trailing_comment():
     """`package = "x" # comment` must still match (generator parity)."""
     stanza = '[[G]]\npackage = "snapd" # trailing comment\npath = "/x"\n'
@@ -152,7 +166,9 @@ def test_in_place_update_is_not_a_deletion():
     changed, new, added, updated, removed, skipped = sync.plan_merge(
         SYSCTL_HEADER + old, SYSCTL_HEADER + new_stanza, set())
     assert changed
-    assert added == 1
+    # A changed stanza is an update, not an addition: counting it in
+    # `added` too double-counted the change in the sync summary.
+    assert added == 0
     assert removed == []
     assert updated == ["[[FileDigestGroup]] for foo (content updated)"]
     assert "BBBB" in new

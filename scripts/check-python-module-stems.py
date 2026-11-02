@@ -64,16 +64,30 @@ def stem_patterns(stem):
 
 
 def load_table(config_path):
+    """Load [[PythonModuleStems]] entries, failing loudly on malformed
+    ones: a dropped entry used to pass silently, so a typo'd table (or a
+    table whose entries all fail validation) read as a clean check."""
     with open(config_path, "rb") as fh:
         parsed = tomllib.load(fh)
+    raw = parsed.get("PythonModuleStems", [])
+    if not isinstance(raw, list):
+        raise ValueError("PythonModuleStems is not a list")
     entries = []
-    for entry in parsed.get("PythonModuleStems", []):
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f"PythonModuleStems entry {i} is not a table")
         module = entry.get("module")
         stems = entry.get("stems")
-        if isinstance(module, str) and isinstance(stems, list):
-            stems = [s for s in stems if isinstance(s, str)]
-            if stems:
-                entries.append((module, stems))
+        if not isinstance(module, str) or not module.strip():
+            raise ValueError(
+                f"PythonModuleStems entry {i} has no string module")
+        if not isinstance(stems, list) or not stems:
+            raise ValueError(
+                f"PythonModuleStems entry {i} ({module}) has no stems list")
+        if not all(isinstance(s, str) for s in stems):
+            raise ValueError(
+                f"PythonModuleStems entry {i} ({module}) has a non-string stem")
+        entries.append((module, stems))
     return entries
 
 
@@ -205,13 +219,19 @@ def main():
                         help="comma-separated module names to check (default: all)")
     args = parser.parse_args()
 
-    entries = load_table(args.config)
+    try:
+        entries = load_table(args.config)
+    except ValueError as exc:
+        print(f"error: malformed PythonModuleStems table: {exc}", file=sys.stderr)
+        return 2
     if args.modules:
         wanted = {canon(m) for m in args.modules.split(",") if m.strip()}
         entries = [(m, s) for (m, s) in entries if canon(m) in wanted]
     if not entries:
-        print("no table entries to check")
-        return 0
+        # A filter matching nothing, or an empty table, is a vacuous
+        # pass if it exits 0: a typo'd --modules value would look clean.
+        print("no table entries to check", file=sys.stderr)
+        return 2
 
     npackages = 0
     lines = []

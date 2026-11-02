@@ -37,8 +37,13 @@ echo "reference python: $py ($("$py" -c 'import rpm; print(rpm.__version__)'))"
 # commit, verify the checkout matches, and record the SHA for the corpus
 # (capture-parity.sh writes it into each case's meta.toml).
 REF_SHA="84848c05c5571c22274a55ff9afdfe6d88c67dc9"
-if [ -d "$src/.git" ] && [ "$(git -C "$src" rev-parse HEAD 2>/dev/null || true)" = "$REF_SHA" ]; then
-  : # already at the pinned commit
+if [ -d "$src/.git" ] && [ "$(git -C "$src" rev-parse HEAD 2>/dev/null || true)" = "$REF_SHA" ] \
+    && git -C "$src" diff --quiet 2>/dev/null && git -C "$src" diff --cached --quiet 2>/dev/null; then
+  : # already at the pinned commit with a clean tracked tree
+  # (HEAD alone is not enough: edited files at the pinned commit
+  # would pass the old check while later captures used drifted
+  # content. Untracked files, e.g. __pycache__ from running the
+  # reference, are not drift and do not force a re-clone.)
 else
   rm -rf "$src"
   git init -q "$src"

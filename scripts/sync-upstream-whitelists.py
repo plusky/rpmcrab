@@ -270,6 +270,12 @@ def plan_merge(local_text, upstream_text, blocklist, filename=None,
         if norm not in local_by_norm:
             local_by_norm[norm] = text
 
+    # Identities already present locally: an upstream stanza with a
+    # known identity but new content is an update, not an addition
+    # (its description lands in `updated` below). Counting it in
+    # `added` too double-counts the change in the sync summary.
+    local_idents = {(t, pkgs) for t, pkgs, _ in local_stanzas}
+
     # Process upstream stanzas in order, building the new stanza list
     new_stanzas = []  # List of (table, packages, text) in upstream order
     seen_norms = set()
@@ -289,7 +295,8 @@ def plan_merge(local_text, upstream_text, blocklist, filename=None,
                 new_stanzas.append((table, packages, local_by_norm[norm]))
             else:
                 new_stanzas.append((table, packages, stanza_text))
-                added += 1
+                if (table, packages) not in local_idents:
+                    added += 1
             continue
         if packages and all(p in effective_blocklist for p in packages):
             # Only the actually-blocklisted members are reported; innocent
@@ -307,9 +314,12 @@ def plan_merge(local_text, upstream_text, blocklist, filename=None,
             # Exists, keep the local version (preserve formatting)
             new_stanzas.append((table, packages, local_by_norm[norm]))
         else:
-            # New or changed stanza; use upstream version
+            # New or changed stanza; use upstream version. A changed
+            # stanza (known identity, new content) is reported via
+            # `updated` below, never counted in `added`.
             new_stanzas.append((table, packages, stanza_text))
-            added += 1
+            if (table, packages) not in local_idents:
+                added += 1
 
     old_by_norm = {}
     for table, pkgs, text in local_stanzas:

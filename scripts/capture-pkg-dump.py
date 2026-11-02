@@ -183,7 +183,14 @@ def dump_one(path, outname):
 
 def main(argv):
     # Each arg is `input-rpm:output-case.json`.
-    specs = argv[1:] or []
+    specs = argv[1:]
+    if not specs:
+        # Zero arguments used to print `SUMMARY dumped=0 failed=0`
+        # and exit 0, so a CI step passing an empty file list (e.g. a
+        # non-matching glob) passed vacuously.
+        print("ERROR: no input specs: expected <input-rpm>:<output-case.json> ...",
+              file=sys.stderr)
+        return 2
     os.makedirs(OUTDIR, exist_ok=True)
     failures = 0
     for spec in specs:

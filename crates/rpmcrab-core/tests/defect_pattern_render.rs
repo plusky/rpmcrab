@@ -87,3 +87,14 @@ fn json_report_marks_members_and_counts_the_class() {
     assert_eq!(class_of("no-soname"), None);
     assert_eq!(doc["summary"]["classes"]["defect-pattern"], 2);
 }
+
+#[test]
+fn json_summary_carries_the_footer_validated_counters() {
+    // The run validates one package (and no specfile); the summary
+    // must say so, rather than leaving the validated count recoverable
+    // only from the text footer's line.
+    let out = run_with_mixed_findings("json");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("JSON document");
+    assert_eq!(doc["summary"]["packages"], 1);
+    assert_eq!(doc["summary"]["specfiles"], 0);
+}
