@@ -4925,7 +4925,8 @@ mod prebuilt_tests {
         assert_eq!(outcome.prebuilt.len(), 1);
         let expected = format!("{}…{}", "a".repeat(512), "b".repeat(512));
         // The cut path lives on the shipped-join record: prebuilt
-        // stores full paths for grouping since #1428 (issue #1416).
+        // stores cut paths: grouping keys are cut at storage (#1443), as is
+        // the shipped record (#1448).
         assert_eq!(outcome.shipped[0].path, expected);
     }
 
