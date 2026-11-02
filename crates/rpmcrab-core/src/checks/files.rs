@@ -1853,7 +1853,6 @@ fn find_perm_in_tmpfiles(pkg: &Pkg, fname: &str) -> Option<(String, String, Stri
     // The reference realpaths the package path; package paths are already
     // normalized here, so a lexical clean is equivalent.
     let fname = clean_path(fname);
-    let needle = format!(" {fname} ");
 
     for pkgfile in &pkg.files {
         if !pkgfile.name.contains("tmpfiles.d") || !pkgfile.name.ends_with(".conf") {
@@ -1867,11 +1866,12 @@ fn find_perm_in_tmpfiles(pkg: &Pkg, fname: &str) -> Option<(String, String, Stri
             continue;
         };
         for line in content.lines() {
-            if !line.contains(&needle) {
-                continue;
-            }
+            // Parse fields first and anchor on field[1] (the path):
+            // a substring search would credit a line whose later
+            // field merely names this path, and would miss a valid
+            // tab-separated line outright.
             let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 5 {
+            if fields.len() < 5 || fields[1] != fname {
                 continue;
             }
             found = Some((
@@ -1985,55 +1985,102 @@ fn find_shell_keyword(text: &str, word: &str) -> Option<usize> {
 /// The text with shell comment tails removed: a `#` starts a comment
 /// only at the start of a line or after whitespace or a shell operator,
 /// and never inside quotes, so a `#` inside a word (a path) or a quoted
-/// string survives. Line endings are kept, so stripping never joins two
-/// commands onto one line.
+/// string survives. A backslash-newline joins the next line onto the
+/// current one (mirroring `lex_shell`): a comment continued that way
+/// stays a comment, and a quote opened before the continuation stays
+/// open after it, so a commented-out command cannot resurface as live
+/// code on the continued line. Other line endings are kept, so
+/// stripping never joins two commands onto one line.
 pub(crate) fn strip_comment_tails(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
     let mut out = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        let (body, newline) = match line.strip_suffix('\n') {
-            Some(body) => (body, "\n"),
-            None => (line, ""),
-        };
-        let mut cut = body.len();
-        let mut quote: Option<char> = None;
-        let mut skip_next = false;
-        let mut prev_starts_comment = true;
-        for (index, ch) in body.char_indices() {
-            if skip_next {
-                skip_next = false;
-                prev_starts_comment = false;
+    let mut quote: Option<char> = None;
+    let mut in_comment = false;
+    let mut prev_starts_comment = true;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < n {
+        let ch = chars[i];
+        if in_comment {
+            // Backslashes pair up inside a comment, as in `lex_shell`:
+            // an escaped backslash does not fake a continuation.
+            if ch == '\\' && i + 1 < n && chars[i + 1] == '\\' {
+                i += 2;
                 continue;
             }
-            if let Some(q) = quote {
-                if q == '"' && ch == '\\' {
-                    skip_next = true;
-                } else if ch == q {
-                    quote = None;
-                }
-                prev_starts_comment = false;
+            if ch == '\\' && i + 1 < n && chars[i + 1] == '\n' {
+                // Continued comment: the newline joins, it does not end.
+                i += 2;
                 continue;
             }
-            match ch {
-                '\'' | '"' => {
-                    quote = Some(ch);
-                    prev_starts_comment = false;
-                }
-                '#' if prev_starts_comment => {
-                    cut = index;
-                    break;
-                }
-                c if c.is_ascii_whitespace()
-                    || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') =>
-                {
-                    prev_starts_comment = true;
-                }
-                _ => {
-                    prev_starts_comment = false;
-                }
+            if ch == '\n' {
+                in_comment = false;
+                prev_starts_comment = true;
+                out.push('\n');
+            }
+            i += 1;
+            continue;
+        }
+        if escaped {
+            // Inside double quotes, a backslash escapes the next
+            // character: it is literal, never a quote close.
+            escaped = false;
+            out.push(ch);
+            prev_starts_comment = false;
+            i += 1;
+            continue;
+        }
+        if let Some(q) = quote {
+            if q == '"' && ch == '\\' && i + 1 < n && chars[i + 1] == '\n' {
+                // Line continuation inside double quotes: the quote
+                // carries across the joined lines.
+                i += 2;
+                continue;
+            }
+            if q == '"' && ch == '\\' {
+                escaped = true;
+                out.push(ch);
+                i += 1;
+                continue;
+            }
+            if ch == q {
+                quote = None;
+            }
+            // A plain newline inside quotes does not close the quote.
+            out.push(ch);
+            prev_starts_comment = false;
+            i += 1;
+            continue;
+        }
+        // Outside quotes and comments. A backslash-newline joins the
+        // next line onto this logical line; what precedes the
+        // backslash still decides whether a `#` there starts a comment.
+        if ch == '\\' && i + 1 < n && chars[i + 1] == '\n' {
+            i += 2;
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                prev_starts_comment = false;
+            }
+            '#' if prev_starts_comment => {
+                in_comment = true;
+            }
+            c if c.is_ascii_whitespace()
+                || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') =>
+            {
+                prev_starts_comment = true;
+            }
+            _ => {
+                prev_starts_comment = false;
             }
         }
-        out.push_str(&body[..cut]);
-        out.push_str(newline);
+        if !in_comment {
+            out.push(ch);
+        }
+        i += 1;
     }
     out
 }
@@ -2381,6 +2428,13 @@ pub struct FilesCheck {
     /// is decided in `after_checks`, once every package of the run has
     /// been seen.
     session_files: HashSet<String>,
+    /// The non-%ghost subset of `session_files`, for the
+    /// populated-directory credit in `after_checks`: a sibling's
+    /// payload below a candidate's target creates the target
+    /// directory at install time, exactly as the emitting package's
+    /// own payload does in `check_link_relative`. A %ghost entry
+    /// installs no payload, so it is not in this set.
+    session_non_ghost_files: HashSet<String>,
     /// Session state for the run-scoped `python-bytecode-without-source`
     /// credit: the names shipped as regular, non-ghost files by every
     /// package seen since the last export. The credit keys on this set,
@@ -2532,6 +2586,7 @@ impl FilesCheck {
             decompressors: ["gzip", "bzip2", "xz", "zstd"]
                 .map(|name| Tool::probe(&source, name, &[]).0),
             session_files: HashSet::new(),
+            session_non_ghost_files: HashSet::new(),
             session_regular_files: HashSet::new(),
             dangling_candidates: Vec::new(),
             bytecode_candidates: Vec::new(),
@@ -2843,6 +2898,12 @@ impl Check for FilesCheck {
 
         self.session_files
             .extend(pkg.files.iter().map(|f| f.name.clone()));
+        self.session_non_ghost_files.extend(
+            pkg.files
+                .iter()
+                .filter(|f| !f.is_ghost())
+                .map(|f| f.name.clone()),
+        );
         self.session_regular_files.extend(
             pkg.files
                 .iter()
@@ -2876,10 +2937,27 @@ impl Check for FilesCheck {
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
         // The session-aware `dangling-relative-symlink` decision (issue
         // #547): a candidate fires only when no package of the run
-        // ships its normalised target. Candidates are in lint order,
+        // ships its normalised target, or populates its target
+        // directory with non-%ghost payload -- the session mirror of
+        // the per-package populated-directory credit in
+        // `check_link_relative`. Candidates are in lint order,
         // which the stable output sort preserves for equal keys.
         for cand in &self.dangling_candidates {
-            if self.session_files.contains(&cand.target) {
+            // The populated-directory prefix, as in
+            // `check_link_relative`: a trailing slash keeps a
+            // string-prefix lookalike from crediting, and `/`
+            // itself is the one special case.
+            let prefix = if cand.target == "/" {
+                "/".to_string()
+            } else {
+                format!("{}/", cand.target)
+            };
+            if self.session_files.contains(&cand.target)
+                || self
+                    .session_non_ghost_files
+                    .iter()
+                    .any(|f| f.starts_with(&prefix))
+            {
                 continue;
             }
             match &cand.disposition {
@@ -2989,6 +3067,7 @@ impl Check for FilesCheck {
 
     fn reset(&mut self) {
         self.session_files.clear();
+        self.session_non_ghost_files.clear();
         self.session_regular_files.clear();
         self.dangling_candidates.clear();
         self.bytecode_candidates.clear();
@@ -3003,6 +3082,7 @@ impl Check for FilesCheck {
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
         if self.session_files.is_empty()
+            && self.session_non_ghost_files.is_empty()
             && self.session_regular_files.is_empty()
             && self.dangling_candidates.is_empty()
             && self.bytecode_candidates.is_empty()
@@ -3017,6 +3097,7 @@ impl Check for FilesCheck {
         }
         Some(Box::new(FilesSessionState {
             session_files: std::mem::take(&mut self.session_files),
+            session_non_ghost_files: std::mem::take(&mut self.session_non_ghost_files),
             session_regular_files: std::mem::take(&mut self.session_regular_files),
             dangling_candidates: std::mem::take(&mut self.dangling_candidates),
             bytecode_candidates: std::mem::take(&mut self.bytecode_candidates),
@@ -3032,6 +3113,8 @@ impl Check for FilesCheck {
     fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
         if let Ok(state) = state.downcast::<FilesSessionState>() {
             self.session_files.extend(state.session_files);
+            self.session_non_ghost_files
+                .extend(state.session_non_ghost_files);
             self.session_regular_files
                 .extend(state.session_regular_files);
             self.dangling_candidates.extend(state.dangling_candidates);
@@ -3063,6 +3146,7 @@ impl Check for FilesCheck {
 /// `python-bytecode-without-source` credit.
 struct FilesSessionState {
     session_files: HashSet<String>,
+    session_non_ghost_files: HashSet<String>,
     session_regular_files: HashSet<String>,
     dangling_candidates: Vec<DanglingCandidate>,
     bytecode_candidates: Vec<BytecodeCandidate>,
@@ -4881,9 +4965,18 @@ fn license_family_version(stem: &str) -> (String, Option<Vec<u32>>) {
             && tail.chars().any(|c| c.is_ascii_digit())
             && !tail.starts_with('.')
             && !tail.ends_with('.')
+            && !tail.split('.').any(str::is_empty)
         {
-            let version: Vec<u32> = tail.split('.').map(|p| p.parse().unwrap_or(0)).collect();
-            return (stem[..pos].to_string(), Some(version));
+            // An overflowing component is not a version at all (it
+            // must not silently become 0 and sort below everything):
+            // fall through to the version-less family instead.
+            if let Ok(version) = tail
+                .split('.')
+                .map(|comp| comp.parse::<u32>())
+                .collect::<Result<Vec<u32>, _>>()
+            {
+                return (stem[..pos].to_string(), Some(version));
+            }
         }
     }
     (stem.to_string(), None)
@@ -15549,6 +15642,52 @@ print("hi")
     }
 
     #[test]
+    fn dangling_relative_sibling_populated_dir_stays_silent() {
+        // The session mirror of the per-package populated-directory
+        // credit: the link's target directory is populated by a
+        // sibling package's payload, not by any header entry, so the
+        // candidate stays quiet -- in either lint order. A sibling
+        // %ghost entry below the target installs no payload, so it
+        // does not credit and the candidate still fires.
+        let session_pkg = |files: Vec<PkgFile>| {
+            let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+            let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+            pkg.ghost_files = files
+                .iter()
+                .filter(|f| f.is_ghost())
+                .map(|f| f.name.clone())
+                .collect();
+            pkg.req_names.clear();
+            pkg.files = files;
+            pkg
+        };
+        for (sibling_file, silent) in [
+            (plain_file("/usr/share/locale/en/LC_MESSAGES/foo.mo"), true),
+            (ghost_file("/usr/share/locale/en/LC_MESSAGES/foo.mo"), false),
+        ] {
+            for pkgs in [
+                vec![
+                    session_pkg(vec![symlink("/usr/share/foo/locale", "../locale")]),
+                    session_pkg(vec![sibling_file.clone()]),
+                ],
+                vec![
+                    session_pkg(vec![sibling_file.clone()]),
+                    session_pkg(vec![symlink("/usr/share/foo/locale", "../locale")]),
+                ],
+            ] {
+                let (results, _levels) = run_files_check_pkgs(&pkgs, &test_config());
+                let names: Vec<String> = results.iter().map(|(n, _)| n.clone()).collect();
+                if silent {
+                    assert_lacks(&names, "dangling-relative-symlink");
+                } else {
+                    assert_has(&names, "dangling-relative-symlink");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn dangling_relative_string_prefix_lookalike_fires() {
         // `/usr/share/locale2/...` shares a string prefix with the
         // target `/usr/share/locale` but is not below it: no credit.
@@ -20201,6 +20340,53 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
     }
 
     #[test]
+    fn zero_perms_ghost_tmpfiles_anchors_on_path_field() {
+        // A line whose later field merely names the ghost path must
+        // not supply its mode/user/group, and a tab-separated line
+        // declaring the path must: field[1] is the path, not a
+        // substring search.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let conf_path = dir.path().join("anchored.conf");
+        std::fs::write(
+            &conf_path,
+            "f /run/decoy 0600 decoy decoy /run/netconfig/resolv.conf -\n\
+             f\t/run/netconfig/resolv.conf\t0640\tnetdev\tnetdev\t-\n",
+        )
+        .expect("write tmpfiles conf");
+        let rpm = fixture_path("fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(std::path::Path::new(&rpm)).expect("open fixture");
+        pkg.files = vec![
+            PkgFile {
+                name: "/run/netconfig/resolv.conf".to_string(),
+                path: "/run/netconfig/resolv.conf".to_string(),
+                mode: 0,
+                flags: RPMFILE_GHOST,
+                ..Default::default()
+            },
+            PkgFile {
+                name: "/usr/lib/tmpfiles.d/anchored.conf".to_string(),
+                path: conf_path.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        ];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        let hits: Vec<_> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "zero-perms-ghost")
+            .map(|(_, d)| d.clone())
+            .collect();
+        assert_eq!(hits.len(), 1, "expected 1 finding, got: {hits:?}");
+        assert!(
+            hits[0].contains("W: zero-perms-ghost Suggestion: \"%ghost %attr(0640,netdev,netdev) /run/netconfig/resolv.conf\""),
+            "suggestion must use the path field's line, not the decoy: {hits:?}"
+        );
+    }
+
+    #[test]
     fn debug_path_segment_match_11() {
         assert!(is_debug_path("/usr/lib/debug/foo.debug"));
         assert!(is_debug_path("/usr/lib/debug"));
@@ -20384,6 +20570,28 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
             "for j in a b; do ln -sf /t /d/${i}; done\n",
             "/d/a"
         ));
+    }
+
+    #[test]
+    fn strip_comment_tails_continuation_and_quote_carry() {
+        // A comment continued with a backslash stays a comment on the
+        // next line: the ln there is not live code.
+        assert!(!scriptlet_creates_symlink("# note \\\nln -s /a /b\n", "/b"));
+        // An escaped backslash does not fake a continuation: the
+        // comment ends at the newline and the ln below is live.
+        assert!(scriptlet_creates_symlink(
+            "# note \\\\\nln -s /a /b\n",
+            "/b"
+        ));
+        // A quote opened before a continuation stays open after it,
+        // so the `#` inside it does not start a comment on the
+        // continued line.
+        assert_eq!(
+            strip_comment_tails("ln -s \"/a \\\n#b\" /target\n"),
+            "ln -s \"/a #b\" /target\n"
+        );
+        // A live command continued with a backslash is one command.
+        assert!(scriptlet_creates_symlink("ln -s /a \\\n/b\n", "/b"));
     }
 
     #[test]
@@ -25605,6 +25813,26 @@ x /etc/sysconfig/f - - - -
             .into_iter()
             .map(|(kind, display, _)| (kind, display))
             .collect()
+    }
+
+    #[test]
+    fn license_family_version_rejects_empty_and_overflowing_components() {
+        // Interior empty components are not versions: `2..1` must not
+        // become `[2, 0, 1]`.
+        assert_eq!(
+            license_family_version("lgpl-2..1"),
+            ("lgpl-2..1".to_string(), None)
+        );
+        // An overflowing component is not a version either, not a 0.
+        assert_eq!(
+            license_family_version("gpl-99999999999999999999"),
+            ("gpl-99999999999999999999".to_string(), None)
+        );
+        // Well-formed versions are untouched.
+        assert_eq!(
+            license_family_version("lgpl-2.1"),
+            ("lgpl".to_string(), Some(vec![2, 1]))
+        );
     }
 
     #[test]
