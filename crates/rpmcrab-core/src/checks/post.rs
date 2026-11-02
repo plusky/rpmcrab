@@ -1442,11 +1442,29 @@ impl PostCheck {
             // Split on whitespace outside quotes: a quoted span is
             // one word, so `FOO='a b' sh` reads as the assignment
             // plus `sh`, not as the assignment plus the stray `b`.
-            fn split_words(s: &str) -> Vec<&str> {
+            // A backslash escapes the next character, except inside
+            // single quotes, where it is literal (matching the
+            // heredoc scanner); an escaped space keeps a word whole
+            // and an escaped quote does not toggle quoting. Also
+            // reports whether a quote is still
+            // open at the end of input: an unclosed quote is a syntax
+            // error, so the outer line never feeds a shell.
+            fn split_words(s: &str) -> (Vec<&str>, bool) {
                 let mut words = Vec::new();
                 let mut start: Option<usize> = None;
                 let mut quote: Option<char> = None;
+                let mut escaped = false;
                 for (i, c) in s.char_indices() {
+                    if escaped {
+                        escaped = false;
+                        start.get_or_insert(i);
+                        continue;
+                    }
+                    if c == '\\' && quote != Some('\'') {
+                        escaped = true;
+                        start.get_or_insert(i);
+                        continue;
+                    }
                     match quote {
                         Some(q) => {
                             if c == q {
@@ -1472,10 +1490,29 @@ impl PostCheck {
                 if let Some(st) = start.take() {
                     words.push(&s[st..]);
                 }
-                words
+                (words, quote.is_some())
             }
-            let mut words: std::collections::VecDeque<&str> =
-                split_words(last).into_iter().map(trim).collect();
+            // Attached -S values arrive with quote remnants: the outer
+            // trim stripped the closing edge quote, leaving an unmatched
+            // opener that must not swallow the rest of the value.
+            // Edge-trim the value, then split quote-aware; a value with
+            // an unmatched quote falls back to whitespace splitting,
+            // which recovers the intended words from the remnant.
+            // A balanced pair inside an attached value is treated as
+            // live grouping, even when the outer parse already consumed
+            // it (a known approximation).
+            fn split_attached_payload(val: &str) -> Vec<&str> {
+                let val = trim(val);
+                if val.matches('\'').count() % 2 == 1 || val.matches('"').count() % 2 == 1 {
+                    return val.split_whitespace().map(trim).collect();
+                }
+                split_words(val).0.into_iter().map(trim).collect()
+            }
+            let (outer, unclosed) = split_words(last);
+            if unclosed {
+                return false;
+            }
+            let mut words: std::collections::VecDeque<&str> = outer.into_iter().map(trim).collect();
             let mut word = match words.pop_front() {
                 Some(w) => w,
                 None => return false,
@@ -1531,21 +1568,28 @@ impl PostCheck {
                     // `--argv0` take a separate argument, which is
                     // skipped; the `=value` and attached short
                     // forms consume nothing further.
-                    // `--default-signal` and `--block-signal` take
-                    // only an attached `=value` argument, so a
-                    // following word is never their argument.
+                    // `--default-signal`, `--block-signal` and
+                    // `--ignore-signal` take only an attached
+                    // `=value` argument, so a following word is
+                    // never their argument.
                     // An unknown long flag ends recognition: env
                     // rejects it, so the command never runs and the
-                    // body is never executed.
+                    // body is never executed. `--help` and
+                    // `--version` print and exit without executing,
+                    // so they end recognition too, as does `=value`
+                    // on a no-argument long flag.
                     // `-S`/`--split-string` insert their argument's
-                    // words into argv, so a separate-form argument
-                    // flows through the same flag, assignment and
-                    // command logic as the following words, while
-                    // an attached value's words are prepended.
+                    // words into argv, split quote-aware, so a
+                    // separate-form argument flows through the same
+                    // flag, assignment and command logic as the
+                    // following words, while an attached value's
+                    // words are prepended.
                     // Bundled short flags parse left-to-right: a
                     // takes-argument short consumes the rest of the
                     // bundle as its value, or the next word when
-                    // last in the bundle. `--` and a lone `-` end
+                    // last in the bundle. Unknown short flags are
+                    // skipped, unlike unknown long flags, which end
+                    // recognition. `--` and a lone `-` end
                     // flag parsing; assignments still precede the
                     // command after them.
                     while word == "-" || (word.starts_with('-') && word.len() > 1) {
@@ -1565,13 +1609,7 @@ impl PostCheck {
                         if word.starts_with("--") {
                             if let Some((opt, val)) = word.split_once('=') {
                                 if opt == "--split-string" {
-                                    for w in val
-                                        .split_whitespace()
-                                        .map(trim)
-                                        .collect::<Vec<_>>()
-                                        .into_iter()
-                                        .rev()
-                                    {
+                                    for w in split_attached_payload(val).into_iter().rev() {
                                         words.push_front(w);
                                     }
                                 } else if !matches!(
@@ -1581,15 +1619,15 @@ impl PostCheck {
                                         | "--argv0"
                                         | "--default-signal"
                                         | "--block-signal"
-                                        | "--ignore-environment"
-                                        | "--null"
-                                        | "--debug"
-                                        | "--help"
-                                        | "--version"
+                                        | "--ignore-signal"
                                 ) {
-                                    // Unknown long flag: env rejects
-                                    // it, so the command never runs
-                                    // and the body is never executed.
+                                    // A no-argument long flag
+                                    // (`--ignore-environment`, `--null`,
+                                    // `--debug`, `--help`, `--version`)
+                                    // rejects `=value`, as does an unknown
+                                    // long flag: env errors, so the command
+                                    // never runs and the body is never
+                                    // executed.
                                     return false;
                                 }
                                 word = match words.pop_front() {
@@ -1616,8 +1654,9 @@ impl PostCheck {
                                     let Some(arg) = words.pop_front() else {
                                         return false;
                                     };
-                                    for w in arg
-                                        .split_whitespace()
+                                    for w in split_words(arg)
+                                        .0
+                                        .into_iter()
                                         .map(trim)
                                         .collect::<Vec<_>>()
                                         .into_iter()
@@ -1631,27 +1670,31 @@ impl PostCheck {
                                     };
                                 }
                                 // Known no-separate-argument long
-                                // flags: `--default-signal` and
-                                // `--block-signal` take only an
-                                // attached `=value`, and
-                                // `--ignore-environment`, `--null`,
-                                // `--debug`, `--help` and `--version`
-                                // take none. Any other long flag is
+                                // flags: `--default-signal`,
+                                // `--block-signal` and `--ignore-signal`
+                                // take only an attached `=value`, and
+                                // `--ignore-environment`, `--null` and
+                                // `--debug` take none. `--help` and
+                                // `--version` print and exit without
+                                // executing. Any other long flag is
                                 // not a GNU env flag: env rejects it,
                                 // so the command never runs and the
                                 // body is never executed.
                                 "--default-signal"
                                 | "--block-signal"
+                                | "--ignore-signal"
                                 | "--ignore-environment"
                                 | "--null"
-                                | "--debug"
-                                | "--help"
-                                | "--version" => {
+                                | "--debug" => {
                                     word = match words.pop_front() {
                                         Some(w) => w,
                                         None => return false,
                                     };
                                 }
+                                // `--help` and `--version` print and exit
+                                // without executing: the body is never
+                                // executed.
+                                "--help" | "--version" => return false,
                                 _ => return false,
                             }
                             continue;
@@ -1677,7 +1720,7 @@ impl PostCheck {
                                     if ci + 1 < chars.len() {
                                         let byte_idx = chars[ci].0 + c.len_utf8();
                                         let val = &bundle[byte_idx..];
-                                        prepend = val.split_whitespace().map(trim).collect();
+                                        prepend = split_attached_payload(val);
                                     } else {
                                         // Separate form: the next
                                         // word is the split-string
@@ -1686,8 +1729,11 @@ impl PostCheck {
                                         // attached form.
                                         match words.pop_front() {
                                             Some(arg) => {
-                                                prepend =
-                                                    arg.split_whitespace().map(trim).collect();
+                                                prepend = split_words(arg)
+                                                    .0
+                                                    .into_iter()
+                                                    .map(trim)
+                                                    .collect();
                                             }
                                             None => return false,
                                         }
@@ -3979,6 +4025,109 @@ mod tests {
                     .iter()
                     .any(|(_, f, _)| f == "dangerous-command-in-%post"),
                 "unknown-long-flag body stays blanked: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_env_ignore_signal_fires() {
+        // Signal flags taking only an attached `=value` feed the
+        // shell: `--ignore-signal` bare and attached, and the sibling
+        // `--default-signal`/`--block-signal` attached forms
+        // (issue #1454).
+        for script in [
+            "env --ignore-signal sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --ignore-signal=TERM sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --default-signal=TERM sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --block-signal=TERM sh <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "signal-flag shell-fed body must fire: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_env_help_version_stay_blanked() {
+        // `--help`/`--version` print and exit without executing, so
+        // the body stays blanked, as does `=value` on a no-argument
+        // long flag (issue #1454).
+        for script in [
+            "env --help sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --version sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --help=x sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --version=x sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --null=x sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --ignore-environment=x sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --debug=x sh <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "exit-or-rejected-flag body stays blanked: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_env_split_string_quoted_payload_fires() {
+        // A quote-aware -S payload: a protected quoted span inside
+        // the payload stays one word, so the assignment value keeps
+        // its space and the command word is the shell; attached
+        // values with quote remnants recover their words instead of
+        // swallowing them (issue #1454).
+        for script in [
+            "env --split-string=\"FOO='a b' sh\" <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --split-string='sh -x' <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --split-string=sh' -x' <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -S'sh -x' <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env -S 'env FOO=\"a b\" sh' <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --split-string 'env FOO=\"a b\" sh' <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "quoted-payload shell-fed body must fire: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_split_words_backslash_and_unclosed() {
+        // A backslash escapes the next character, so an escaped space
+        // keeps an assignment value whole and the shell-fed body fires
+        // (issue #1454).
+        let script = "FOO=a\\ b sh <<'EOF'\nrm -rf /foo\nEOF\n";
+        {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "escaped-space shell-fed body must fire: {script}"
+            );
+        }
+        // An unclosed quote is a syntax error, so the body stays
+        // blanked: the last << sits inside a quote opened after the
+        // first (recognized) opener, so the fed line ends in an
+        // unclosed quoted word and never feeds a shell
+        // (issue #1454).
+        let script = "sh <<'EOF' 'foo <<'BAR'\nrm -rf /foo\nEOF\n";
+        {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "unclosed-quote body stays blanked: {script}"
             );
         }
     }

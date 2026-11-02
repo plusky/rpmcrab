@@ -6064,9 +6064,11 @@ fn service_exec_binaries(
         if !ok {
             return (vec![], false);
         }
-        if !bins.is_empty() {
-            cleared = false;
-        }
+        // A non-empty ExecStart replaces the cleared state even
+        // when it resolves to nothing: clear-then-unshipped
+        // equals unshipped alone, which resolves empty and stays
+        // quiet (issue #1454).
+        cleared = false;
         binaries.append(&mut bins);
     }
     // A unit left with no binaries — no ExecStart line at all, or
@@ -24832,6 +24834,19 @@ description = "explicit priority string bypasses the system crypto policy"
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit]);
         let exec = daemon_exec_binaries(&pkg);
         assert!(exec.has_unresolvable, "{exec:?}");
+        assert!(exec.binaries.is_empty(), "{exec:?}");
+
+        // Clear-then-unshipped equals unshipped alone: the unit
+        // resolves empty and stays quiet, not fail-open
+        // (issue #1454).
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/w4unshipped.service",
+            "[Service]\nExecStart=/usr/bin/foo\nExecStart=\nExecStart=dangle\n",
+        );
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit]);
+        let exec = daemon_exec_binaries(&pkg);
+        assert!(!exec.has_unresolvable, "{exec:?}");
         assert!(exec.binaries.is_empty(), "{exec:?}");
 
         // W5: with Accept=yes (and the wider boolean spellings) the
