@@ -124,9 +124,11 @@ pub enum PkgError {
 /// While any `guarded` call is in flight, a panic on another thread
 /// also sees the silent hook; that window is inherent to a
 /// process-global hook and is exactly the set of guarded calls.
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo) + Sync + Send + 'static>;
+
 struct HookState {
     active: usize,
-    previous: Option<Box<dyn Fn(&std::panic::PanicHookInfo) + Sync + Send + 'static>>,
+    previous: Option<PanicHook>,
 }
 
 static GUARDED_HOOK: std::sync::Mutex<HookState> = std::sync::Mutex::new(HookState {
@@ -151,10 +153,10 @@ pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, PkgError>) -> Result<T, P
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.active -= 1;
-        if state.active == 0 {
-            if let Some(previous) = state.previous.take() {
-                std::panic::set_hook(previous);
-            }
+        if state.active == 0
+            && let Some(previous) = state.previous.take()
+        {
+            std::panic::set_hook(previous);
         }
     }
     match outcome {
