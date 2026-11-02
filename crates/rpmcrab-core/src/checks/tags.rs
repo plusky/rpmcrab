@@ -168,10 +168,19 @@ impl TagsCheck {
                 .then(|| Regex::new(&format!("(?i){invalid_url}")).ok())
                 .flatten(),
             use_epoch: get_bool("UseEpoch"),
-            max_line_len: tbl
+            // A negative limit must fail loud here: `as usize`
+            // would wrap it to `usize::MAX` and silently disable
+            // the summary/description length checks.
+            max_line_len: match tbl
                 .get("MaxLineLength")
                 .and_then(toml::Value::as_integer)
-                .unwrap_or(79) as usize,
+            {
+                Some(v) if v < 0 => {
+                    panic!("TagsCheck: MaxLineLength must not be negative, got {v}")
+                }
+                Some(v) => v as usize,
+                None => 79,
+            },
             valid_license_exceptions: get_strings("ValidLicenseExceptions"),
             macro_re: macro_regex().clone(),
             devel_re: devel_regex().clone(),
@@ -1262,7 +1271,9 @@ impl TagsCheck {
                 self.check_description(pkg, out, &d, lang, ignored);
             }
         }
-        if description.len() < summary.len() {
+        // Characters, not UTF-8 bytes, like the neighbouring
+        // length checks and the reference's Python `len`.
+        if description.chars().count() < summary.chars().count() {
             add_info(
                 out,
                 Level::Warning,
@@ -2920,6 +2931,59 @@ mod tests {
             hits[0].1,
             "tags-emission-pins-longsummary.noarch: E: summary-too-long This is a deliberately overlong summary that stretches well past seventy nine characters"
         );
+    }
+
+    #[test]
+    fn description_shorter_than_summary_counts_characters_not_bytes() {
+        // Both directions of the byte-length divergence: a 4-char /
+        // 8-byte summary against a 5-char description must stay
+        // quiet, and a 4-char summary against a 3-char / 6-byte
+        // description must warn.
+        let (_tmp, pkg) = fixture_pkg("tags-emission-pins-longsummary-1.0-1.noarch.rpm");
+        let config = test_config();
+        let check = TagsCheck::new(&config);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_description_tag(
+            &pkg,
+            &mut out,
+            "abcde",
+            "\u{e9}\u{e9}\u{e9}\u{e9}",
+            &[],
+            &[],
+        );
+        let results = out.results().to_vec();
+        assert!(
+            tag_hits(&results, "description-shorter-than-summary").is_empty(),
+            "multibyte summary must not warn on byte length: {results:?}"
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_description_tag(&pkg, &mut out, "\u{e9}\u{e9}\u{e9}", "aaaa", &[], &[]);
+        let results = out.results().to_vec();
+        assert_eq!(
+            tag_hits(&results, "description-shorter-than-summary").len(),
+            1,
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "MaxLineLength must not be negative")]
+    fn negative_max_line_length_panics() {
+        // A negative limit used to wrap to `usize::MAX` and
+        // silently disable the length checks; it must fail loud
+        // at config load instead.
+        let mut config = Config::default();
+        let tbl = &mut config.configuration;
+        tbl.insert("UseEpoch".to_string(), toml::Value::Boolean(false));
+        tbl.insert("MaxLineLength".to_string(), toml::Value::Integer(-1));
+        tbl.insert("ValidLicenses".to_string(), toml::Value::Array(vec![]));
+        tbl.insert(
+            "ValidLicenseExceptions".to_string(),
+            toml::Value::Array(vec![]),
+        );
+        tbl.insert("InvalidRequires".to_string(), toml::Value::Array(vec![]));
+        config.finalize().expect("fixture config");
+        let _check = TagsCheck::new(&config);
     }
 
     #[test]
