@@ -408,16 +408,27 @@ impl PythonCheck {
     /// belong to the previous field and are never headers
     /// themselves.
     fn metadata_headers(content: &str, field: &str) -> Vec<String> {
-        content
-            .lines()
-            .take_while(|l| !l.trim().is_empty())
-            .filter(|l| !l.starts_with([' ', '\t']))
-            .filter_map(|l| {
-                let (name, value) = l.split_once(':')?;
-                name.trim()
-                    .eq_ignore_ascii_case(field)
-                    .then(|| value.trim().to_string())
-            })
+        // Folded continuation lines (leading whitespace) belong
+        // to the previous field: append them to its value instead
+        // of dropping them, or a folded specifier loses its tail
+        // and the floor/ceiling comparisons see a truncated range.
+        let mut fields: Vec<(String, String)> = Vec::new();
+        for line in content.lines().take_while(|l| !l.trim().is_empty()) {
+            if line.starts_with([' ', '\t']) {
+                if let Some((_, value)) = fields.last_mut() {
+                    value.push(' ');
+                    value.push_str(line.trim());
+                }
+                continue;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                fields.push((name.trim().to_string(), value.trim().to_string()));
+            }
+        }
+        fields
+            .into_iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(field))
+            .map(|(_, value)| value)
             .filter(|v| !v.is_empty())
             .collect()
     }
@@ -2118,6 +2129,15 @@ impl PythonCheck {
         if sense == 0 {
             return LeafFloor::Unversioned;
         }
+        // `!=` (LESS|GREATER, no EQUAL) imposes neither a floor
+        // nor a ceiling: it admits versions on both sides of the
+        // point, so it stays merely `Versioned`.
+        if sense & RPMSENSE_LESS != 0
+            && sense & RPMSENSE_GREATER != 0
+            && sense & RPMSENSE_EQUAL == 0
+        {
+            return LeafFloor::Versioned;
+        }
         if sense & RPMSENSE_GREATER == 0
             && !(sense & RPMSENSE_EQUAL != 0 && sense & RPMSENSE_LESS == 0)
         {
@@ -2431,6 +2451,15 @@ impl PythonCheck {
         if sense == 0 {
             return LeafCeiling::Unversioned;
         }
+        // `!=` (LESS|GREATER, no EQUAL) imposes neither a floor
+        // nor a ceiling: it admits versions on both sides of the
+        // point, so it stays merely `Versioned`.
+        if sense & RPMSENSE_LESS != 0
+            && sense & RPMSENSE_GREATER != 0
+            && sense & RPMSENSE_EQUAL == 0
+        {
+            return LeafCeiling::Versioned;
+        }
         let inclusive = if sense & RPMSENSE_LESS != 0 {
             sense & RPMSENSE_EQUAL != 0
         } else if sense & RPMSENSE_EQUAL != 0 && sense & RPMSENSE_GREATER == 0 {
@@ -2529,8 +2558,12 @@ impl PythonCheck {
     /// The dependency name a `python3-foo`-style RPM require stands for,
     /// lowercased; `None` for requires of any other shape.
     fn leftover_dep_name(req: &str) -> Option<String> {
-        let py_re = PYTHON_NAME_RE
-            .get_or_init(|| Regex::new(r"^python\d*-(?P<name>.+)$").expect("static regex"));
+        // The dotted flavour spelling (`python3.13-foo`) is the
+        // same shape `classify_atom` handles; `\d*` alone stops
+        // at the `.` and would skip it entirely.
+        let py_re = PYTHON_NAME_RE.get_or_init(|| {
+            Regex::new(r"^python\d*(?:\.\d+)?-(?P<name>.+)$").expect("static regex")
+        });
         let caps = py_re.captures(req).ok().flatten()?;
         let module = caps
             .get(1)
@@ -2833,33 +2866,85 @@ impl PythonCheck {
             }
             let content = pkg.read_file(&pkgfile.name);
             let code = strip_strings_and_comments(&content);
+            // A parenthesised `from` import spans lines; join the
+            // lines while parens are open so the submodule names
+            // on continuation lines are recorded too. String and
+            // comment parens are already blanked above, so a raw
+            // paren count is safe here.
+            let mut logical = String::new();
+            let mut depth: i32 = 0;
             for line in code.lines() {
-                Self::scan_import_line(line, &mut out);
+                if depth > 0 {
+                    logical.push(' ');
+                }
+                logical.push_str(line);
+                depth += line.chars().filter(|c| *c == '(').count() as i32
+                    - line.chars().filter(|c| *c == ')').count() as i32;
+                if depth <= 0 {
+                    depth = 0;
+                    Self::scan_import_line(&logical, &mut out);
+                    logical.clear();
+                }
+            }
+            if !logical.is_empty() {
+                Self::scan_import_line(&logical, &mut out);
             }
         }
         out
     }
 
+    /// The remainder after an `import`/`from` verb plus following
+    /// whitespace -- any whitespace, not just a space, since
+    /// Python allows tabs after the verb. `None` when the verb
+    /// is not followed by whitespace, so `importfoo` is no import.
+    fn strip_import_verb<'a>(line: &'a str, verb: &str) -> Option<&'a str> {
+        let rest = line.strip_prefix(verb)?;
+        let rest = rest.strip_prefix(|c: char| c.is_whitespace())?;
+        Some(rest.trim_start())
+    }
+
+    /// Split `rest` at a whitespace-delimited `import` keyword:
+    /// (module part, names part), both trimmed. `None` when there
+    /// is no such keyword (the `import` inside `importlib` or
+    /// `foo.import` is not one).
+    fn split_import_keyword(rest: &str) -> Option<(&str, &str)> {
+        for (idx, _) in rest.match_indices("import") {
+            let before_ok = rest[..idx]
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_whitespace());
+            let after = &rest[idx + "import".len()..];
+            let after_ok =
+                after.is_empty() || after.chars().next().is_some_and(|c| c.is_whitespace());
+            if before_ok && after_ok {
+                return Some((rest[..idx].trim_end(), after.trim_start()));
+            }
+        }
+        None
+    }
+
     fn scan_import_line(line: &str, out: &mut HashSet<String>) {
         let line = line.trim_start();
-        if let Some(rest) = line.strip_prefix("import ") {
+        if let Some(rest) = Self::strip_import_verb(line, "import") {
             // `import a.b, c as d`
             for part in rest.split(',') {
                 let dotted = part.split_whitespace().next().unwrap_or("");
                 Self::push_module_path(dotted, out);
             }
-        } else if let Some(rest) = line.strip_prefix("from ") {
+        } else if let Some(rest) = Self::strip_import_verb(line, "from") {
             // `from a.b import c, d as e`: the statement imports `a.b`
             // and each named submodule (`a.b.c`), so record both —
             // `from azure.mgmt import network` proves
             // `azure.mgmt.network`, not the shared `azure` namespace.
-            let mut halves = rest.splitn(2, " import ");
-            let dotted = halves.next().unwrap_or("").trim();
+            let (dotted, names) = match Self::split_import_keyword(rest) {
+                Some((d, n)) => (d, Some(n)),
+                None => (rest.trim(), None),
+            };
             if dotted.starts_with('.') {
                 return;
             }
             if Self::push_module_path(dotted, out)
-                && let Some(names) = halves.next()
+                && let Some(names) = names
             {
                 for part in names.split(',') {
                     let name = part
@@ -3061,6 +3146,31 @@ mod tests {
             &HashMap::new(),
         );
         assert_eq!(got, vec!["python3-jaraco-context".to_string()]);
+    }
+
+    #[test]
+    fn leftover_sees_dotted_flavour_spelling() {
+        // A dotted-flavour require (`python3.13-foo`) is a
+        // leftover like the plain spelling, not a shape to skip;
+        // a dotted-flavour require of a declared distribution is
+        // satisfied like any other.
+        let reqs = PythonCheck::parse_requirements(
+            "Metadata-Version: 2.1\nRequires-Dist: dulwich\n",
+            true,
+            "3.13",
+        );
+        let got = PythonCheck::leftover_require_strings(
+            &["python3.13-foo".to_string()],
+            &[(&reqs, "3.13")],
+            &HashMap::new(),
+        );
+        assert_eq!(got, vec!["python3.13-foo".to_string()]);
+        let got = PythonCheck::leftover_require_strings(
+            &["python3.13-dulwich".to_string()],
+            &[(&reqs, "3.13")],
+            &HashMap::new(),
+        );
+        assert!(got.is_empty(), "unexpected leftovers: {got:?}");
     }
 
     #[test]
@@ -5308,6 +5418,11 @@ mod tests {
             }
             _ => panic!("expected a ceiling"),
         }
+        // `!=` is neither a floor nor a ceiling.
+        assert!(matches!(
+            PythonCheck::leaf_ceiling(&leaf(RPMSENSE_LESS | RPMSENSE_GREATER, Some("2.0"))),
+            LeafCeiling::Versioned
+        ));
         match PythonCheck::leaf_ceiling(&leaf(RPMSENSE_EQUAL, Some("2.0"))) {
             LeafCeiling::Ceiling(c) => {
                 assert!(c.inclusive);
@@ -5315,6 +5430,25 @@ mod tests {
             }
             _ => panic!("expected a ceiling"),
         }
+    }
+
+    #[test]
+    fn leaf_floor_not_equal_is_versioned_not_a_floor() {
+        // `!=` (LESS|GREATER) admits versions below the point, so
+        // it must not credit a floor at it.
+        use crate::pkg::dep::{RPMSENSE_GREATER, RPMSENSE_LESS};
+        let leaf = crate::pkg::dep::DepLeaf {
+            name: "python3.13dist(dulwich)".to_string(),
+            qualifier: None,
+            flags: RPMSENSE_LESS | RPMSENSE_GREATER,
+            epoch: None,
+            version: Some("1.0".to_string()),
+            release: None,
+        };
+        assert!(matches!(
+            PythonCheck::leaf_floor(&leaf),
+            LeafFloor::Versioned
+        ));
     }
 
     #[test]
@@ -5596,6 +5730,21 @@ mod tests {
         let reqs = PythonCheck::parse_requirements(content, true, "3.13");
         let names: Vec<&str> = reqs.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["lowerreq", "realreq"]);
+    }
+
+    #[test]
+    fn metadata_folded_requires_dist_keeps_continuation() {
+        // A folded specifier keeps its second half: the floor and
+        // the ceiling both come from the joined range, not from a
+        // truncation at the fold.
+        let content = "Metadata-Version: 2.1\nName: demo\nRequires-Dist: foo (>=1.0,\n <2.0)\n\n";
+        let reqs = PythonCheck::parse_requirements(content, true, "3.13");
+        assert_eq!(reqs.len(), 1);
+        let (floor, _) = PythonCheck::metadata_floor(&reqs[0]).expect("floor");
+        assert_eq!(floor.release, vec![1, 0]);
+        let ceiling = PythonCheck::metadata_ceiling(&reqs[0]).expect("ceiling");
+        assert_eq!(ceiling.version.release, vec![2, 0]);
+        assert!(!ceiling.inclusive);
     }
 
     #[test]
@@ -5989,6 +6138,10 @@ mod tests {
             "x = 'import not_code'",
             "importlib.import_module('dynamic')",
             "from __future__ import annotations",
+            // Tabs separate verbs and keywords like spaces do.
+            "import\tfoo",
+            "from\tbar import baz",
+            "from bar\timport baz",
         ] {
             PythonCheck::scan_import_line(line, &mut imports);
         }
@@ -6003,11 +6156,45 @@ mod tests {
             "importlib",
             "__future__",
             "__future__.annotations",
+            "foo",
+            "bar",
+            "bar.baz",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         assert_eq!(imports, want);
+    }
+
+    #[test]
+    fn scan_imports_joins_parenthesised_from_imports() {
+        // A multi-line parenthesised `from` import proves the
+        // submodules on its continuation lines, not just the base
+        // module: `azure.mgmt.network` must be recorded.
+        use crate::pkg::pkgfile::PkgFile;
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let write = |pkg: &Pkg, name: &str, content: &str| {
+            let disk = pkg.dir_name().join(name.trim_start_matches('/'));
+            std::fs::create_dir_all(disk.parent().unwrap()).expect("test dirs");
+            std::fs::write(&disk, content).expect("test file");
+            PkgFile {
+                name: name.to_string(),
+                ..Default::default()
+            }
+        };
+        pkg.files = vec![write(
+            &pkg,
+            "/usr/lib/python3.13/site-packages/proofpkg/__init__.py",
+            "from azure.mgmt import (\n    network,\n    resource\n)\n",
+        )];
+        let got = PythonCheck::scan_imports(&pkg);
+        let want: HashSet<String> = ["azure.mgmt", "azure.mgmt.network", "azure.mgmt.resource"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(got, want);
     }
 
     #[test]
