@@ -54,7 +54,7 @@ indexmap = "2"
 # lookbehind and backreferences; the `regex` crate rejects those, so a pure-Rust
 # backtracking engine is required to honour existing filters byte-for-byte.
 # fancy-regex wraps `regex` for the fast path and stays unsafe-free.
-fancy-regex = "0.19"
+fancy-regex = "0.20"
 log = "0.4"
 # Progress reporting (`tracing::info!` in `worker.rs`, upstream rpmlint#255).
 # This crate only emits events; the subscriber is installed by the binary.
