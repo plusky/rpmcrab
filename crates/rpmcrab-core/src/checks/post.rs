@@ -1485,12 +1485,24 @@ impl PostCheck {
                 None => return false,
             };
             // The last command segment: separators outside quotes do
-            // not split, so `FOO='a;b' sh` reads its last segment as
-            // the assignment plus `sh`, not the stray `b`.
+            // not split, and a backslash escapes the next character
+            // (except inside single quotes, where it is literal), so
+            // an escaped separator does not split either: `FOO='a;b'
+            // sh` reads its last segment as the assignment plus `sh`,
+            // not the stray `b`.
             fn last_segment(s: &str) -> &str {
                 let mut start = 0;
                 let mut quote: Option<char> = None;
+                let mut escaped = false;
                 for (i, c) in s.char_indices() {
+                    if escaped {
+                        escaped = false;
+                        continue;
+                    }
+                    if c == '\\' && quote != Some('\'') {
+                        escaped = true;
+                        continue;
+                    }
                     match quote {
                         Some(q) => {
                             if c == q {
@@ -4212,6 +4224,26 @@ mod tests {
         for script in [
             "sh <<EOF \"a<<b\" \nrm -rf /foo\nEOF\n",
             "sh <<EOF # don't << x\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "shell-fed body must fire: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_escaped_separator_still_fires() {
+        // An escaped separator or quote does not split or toggle:
+        // `sh -c 'echo' \; foo` is one sh command, and a `;` inside
+        // a quoted span held open by an escaped quote stays quoted,
+        // so the body fires (issue #1457).
+        for script in [
+            "sh -c 'echo' \\; foo <<'EOF'\nrm -rf /foo\nEOF\n",
+            "sh \"a\\\";b\" <<'EOF'\nrm -rf /foo\nEOF\n",
         ] {
             let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
             assert!(
