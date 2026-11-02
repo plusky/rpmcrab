@@ -2576,9 +2576,16 @@ impl SpecCheck {
         }
         *self.section.entry(sec.clone()).or_insert(0) += 1;
         if sec == "package" || sec == "files" {
-            let rest = self
-                .filelist_re
-                .replace_all(&line[end.saturating_sub(1)..], "");
+            // Back over the separator by one *character*, not one
+            // byte: the section regex matches multibyte whitespace
+            // (e.g. NBSP) after the keyword, and `end - 1` would
+            // land mid-character and panic on the slice below.
+            let rest_start = line[..end]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let rest = self.filelist_re.replace_all(&line[rest_start..], "");
             self.current_package = self
                 .pkgname_re
                 .captures(rest.as_ref())
@@ -6195,6 +6202,26 @@ mod tests {
     }
 
     // Upstream rpmlint#554: NBSP in prose is not a syntax hazard.
+    #[test]
+    fn nbsp_after_section_keyword_does_not_panic() {
+        // The section regexes match a multibyte whitespace
+        // separator (NBSP) after the keyword; backing over it by
+        // one byte used to slice mid-character and panic.
+        let spec = "Name: foo\nBuildArch: noarch\n%files\u{a0}\n%{_libdir}/foo\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "libdir-macro-in-noarch-package");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        // Same shape on a `%package` header: the run must complete
+        // and the subpackage header must parse.
+        let spec = "Name: foo\nBuildArch: noarch\n%package\u{a0}sub\nSummary: x\n%files -n sub\n%{_libdir}/foo\n";
+        let results = run_mini(spec);
+        assert_eq!(
+            lines_for(&results, "libdir-macro-in-noarch-package").len(),
+            1,
+            "results: {results:?}"
+        );
+    }
+
     #[test]
     fn nbsp_in_description_is_quiet() {
         let results = run_mini("Name: foo\n%description\nhot\u{a0} latte\n");
