@@ -119,6 +119,13 @@ impl Renderer for JsonRenderer {
                 "warnings": lint.filter().printed(Level::Warning),
                 "filtered": lint.filter().filtered_out,
                 "classes": lint.filter().class_counts(),
+                // The footer's validated counters, not the CLI argument
+                // count in top-level "packages": a directory argument
+                // (1 arg, N packages) or an `-i` expansion makes them
+                // differ, and a clean run otherwise names no validated
+                // count anywhere in the document.
+                "packages": lint.packages_checked(),
+                "specfiles": lint.specfiles_checked,
                 "exit_code": lint.exit_code(),
             },
         });
