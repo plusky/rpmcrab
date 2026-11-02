@@ -774,6 +774,37 @@ impl PostCheck {
     /// `systemd-tmpfiles` are declarative tmpfiles.d entries, not scriptlet
     /// scratch use, and do not fire either. Ledgered in
     /// tests/parity/divergences.toml.
+    /// The code portion of a line: everything before a `#`
+    /// comment, where `#` starts a comment only at a word start
+    /// outside quotes (the `delimiters_in_line` rule). A naive
+    /// split on `#` would truncate at a quoted `#` and hide a
+    /// heredoc opener later on the line.
+    fn code_before_comment(line: &str) -> &str {
+        let bytes = line.as_bytes();
+        let (mut sq, mut dq) = (false, false);
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' if !sq => {
+                    i += 2;
+                    continue;
+                }
+                b'\'' if !dq => sq = !sq,
+                b'"' if !sq => dq = !dq,
+                b'#' if !sq
+                    && !dq
+                    && (i == 0
+                        || matches!(bytes[i - 1], b' ' | b'\t' | b';' | b'|' | b'&' | b'(')) =>
+                {
+                    return &line[..i];
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        line
+    }
+
     fn uses_tmp_literal(script: &str) -> bool {
         // Pending heredocs in the order their bodies appear:
         // (delimiter, body is fed to `systemd-tmpfiles`, `<<-` form).
@@ -822,8 +853,11 @@ impl PostCheck {
             if Self::line_has_tmp_literal(&logical) {
                 return true;
             }
-            // The reference's `^[^#]*` prefix cannot cross a `#`.
-            let code = logical.split('#').next().unwrap_or("");
+            // The reference's `^[^#]*` prefix cannot cross a `#`
+            // comment -- but a quoted `#` is not a comment start,
+            // so strip comments quote-awarely or a tmpfiles
+            // heredoc opener after one is hidden.
+            let code = Self::code_before_comment(&logical);
             pending.extend(Self::heredoc_delimiters(code, &mut scan));
         }
         false
@@ -859,7 +893,12 @@ impl PostCheck {
             .filter_map(|c| c.get(1))
             .any(|m| {
                 let token = m.as_str();
-                !token.contains('*') && !token.contains('[') && !token.contains("XXX")
+                // `?` is a glob wildcard like `*`/`[`: a pattern,
+                // not a predictable creation target.
+                !token.contains('*')
+                    && !token.contains('[')
+                    && !token.contains('?')
+                    && !token.contains("XXX")
             })
     }
 
@@ -1096,12 +1135,15 @@ impl PostCheck {
             j += 1;
         }
         let start = j;
+        // Same delimiter characters as the main scanner: `-`, `.`
+        // and `:` are ordinary delimiter characters (`<<EOF:2`).
         while j < bytes.len()
-            && (bytes[j].is_ascii_alphanumeric() || matches!(bytes[j], b'_' | b'-' | b'.'))
+            && (bytes[j].is_ascii_alphanumeric() || matches!(bytes[j], b'_' | b'-' | b'.' | b':'))
         {
             j += 1;
         }
-        if j == start || !(bytes[start].is_ascii_alphabetic() || bytes[start] == b'_') {
+        // Bash accepts digit-start delimiters (`<<9`) here too.
+        if j == start {
             return None;
         }
         Some((code[start..j].to_string(), strip_tabs, j))
@@ -1183,11 +1225,9 @@ impl PostCheck {
                     )
             }
             fn finish(word: String) -> Option<String> {
-                if word.is_empty() || word.starts_with(|c: char| c.is_ascii_digit()) {
-                    None
-                } else {
-                    Some(word)
-                }
+                // Bash accepts digit-start delimiters (`<<9`); the
+                // word is the full shell word either way.
+                if word.is_empty() { None } else { Some(word) }
             }
             // The quoted text up to the matching closing quote.
             fn quoted_word(s: &str, q: char) -> Option<String> {
@@ -1675,9 +1715,9 @@ impl PostCheck {
                     // Bundled short flags parse left-to-right: a
                     // takes-argument short consumes the rest of the
                     // bundle as its value, or the next word when
-                    // last in the bundle. Unknown short flags are
-                    // skipped, unlike unknown long flags, which end
-                    // recognition. `--` and a lone `-` end
+                    // last in the bundle. Unknown short flags end
+                    // recognition, like unknown long flags. `--` and
+                    // a lone `-` end
                     // flag parsing; assignments still precede the
                     // command after them.
                     while word == "-" || (word.starts_with('-') && word.len() > 1) {
@@ -2479,7 +2519,10 @@ impl PostCheck {
                 ("chkfontpath", vec!["chkfontpath", "/usr/sbin/chkfontpath"]),
                 ("rpm-helper", vec!["rpm-helper"]),
             ] {
-                let re = Regex::new(&format!(r"(?m)^[^#]+{name}")).expect("prereq regex");
+                // `[^#]*` (not `+`): a line starting exactly with
+                // the tool name is an invocation too; a `#` first
+                // still keeps comment lines quiet.
+                let re = Regex::new(&format!(r"(?m)^[^#]*{name}")).expect("prereq regex");
                 if is_match(&re, script)
                     && !bins
                         .iter()
@@ -3104,6 +3147,13 @@ mod tests {
     }
 
     #[test]
+    fn tmp_question_glob_is_not_flagged() {
+        // `?` is a single-character glob wildcard: the token
+        // matches existing files instead of naming a target.
+        assert!(!tmp_finding("echo hi > /tmp/file?"));
+    }
+
+    #[test]
     fn var_tmp_literal_is_flagged() {
         assert!(tmp_finding("echo hi > /var/tmp/foo"));
     }
@@ -3124,6 +3174,35 @@ mod tests {
             !found.iter().any(|(_, f, _)| f == "use-tmp-in-%pre"),
             "must stay silent: {found:?}"
         );
+    }
+
+    #[test]
+    fn tmpfiles_heredoc_digit_delimiter_is_not_flagged() {
+        // A digit-start delimiter (`<<9`) is a heredoc for the tmp
+        // scanner too: the tmpfiles entry stays exempt.
+        let script = "systemd-tmpfiles --create - <<9\nd /tmp/myapp 0755 root root -\n9";
+        assert!(!tmp_finding(script));
+    }
+
+    #[test]
+    fn tmpfiles_heredoc_colon_delimiter_terminates() {
+        // A `:` delimiter (`<<EOF:2`) must terminate in the tmp
+        // scan too: otherwise the pending heredoc never drains and
+        // swallows a later genuine /tmp use as exempt.
+        let script = "systemd-tmpfiles --create - <<EOF:2\nd /tmp/myapp 0755 root root -\nEOF:2\necho hi > /tmp/after";
+        assert!(tmp_finding(script));
+    }
+
+    #[test]
+    fn tmpfiles_heredoc_after_quoted_hash_is_not_flagged() {
+        // A quoted `#` before the opener is not a comment start:
+        // the tmpfiles heredoc still exempts its entries, and a
+        // later genuine /tmp use still fires.
+        let script =
+            "echo \"a#b\"; systemd-tmpfiles --create - <<EOF\nd /tmp/myapp 0755 root root -\nEOF";
+        assert!(!tmp_finding(script));
+        let script = "echo \"a#b\"; systemd-tmpfiles --create - <<EOF\nd /tmp/myapp 0755 root root -\nEOF\necho hi > /tmp/after";
+        assert!(tmp_finding(script));
     }
 
     #[test]
@@ -3940,6 +4019,20 @@ mod tests {
             !found
                 .iter()
                 .any(|(_, f, _)| f == "dangerous-command-in-%post")
+        );
+    }
+
+    #[test]
+    fn dangerous_command_in_digit_delimiter_heredoc_body_is_silent() {
+        // Bash accepts a digit-start delimiter (`<<9`); the body is
+        // written text, not executed code, so it stays blanked.
+        let script = "cat > /var/run/x <<9\nrm -rf /foo\n9\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+            "must stay silent: {found:?}"
         );
     }
 
@@ -5546,6 +5639,18 @@ mod tests {
         assert_eq!(cmds, vec!["update-mime-database"]);
     }
 
+    #[test]
+    fn no_prereq_on_chkfontpath_at_column_zero_is_flagged() {
+        // The tool name at column 0 is an invocation, not a
+        // comment: the `[^#]*` prefix must allow it.
+        let found = check().check_scriptlet("/bin/sh", "chkfontpath --add /x", "%post", &[], &[]);
+        assert!(found.iter().any(|(l, f, d)| *l == Level::Error
+            && f == "no-prereq-on"
+            && d == &vec!["chkfontpath".to_string()]));
+        // A comment line mentioning the tool stays quiet.
+        let found = check().check_scriptlet("/bin/sh", "# chkfontpath --add /x", "%post", &[], &[]);
+        assert!(!found.iter().any(|(_, f, _)| f == "no-prereq-on"));
+    }
     #[test]
     fn no_prereq_on_chkfontpath_is_flagged() {
         let found = check().check_scriptlet("/bin/sh", " chkfontpath --add /x", "%post", &[], &[]);
