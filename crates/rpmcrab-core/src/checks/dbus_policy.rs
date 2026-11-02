@@ -59,14 +59,21 @@ fn escape_xml_attr(s: &str) -> String {
 }
 
 /// Record an `<allow>` or `<deny>` element into the current `<policy>`.
-fn push_element(e: &quick_xml::events::BytesStart<'_>, current: &mut Option<PolicyBlock>) {
+/// An attribute value that fails to resolve (e.g. an undefined entity
+/// reference) is a parse error, not an empty value: defaulting it
+/// would silently rewrite the rule (a present-but-empty destination
+/// reads as "destination given").
+fn push_element(
+    e: &quick_xml::events::BytesStart<'_>,
+    current: &mut Option<PolicyBlock>,
+) -> Result<(), String> {
     let name = e.name();
     let kind: &'static str = if name.as_ref() == "allow" {
         "allow"
     } else if name.as_ref() == "deny" {
         "deny"
     } else {
-        return;
+        return Ok(());
     };
     let tag = name.as_ref().to_owned();
     let mut attrs = Vec::new();
@@ -75,7 +82,7 @@ fn push_element(e: &quick_xml::events::BytesStart<'_>, current: &mut Option<Poli
         let val = attr
             .normalized_value(quick_xml::XmlVersion::Implicit1_0)
             .map(|v| v.into_owned())
-            .unwrap_or_default();
+            .map_err(|err| err.to_string())?;
         attrs.push((key, val));
     }
     // Document order with XML-escaped values, byte-identical to minidom's
@@ -90,6 +97,7 @@ fn push_element(e: &quick_xml::events::BytesStart<'_>, current: &mut Option<Poli
     if let Some(block) = current {
         block.elems.push((kind, PolicyElement { attrs, xml }));
     }
+    Ok(())
 }
 
 /// One `<policy>` element: whether it is scoped to named subjects (a
@@ -125,12 +133,19 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
             Ok(Event::Start(ref e)) => {
                 open.push(e.name().as_ref().to_owned());
                 if e.name().as_ref() == "policy" {
+                    // A nested `<policy>` is malformed input, but it
+                    // must not discard the outer block's rules: push
+                    // the outer block first, as the reference's flat
+                    // iteration still sees those rules.
+                    if let Some(block) = current.take() {
+                        policies.push(block);
+                    }
                     current = Some(PolicyBlock {
                         subject_scoped: policy_subject_scoped(e),
                         elems: Vec::new(),
                     });
                 } else {
-                    push_element(e, &mut current);
+                    push_element(e, &mut current)?;
                 }
             }
             Ok(Event::Empty(ref e)) => {
@@ -141,7 +156,19 @@ fn check_content(content: &str) -> Result<Vec<(Level, &'static str, String)>, St
                         elems: Vec::new(),
                     });
                 } else {
-                    push_element(e, &mut current);
+                    push_element(e, &mut current)?;
+                }
+            }
+            // An entity reference in text content: predefined and
+            // character references are valid (and the text itself is
+            // ignored here); anything else is undefined, and the
+            // reference raises on it instead of ignoring it.
+            Ok(Event::GeneralRef(ref e)) => {
+                let name: &str = e;
+                if !name.starts_with('#')
+                    && !matches!(name, "amp" | "lt" | "gt" | "quot" | "apos")
+                {
+                    return Err(format!("undefined entity {name:?}"));
                 }
             }
             Ok(Event::End(ref e)) => {
@@ -483,6 +510,45 @@ mod tests {
 </busconfig>"#;
         let findings = check_content(xml).expect("parses");
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn undefined_entities_are_parse_errors() {
+        // An undefined entity in an attribute value must fail the
+        // parse, not become a present-but-empty destination.
+        let xml = r#"<busconfig><policy user="root">
+<allow send_destination="&foo;"/>
+</policy></busconfig>"#;
+        assert!(check_content(xml).is_err());
+        // An undefined entity reference in text content likewise.
+        let xml = r#"<busconfig><policy user="root">
+&foo;
+<allow send_destination="org.foo.Bar"/>
+</policy></busconfig>"#;
+        assert!(check_content(xml).is_err());
+        // Predefined and character references in text stay valid.
+        let xml = r#"<busconfig><policy user="root">
+&amp; &#65;
+<allow send_destination="org.foo.Bar"/>
+</policy></busconfig>"#;
+        assert!(check_content(xml).is_ok());
+    }
+
+    #[test]
+    fn nested_policy_keeps_outer_block_rules() {
+        let xml = r#"<busconfig><policy user="root">
+<allow send_interface="org.foo.Bar"/>
+<policy user="other">
+<allow send_destination="org.foo.Bar"/>
+</policy>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "outer block's rule must survive the nested policy: {findings:?}"
+        );
     }
 
     #[test]

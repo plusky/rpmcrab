@@ -182,6 +182,16 @@ fn walk_xml(text: &str) -> Option<ComponentShape> {
         if AppDataCheck::has_undefined_entity(&text) {
             return None;
         }
+        // Text outside the root element is Misc, which allows only
+        // whitespace: leading or trailing junk is malformed, not
+        // element content.
+        if stack.is_empty()
+            && !text
+                .trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
+                .is_empty()
+        {
+            return None;
+        }
         if i >= n {
             break;
         }
@@ -198,12 +208,16 @@ fn walk_xml(text: &str) -> Option<ComponentShape> {
             continue;
         }
 
-        // Closing tag
+        // Closing tag: an end tag allows only whitespace between
+        // its name and `>`, and the `>` must actually be present.
         if chars[i] == '/' {
             i += 1;
             let name = tag_name(&chars, &mut i);
-            while i < n && chars[i] != '>' {
+            while i < n && matches!(chars[i], ' ' | '\t' | '\n' | '\r') {
                 i += 1;
+            }
+            if i >= n || chars[i] != '>' {
+                return None;
             }
             i += 1; // skip '>'
             if stack.pop().as_deref() != Some(name.as_str()) {
@@ -248,6 +262,13 @@ fn walk_xml(text: &str) -> Option<ComponentShape> {
         if stack.is_empty() {
             if root_seen {
                 return None; // second root element
+            }
+            // The validator requires a `<component>` root, with the
+            // legacy `<application>` root also accepted (pinned by
+            // `legacy_application_root_without_name_is_silent`); any
+            // other root element name is malformed for this check.
+            if name != "component" && name != "application" {
+                return None;
             }
             root_seen = true;
             component_type = type_attr(&chars[attrs_start..i]);
@@ -559,6 +580,29 @@ mod tests {
         assert!(children.contains("id"));
         assert!(children.contains("name"));
         assert!(!children.contains("component"));
+    }
+
+    #[test]
+    fn malformed_misc_and_end_tags_are_rejected() {
+        // Non-whitespace text before or after the root element.
+        assert!(walk_xml("junk<component/>").is_none());
+        assert!(walk_xml("<component/>junk").is_none());
+        assert!(walk_xml("  \n<component/>  \n").is_some());
+        // An end tag with no `>` at all.
+        assert!(walk_xml("<component><id>x</id></component").is_none());
+        // Junk inside an end tag.
+        assert!(walk_xml("<component><id>x</id></component junk>").is_none());
+        // Whitespace inside an end tag stays valid.
+        assert!(walk_xml("<component><id>x</id></component  >").is_some());
+    }
+
+    #[test]
+    fn non_component_root_is_rejected() {
+        assert!(walk_xml("<foo><id>x</id><metadata_license>y</metadata_license></foo>").is_none());
+        assert!(walk_xml("<foo/>").is_none());
+        assert!(walk_xml("<component><id>x</id></component>").is_some());
+        // The legacy `<application>` root stays accepted.
+        assert!(walk_xml("<application><id>x</id></application>").is_some());
     }
 
     #[test]

@@ -319,14 +319,25 @@ impl Canonicalizer {
                 validate_xml_chars(&uri)?;
                 push_decl(&mut scope_frame, None, &uri)?;
             } else if let Some(p) = key.strip_prefix("xmlns:") {
-                if p == "xml" {
-                    return Err(
-                        "XML parse error: reserved prefix (xml) must not be rebound".to_string()
-                    );
+                // Both `xml` and `xmlns` are reserved prefixes that
+                // must not be rebound.
+                if p == "xml" || p == "xmlns" {
+                    return Err(format!(
+                        "XML parse error: reserved prefix ({p}) must not be rebound"
+                    ));
                 }
                 let (uri, added) = self.expand_entities(value, 8)?;
                 self.charge_expansion(added)?;
                 validate_xml_chars(&uri)?;
+                // Namespaces 1.0 forbids binding a prefix to the
+                // empty URI (only the default namespace undeclares
+                // that way, via bare `xmlns=""`).
+                if uri.is_empty() {
+                    return Err(
+                        "XML parse error: prefix must not be bound to the empty namespace"
+                            .to_string(),
+                    );
+                }
                 push_decl(&mut scope_frame, Some(p), &uri)?;
             } else {
                 regular.push((key.clone(), value.clone()));
@@ -594,9 +605,12 @@ impl Canonicalizer {
                         i += 1;
                     }
                     let value = &inner[vstart..i];
-                    if i < bytes.len() {
-                        i += 1;
+                    if i >= bytes.len() {
+                        return Err(
+                            "XML parse error: unterminated entity value".to_string()
+                        );
                     }
+                    i += 1;
                     if !name.is_empty() {
                         if !is_valid_entity_name(name) {
                             return Err(format!("invalid entity name {name:?}"));
@@ -925,6 +939,24 @@ mod tests {
             dtd.push_str(&format!("<!ENTITY {} \"{}\">", w[1], body));
         }
         dtd
+    }
+
+    #[test]
+    fn malformed_namespace_and_entity_declarations_are_rejected() {
+        // The `xmlns` prefix itself is reserved and unbindable.
+        assert!(canon("<r xmlns:xmlns=\"urn:x\"/>").is_err());
+        // A prefix must not be bound to the empty URI.
+        assert!(canon("<r xmlns:p=\"\"/>").is_err());
+        // An entity value with no closing quote is not inserted.
+        assert!(canon("<!DOCTYPE r [<!ENTITY x \"abc]><r/>").is_err());
+        // The well-formed counterparts still canonicalize.
+        // C14N drops an unused namespace declaration and renders
+        // an empty element with a separate end tag.
+        assert_eq!(canon("<r xmlns:p=\"urn:x\"/>").unwrap(), "<r></r>");
+        assert_eq!(
+            canon("<!DOCTYPE r [<!ENTITY x \"abc\">]><r>&x;</r>").unwrap(),
+            "<r>abc</r>"
+        );
     }
 
     #[test]
