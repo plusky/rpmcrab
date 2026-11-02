@@ -13,6 +13,15 @@ submissions cannot use it: suppress the finding it names with
 addFilter instead.
 """
 
+source-archive-contains-lfs-pointer="""
+A source archive contains a git-lfs pointer stub instead of the
+file's real content: a small text file starting with the git-lfs
+version line and an oid sha256: line. Whatever reads the file during
+the build gets the pointer text, not the content, and fails. Report
+the stubs upstream and remove them (and the tests that need them), or
+ship the real files. Pointer names are cut to 1024 bytes, keeping head and tail around one ellipsis. Findings are capped at 25,000 per tag per source package; the stop
+log keeps 10 lines per kind per Source.
+"""
 source-archive-contains-vcs-metadata="""
 A source archive contains a version-control metadata tree (a .git,
 .svn, .hg or .bzr directory, or files directly inside a CVS
@@ -22,15 +31,6 @@ before packaging the archive; when the archive is produced by the
 service, drop the package-meta opt-in that keeps it. The finding only
 fires for sources the spec declares without an upstream URL, so
 metadata inside an upstream tarball stays quiet.
-"""
-source-archive-contains-lfs-pointer="""
-A source archive contains a git-lfs pointer stub instead of the
-file's real content: a small text file starting with the git-lfs
-version line and an oid sha256: line. Whatever reads the file during
-the build gets the pointer text, not the content, and fails. Report
-the stubs upstream and remove them (and the tests that need them), or
-ship the real files. Pointer names are cut to 1024 bytes, keeping head and tail around one ellipsis. Findings are capped at 25,000 per tag per source package; the stop
-log keeps 10 lines per kind per Source.
 """
 
 source-archive-contains-bidi-control="""
