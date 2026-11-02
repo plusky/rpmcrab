@@ -2107,10 +2107,27 @@ mod prebuilt {
                 None => {
                     if is_archive_or_compressed(bytes) {
                         if depth < MAX_DEPTH - 1 {
+                            // A member-nested compressed archive
+                            // costs one depth level, not two: the
+                            // decoder arm below supplies the level
+                            // for the compressed form, so a compressed
+                            // member enters at this depth and a plain
+                            // member at depth + 1 (issue #1428).
+                            let nested_depth = if decoder_kind(bytes).is_some() {
+                                depth
+                            } else {
+                                depth + 1
+                            };
                             // A nested archive that holds hits joins
                             // the run-scoped shipped records (issue
                             // #1389) with its own bytes' digest, like
                             // the old inspect_entry did.
+                            // A member-nested compressed archive
+                            // costs one depth level, not two: the
+                            // decoder arm below supplies the level
+                            // for the compressed form, so a compressed
+                            // member enters at this depth and a plain
+                            // member at depth + 1 (issue #1428).
                             let before = self.out.shipped.len();
                             self.walk_archive_buffer(
                                 bytes,
@@ -2120,7 +2137,7 @@ mod prebuilt {
                                     stream: raw_name,
                                 },
                                 mctx,
-                                depth + 1,
+                                nested_depth,
                                 prebuilt_active,
                             );
                             let hits = self.out.shipped.len() - before;
@@ -4723,6 +4740,38 @@ mod prebuilt_tests {
             "an archive record keeps the full chain: {:?}",
             outcome.archives
         );
+    }
+
+    #[test]
+    fn prebuilt_nested_tar_gz_depth_counts_one_level() {
+        // A member-nested .tar.gz costs one depth level, not two:
+        // five nested .tar.gz members still reach the ELF, and a
+        // sixth is refused (issue #1428). Before the fix each
+        // member-nested compressed archive cost two levels (member
+        // +1 and decoder +1), so only two reached it.
+        let mut five = ELF.to_vec();
+        for i in 0..5 {
+            five = gzip_bytes(&tarball(&[(format!("level{i}.tar.gz").as_str(), &five)]));
+        }
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar.gz", five),
+        ]);
+        let findings = run_source(&pkg);
+        let lines = prebuilt_lines(&findings);
+        assert_eq!(lines.len(), 1, "all: {findings:?}");
+        assert!(lines[0].contains("level0.tar.gz"), "{}", lines[0]);
+        assert!(lines[0].ends_with("ELF binary"), "{}", lines[0]);
+        let mut six = ELF.to_vec();
+        for i in 0..6 {
+            six = gzip_bytes(&tarball(&[(format!("level{i}.tar.gz").as_str(), &six)]));
+        }
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar.gz", six),
+        ]);
+        let findings = run_source(&pkg);
+        assert!(prebuilt_lines(&findings).is_empty(), "all: {findings:?}");
     }
 
     #[test]
