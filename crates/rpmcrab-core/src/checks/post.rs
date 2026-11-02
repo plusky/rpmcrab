@@ -1416,8 +1416,43 @@ impl PostCheck {
             fn trim(w: &str) -> &str {
                 w.trim_matches(['"', '\''].as_slice())
             }
+            // Split on whitespace outside quotes: a quoted span is
+            // one word, so `FOO='a b' sh` reads as the assignment
+            // plus `sh`, not as the assignment plus the stray `b`.
+            fn split_words(s: &str) -> Vec<&str> {
+                let mut words = Vec::new();
+                let mut start: Option<usize> = None;
+                let mut quote: Option<char> = None;
+                for (i, c) in s.char_indices() {
+                    match quote {
+                        Some(q) => {
+                            if c == q {
+                                quote = None;
+                            }
+                        }
+                        None => match c {
+                            '\'' | '"' => {
+                                quote = Some(c);
+                                start.get_or_insert(i);
+                            }
+                            _ if c.is_whitespace() => {
+                                if let Some(st) = start.take() {
+                                    words.push(&s[st..i]);
+                                }
+                            }
+                            _ => {
+                                start.get_or_insert(i);
+                            }
+                        },
+                    }
+                }
+                if let Some(st) = start.take() {
+                    words.push(&s[st..]);
+                }
+                words
+            }
             let mut words: std::collections::VecDeque<&str> =
-                last.split_whitespace().map(trim).collect();
+                split_words(last).into_iter().map(trim).collect();
             let mut word = match words.pop_front() {
                 Some(w) => w,
                 None => return false,
@@ -1476,6 +1511,9 @@ impl PostCheck {
                     // `--default-signal` and `--block-signal` take
                     // only an attached `=value` argument, so a
                     // following word is never their argument.
+                    // An unknown long flag ends recognition: env
+                    // rejects it, so the command never runs and the
+                    // body is never executed.
                     // `-S`/`--split-string` insert their argument's
                     // words into argv, so a separate-form argument
                     // flows through the same flag, assignment and
@@ -1513,6 +1551,23 @@ impl PostCheck {
                                     {
                                         words.push_front(w);
                                     }
+                                } else if !matches!(
+                                    opt,
+                                    "--unset"
+                                        | "--chdir"
+                                        | "--argv0"
+                                        | "--default-signal"
+                                        | "--block-signal"
+                                        | "--ignore-environment"
+                                        | "--null"
+                                        | "--debug"
+                                        | "--help"
+                                        | "--version"
+                                ) {
+                                    // Unknown long flag: env rejects
+                                    // it, so the command never runs
+                                    // and the body is never executed.
+                                    return false;
                                 }
                                 word = match words.pop_front() {
                                     Some(w) => w,
@@ -1530,17 +1585,51 @@ impl PostCheck {
                                         None => return false,
                                     };
                                 }
-                                // `--split-string` (separate form),
-                                // `--default-signal` and
-                                // `--block-signal` take no separate
-                                // argument; any other long flag is
-                                // skipped permissively.
-                                _ => {
+                                // `--split-string` (separate form):
+                                // the next word is the split-string
+                                // argument; split it into argv words
+                                // like the attached form.
+                                "--split-string" => {
+                                    let Some(arg) = words.pop_front() else {
+                                        return false;
+                                    };
+                                    for w in arg
+                                        .split_whitespace()
+                                        .map(trim)
+                                        .collect::<Vec<_>>()
+                                        .into_iter()
+                                        .rev()
+                                    {
+                                        words.push_front(w);
+                                    }
                                     word = match words.pop_front() {
                                         Some(w) => w,
                                         None => return false,
                                     };
                                 }
+                                // Known no-separate-argument long
+                                // flags: `--default-signal` and
+                                // `--block-signal` take only an
+                                // attached `=value`, and
+                                // `--ignore-environment`, `--null`,
+                                // `--debug`, `--help` and `--version`
+                                // take none. Any other long flag is
+                                // not a GNU env flag: env rejects it,
+                                // so the command never runs and the
+                                // body is never executed.
+                                "--default-signal"
+                                | "--block-signal"
+                                | "--ignore-environment"
+                                | "--null"
+                                | "--debug"
+                                | "--help"
+                                | "--version" => {
+                                    word = match words.pop_front() {
+                                        Some(w) => w,
+                                        None => return false,
+                                    };
+                                }
+                                _ => return false,
                             }
                             continue;
                         }
@@ -1566,6 +1655,19 @@ impl PostCheck {
                                         let byte_idx = chars[ci].0 + c.len_utf8();
                                         let val = &bundle[byte_idx..];
                                         prepend = val.split_whitespace().map(trim).collect();
+                                    } else {
+                                        // Separate form: the next
+                                        // word is the split-string
+                                        // argument; split it into
+                                        // argv words like the
+                                        // attached form.
+                                        match words.pop_front() {
+                                            Some(arg) => {
+                                                prepend =
+                                                    arg.split_whitespace().map(trim).collect();
+                                            }
+                                            None => return false,
+                                        }
                                     }
                                     break;
                                 }
@@ -3781,6 +3883,57 @@ mod tests {
                     .iter()
                     .any(|(_, f, _)| f == "dangerous-command-in-%post"),
                 "non-shell env body stays blanked: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_quoted_assignment_still_fires() {
+        // A spaced quoted assignment value is one word: `FOO='a b'
+        // sh` feeds the shell, so the body fires; the tail of the
+        // quoted value must not misread as the command word.
+        for script in [
+            "FOO='a b' sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "FOO=\"a b\" sh <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "quoted-assignment shell-fed body must fire: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_env_unknown_long_flag_stays_blanked() {
+        // Known no-separate-argument long flags still feed the
+        // shell; an unknown long flag ends recognition (env rejects
+        // it, so the body is never executed) and the body stays
+        // blanked.
+        for script in [
+            "env --ignore-environment sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --null sh <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "known-long-flag shell-fed body must fire: {script}"
+            );
+        }
+        for script in [
+            "env --unknown sh <<'EOF'\nrm -rf /foo\nEOF\n",
+            "env --unknown=foo sh <<'EOF'\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                !found
+                    .iter()
+                    .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+                "unknown-long-flag body stays blanked: {script}"
             );
         }
     }
