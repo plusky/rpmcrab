@@ -191,7 +191,9 @@ fn self_var_assignment(line: &str) -> Option<String> {
     value = value.strip_suffix(';').unwrap_or(value).trim();
     value = value.strip_prefix(['"', '\'']).unwrap_or(value);
     value = value.strip_suffix(['"', '\'']).unwrap_or(value);
-    if value == "$0" {
+    // `${0}` is the same self reference as `$0` (the indirection
+    // check in `exec_switch` already treats both as self targets).
+    if value == "$0" || value == "${0}" {
         Some(var.to_string())
     } else {
         None
@@ -557,6 +559,17 @@ mod tests {
         }
         assert!(!is_polyglot_wrapper(
             "#!/bin/sh\nexec /bin/zsh \"$0\" \"$@\"\n"
+        ));
+    }
+
+    #[test]
+    fn wrapper_braced_self_var_indirection() {
+        // `${0}` binds the self variable just like `$0`, quoted or not.
+        assert!(is_polyglot_wrapper(
+            "#!/bin/sh\nargv0=${0}\nexec 'wish' \"$argv0\" -- \"$@\"\n"
+        ));
+        assert!(is_polyglot_wrapper(
+            "#!/bin/sh\nargv0=\"${0}\"\nexec 'wish' \"$argv0\" -- \"$@\"\n"
         ));
     }
 

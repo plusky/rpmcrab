@@ -208,7 +208,9 @@ impl Check for MenuCheck {
                     add_info(out, Level::Warning, pkg, "non-transparent-xpm", &[fname]);
                 }
             }
-            if fname.starts_with("/usr/lib64/menu") {
+            // Segment boundary: a sibling-prefix path such as
+            // `/usr/lib64/menubar/...` is not inside the menu dir.
+            if fname == "/usr/lib64/menu" || fname.starts_with("/usr/lib64/menu/") {
                 add_info(out, Level::Error, pkg, "menu-in-wrong-dir", &[fname]);
             }
         }
@@ -776,6 +778,35 @@ mod menu_icon_xdg_tests {
     /// but the compiled pattern is byte-identical, so it proves nothing.
     /// The mutation that genuinely adds a trailing `"` to the pattern
     /// needs an escaped normal string; these tests fail on that.
+    #[test]
+    fn sibling_prefix_of_menu_dir_is_quiet() {
+        let config = menu_test_config();
+        let mut pkg = menu_test_pkg();
+        let pkgfile = |name: &str| crate::pkg::pkgfile::PkgFile {
+            name: name.to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        };
+        // A sibling-prefix path draws no `menu-in-wrong-dir`.
+        pkg.files = vec![pkgfile("/usr/lib64/menubar/x")];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = MenuCheck::new(&config);
+        crate::check::Check::check_binary(&mut check, &pkg, &config, &mut out);
+        assert!(out.results().is_empty(), "unexpected: {:?}", out.results());
+        // A file genuinely under the menu dir still fires.
+        pkg.files = vec![pkgfile("/usr/lib64/menu/x")];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = MenuCheck::new(&config);
+        crate::check::Check::check_binary(&mut check, &pkg, &config, &mut out);
+        assert!(
+            out.results()
+                .iter()
+                .any(|(n, _)| n == "menu-in-wrong-dir"),
+            "unexpected: {:?}",
+            out.results()
+        );
+    }
+
     #[test]
     fn unquoted_icon_and_xdg_are_quiet() {
         let findings = menu_line_findings("foo.png", "true");

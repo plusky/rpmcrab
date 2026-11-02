@@ -257,6 +257,17 @@ impl PolkitCheck {
                         // document-order slot like a Start immediately
                         // followed by End.
                         actions.push((Self::action_id(e.attributes()), HashMap::new()));
+                    } else if matches!(e.name().as_ref(), "allow_any" | "allow_inactive" | "allow_active")
+                        && open.last().is_some_and(|top| top.in_defaults)
+                    {
+                        // A self-closing setting is the paired-empty
+                        // spelling: it inserts the empty value, exactly
+                        // as Start + End would, rather than dropping
+                        // the setting (which would default it to `no`).
+                        let setting = e.name().as_ref().to_owned();
+                        if let Some(top) = open.last() {
+                            actions[top.idx].1.insert(setting, String::new());
+                        }
                     }
                 }
                 Ok(Event::Eof) => {
@@ -585,6 +596,32 @@ mod tests {
         .unwrap();
         assert!(PolkitCheck::parse_actions(path.to_str().unwrap()).is_err());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn self_closing_setting_matches_paired_empty() {
+        for (name, body) in [
+            ("self", "<allow_any/>"),
+            ("paired", "<allow_any></allow_any>"),
+        ] {
+            let dir = std::env::temp_dir();
+            let path = dir.join(format!("rpmcrab-polkit-{name}.policy"));
+            std::fs::write(
+                &path,
+                format!(
+                    "<policyconfig><action id=\"org.foo.bar\"><defaults>{body}</defaults></action></policyconfig>"
+                ),
+            )
+            .unwrap();
+            let actions = PolkitCheck::parse_actions(path.to_str().unwrap()).expect("parse");
+            std::fs::remove_file(&path).ok();
+            assert_eq!(actions.len(), 1);
+            assert_eq!(
+                actions[0].1.get("allow_any").map(String::as_str),
+                Some(""),
+                "{name} spelling must insert the empty value"
+            );
+        }
     }
 
     #[test]

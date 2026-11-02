@@ -86,7 +86,12 @@ impl BuildRootAndDateCheck {
     /// tests pin the run day instead of depending on the machine clock.
     fn with_datetime(now: time::OffsetDateTime) -> Self {
         Self {
-            looksliketime: Regex::new(r"(2[0-3]|[01]?[0-9]):([0-5]?[0-9]):([0-5]?[0-9])")
+            // Anchored on digit boundaries with two-digit,
+            // range-valid components: an unanchored, single-digit
+            // tolerant pattern matches substrings of invalid times
+            // (`25:00:00` contains `5:00:00`, `23:45:67` contains
+            // `23:45:7`), mislabelling a date-only file.
+            looksliketime: Regex::new(r"(?<!\d)(2[0-3]|[01][0-9]):[0-5][0-9]:[0-5][0-9](?!\d)")
                 .expect("static"),
             istoday: Regex::new(&format_date(now)).expect("static"),
             today: now.date(),
@@ -434,6 +439,22 @@ mod tests {
             "detail: {}",
             results[0].1
         );
+    }
+
+    /// An invalid time next to today's date is not a time: the file
+    /// draws the date-only finding, not the date-and-time one.
+    #[test]
+    fn invalid_time_next_to_today_is_date_only() {
+        let now = OffsetDateTime::now_utc();
+        for time in ["25:00:00", "23:45:67", "9:30:00", "12:34:567"] {
+            let content = format!("built {} at {time}", format_date(now));
+            let results = findings_pinned("/usr/bin/with-date", &content, now, None);
+            assert_eq!(results.len(), 1, "{time}: unexpected: {results:?}");
+            assert_eq!(
+                results[0].0, "file-contains-current-date",
+                "{time}: {results:?}"
+            );
+        }
     }
 
     /// Today's date without a time triggers `file-contains-current-date` (W).
