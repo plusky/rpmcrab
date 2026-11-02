@@ -1409,7 +1409,78 @@ impl PostCheck {
         // sudo-wrapped and substitution shapes are not recognised
         // here and stay blanked.
         fn line_feeds_shell(line: &str) -> bool {
-            let before = match line.rfind("<<") {
+            // The last live heredoc opener on the line, with the
+            // delimiter scanner's quote/comment rules: a `<<` inside
+            // a quoted span or after a word-start `#` comment is not
+            // an opener, and `<<<` is a herestring, not a heredoc.
+            // Also reports whether the line ends with a quote still
+            // open: an unclosed line is a syntax error, so nothing on
+            // it executes and its body stays blanked (issue #1454 pin).
+            fn last_live_opener(line: &str) -> (Option<usize>, bool) {
+                let bytes = line.as_bytes();
+                let mut quote: Option<char> = None;
+                let mut escaped = false;
+                let mut last: Option<usize> = None;
+                let mut i = 0;
+                while i < bytes.len() {
+                    let c = bytes[i] as char;
+                    if escaped {
+                        escaped = false;
+                        i += 1;
+                        continue;
+                    }
+                    if c == '\\' && quote != Some('\'') {
+                        escaped = true;
+                        i += 1;
+                        continue;
+                    }
+                    match quote {
+                        Some(q) => {
+                            if c == q {
+                                quote = None;
+                            }
+                            i += 1;
+                        }
+                        None => {
+                            if c == '#'
+                                && (i == 0
+                                    || matches!(
+                                        bytes[i - 1] as char,
+                                        ' ' | '\t' | ';' | '|' | '&' | '('
+                                    ))
+                            {
+                                break;
+                            }
+                            if c == '\'' || c == '"' {
+                                quote = Some(c);
+                                i += 1;
+                                continue;
+                            }
+                            if c == '<' && i + 1 < bytes.len() && bytes[i + 1] == b'<' {
+                                if i + 2 < bytes.len() && bytes[i + 2] == b'<' {
+                                    i += 3;
+                                    continue;
+                                }
+                                last = Some(i);
+                                i += 2;
+                                continue;
+                            }
+                            i += 1;
+                        }
+                    }
+                }
+                (last, quote.is_some())
+            }
+            // A raw rfind can land inside a quoted fragment or a
+            // comment after the real opener, leaving `before` ending
+            // in an unmatched quote, which then reads as unclosed and
+            // blanks an executed body. Cut at the last live opener
+            // instead (issue #1457).
+            let (last, unclosed) = last_live_opener(line);
+            if unclosed {
+                return false;
+            }
+            let before = match last {
                 Some(i) => &line[..i],
                 None => return false,
             };
@@ -4128,6 +4199,26 @@ mod tests {
                     .iter()
                     .any(|(_, f, _)| f == "dangerous-command-in-%post"),
                 "unclosed-quote body stays blanked: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_last_live_opener_still_fires() {
+        // The fed line's last `<<` can sit inside a quoted fragment
+        // or a comment after the real opener: the cut must be at the
+        // last live opener, not the raw rfind, or an executed body
+        // stays blanked (issue #1457).
+        for script in [
+            "sh <<EOF \"a<<b\" \nrm -rf /foo\nEOF\n",
+            "sh <<EOF # don't << x\nrm -rf /foo\nEOF\n",
+        ] {
+            let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+            assert!(
+                found.iter().any(|(l, f, d)| *l == Level::Warning
+                    && f == "dangerous-command-in-%post"
+                    && d == &vec!["rm".to_string()]),
+                "shell-fed body must fire: {script}"
             );
         }
     }
