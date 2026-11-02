@@ -1761,8 +1761,8 @@ impl PostCheck {
                                 // flags: `--default-signal`,
                                 // `--block-signal` and `--ignore-signal`
                                 // take only an attached `=value`, and
-                                // `--ignore-environment`, `--null` and
-                                // `--debug` take none. `--help` and
+                                // `--ignore-environment`, `--null`, `--debug`
+                                // and `--list-signal-handling` take none. `--help` and
                                 // `--version` print and exit without
                                 // executing. Any other long flag is
                                 // not a GNU env flag: env rejects it,
@@ -1773,7 +1773,8 @@ impl PostCheck {
                                 | "--ignore-signal"
                                 | "--ignore-environment"
                                 | "--null"
-                                | "--debug" => {
+                                | "--debug"
+                                | "--list-signal-handling" => {
                                     word = match words.pop_front() {
                                         Some(w) => w,
                                         None => return false,
@@ -4273,6 +4274,30 @@ mod tests {
                 && f == "dangerous-command-in-%post"
                 && d == &vec!["rm".to_string()]),
             "shell-fed body must fire: {script}"
+        );
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_env_list_signal_handling_fires() {
+        // `--list-signal-handling` lists handling and executes its
+        // command, so the body fires; it takes no argument, so
+        // `=value` on it ends recognition like any no-argument flag
+        // (issue #1457).
+        let script = "env --list-signal-handling sh <<'EOF'\nrm -rf /foo\nEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["rm".to_string()]),
+            "shell-fed body must fire: {script}"
+        );
+        let script = "env --list-signal-handling=TERM sh <<'EOF'\nrm -rf /foo\nEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+            "argument-on-no-argument-flag body stays blanked: {script}"
         );
     }
 
