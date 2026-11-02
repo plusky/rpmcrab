@@ -6013,9 +6013,10 @@ fn resolve_exec_token(
 /// alias, not content: reading it would follow the link off the
 /// extraction path onto the host filesystem, so it is skipped and
 /// reported unresolvable (fail-open, preserving the package arm).
-/// An empty ExecStart resets the accumulated list. A service with
-/// no ExecStart line at all is unresolvable (fail-open): there is
-/// no command to judge. Only the unit file itself is read;
+/// An empty ExecStart resets the accumulated list. A service left
+/// with no binaries — no ExecStart line at all, or every ExecStart
+/// cleared — is unresolvable (fail-open): there is no command to
+/// judge. Only the unit file itself is read;
 /// `*.d/*.conf` drop-ins are never consulted, so a unit whose
 /// ExecStart lives only in a drop-in is unresolvable the same way.
 fn service_exec_binaries(
@@ -6032,6 +6033,7 @@ fn service_exec_binaries(
     };
     let mut binaries = Vec::new();
     let mut saw_execstart = false;
+    let mut cleared = false;
     let mut in_service = false;
     for raw in content.lines() {
         let line = raw.trim();
@@ -6052,6 +6054,7 @@ fn service_exec_binaries(
         let cmd = value.trim();
         if cmd.is_empty() {
             binaries.clear();
+            cleared = true;
             continue;
         }
         let Some(token) = systemd_program_token(cmd) else {
@@ -6061,9 +6064,15 @@ fn service_exec_binaries(
         if !ok {
             return (vec![], false);
         }
+        if !bins.is_empty() {
+            cleared = false;
+        }
         binaries.append(&mut bins);
     }
-    if !saw_execstart {
+    // A unit left with no binaries — no ExecStart line at all, or
+    // every ExecStart cleared — is unresolvable (fail-open): there
+    // is no command to judge.
+    if !saw_execstart || cleared {
         return (vec![], false);
     }
     (binaries, true)
@@ -24805,7 +24814,7 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(exec.binaries.is_empty(), "{exec:?}");
 
         // W4: an empty ExecStart clears the accumulated list, and a
-        // unit left with only cleared entries resolves empty.
+        // unit left with only cleared entries fails open.
         let unit = unit_file(
             &dir,
             "/usr/lib/systemd/system/w4.service",
@@ -24822,7 +24831,7 @@ description = "explicit priority string bypasses the system crypto policy"
         );
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![unit]);
         let exec = daemon_exec_binaries(&pkg);
-        assert!(!exec.has_unresolvable, "{exec:?}");
+        assert!(exec.has_unresolvable, "{exec:?}");
         assert!(exec.binaries.is_empty(), "{exec:?}");
 
         // W5: with Accept=yes (and the wider boolean spellings) the

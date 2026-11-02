@@ -17346,6 +17346,28 @@ print("hi")
     }
 
     #[test]
+    fn symlink_to_shipped_undocumented_binary_still_fires_no_manual_page() {
+        // A bindir symlink invoking a shipped binary with no man
+        // page keeps firing: the target resolves OK, but no page
+        // documents it — the branch the chain/external test does
+        // not cover (there, resolution itself fails).
+        let (pkg, _dir) = pkg_with_files(vec![
+            mkfile("/usr/bin/tool", 0o100755, 81),
+            PkgFile {
+                linkto: "/usr/bin/tool".to_string(),
+                ..mkfile("/usr/bin/alias", 0o120777, 83)
+            },
+        ]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            results
+                .iter()
+                .any(|(n, d)| n == "no-manual-page-for-binary" && d.ends_with("alias")),
+            "alias invokes the shipped undocumented tool and must still fire: {results:?}"
+        );
+    }
+
+    #[test]
     fn symlink_chain_and_external_target_for_no_manual_page() {
         // A chain of links resolves through the package; a link whose
         // target the package does not ship earns no credit.

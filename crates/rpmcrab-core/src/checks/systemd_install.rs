@@ -593,9 +593,6 @@ impl Check for SystemdInstallCheck {
                 let Some((parent, link_basename)) = file.name.rsplit_once('/') else {
                     continue;
                 };
-                if link_basename.is_empty() {
-                    continue;
-                }
                 let Some(wants_dir) = parent.strip_prefix(&unit_prefix) else {
                     continue;
                 };
