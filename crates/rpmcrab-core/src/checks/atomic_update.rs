@@ -100,6 +100,15 @@ fn str_list(value: &toml::Value, key: &str) -> Vec<String> {
         .collect()
 }
 
+/// True when `path` is `dir` itself or lives directly under it.
+/// A bare prefix test would let `/usr` match `/usr2/...` and
+/// `/usr/local` match `/usr/local2/...`; config entries are not
+/// required to end with `/`, so the boundary is enforced here.
+fn under_dir(path: &str, dir: &str) -> bool {
+    let base = dir.trim_end_matches('/');
+    path == base || path.starts_with(&format!("{base}/"))
+}
+
 impl AtomicUpdateCheck {
     pub fn new(config: &Config) -> Self {
         let cfg = &config.configuration;
@@ -119,8 +128,8 @@ impl AtomicUpdateCheck {
 
     /// True when `path` is inside an allowed dir and not in a disallowed subdir.
     fn path_allowed(&self, path: &str) -> bool {
-        let allowed = self.allowed_dirs.iter().any(|d| path.starts_with(d));
-        let disallowed = self.disallowed_subdirs.iter().any(|d| path.starts_with(d));
+        let allowed = self.allowed_dirs.iter().any(|d| under_dir(path, d));
+        let disallowed = self.disallowed_subdirs.iter().any(|d| under_dir(path, d));
         allowed && !disallowed
     }
 
@@ -134,7 +143,7 @@ impl AtomicUpdateCheck {
     /// status); the finding itself reports the literal target.
     fn scriptlet_target_outside(&self, path: &str) -> bool {
         let path = &crate::pkg::normalize_path(path);
-        let under = |prefix: &str| path == prefix.trim_end_matches('/') || path.starts_with(prefix);
+        let under = |prefix: &str| under_dir(path, prefix);
         if TRANSIENT_PREFIXES.iter().any(|p| under(p))
             || SANCTIONED_PREFIXES.iter().any(|p| under(p))
         {
@@ -326,7 +335,7 @@ fn segment_command_index(words: &[&str]) -> Option<usize> {
     while i < words.len()
         && (matches!(
             words[i],
-            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!"
+            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!" | "time"
         ) || is_assignment(words[i]))
     {
         i += 1;
@@ -624,7 +633,7 @@ fn segment_defines_function(segment: &str) -> bool {
     while i < words.len()
         && (matches!(
             words[i],
-            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!"
+            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!" | "time"
         ) || is_assignment(words[i]))
     {
         i += 1;
@@ -686,7 +695,7 @@ fn segment_user_creation(segment: &str) -> Option<&'static str> {
     while i < words.len()
         && (matches!(
             words[i],
-            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!"
+            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!" | "time"
         ) || is_assignment(words[i]))
     {
         i += 1;
@@ -932,61 +941,16 @@ struct Tok {
     dynamic: bool,
 }
 
-/// Blank heredoc bodies: their lines are data for the command reading
-/// them, not commands. The `<<DELIM` line itself is kept.
-fn blank_heredocs(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut delim: Option<String> = None;
-    for line in text.split('\n') {
-        if let Some(d) = &delim {
-            if line.trim() == d || line.trim_start_matches('\t') == d.as_str() {
-                delim = None;
-            }
-            out.push('\n');
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-        // Find a heredoc opener: `<<` (not `<<<`), optional `-`, optional
-        // quote, then the delimiter word.
-        let chars: Vec<char> = line.chars().collect();
-        let mut i = 0;
-        while i + 1 < chars.len() {
-            if chars[i] == '<' && chars[i + 1] == '<' {
-                if i + 2 < chars.len() && chars[i + 2] == '<' {
-                    break; // herestring, no body follows
-                }
-                let mut j = i + 2;
-                if j < chars.len() && chars[j] == '-' {
-                    j += 1;
-                }
-                while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
-                    j += 1;
-                }
-                if j < chars.len() && (chars[j] == '\'' || chars[j] == '"') {
-                    j += 1;
-                }
-                let start = j;
-                while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
-                    j += 1;
-                }
-                if j > start {
-                    delim = Some(chars[start..j].iter().collect());
-                }
-                break;
-            }
-            i += 1;
-        }
-    }
-    out
-}
-
 /// A small shell tokeniser: words (quotes removed, contents kept, as the
 /// shell builds them), redirection operators and command separators.
 /// This is deliberately not a shell parser: it recognises exactly the
 /// constructs the scan below matches on, nothing more.
 fn tokenize(text: &str) -> Vec<Tok> {
-    let text = blank_heredocs(text);
+    // Heredoc bodies are blanked by the shared, quote/comment/
+    // delimiter-aware scanner (same as the restart scan), not by a
+    // local naive scan: a quoted or commented `<<EOF` must not open
+    // a phantom heredoc, and a dashed delimiter must match in full.
+    let text = PostCheck::without_heredoc_bodies(text);
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let mut toks = Vec::new();
@@ -1326,7 +1290,30 @@ fn scan_scriptlet(body: &str) -> Vec<String> {
                         .iter()
                         .any(|a| a.text.starts_with("--target-directory="));
                 if WRITE_EVERY_ARG.contains(&base) {
-                    cands.extend(plain.iter().copied());
+                    if base == "touch" {
+                        // `touch -r FILE` / `touch --reference FILE`
+                        // reads FILE; it is not a write target. (The
+                        // attached `--reference=FILE` form starts with
+                        // `-` and is already excluded from `plain`.)
+                        // Other every-arg commands keep their following
+                        // argument: `rm -r` is a flag, not a reference.
+                        let mut skip_next = false;
+                        for a in &args {
+                            if skip_next {
+                                skip_next = false;
+                                continue;
+                            }
+                            if a.text == "-r" || a.text == "--reference" {
+                                skip_next = true;
+                                continue;
+                            }
+                            if !a.text.starts_with('-') {
+                                cands.push(a);
+                            }
+                        }
+                    } else {
+                        cands.extend(plain.iter().copied());
+                    }
                 } else if WRITE_LAST_ARG.contains(&base) {
                     if has_t {
                         cands.extend(target_dirs.iter().copied());
@@ -1568,6 +1555,14 @@ mod tests {
     #[test]
     fn systemctl_restart_without_unit_still_fires() {
         assert_eq!(service_restarts_in_body("systemctl restart").len(), 1);
+    }
+
+    #[test]
+    fn time_prefixed_restart_fires() {
+        assert_eq!(
+            service_restarts_in_body("time systemctl restart foo.service").len(),
+            1
+        );
     }
 
     #[test]
@@ -1895,6 +1890,10 @@ fi
         let c = check_with(&["/usr", "/etc"], &[], false);
         assert!(c.path_allowed("/usr/bin/foo"));
         assert!(c.path_allowed("/etc/bar.conf"));
+        // Sibling-prefix names are not under the allowed dir.
+        assert!(!c.path_allowed("/usr2/bin/foo"));
+        assert!(!c.path_allowed("/etc2/bar.conf"));
+        assert!(c.path_allowed("/usr"));
     }
 
     #[test]
@@ -1909,6 +1908,8 @@ fi
         let c = check_with(&["/usr"], &["/usr/local"], false);
         assert!(!c.path_allowed("/usr/local/bin/foo"));
         assert!(c.path_allowed("/usr/bin/foo"));
+        // The disallowed subdir must not swallow a sibling prefix.
+        assert!(c.path_allowed("/usr/local2/bin/foo"));
     }
 
     #[test]
@@ -2551,6 +2552,19 @@ fi
             ("rm -rf /var/lib/foo", &["/var/lib/foo"]),
             ("rmdir /var/lib/foodir", &["/var/lib/foodir"]),
             ("touch /var/lib/flag", &["/var/lib/flag"]),
+            // `touch -r` / `--reference` values are read, not written.
+            (
+                "touch -r /var/lib/ref /var/lib/new",
+                &["/var/lib/new"],
+            ),
+            (
+                "touch --reference /var/lib/ref /var/lib/new",
+                &["/var/lib/new"],
+            ),
+            (
+                "touch --reference=/var/lib/ref /var/lib/new",
+                &["/var/lib/new"],
+            ),
             (
                 "tee /var/log/x /var/log/y < /dev/null",
                 &["/var/log/x", "/var/log/y"],
@@ -2658,6 +2672,27 @@ fi
             ),
             (
                 "cat <<EOF\nmkdir /var/lib/heredoc\nEOF\nmkdir /var/lib/after",
+                &["/var/lib/after"],
+            ),
+            // Heredoc openers inside quotes or comments are not
+            // openers: the following write stays visible.
+            (
+                "echo \"see <<EOF\"\nmkdir /var/lib/phantom",
+                &["/var/lib/phantom"],
+            ),
+            (
+                "# note <<EOF\nmkdir /var/lib/phantom",
+                &["/var/lib/phantom"],
+            ),
+            // A dashed delimiter matches in full, not up to the dash.
+            (
+                "cat <<END-OF-MSG\nmkdir /var/lib/heredoc\nEND-OF-MSG\nmkdir /var/lib/after",
+                &["/var/lib/after"],
+            ),
+            // A space-indented delimiter line does not end a plain
+            // `<<EOF` heredoc; only the exact line does.
+            (
+                "cat <<EOF\nmkdir /var/lib/heredoc\n  EOF\nmkdir /var/lib/still\nEOF\nmkdir /var/lib/after",
                 &["/var/lib/after"],
             ),
             // De-duplication across constructs in one body.
@@ -2899,6 +2934,7 @@ fi
             ("/usr/sbin/groupadd foo", "groupadd"),
             ("FOO=bar useradd foo", "useradd"),
             ("if useradd foo; then true; fi", "useradd"),
+            ("time useradd foo", "useradd"),
         ] {
             let hits = direct_user_creation_in_body(body);
             assert_eq!(hits, vec![(tool, body.to_string())], "must fire: {body}");

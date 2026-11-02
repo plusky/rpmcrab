@@ -51,8 +51,10 @@ impl SystemdInstallCheck {
             .and_then(|v| v.as_str())
             .unwrap_or("/usr/lib/systemd/system")
             .to_string();
+        // The `/` after the unit dir is load-bearing: without it a
+        // sibling-prefix file (`systemfoo.service`) matches as a unit.
         let unit_regex = Regex::new(&format!(
-            r"^{}.+[^@]\.(service|socket|target|path)$",
+            r"^{}/.+[^@]\.(service|socket|target|path)$",
             fancy_regex::escape(&unit_dir)
         ))
         .expect("unit regex");
@@ -192,12 +194,21 @@ impl SystemdInstallCheck {
         if line.trim_start().starts_with('#') {
             return false;
         }
-        if Self::shell_words(line).iter().any(|(word, _, _)| {
+        let words = Self::shell_words(line);
+        // An empty word list fails closed, like the helper path: an
+        // unterminated quote empties the list, so the scope test
+        // would see nothing while the credit regex still matches.
+        if words.is_empty() {
+            return false;
+        }
+        if words.iter().any(|(word, _, _)| {
             matches!(
                 word.as_str(),
                 "--user" | "--global" | "-H" | "-M" | "--host" | "--machine"
             ) || word.starts_with("--host=")
                 || word.starts_with("--machine=")
+                || (word.starts_with("-H") && word.len() > 2)
+                || (word.starts_with("-M") && word.len() > 2)
         }) {
             return false;
         }
@@ -443,6 +454,7 @@ impl SystemdInstallCheck {
                 && i + 1 < words.len()
                 && words[i + 1].0 == verb
                 && !words[i + 1].1
+                && !words[i + 1].2
             {
                 let mut j = i + 2;
                 while j < words.len() && !words[j].1 {
@@ -551,11 +563,13 @@ impl Check for SystemdInstallCheck {
             if !seen.insert(candidate.name.as_str()) {
                 continue;
             }
+            // Regex-matched candidates always strip the unit dir
+            // prefix; default closed (false) if one ever does not.
             let pre_direct = candidate
                 .name
                 .strip_prefix(&format!("{}/", self.unit_dir))
                 .map(|rest| !rest.contains('/'))
-                .unwrap_or(true);
+                .unwrap_or(false);
             let basename = Path::new(&candidate.name)
                 .file_name()
                 .map(|b| b.to_string_lossy().into_owned())
@@ -898,6 +912,20 @@ mod tests {
         let re = check.unit_regex();
         assert!(!is_match(re, "/usr/lib/systemd/system/foo@.service"));
         assert!(is_match(re, "/usr/lib/systemd/system/foo.service"));
+    }
+
+    #[test]
+    fn sibling_prefix_path_is_not_a_unit() {
+        let check = SystemdInstallCheck::new(&Config::default());
+        let re = check.unit_regex();
+        assert!(!is_match(
+            re,
+            "/usr/lib/systemd/systemfoo.service"
+        ));
+        assert!(!is_match(
+            re,
+            "/usr/lib/systemd/system.d/foo.service"
+        ));
     }
 
     #[test]
@@ -1338,12 +1366,28 @@ mod tests {
     }
 
     #[test]
+    fn manual_unterminated_quote_does_not_credit() {
+        // An unterminated quote empties the tokenizer's word list;
+        // the line is a shell syntax error and must not credit, even
+        // though `--user` would scope it away anyway.
+        let post = "systemctl --user enable foo.service'";
+        let missing = SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
+        assert!(
+            missing.contains(&"systemd-service-without-service_add_post"),
+            "{missing:?}"
+        );
+    }
+
+    #[test]
     fn manual_remote_machine_flags_do_not_credit() {
         for post in [
             "systemctl -H remote preset foo.service",
             "systemctl --host=remote preset foo.service",
             "systemctl -M container preset foo.service",
             "systemctl --machine=container enable foo.service",
+            // Attached short-option values are the same flag.
+            "systemctl -Hremote preset foo.service",
+            "systemctl -Mcontainer enable foo.service",
         ] {
             let missing =
                 SystemdInstallCheck::check_unit("foo.service", true, "", post, "", "", false);
@@ -1748,6 +1792,18 @@ mod tests {
             "{missing:?}"
         );
         assert_eq!(missing.len(), 3);
+    }
+
+    #[test]
+    fn redirection_target_verb_is_not_credited() {
+        // `remove-system-units` here is a redirection target (a
+        // filename), not the helper's verb, so it credits nothing.
+        let missing =
+            missing_with("systemd-update-helper > remove-system-units foo || :");
+        assert!(
+            missing.contains(&"systemd-service-without-service_del_preun"),
+            "{missing:?}"
+        );
     }
 
     #[test]

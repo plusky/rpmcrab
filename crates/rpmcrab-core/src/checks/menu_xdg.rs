@@ -342,14 +342,18 @@ impl MenuXDGCheck {
     /// skipped and the next token is the program (assignments are
     /// skipped after `--` too); with no program left, `env` itself
     /// is returned.
-    /// For `sh`/`bash`, a `-c` payload's first word is the program;
+    /// For `sh`/`bash`, a `-c` payload feeds back through the same
+    /// unwrapping, so its first word may itself be `env` (or another
+    /// wrapper) before the program is reached;
     /// without `-c` the shell itself is the program and is returned
     /// unchanged. Wrapper names are matched by basename, so
     /// absolute spellings (`/usr/bin/env`, `/bin/sh`) unwrap the
     /// same way. One wrapper layer past `env` is followed, so
     /// `env sh -c 'prog'` resolves to `prog`.
     fn effective_exec_binary(exec: &str) -> String {
-        let tokens: Vec<&str> = exec.split_whitespace().collect();
+        // Owned tokens: a `sh -c` payload replaces the token list
+        // so it feeds back through the same unwrapping loop.
+        let mut tokens: Vec<String> = exec.split_whitespace().map(str::to_string).collect();
         let mut start = 0usize;
         for _ in 0..3 {
             let Some(first) = tokens.get(start) else {
@@ -362,10 +366,10 @@ impl MenuXDGCheck {
                     let mut idx = start + 1;
                     let mut program_idx = None;
                     while idx < tokens.len() {
-                        let tok = tokens[idx];
+                        let tok: &str = &tokens[idx];
                         if tok == "--" {
                             idx += 1;
-                            while idx < tokens.len() && Self::is_env_assignment(tokens[idx]) {
+                            while idx < tokens.len() && Self::is_env_assignment(&tokens[idx]) {
                                 idx += 1;
                             }
                             program_idx = if idx < tokens.len() { Some(idx) } else { None };
@@ -376,15 +380,25 @@ impl MenuXDGCheck {
                             // consume their argument; any other flag
                             // is standalone (`-CDIR` carries its
                             // argument attached, so it consumes one).
-                            idx += if tok == "-u"
-                                || tok == "--unset"
-                                || tok == "-C"
-                                || tok == "--chdir"
-                            {
-                                2
-                            } else {
-                                1
-                            };
+                            // Short flags cluster: a value-taking
+                            // `u`/`C` consumes the rest of the
+                            // cluster as its value, or the next
+                            // token when it ends the cluster
+                            // (`env -iu NAME prog` is `-i`,
+                            // `-u NAME`, program `prog`).
+                            if tok.starts_with("--") {
+                                idx += if tok == "--unset" || tok == "--chdir" { 2 } else { 1 };
+                                continue;
+                            }
+                            let cluster = &tok[1..];
+                            let mut take_next = false;
+                            for (k, ch) in cluster.char_indices() {
+                                if ch == 'u' || ch == 'C' {
+                                    take_next = k + ch.len_utf8() >= cluster.len();
+                                    break;
+                                }
+                            }
+                            idx += if take_next { 2 } else { 1 };
                             continue;
                         }
                         if Self::is_env_assignment(tok) {
@@ -406,7 +420,7 @@ impl MenuXDGCheck {
                     let mut j = start + 1;
                     let mut payload: Option<String> = None;
                     while j < tokens.len() {
-                        let tok = tokens[j];
+                        let tok: &str = &tokens[j];
                         if tok == "-c" {
                             payload = Some(tokens[j + 1..].join(" "));
                             break;
@@ -465,13 +479,23 @@ impl MenuXDGCheck {
                     }
                     return match payload {
                         Some(p) => {
-                            let word = p
-                                .trim_start_matches(['\'', '"'])
+                            // Feed the payload back through the same
+                            // loop instead of returning its first word
+                            // directly: a payload starting with `env`
+                            // unwraps like the other direction, so
+                            // `sh -c 'env FOO=1 missing'` resolves to
+                            // `missing`, not to the system `env`
+                            // binary hiding a broken launcher.
+                            // The payload is one shell word string;
+                            // edge quotes on its tokens are syntactic
+                            // (the old code trimmed them off the first
+                            // word only), so strip them per token.
+                            tokens = p
                                 .split_whitespace()
-                                .next()
-                                .unwrap_or("")
-                                .trim_end_matches(['\'', '"']);
-                            Self::unquote_exec_token(word).to_string()
+                                .map(|t| t.trim_matches(['\'', '"']).to_string())
+                                .collect();
+                            start = 0;
+                            continue;
                         }
                         None => first.to_string(),
                     };
@@ -2664,6 +2688,29 @@ mod tests {
     }
 
     #[test]
+    fn effective_exec_binary_env_flag_clusters() {
+        // A cluster ending in a value-taking flag consumes the
+        // next token as that flag's value, not as the program.
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("env -iu NAME myprog"),
+            "myprog"
+        );
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("env -iC /opt/foo myprog"),
+            "myprog"
+        );
+        // A value attached inside the cluster consumes nothing more.
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("env -uNAME myprog"),
+            "myprog"
+        );
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("env -iuNAME myprog"),
+            "myprog"
+        );
+    }
+
+    #[test]
     fn effective_exec_binary_sh_long_flags_and_clusters() {
         // Long flags are skipped, not terminal.
         assert_eq!(
@@ -2687,6 +2734,25 @@ mod tests {
         );
         // End of options: a following -c is a script file.
         assert_eq!(MenuXDGCheck::effective_exec_binary("bash -- -c"), "bash");
+    }
+
+    #[test]
+    fn effective_exec_binary_sh_c_env_unwraps() {
+        // The `sh` direction unwraps `env` just like the `env`
+        // direction unwraps `sh`: the payload's program, not `env`.
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("sh -c 'env FOO=1 myprog'"),
+            "myprog"
+        );
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("env sh -c 'env FOO=1 myprog'"),
+            "myprog"
+        );
+        // A plain `sh -c` payload still resolves to its program.
+        assert_eq!(
+            MenuXDGCheck::effective_exec_binary("sh -c 'myprog arg'"),
+            "myprog"
+        );
     }
 
     #[test]

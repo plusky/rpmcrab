@@ -355,8 +355,10 @@ impl TrieNode {
         node.terminal = true;
     }
 
-    /// True when inserting `path` would descend through an existing
-    /// terminal, i.e. an already-restricted location is a prefix of `path`.
+    /// True when inserting `path` would conflict with an existing
+    /// location: either an already-restricted location is a prefix of
+    /// `path`, or `path` is a prefix of an already-restricted location.
+    /// An exact duplicate is not a conflict and stays accepted.
     /// Mirrors the reference's `Conflicting paths in trie` raise.
     fn conflicts(&self, path: &str) -> bool {
         let mut node = self;
@@ -369,7 +371,14 @@ impl TrieNode {
                 None => return false,
             }
         }
-        false
+        node.has_terminal_below()
+    }
+
+    /// True when any strict descendant of this node is terminal.
+    fn has_terminal_below(&self) -> bool {
+        self.children
+            .values()
+            .any(|child| child.terminal || child.has_terminal_below())
     }
 
     /// True when `path` is within a restricted location.
@@ -455,6 +464,16 @@ impl FileDigestCheck {
             let follow_symlinks = Self::cfg_bool(cfg_table, check_type, "FollowSymlinks", false);
             let recursive = Self::cfg_bool(cfg_table, check_type, "Recursive", true);
             let content_check = Self::cfg_opt_string(cfg_table, check_type, "ContentCheck");
+            // Fail fast on an unknown value here, like every other
+            // malformed-config case in this file, instead of panicking
+            // mid-run on the first restricted file of this type.
+            if let Some(content_check) = &content_check {
+                if content_check != "VarlinkServiceCheck" {
+                    panic!(
+                        "FileDigestCheck: no matching type for ContentCheck={content_check}"
+                    );
+                }
+            }
 
             for loc in &locations {
                 // The reference rejects relative and overlapping locations
@@ -693,14 +712,29 @@ impl FileDigestCheck {
                     if !matches!(digester, "default" | "shell" | "xml" | "systemd-socket") {
                         panic!("FileDigestCheck: invalid digester \"{digester}\" for path {path}");
                     }
+                    // A digest entry without a hash would guarantee a
+                    // mismatch finding; like a missing `path`, it is
+                    // malformed config. (`skip` entries carry no hash
+                    // by design and return early in `check_digest`.)
+                    let hash = if algorithm == "skip" {
+                        dt.get("hash")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    } else {
+                        dt.get("hash")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "FileDigestCheck: missing \"hash\" key in FileDigestGroup entry"
+                                )
+                            })
+                            .to_string()
+                    };
                     digests.push(DigestInfo {
                         path,
                         algorithm,
-                        hash: dt
-                            .get("hash")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
+                        hash,
                         digester: digester.to_string(),
                     });
                 }
@@ -2444,6 +2478,46 @@ hash = "0000000000000000000000000000000000000000"
     #[should_panic(expected = "conflicting paths in trie")]
     fn overlapping_locations_panic() {
         let config = config_with_locations("\"/etc\", \"/etc/pam.d\"");
+        let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "conflicting paths in trie")]
+    fn overlapping_locations_panic_reversed_order() {
+        let config = config_with_locations("\"/etc/pam.d\", \"/etc\"");
+        let _ = FileDigestCheck::new(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing \"hash\" key")]
+    fn missing_digest_hash_panics_at_construction() {
+        let mut cfg = test_config("");
+        let group: toml::Value = toml::from_str(
+            r#"
+type = "pam"
+package = "testpkg"
+digests = [{path = "/check/me", algorithm = "sha256"}]
+"#,
+        )
+        .unwrap();
+        cfg.configuration
+            .entry("FileDigestGroup")
+            .or_insert(toml::Value::Array(Vec::new()))
+            .as_array_mut()
+            .unwrap()
+            .push(group);
+        let _ = FileDigestCheck::new(&cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "no matching type for ContentCheck")]
+    fn unknown_content_check_panics_at_construction() {
+        let extra = r#"
+[FileDigestLocation.bad]
+Locations = ["/etc/pam.d"]
+ContentCheck = "UnknownContentCheck"
+"#;
+        let config = test_config(extra);
         let _ = FileDigestCheck::new(&config);
     }
 
