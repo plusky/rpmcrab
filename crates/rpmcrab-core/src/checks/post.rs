@@ -4314,6 +4314,21 @@ mod tests {
     }
 
     #[test]
+    fn dangerous_command_in_shell_fed_heredoc_env_split_string_unclosed_payload_fallback_fires() {
+        // A genuinely unclosed quote in the `-S` payload falls back
+        // to whitespace splitting: the first fallback word still
+        // names the shell, so the body fires (issue #1461).
+        let script = "env -Ssh' 'a'b' sh <<'EOF'\nrm -rf /foo\nEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["rm".to_string()]),
+            "shell-fed body must fire: {script}"
+        );
+    }
+
+    #[test]
     fn dangerous_command_in_shell_fed_heredoc_env_unknown_short_stays_blanked() {
         // Known no-argument shorts still feed the shell; `-0` and
         // an unknown short end recognition (env rejects them, so the
