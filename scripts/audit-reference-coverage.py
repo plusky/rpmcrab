@@ -1605,7 +1605,11 @@ def resolve_rs_name(expr, src, seen=None, scope=None, call_pos=None,
         if e in seen:
             return set(), False
         seen = seen | {e}
-        rhs = find_let_rhs(scope, e) or find_let_rhs(src, e)
+        # Scope positions are relative: convert the absolute call
+        # position with scope_off so only bindings before the use count.
+        rel_pos = call_pos - scope_off if call_pos is not None else None
+        rhs = (find_let_rhs(scope, e, before=rel_pos)
+               or find_let_rhs(src, e, before=call_pos))
         if rhs is not None:
             if "WarnOnFunction" in rhs:
                 # config-driven finding names; empty under the openSUSE config
@@ -1763,12 +1767,18 @@ def resolve_struct_field(src, base, field, call_pos, seen):
     return out, found
 
 
-def find_let_rhs(src, name):
-    """RHS of the last `let <name> [: ty] = <rhs>;` in `src`, paren-aware
-    for multiline initializers."""
+def find_let_rhs(src, name, before=None):
+    """RHS of the last `let <name> [: ty] = <rhs>;` in `src` before
+    offset `before` (or in all of `src` when `before` is None),
+    paren-aware for multiline initializers. Under Rust shadowing, the
+    binding that applies at a use is the last one *before* the use;
+    returning the last binding in the whole file instead lets a
+    rebinding after the call site supply the wrong template."""
     found = None
     for m in re.finditer(r"\blet\s+(?:mut\s+)?" + re.escape(name)
                          + r"\s*(?::\s*[^=;]+?)?=\s*", src):
+        if before is not None and m.start() >= before:
+            continue
         start = m.end()
         depth, i = 0, start
         instr, esc, q = False, False, None
@@ -1892,7 +1902,9 @@ def resolve_closure_call(name, argstr, src, seen, scope, call_pos, scope_off):
     placeholders naming a closure parameter expand to the actual
     argument's templates; anything else is `*` as usual.
     Returns (templates, ok)."""
-    rhs = find_let_rhs(scope, name) or find_let_rhs(src, name)
+    rel_pos = call_pos - scope_off if call_pos is not None else None
+    rhs = (find_let_rhs(scope, name, before=rel_pos)
+           or find_let_rhs(src, name, before=call_pos))
     if rhs is None:
         return set(), False
     cm = re.match(r"^(?:move\s+)?\|([^|]*)\|\s*(.+)$", rhs.strip(), re.S)
@@ -2493,6 +2505,18 @@ KNOWN_DRIFT = {
 }
 
 
+def _reason_mentions(reasons, token):
+    """Whether ledger reason text names `token` as a word, mirroring
+    `Ledger._mentions` in parity-runner.py: word boundaries plus a
+    length floor. A bare substring match lets a short token such as
+    `config` or `empty`, which occurs in ordinary reason prose, pass a
+    genuinely port-only wildcard pattern as explained."""
+    if len(token) < 8:
+        return False
+    pat = r"(?<![a-z0-9\-])" + re.escape(token) + r"(?![a-z0-9])"
+    return re.search(pat, reasons) is not None
+
+
 def reconcile_emissions(findings, by_module, family_names, entries,
                         check_map):
     """Port patterns explained by nothing: every pattern the port can
@@ -2515,7 +2539,7 @@ def reconcile_emissions(findings, by_module, family_names, entries,
                 if (pattern in ref_names or pattern in ledger_checks
                         or pattern in family_names
                         or module_key in ledger_checks
-                        or pattern in reasons):
+                        or _reason_mentions(reasons, pattern)):
                     continue
                 if any(template_regex(t).match(pattern)
                        for t in ref_templates):
@@ -2532,7 +2556,7 @@ def reconcile_emissions(findings, by_module, family_names, entries,
             if any(c and (c.startswith(pfx) or pfx.startswith(c))
                    for c in ledger_checks):
                 continue
-            if module_key in ledger_checks or bare in reasons:
+            if module_key in ledger_checks or _reason_mentions(reasons, bare):
                 continue
             unexplained.append(pattern)
     return unexplained
