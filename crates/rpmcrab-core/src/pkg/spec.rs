@@ -552,6 +552,17 @@ fn brace_item(inner: &str, literal: &str, depth: usize) -> ValueItem {
 /// widened to a single unconstrained pattern rather than enumerated.
 const MAX_NAME_PATTERNS: usize = 64;
 
+/// Cap on the segments of one pattern. `NamePattern::matches_at`
+/// recurses once per segment (plus one `any()` closure frame per `Any`
+/// level), and `Any` segments accumulate without merging, so one
+/// undefined macro per segment in a pathological `Name:` value would
+/// otherwise drive the matcher arbitrarily deep. Past this cap the
+/// value widens to a single unconstrained pattern, exactly like the
+/// pattern-count cap above; 1024 bounds the recursion to roughly two
+/// thousand frames while real `Name:` values produce a handful of
+/// segments.
+const MAX_NAME_SEGMENTS: usize = 1024;
+
 /// Cap on macro-expansion recursion depth.
 const MAX_EXPANSION_DEPTH: usize = 8;
 
@@ -685,6 +696,9 @@ fn compose_patterns(left: &[NamePattern], right: &[NamePattern]) -> Vec<NamePatt
                     }
                     _ => segs.push(seg.clone()),
                 }
+            }
+            if segs.len() > MAX_NAME_SEGMENTS {
+                return vec![NamePattern(vec![NameSegment::Any])];
             }
             out.insert(NamePattern(segs));
             if out.len() > MAX_NAME_PATTERNS {
@@ -859,6 +873,47 @@ mod name_patterns_tests {
             utf8: true,
         };
         pkg.declared_name_patterns()
+    }
+
+    /// A run of undefined macros past the segment cap is bounded
+    /// instead of recursing one frame per segment in `matches_at`:
+    /// no stored pattern exceeds the cap, a pure-`Any` run widens to
+    /// unconstrained, and a run under the cap keeps its literal
+    /// anchors. (Widening is not sticky: literals after the cap
+    /// re-anchor the pattern, still within the cap — the invariant
+    /// is the bound, not permanent unconstrainedness.)
+    #[test]
+    fn overlong_segment_run_is_bounded() {
+        let mut over = String::from("Name: foo");
+        for i in 0..1100 {
+            over.push_str(&format!("%{{u{i}}}"));
+        }
+        over.push_str("bar\n");
+        let pats = patterns(&over).expect("patterns declared");
+        assert_eq!(pats.len(), 1);
+        assert!(pats[0].0.len() <= MAX_NAME_SEGMENTS);
+        assert!(pats[0].matches("fooxbar"));
+        assert!(!pats[0].matches("zzz"));
+
+        let mut pure = String::from("Name:");
+        for i in 0..1100 {
+            pure.push_str(&format!("%{{u{i}}}"));
+        }
+        pure.push('\n');
+        let pats = patterns(&pure).expect("patterns declared");
+        assert_eq!(pats.len(), 1);
+        assert!(pats[0].is_unconstrained());
+        assert!(pats[0].matches("zzz"));
+
+        let mut under = String::from("Name: foo");
+        for i in 0..100 {
+            under.push_str(&format!("%{{u{i}}}"));
+        }
+        under.push_str("bar\n");
+        let pats = patterns(&under).expect("patterns declared");
+        assert!(!pats.iter().any(|p| p.matches("zzz")));
+        assert!(!pats.iter().any(|p| p.matches("xbar")));
+        assert!(pats.iter().any(|p| p.matches("fooxbar")));
     }
 
     /// Assert the patterns of `text` produce every name in `yes` and
