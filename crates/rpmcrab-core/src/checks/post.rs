@@ -1234,12 +1234,18 @@ impl PostCheck {
             }
             finish(rest.chars().take_while(|c| !is_stop(*c)).collect()).map(|w| (w, strip_tabs))
         }
-        // Delimiters introduced by unquoted `<<` operators on `line`.
-        // A `<<` inside single/double quotes, inside a `#` comment, or
-        // inside a `$((...))` arithmetic expansion (where it is the
-        // left-shift operator) is not a heredoc operator, and `<<<`
-        // is a herestring, not a heredoc.
-        fn delimiters_in_line(line: &str) -> Vec<(String, bool)> {
+        // Byte offsets of the live `<<` operators on `line`, plus
+        // whether a quote is still open at the end of the line.
+        // The one scanner shared by `delimiters_in_line` and
+        // `last_live_opener`: a `<<` inside single/double quotes,
+        // inside a `#` comment, or inside a `$((...))` arithmetic
+        // expansion (where it is the left-shift operator) is not a
+        // heredoc operator, and `<<<` is a herestring, not a
+        // heredoc. A quote open at the end means a Single or
+        // Double frame is still on the stack; an unclosed
+        // substitution or arithmetic frame alone does not count,
+        // matching the old quote-only unclosed rule.
+        fn live_opener_offsets(line: &str) -> (Vec<usize>, bool) {
             // Context stack: a `$(...)` or backtick substitution
             // re-enters code even inside double quotes, so a heredoc
             // operator inside one is live; `$((...))` arithmetic is
@@ -1373,10 +1379,8 @@ impl PostCheck {
                             i += 3;
                             continue;
                         }
-                        if line[i..].starts_with("<<")
-                            && let Some(delim) = delimiter_after(line, i)
-                        {
-                            out.push(delim);
+                        if line[i..].starts_with("<<") {
+                            out.push(i);
                             i += 2;
                             continue;
                         }
@@ -1387,7 +1391,23 @@ impl PostCheck {
                     }
                 }
             }
-            out
+            let unclosed = stack
+                .iter()
+                .any(|f| matches!(f, Frame::Single | Frame::Double));
+            (out, unclosed)
+        }
+        // Delimiters introduced by unquoted `<<` operators on `line`.
+        // A `<<` inside single/double quotes, inside a `#` comment, or
+        // inside a `$((...))` arithmetic expansion (where it is the
+        // left-shift operator) is not a heredoc operator, and `<<<`
+        // is a herestring, not a heredoc. Shares its scanner with
+        // `last_live_opener` (see `live_opener_offsets`).
+        fn delimiters_in_line(line: &str) -> Vec<(String, bool)> {
+            let (offsets, _) = live_opener_offsets(line);
+            offsets
+                .into_iter()
+                .filter_map(|at| delimiter_after(line, at))
+                .collect()
         }
         // Whether `line` terminates the heredoc: an exact match for
         // the plain form, leading tabs stripped for the `<<-` form —
@@ -1409,67 +1429,19 @@ impl PostCheck {
         // sudo-wrapped and substitution shapes are not recognised
         // here and stay blanked.
         fn line_feeds_shell(line: &str) -> bool {
-            // The last live heredoc opener on the line, with the
-            // delimiter scanner's quote/comment rules: a `<<` inside
-            // a quoted span or after a word-start `#` comment is not
-            // an opener, and `<<<` is a herestring, not a heredoc.
-            // Also reports whether the line ends with a quote still
-            // open: an unclosed line is a syntax error, so nothing on
-            // it executes and its body stays blanked (issue #1454 pin).
+            // The last live heredoc opener on the line, on the shared
+            // scanner: a `<<` inside a quoted span or after a
+            // word-start `#` comment is not an opener, `<<<` is a
+            // herestring, not a heredoc, and `<<` inside `$((...))`
+            // arithmetic is the left-shift operator, not an opener,
+            // while `<<` inside a `$(...)` or backtick substitution
+            // is live. Also reports whether the line ends with a
+            // quote still open: an unclosed line is a syntax error,
+            // so nothing on it executes and its body stays blanked
+            // (issue #1454 pin).
             fn last_live_opener(line: &str) -> (Option<usize>, bool) {
-                let bytes = line.as_bytes();
-                let mut quote: Option<char> = None;
-                let mut escaped = false;
-                let mut last: Option<usize> = None;
-                let mut i = 0;
-                while i < bytes.len() {
-                    let c = bytes[i] as char;
-                    if escaped {
-                        escaped = false;
-                        i += 1;
-                        continue;
-                    }
-                    if c == '\\' && quote != Some('\'') {
-                        escaped = true;
-                        i += 1;
-                        continue;
-                    }
-                    match quote {
-                        Some(q) => {
-                            if c == q {
-                                quote = None;
-                            }
-                            i += 1;
-                        }
-                        None => {
-                            if c == '#'
-                                && (i == 0
-                                    || matches!(
-                                        bytes[i - 1] as char,
-                                        ' ' | '\t' | ';' | '|' | '&' | '('
-                                    ))
-                            {
-                                break;
-                            }
-                            if c == '\'' || c == '"' {
-                                quote = Some(c);
-                                i += 1;
-                                continue;
-                            }
-                            if c == '<' && i + 1 < bytes.len() && bytes[i + 1] == b'<' {
-                                if i + 2 < bytes.len() && bytes[i + 2] == b'<' {
-                                    i += 3;
-                                    continue;
-                                }
-                                last = Some(i);
-                                i += 2;
-                                continue;
-                            }
-                            i += 1;
-                        }
-                    }
-                }
-                (last, quote.is_some())
+                let (offsets, unclosed) = live_opener_offsets(line);
+                (offsets.last().copied(), unclosed)
             }
             // A raw rfind can land inside a quoted fragment or a
             // comment after the real opener, leaving `before` ending
@@ -4248,6 +4220,36 @@ mod tests {
                 "shell-fed body must fire: {script}"
             );
         }
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_arith_shift_after_opener_still_fires() {
+        // An arithmetic `<<` after the real opener is the left-shift
+        // operator, not a heredoc opener: the cut stays at the real
+        // opener, so the shell-fed body still fires (issue #1461).
+        let script = "sh <<EOF; x=$((a << 1))\nrm -rf /foo\nEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            found.iter().any(|(l, f, d)| *l == Level::Warning
+                && f == "dangerous-command-in-%post"
+                && d == &vec!["rm".to_string()]),
+            "shell-fed body must fire: {script}"
+        );
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_fed_heredoc_unclosed_in_subst_stays_blanked() {
+        // A quote left open inside a substitution leaves the fed line
+        // unclosed: the line is a syntax error, so nothing on it
+        // executes and the body stays blanked (issue #1461).
+        let script = "sh <<EOF \"$(echo a\"\nrm -rf /foo\nEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+            "unclosed-quote body stays blanked: {script}"
+        );
     }
 
     #[test]
