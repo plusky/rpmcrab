@@ -398,7 +398,7 @@ fn no_inputs_warns_and_exits_zero() {
 /// A bogus file is a fatal result: one line on stderr, exit 3. The `-v`
 /// re-raise is gone, so the cause chain is not printed.
 #[test]
-fn verbose_prints_the_cause_chain_and_exits_one() {
+fn verbose_bogus_file_exits_three_without_cause_chain() {
     let dir = tempfile::tempdir().unwrap();
     let bogus = dir.path().join("not-an-rpm.rpm");
     std::fs::write(&bogus, b"definitely not an rpm").unwrap();
@@ -1888,7 +1888,7 @@ fn severity_override_json_reports_overridden_level() {
 }
 /// `--errors-only` (upstream rpmlint#134) end-to-end: the header still reports
 /// the configured check count (`docs/DESIGN.md` §4.5 — the reference's
-/// `lint.py:272`), even though only 40 checks run.
+/// `lint.py:272`), even though only 39 checks run.
 #[test]
 fn errors_only_header_reports_configured_check_count() {
     let out = rpmcrab(&[
@@ -1964,10 +1964,13 @@ fn strict_reenables_warning_only_checks_under_errors_only() {
     );
 }
 
-/// `--format json --errors-only`: the finding multiset matches the full run
-/// (the six skipped checks fire nothing on this fixture), no finding names
-/// a warning-only check, the JSON `checks` field reports the configured
-/// count, and the summary exit code matches the process.
+/// `--format json --errors-only`: the finding multiset matches the full run,
+/// the JSON `checks` field reports the configured count, and the summary
+/// exit code matches the process. This pins the observable outcome only:
+/// JSON findings carry tags, not check modules, so per-check skipping
+/// cannot be asserted here; it is pinned by the sibling selection tests
+/// (`errors_only_empty_selection_warns_instead_of_silently_exiting_zero`,
+/// `errors_only_skips_systemd_install_check`).
 #[test]
 fn errors_only_json_finding_set_matches_full_run() {
     let rpm = "../../tests/parity/cases/parity/input/parity-1.0-1.noarch.rpm";
@@ -1979,21 +1982,6 @@ fn errors_only_json_finding_set_matches_full_run() {
     let eo_doc: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&eo.stdout)).expect("JSON");
     assert_eq!(full_doc["findings"], eo_doc["findings"]);
-    for f in eo_doc["findings"].as_array().expect("findings") {
-        let check = f["check"].as_str().expect("check");
-        assert!(
-            ![
-                "BashismsCheck",
-                "ConfigFilesCheck",
-                "FHSCheck",
-                "SourceCheck",
-                "SystemdInstallCheck",
-                "TmpFilesCheck"
-            ]
-            .contains(&check),
-            "warning-only check ran: {check}"
-        );
-    }
     assert_eq!(eo_doc["checks"], 46);
     assert_eq!(
         eo_doc["summary"]["exit_code"].as_i64(),

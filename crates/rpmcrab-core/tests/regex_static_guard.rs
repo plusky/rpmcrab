@@ -121,6 +121,15 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     // static; compiled once per package in check_files, never per file.
     ("buildroot_and_date.rs", "Regex::new(&format!", "runtime"),
     ("buildroot_and_date.rs", "fn sde_stamp_regex", "runtime"),
+    // spec.rs: `section_res` builds ~30 patterns per call, but the result
+    // is compiled once in the constructor and stored in the struct, so the
+    // factory shape is legitimate (ctor-once, like the entries above).
+    ("spec.rs", "fn section_res", "ctor-once"),
+    // binaries.rs: `forbidden_function_calls` returns config-driven
+    // `good_param` waiver patterns (WarnOnFunction entries), compiled per
+    // file because the helper is a free function over `&Config`; a static
+    // cannot hold runtime configuration values.
+    ("binaries.rs", "fn forbidden_function_calls", "config"),
 ];
 
 fn checks_dir() -> PathBuf {
@@ -158,16 +167,98 @@ fn is_allowlisted(file: &str, line: &str) -> bool {
     })
 }
 
-/// Returns true if the line looks like `fn name(...) -> Regex` (owned).
-fn is_owned_regex_factory(line: &str) -> bool {
+/// The remainder of a line after stripping a visibility prefix (`pub`,
+/// `pub(crate)`, `pub(super)`, `pub(in path)`), or the line itself when
+/// it carries none. `None` only for a malformed `pub(` group.
+fn strip_visibility(line: &str) -> Option<&str> {
     let t = line.trim();
+    let Some(rest) = t.strip_prefix("pub") else {
+        return Some(t);
+    };
+    let rest = rest.trim_start();
+    if let Some(after) = rest.strip_prefix('(') {
+        let close = after.find(')')?;
+        Some(after[close + 1..].trim_start())
+    } else {
+        Some(rest)
+    }
+}
+
+/// Whether `s` contains `Regex` as a whole token: `MyRegex` and `RegexSet`
+/// are different types, not the owned factory return.
+fn contains_regex_token(s: &str) -> bool {
+    let mut start = 0;
+    while let Some(idx) = s[start..].find("Regex") {
+        let a = start + idx;
+        let b = a + "Regex".len();
+        let before_ok = a == 0 || !is_ident_char(s[..a].chars().next_back().unwrap());
+        let after_ok = b == s.len() || !is_ident_char(s[b..].chars().next().unwrap());
+        if before_ok && after_ok {
+            return true;
+        }
+        start = a + 1;
+    }
+    false
+}
+
+/// The full signature starting at `lines[i]`, joining continuation lines
+/// until the line holding `{` (definition) or ending with `;`
+/// (declaration). Multi-line signatures put `-> Regex` on a later line,
+/// so the single-line detector alone misses them. `None` when the line is
+/// not a function start, or when no terminator appears within a bounded
+/// window.
+fn signature_at(lines: &[&str], i: usize) -> Option<String> {
+    let first = strip_visibility(lines[i])?;
+    if !first.starts_with("fn ") {
+        return None;
+    }
+    let mut sig = lines[i].trim().to_string();
+    if sig.contains('{') || sig.trim_end().ends_with(';') {
+        return Some(sig);
+    }
+    for line in lines.iter().skip(i + 1).take(31) {
+        sig.push(' ');
+        sig.push_str(line.trim());
+        if line.contains('{') || line.trim_end().ends_with(';') {
+            return Some(sig);
+        }
+    }
+    None
+}
+
+/// Returns true if the line looks like a factory returning an owned regex:
+/// `fn name(...) -> Regex`, or a wrapped owned return such as
+/// `Vec<(String, Regex)>`. Visibility prefixes do not hide a factory.
+/// A reference return (`&...`) is not owned, and a fallible outermost
+/// wrapper (`Option<...>`, `Result<...>`) is not flagged here: the
+/// bare-`Regex::new` guard covers what those compile. The return type is
+/// cut at `{`, `;`, or ` where `, so a bound mentioning `Regex` does not
+/// count as returning one.
+fn is_owned_regex_factory(line: &str) -> bool {
+    let Some(t) = strip_visibility(line) else {
+        return false;
+    };
     if !t.starts_with("fn ") {
         return false;
     }
     if let Some(arrow) = t.find("->") {
-        let ret = t[arrow + 2..].trim_start();
-        // Owned Regex: starts with "Regex" but not "&'static" or "&"
-        return ret.starts_with("Regex") && !ret.starts_with("&");
+        let mut ret = t[arrow + 2..].trim_start();
+        if let Some(end) = ret.find('{') {
+            ret = ret[..end].trim_end();
+        }
+        if let Some(end) = ret.find(';') {
+            ret = ret[..end].trim_end();
+        }
+        if let Some(end) = ret.find(" where ") {
+            ret = ret[..end].trim_end();
+        }
+        if ret.starts_with('&') {
+            return false;
+        }
+        if ret.starts_with("Option<") || ret.starts_with("Result<") {
+            return false;
+        }
+        return contains_regex_token(ret);
     }
     false
 }
@@ -190,10 +281,50 @@ fn owned_regex_factory_detector() {
     assert!(!is_owned_regex_factory("fn f() -> Option<Regex> {"));
     assert!(!is_owned_regex_factory("fn f(x: Regex) -> bool {"));
     assert!(!is_owned_regex_factory("fn f() {"));
+    // Visibility prefixes do not hide a factory.
+    assert!(is_owned_regex_factory("pub fn f() -> Regex {"));
+    assert!(is_owned_regex_factory("pub(crate) fn f() -> Regex {"));
+    assert!(is_owned_regex_factory("pub(super) fn f() -> Regex {"));
+    assert!(is_owned_regex_factory(
+        "pub(in crate::checks) fn f() -> Regex {"
+    ));
+    // Wrapped owned returns are factories too.
+    assert!(is_owned_regex_factory(
+        "fn section_res() -> Vec<(String, Regex)> {"
+    ));
+    assert!(is_owned_regex_factory("fn f() -> (Regex, String) {"));
+    assert!(is_owned_regex_factory("fn f() -> Box<Regex> {"));
+    assert!(is_owned_regex_factory("fn f() -> Regex where T: Clone {"));
+    // Fallible outermost wrappers and near-miss identifiers are not.
+    assert!(!is_owned_regex_factory("fn f() -> Option<Vec<Regex>> {"));
+    assert!(!is_owned_regex_factory("fn f() -> Result<Regex, E> {"));
+    assert!(!is_owned_regex_factory("fn f() -> MyRegex {"));
+    assert!(!is_owned_regex_factory("fn f() -> RegexSet {"));
     // Not a function definition line at all.
     assert!(!is_owned_regex_factory("    let re = Regex::new(\"x\");"));
     assert!(!is_owned_regex_factory(""));
     assert!(!is_owned_regex_factory("// fn old() -> Regex {"));
+}
+
+#[test]
+fn multi_line_signatures_join_for_the_detector() {
+    let lines = [
+        "fn section_res(",
+        "    ) -> Vec<(String, Regex)> {",
+        "    vec![]",
+        "}",
+    ];
+    let sig = signature_at(&lines, 0).expect("signature");
+    assert!(is_owned_regex_factory(&sig));
+    assert!(signature_at(&lines, 1).is_none());
+    assert!(signature_at(&lines, 2).is_none());
+    // A declaration ending in `;` joins the same way.
+    let decl = ["pub fn f(", ") -> Regex;"];
+    let sig = signature_at(&decl, 0).expect("declaration");
+    assert!(is_owned_regex_factory(&sig));
+    // No terminator within the window: not a signature we can judge.
+    let unterminated = ["fn f(", ") -> Regex"];
+    assert!(signature_at(&unterminated, 0).is_none());
 }
 
 #[test]
@@ -228,11 +359,14 @@ fn allowlist_matching_is_token_anchored() {
 // and the pinning test below, so a guard change cannot desync them.
 fn allowlist_entry_is_live(lines: &[&str], i: usize, pat: &str) -> bool {
     let line = lines[i];
-    fragment_matches_token_anchored(line, pat)
+    (fragment_matches_token_anchored(line, pat)
         && ((line.contains("Regex::new")
             && !line.trim_start().starts_with("//")
             && !in_get_or_init_closure(lines, i))
-            || is_owned_regex_factory(line))
+            || is_owned_regex_factory(line)))
+        || signature_at(lines, i).is_some_and(|sig| {
+            fragment_matches_token_anchored(&sig, pat) && is_owned_regex_factory(&sig)
+        })
 }
 
 #[test]
@@ -279,9 +413,13 @@ fn no_owned_regex_factories() {
             continue;
         }
         let src = std::fs::read_to_string(entry.path()).unwrap();
-        for (i, line) in src.lines().enumerate() {
-            if is_owned_regex_factory(line) && !is_allowlisted(&fname, line) {
-                violations.push(format!("{}:{}: {}", fname, i + 1, line.trim()));
+        let lines: Vec<&str> = src.lines().collect();
+        for i in 0..lines.len() {
+            let Some(sig) = signature_at(&lines, i) else {
+                continue;
+            };
+            if is_owned_regex_factory(&sig) && !is_allowlisted(&fname, lines[i]) {
+                violations.push(format!("{}:{}: {}", fname, i + 1, lines[i].trim()));
             }
         }
     }

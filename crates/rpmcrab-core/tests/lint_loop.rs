@@ -416,26 +416,29 @@ fn setbadness_report_is_quiet_on_comments_and_addfilter() {
     );
 }
 
-/// `Pkg.timers` reaches the duration map the `-t` report reads.
+/// Worker durations reach the `-t` report: a check slower than the 0.1s
+/// cut-off prints its row. Phase timers travel through the same worker
+/// durations map, but no committed fixture extracts slowly enough to push
+/// a phase row over 0.1s, so the phase row itself is not directly pinned
+/// here — only the check row is.
 #[test]
-fn package_phase_timers_reach_the_time_report() {
-    let log = Arc::new(Mutex::new(Log::default()));
-    let (mut lint, make_checks) = lint_with(
-        {
-            let log = Arc::clone(&log);
-            move || Recorder {
-                name: "Recorder",
-                log: Arc::clone(&log),
-                emit: false,
-            }
-        },
-        Config::default(),
-    );
+fn check_durations_reach_the_time_report() {
+    struct Sleeper;
+    impl Check for Sleeper {
+        fn name(&self) -> &'static str {
+            "Sleeper"
+        }
+        fn check_binary(&mut self, _pkg: &Pkg, _c: &Config, _o: &mut Filter) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    let make_checks = || vec![Box::new(Sleeper) as Box<dyn Check>];
+    let mut lint =
+        Lint::new(Config::default(), make_checks(), Color::for_tty(false), 80).expect("build Lint");
     lint.check_batch(tasks(1), 1, &make_checks, true);
     let report = lint.time_report();
-    // A file package records ExtractRpm; it is below the 0.1s cut-off so
-    // it does not print, but the header does.
-    assert!(report.contains("Check time report"), "{report}");
+    assert!(report.contains("Sleeper"), "{report}");
 }
 
 /// The `Check` dispatch: a source package goes to `check_source`, a binary
@@ -468,9 +471,21 @@ fn check_dispatches_on_is_source() {
     };
     let mut lint =
         Lint::new(Config::default(), make_checks(), Color::for_tty(false), 80).expect("build Lint");
-    // The corpus rpm is a binary package, so both take the binary hook.
-    lint.check_batch(tasks(2), 1, &make_checks, true);
-    assert_eq!(log.lock().unwrap().checked, vec!["binary", "binary"]);
+    // The corpus rpm is a binary package and the source rpm a source
+    // package, so the first two take the binary hook and the last the
+    // source hook.
+    let mut batch = tasks(2);
+    batch.push(Task::File(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/cases/source-parity/input/source-parity-1.0-1.src.rpm")
+            .canonicalize()
+            .expect("source corpus rpm is committed"),
+    ));
+    lint.check_batch(batch, 1, &make_checks, true);
+    assert_eq!(
+        log.lock().unwrap().checked,
+        vec!["binary", "binary", "source"]
+    );
 }
 
 /// The `Package` dispatch: a `.spec` input goes to `check_spec` (never
