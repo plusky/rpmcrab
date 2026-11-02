@@ -55,7 +55,7 @@ use crate::pkg::dep::{
 };
 use crate::pkg::spec::SpecPkg;
 use crate::pkg::{Pkg, init as pkg_init};
-use crate::tools::{Tool, ToolSource, test_source};
+use crate::tools::{Tool, ToolSource, spawn_with_retry, test_source};
 use std::sync::OnceLock;
 
 static PATCH_RE: OnceLock<Regex> = OnceLock::new();
@@ -931,7 +931,9 @@ fn url_scheme_netloc(url: &str) -> (Option<&str>, Option<&str>) {
     if !scheme_ok {
         return (None, None);
     }
-    let netloc = rest.split('/').next().unwrap_or("");
+    // The netloc ends at the first `/`, `?` or `#`: `urlparse`
+    // yields an empty netloc for `http://?query` and `http://#frag`.
+    let netloc = rest.split(['/', '?', '#']).next().unwrap_or("");
     (Some(scheme), (!netloc.is_empty()).then_some(netloc))
 }
 
@@ -1341,7 +1343,13 @@ fn redirect_skip(token: &str) -> Option<usize> {
     if !rest.starts_with('>') && !rest.starts_with('<') {
         return None;
     }
-    let op_len = if rest.starts_with(">>") || rest.starts_with("<<") {
+    // `>&` / `<&` are two-character operators too: standalone
+    // they take their target as the next word, like `>>` alone.
+    let op_len = if rest.starts_with(">>")
+        || rest.starts_with("<<")
+        || rest.starts_with(">&")
+        || rest.starts_with("<&")
+    {
         2
     } else {
         1
@@ -1624,17 +1632,15 @@ struct CondFrame {
 /// only provable exclusion is a level where both sides share a
 /// condition (the same directive instance, or the same condition
 /// text) but sit in different branches of it: branches of one
-/// condition are mutually exclusive. Any other shape -- different
-/// conditions, nesting, an unconditional side -- stays compatible,
-/// so the caller keeps judging.
+/// condition are mutually exclusive. A level where the sides sit
+/// under different conditions proves nothing by itself -- a deeper
+/// level may still share a condition in different branches -- so
+/// every level is examined; only running out of levels without
+/// finding a shared-condition exclusion means compatible.
 fn cond_contexts_compatible(a: &[CondFrame], b: &[CondFrame]) -> bool {
     for (fa, fb) in a.iter().zip(b.iter()) {
-        if fa.construct == fb.construct || fa.text == fb.text {
-            if fa.segment != fb.segment {
-                return false;
-            }
-        } else {
-            return true;
+        if (fa.construct == fb.construct || fa.text == fb.text) && fa.segment != fb.segment {
+            return false;
         }
     }
     true
@@ -2207,14 +2213,17 @@ impl SpecCheck {
         let Some(mut cmd) = self.rpm.command() else {
             return false;
         };
-        let output = cmd
-            .args(["-q", "--qf=", "-D", &define, "--specfile", spec_file])
-            .env("LC_ALL", "en_US.UTF-8")
-            .env("LANGUAGE", "en_US")
-            .stderr(Stdio::piped())
-            .stdout(Stdio::null())
-            .output()
-            .expect("the rpm binary is required for the specfile-error check");
+        cmd.args(["-q", "--qf=", "-D", &define, "--specfile", spec_file]);
+        cmd.env("LC_ALL", "en_US.UTF-8");
+        cmd.env("LANGUAGE", "en_US");
+        cmd.stderr(Stdio::piped());
+        cmd.stdout(Stdio::null());
+        // A spawn failure after a successful probe (a transient
+        // fork/exec failure) degrades like a missing tool -- the
+        // check reports nothing -- instead of panicking the run.
+        let Ok(output) = spawn_with_retry(|| cmd.output()) else {
+            return false;
+        };
         let fatal_exit = !output.status.success();
         let stderr = match String::from_utf8(output.stderr) {
             Ok(stderr) => stderr,
@@ -4669,7 +4678,19 @@ impl SpecCheck {
         let text = without_newline(line);
         for m in self.with_macro_empty_re.find_iter(text) {
             let Ok(m) = m else { break };
-            if m.start() > 0 && text.as_bytes()[m.start() - 1] == b'%' {
+            // Run parity, not a single preceding `%`: the run of
+            // `%` before the match plus the match's own leading
+            // `%` decides liveness -- `%%` is a literal `%`, while
+            // `%%%{?with N}` is `%%` plus a live macro that expands
+            // empty (same `percent_run_expands` logic as the
+            // comment scanner, one expansion pass).
+            let run = text.as_bytes()[..m.start()]
+                .iter()
+                .rev()
+                .take_while(|b| **b == b'%')
+                .count()
+                + 1;
+            if !percent_run_expands(run, 1) {
                 continue;
             }
             self.info(
@@ -5054,13 +5075,17 @@ fn heredoc_delimiter(text: &str) -> Option<String> {
                 while b.get(j).map(|c| *c == b' ' || *c == b'\t').unwrap_or(false) {
                     j += 1;
                 }
-                if matches!(b.get(j), Some(b'\'') | Some(b'"')) {
+                // Like the silent scan: a backslash quotes the
+                // first delimiter character (`<<\EOF`), and `.`
+                // and `-` are ordinary delimiter characters
+                // (`<<END-OF-TEST`, `<<OUT.LOG`).
+                if matches!(b.get(j), Some(b'\'') | Some(b'"') | Some(b'\\')) {
                     j += 1;
                 }
                 let start = j;
                 while b
                     .get(j)
-                    .map(|c| c.is_ascii_alphanumeric() || *c == b'_')
+                    .map(|c| c.is_ascii_alphanumeric() || matches!(*c, b'_' | b'.' | b'-'))
                     .unwrap_or(false)
                 {
                     j += 1;
@@ -5424,11 +5449,21 @@ fn soundness_block(
     for c in &cmds {
         let mut row = Vec::with_capacity(c.stmts.len());
         for s in &c.stmts {
-            if pipefail_before.is_none()
-                && command_word(&s.text).as_deref() == Some("set")
-                && s.text.contains("pipefail")
-            {
-                pipefail_before = Some(flat);
+            // Only `set -o pipefail` enables protection; `set +o
+            // pipefail` disables it again (and a later `-o`
+            // re-enables). A bare `pipefail` mention is neither.
+            if command_word(&s.text).as_deref() == Some("set") {
+                let mut prev = "";
+                for tok in s.text.split_whitespace().skip(1) {
+                    if tok == "pipefail" {
+                        if prev == "-o" && pipefail_before.is_none() {
+                            pipefail_before = Some(flat);
+                        } else if prev == "+o" {
+                            pipefail_before = None;
+                        }
+                    }
+                    prev = tok;
+                }
             }
             row.push(flat);
             flat += 1;
@@ -7063,6 +7098,19 @@ exit 1"#,
             lines_for(&results, "invalid-url").is_empty(),
             "valid URL must not warn: {results:?}"
         );
+        // A `?`/`#` directly after `://` is not a netloc either
+        // (urlparse yields an empty netloc there): both warn.
+        for url in ["http://?query", "http://#frag"] {
+            let results = run_with(
+                &spec_with(&format!("Source0:        {url}")),
+                &Config::default(),
+            );
+            assert_eq!(
+                lines_for(&results, "invalid-url").len(),
+                1,
+                "expected one invalid-url for {url}: {results:?}"
+            );
+        }
         // The malformed-URL rule is not Source-only: Patch warns too.
         let results = run_with(&spec_with("Patch0:         http://"), &Config::default());
         let invalid = lines_for(&results, "invalid-url");
@@ -8493,6 +8541,18 @@ exit 1"#,
         assert_eq!(lines.len(), 1, "results: {results:?}");
     }
 
+    /// #1171 follow-up: a shared condition in different branches
+    /// under *different* outer conditions is still exclusive -- the
+    /// outer difference must not stop the scan before the shared
+    /// level is examined, or the finding fires spuriously.
+    #[test]
+    fn libdir_macro_silent_for_shared_condition_nested_under_different_outers_1171() {
+        let spec = "Name: foo\n%if \"%{flavor}\" == \"outer1\"\n%if \"%{flavor}\" == \"shared\"\nBuildArch: noarch\n%endif\n%endif\n%if \"%{flavor}\" == \"outer2\"\n%if \"%{flavor}\" == \"shared\"\n%else\n%files\n%{_libdir}/foo\n%endif\n%endif\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "libdir-macro-in-noarch-package");
+        assert_eq!(lines.len(), 0, "results: {results:?}");
+    }
+
     /// #1171: an `%elif` branch is exclusive with the `%if` branch of
     /// the same construct, so a declaration there does not reach a
     /// `%files` line in the `%if` branch.
@@ -9811,6 +9871,18 @@ Patch0: foo.patch
             !has(&gnulib, "no-license-file-in-spec"),
             "results: {gnulib:?}"
         );
+        // A standalone `>&` / `<&` redirection takes its target
+        // as the next word: the target is not a positional
+        // argument, so the docdir destination still anchors.
+        for redir in [">&", "<&"] {
+            let redirected = run(&format!(
+                "cp COPYING %{{buildroot}}%{{_docdir}}/%{{name}}/ {redir} log"
+            ));
+            assert!(
+                !has(&redirected, "no-license-file-in-spec"),
+                "results: {redirected:?}"
+            );
+        }
         // A value-taking flag's value is not an argument: the mode
         // is skipped and the destination is the final argument.
         let install = run("install -m 644 COPYING %{buildroot}%{_docdir}/%{name}");
@@ -10527,6 +10599,21 @@ Patch0: foo.patch
             has(&results, "check-pipeline-status-masked"),
             "missing: {results:?}"
         );
+        // `set +o pipefail` disables again: a later pipeline fires.
+        let results =
+            run_mini("Name: foo\n%check\nset -o pipefail\nset +o pipefail\nmake test | tee log\n");
+        assert!(
+            has(&results, "check-pipeline-status-masked"),
+            "missing: {results:?}"
+        );
+        // Re-enabling after a disable protects again.
+        let results = run_mini(
+            "Name: foo\n%check\nset -o pipefail\nset +o pipefail\nset -o pipefail\nmake test | tee log\n",
+        );
+        assert!(
+            !has(&results, "check-pipeline-status-masked"),
+            "unexpected: {results:?}"
+        );
         // pipefail before the pipe.
         let results = run_mini("Name: foo\n%check\nset -o pipefail\nmake test | tee log\n");
         assert!(
@@ -10544,6 +10631,30 @@ Patch0: foo.patch
         assert!(
             !has(&results, "check-pipeline-status-masked"),
             "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn soundness_heredoc_delimiters_dashed_and_backslash_quoted() {
+        // A dashed delimiter must close the heredoc: the pipeline
+        // after its terminator is a real command and fires.
+        let results = run_mini(
+            "Name: foo\n%check\ncat <<END-OF-TEST\nmake test | tee log\nEND-OF-TEST\nmake test | tee log\n",
+        );
+        assert!(
+            has(&results, "check-pipeline-status-masked"),
+            "missing: {results:?}"
+        );
+        // A backslash-quoted delimiter must blank its body: only
+        // the pipeline after the terminator fires, not the one
+        // inside the heredoc.
+        let results = run_mini(
+            "Name: foo\n%check\ncat <<\\EOF\nmake test | tee log\nEOF\nmake test | tee log\n",
+        );
+        assert_eq!(
+            lines_for(&results, "check-pipeline-status-masked").len(),
+            1,
+            "results: {results:?}"
         );
     }
 
@@ -10629,7 +10740,12 @@ Patch0: foo.patch
             has(&results, "with-macro-expands-empty"),
             "missing: {results:?}"
         );
-        for line in ["%{!?without foo}", "%{?without:foo}", "%{?with foo}"] {
+        for line in [
+            "%{!?without foo}",
+            "%{?without:foo}",
+            "%{?with foo}",
+            "%%%{?with foo}",
+        ] {
             let results = run_mini(&format!("Name: foo\n{line}\n"));
             assert!(
                 has(&results, "with-macro-expands-empty"),
@@ -10640,6 +10756,7 @@ Patch0: foo.patch
             "%{with foo}",
             "0%{?with_foo}",
             "%%{?with foo}",
+            "%%%%{?with foo}",
             "%{?with_foo}",
         ] {
             let results = run_mini(&format!("Name: foo\n{line}\n"));
