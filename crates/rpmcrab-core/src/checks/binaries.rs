@@ -300,7 +300,10 @@ pub(crate) fn soname_name_match_parts(
 }
 
 static USR_LIB_REGEX: OnceLock<Regex> = OnceLock::new();
-fn usr_lib_regex() -> &'static Regex {
+/// `pub` (rather than private) solely so the external benchmark
+/// `benches/regex_hot_path.rs` can call it.
+#[doc(hidden)]
+pub fn usr_lib_regex() -> &'static Regex {
     USR_LIB_REGEX.get_or_init(|| Regex::new(r"^/usr/lib(64)?/").expect("static regex"))
 }
 
@@ -327,8 +330,19 @@ fn ldso_soname_regex() -> &'static Regex {
 }
 
 static SO_REGEX: OnceLock<Regex> = OnceLock::new();
-fn so_regex() -> &'static Regex {
+/// `pub` (rather than private) solely so the external benchmark
+/// `benches/regex_hot_path.rs` can call it.
+#[doc(hidden)]
+pub fn so_regex() -> &'static Regex {
     SO_REGEX.get_or_init(|| Regex::new(r"/lib(64)?/[^/]+\.so(\.[0-9]+)*$").expect("static regex"))
+}
+
+static BIN_REGEX: OnceLock<Regex> = OnceLock::new();
+/// `pub` (rather than private) solely so the external benchmark
+/// `benches/regex_hot_path.rs` can call it.
+#[doc(hidden)]
+pub fn bin_regex() -> &'static Regex {
+    BIN_REGEX.get_or_init(|| Regex::new(r"^(/usr(/X11R6)?)?/s?bin/").expect("static regex"))
 }
 
 static LA_FILE_REGEX: OnceLock<Regex> = OnceLock::new();

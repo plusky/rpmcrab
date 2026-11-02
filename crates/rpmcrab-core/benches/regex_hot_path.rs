@@ -5,25 +5,13 @@
 //! hot path with synthetic paths; they are informational for CI (not gated
 //! on absolute time). The hard regression guard is the unit test
 //! `regex_factories_are_fast` in binaries.rs.
+//!
+//! The benchmarks call the production factories, not bench-local copies:
+//! a regression to per-call `Regex::new` in production must show up here.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use fancy_regex::Regex;
+use rpmcrab_core::checks::binaries::{bin_regex, so_regex, usr_lib_regex};
 use std::hint::black_box;
-use std::sync::OnceLock;
-
-static USR_LIB: OnceLock<Regex> = OnceLock::new();
-static SO: OnceLock<Regex> = OnceLock::new();
-static BIN: OnceLock<Regex> = OnceLock::new();
-
-fn usr_lib() -> &'static Regex {
-    USR_LIB.get_or_init(|| Regex::new(r"^/usr/lib(64)?/").expect("static"))
-}
-fn so() -> &'static Regex {
-    SO.get_or_init(|| Regex::new(r"/lib(64)?/[^/]+\.so(\.[0-9]+)*$").expect("static"))
-}
-fn bin() -> &'static Regex {
-    BIN.get_or_init(|| Regex::new(r"^(/usr(/X11R6)?)?/s?bin/").expect("static"))
-}
 
 fn synthetic_paths(n: usize) -> Vec<String> {
     let templates = [
@@ -41,13 +29,15 @@ fn synthetic_paths(n: usize) -> Vec<String> {
 fn classify(paths: &[String]) -> usize {
     let mut hits = 0;
     for p in paths {
-        if usr_lib().is_match(p).unwrap_or(false) {
+        // Call the factory per path, as production does: caching the
+        // `&'static Regex` in a local would hide a per-call regression.
+        if usr_lib_regex().is_match(p).unwrap_or(false) {
             hits += 1;
         }
-        if so().is_match(p).unwrap_or(false) {
+        if so_regex().is_match(p).unwrap_or(false) {
             hits += 1;
         }
-        if bin().is_match(p).unwrap_or(false) {
+        if bin_regex().is_match(p).unwrap_or(false) {
             hits += 1;
         }
     }
