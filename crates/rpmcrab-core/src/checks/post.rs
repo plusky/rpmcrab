@@ -1244,7 +1244,7 @@ impl PostCheck {
         // heredoc. A quote open at the end means a Single or
         // Double frame is still on the stack; an unclosed
         // substitution or arithmetic frame alone does not count,
-        // matching the old quote-only unclosed rule.
+        // Unlike the old quote-only scan, quotes do not pair across a substitution boundary: a quote opened outside is not closed by one inside, and vice versa.
         fn live_opener_offsets(line: &str) -> (Vec<usize>, bool) {
             // Context stack: a `$(...)` or backtick substitution
             // re-enters code even inside double quotes, so a heredoc
