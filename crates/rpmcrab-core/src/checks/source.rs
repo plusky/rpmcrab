@@ -129,17 +129,18 @@ fn sha256_reader<R: std::io::Read>(mut r: R) -> Option<String> {
     )
 }
 
-/// Whether a payload file is too big to join any source record on the
-/// sha256 path: source whole-file records are capped at the 256 MiB
-/// archive cap on disk and member records at the 64 MiB entry cap, so
-/// a larger on-disk file matches neither. On the algo-8 path the join
-/// key is the free header digest and archive whole-file records are
-/// uncapped, so the gate never applies there. Bare-file records are
-/// capped at the walk side on every path. Gate soundness rests on
-/// same-build same-algo: the caps agree only when the source and
-/// binary RPMs share FILEDIGESTALGO, true for one build's src+bin
-/// pair; the mixed-algo corner cannot join today, which is
-/// fail-closed and untestable with real headers.
+/// Whether a payload file is too big to join any source record on the sha256
+/// path: source whole-file records are capped at the 256 MiB archive cap on
+/// disk and member records at the 64 MiB entry cap, so a larger on-disk file
+/// matches neither. On the algo-8 path the join key is the free header digest
+/// and archive whole-file source records are uncapped, so no payload size
+/// gate applies there; bare Sources over the 256 MiB cap keep only the
+/// prebuilt-binary-in-sources finding and drop their shipped record on both
+/// paths, so a larger bare payload never joins. Gate soundness rests on
+/// same-build same-algo: the caps agree only when the source and binary RPMs
+/// share FILEDIGESTALGO, true for one build's src+bin pair; the mixed-algo
+/// corner cannot join today, which is fail-closed and untestable with real
+/// headers.
 fn payload_over_source_cap(algo_is_8: bool, len: u64) -> bool {
     !algo_is_8 && len > prebuilt::MAX_ARCHIVE_BYTES as u64
 }
@@ -2865,18 +2866,17 @@ impl Check for SourceCheck {
                 continue;
             }
             let md5 = md5.map(String::as_str).unwrap_or("");
-            // The size gate first: a payload file that can join no
-            // source record needs no head read either. On the sha256
-            // path, source whole-file records are capped at the
-            // 256 MiB archive cap on disk and member records at the
-            // 64 MiB entry cap, so a larger on-disk file matches
-            // neither. The on-disk length decides: the header size
-            // can disagree with the bytes actually hashed. On the
-            // algo-8 path the join key is the free header digest
-            // and archive whole-file records are uncapped, so the
-            // gate never applies there. Bare-file records are capped
-            // at the walk side on every path, so the uncapped claim
-            // covers archive whole-file records only.
+            // The size gate first: a payload file that can join no source
+            // record needs no head read either. On the sha256 path, source
+            // whole-file records are capped at the 256 MiB archive cap on
+            // disk and member records at the 64 MiB entry cap, so a larger
+            // on-disk file matches neither. The on-disk length decides: the
+            // header size can disagree with the bytes actually hashed. On the
+            // algo-8 path the join key is the free header digest and archive
+            // whole-file source records are uncapped, so no payload size gate
+            // applies there; bare Sources over the 256 MiB cap keep only the
+            // prebuilt-binary-in-sources finding and drop their shipped
+            // record on both paths, so a larger bare payload never joins.
             let too_big = std::fs::metadata(&f.path)
                 .map(|m| payload_over_source_cap(algo_is_8, m.len()))
                 .unwrap_or(false);
