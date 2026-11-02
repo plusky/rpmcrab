@@ -737,16 +737,13 @@ impl<'a> Extractor<'a> {
                 // filesystem — blocks on a read open (FIFO) or fails it;
                 // a FIFO's own mtime is None by construction, so there is
                 // nothing to restore here.
-                if !f.is_dir {
-                    if let Ok(meta) = fs::symlink_metadata(&f.path) {
-                        let ft = meta.file_type();
-                        if ft.is_fifo()
-                            || ft.is_socket()
-                            || ft.is_block_device()
-                            || ft.is_char_device()
-                        {
-                            continue;
-                        }
+                if !f.is_dir
+                    && let Ok(meta) = fs::symlink_metadata(&f.path)
+                {
+                    let ft = meta.file_type();
+                    if ft.is_fifo() || ft.is_socket() || ft.is_block_device() || ft.is_char_device()
+                    {
+                        continue;
                     }
                 }
                 let time = UNIX_EPOCH + Duration::from_secs(mtime as u64);

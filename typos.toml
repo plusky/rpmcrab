@@ -79,7 +79,10 @@ extend-words = { matix = "matix", nd = "nd", tou = "tou" }
 # allow-list does not silence real typos repo-wide.
 [type.spelling-fixture]
 extend-glob = ["**/spellcheck.rs"]
-extend-words = { informations = "informations", libary = "libary" }
+# somethin is a deliberate truncation in the spellcheck package-name-skip
+# tests in the same file: it proves a truncated fragment is not skipped
+# for the full package name.
+extend-words = { informations = "informations", libary = "libary", somethin = "somethin" }
 
 # patern is a deliberate misspelling in the unknown-class tests in
 # defect_pattern.rs: a plausible user typo of the real defect-pattern
@@ -90,4 +93,3 @@ extend-words = { informations = "informations", libary = "libary" }
 [type.patern-fixture]
 extend-glob = ["**/defect_pattern.rs"]
 extend-words = { patern = "patern" }
-
