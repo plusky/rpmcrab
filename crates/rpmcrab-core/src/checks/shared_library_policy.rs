@@ -4,7 +4,8 @@
 //! `shlib-policy-missing-lib`, `readelf-failed`, `shlib-unversioned-lib`,
 //! `shlib-fixed-dependency`, `shlib-policy-excessive-dependency`,
 //! `shlib-policy-obsoletes-sibling`, `shlib-policy-etc-payload`,
-//! `shlib-policy-truncated-soname-path`.
+//! `shlib-policy-truncated-soname-path`,
+//! `shlib-policy-wrong-library-version`.
 //!
 //! One deliberate divergence in an existing finding:
 //! `shlib-policy-excessive-dependency` is not charged for a SONAME that
@@ -38,6 +39,21 @@
 //! (`-devel`, group), naming the group's canonical base name.
 //! Rich (boolean) requires are read through their leaves: a leaf naming the
 //! sibling with a version relation satisfies the rule, a bare leaf does not.
+//!
+//! One more finding has no reference counterpart:
+//! `shlib-policy-wrong-library-version` (Error). A versioned shared
+//! library package's own library files must be versioned, and their
+//! version must be the package's SONAME generation: a library file
+//! with no DT_SONAME (the libiio.so.0 shape: built NO_SONAME and
+//! shipped in libiio1), a bare `.so` regular file, or a plain
+//! dotted-digit filename version whose leading component differs from
+//! the package number all fire. The scan is deliberately narrow: only
+//! scheme-named library packages, only regular ELF files whose
+//! library stem equals the package stem, and only plain filename
+//! versions — decorated tails (23.11-1, suse0, 0d, word tails) stay
+//! with the SONAME arms, as do SONAME mismatches (which stay with
+//! `shlib-policy-name-error`); symlinks, %ghost entries and debug
+//! paths stay quiet.
 //!
 //! `shlib-fixed-dependency` is likewise deferred: a versioned library
 //! package pinning a dependency at `=` is version lockstep, not a policy
@@ -436,6 +452,83 @@ impl SharedLibraryPolicyCheck {
         }
     }
 
+    /// The `shlib-policy-wrong-library-version` scan: a versioned
+    /// shared library package's own library files must be versioned,
+    /// and their version must be the package's SONAME generation.
+    ///
+    /// A file fires when its library stem equals the package stem and
+    /// it is a bare `.so` regular file, carries no DT_SONAME under a
+    /// bare or plain dotted-digit name, or carries a plain
+    /// dotted-digit filename version whose leading component differs
+    /// from the package number (leading zeroes normalised away, so
+    /// `.so.01` in `libfoo1` stays quiet). The motivating shape is
+    /// `libiio.so.0` built NO_SONAME and shipped in `libiio1`: no
+    /// SONAME and version 0 against generation 1.
+    ///
+    /// Deliberately narrow: only scheme-named packages (the
+    /// `soname_package_parts` number is the generation to compare
+    /// against); only regular ELF files the walk read (symlinks, the
+    /// `-devel` link shape, stay quiet, as do %ghost entries, which
+    /// never join the scan set, and debug paths); only files whose
+    /// library stem equals the package stem (a plugin or secondary
+    /// library keeps its own versioning); only plain dotted-digit
+    /// filename versions (decorated tails such as `23.11-1`, `suse0`
+    /// or `0d` stay with the SONAME arms, whose matcher understands
+    /// them). A SONAME that mismatches the package name stays with
+    /// `shlib-policy-name-error`; a file whose filename version
+    /// mismatches fires here even when its SONAME matches, because
+    /// the file name itself is wrong.
+    fn check_library_file_versions(
+        &self,
+        pkg: &Pkg,
+        lib_file_sonames: &[(&str, Option<String>)],
+        out: &mut Filter,
+    ) {
+        let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name) else {
+            return;
+        };
+        for (fname, soname) in lib_file_sonames {
+            if fname.starts_with("/usr/lib/debug/") {
+                continue;
+            }
+            let base = fname.rsplit('/').next().unwrap_or(fname);
+            let Some(lib_stem) = base.split_once(".so").map(|(s, _)| s) else {
+                continue;
+            };
+            if lib_stem != stem.as_str() {
+                continue;
+            }
+            let mut reasons: Vec<String> = Vec::new();
+            match base.split_once(".so.") {
+                None => reasons.push("unversioned file name".to_string()),
+                Some((_, tail)) => {
+                    if !is_dotted_digits(tail) {
+                        continue;
+                    }
+                    if soname.is_none() {
+                        reasons.push("no SONAME".to_string());
+                    }
+                    let first = tail.split('.').next().unwrap_or("");
+                    let first = first.trim_start_matches('0');
+                    let first = if first.is_empty() { "0" } else { first };
+                    if first != number {
+                        reasons.push(format!("version {first}, expected {number}"));
+                    }
+                }
+            }
+            if reasons.is_empty() {
+                continue;
+            }
+            add_info(
+                out,
+                Level::Error,
+                pkg,
+                "shlib-policy-wrong-library-version",
+                &[&format!("{fname} ({})", reasons.join("; "))],
+            );
+        }
+    }
+
     /// `(soname, needed)` from an ELF file, or the parse failure reason.
     fn elf_dynamic(path: &str) -> Result<(Option<String>, Vec<String>), String> {
         let data = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -731,6 +824,10 @@ impl Check for SharedLibraryPolicyCheck {
         // Paths of the walked library files, for the dlopen credit in
         // the excessive-dependency loop below.
         let mut lib_files: Vec<&str> = Vec::new();
+        // Library files with their DT_SONAMEs, for the
+        // `shlib-policy-wrong-library-version` scan below: %ghost
+        // entries are not shipped payload and never join.
+        let mut lib_file_sonames: Vec<(&str, Option<String>)> = Vec::new();
         // DT_NEEDED of every ELF file in the package, library-named or
         // not: the link-time consumer set for the same credit. The
         // reference never computes this - it only walks library-named
@@ -783,6 +880,9 @@ impl Check for SharedLibraryPolicyCheck {
                     lib_files.push(file.path.as_str());
                     all_needed.extend(needed.iter().cloned());
                     libs_needed.extend(needed);
+                    if !file.is_ghost() {
+                        lib_file_sonames.push((fname, soname.clone()));
+                    }
                     if let Some(soname) = soname {
                         elf_carries_soname = true;
                         let dir = match fname.rfind('/') {
@@ -798,6 +898,11 @@ impl Check for SharedLibraryPolicyCheck {
                 }
             }
         }
+
+        // A library file in a versioned package that is unversioned or
+        // versioned for another SONAME generation (see
+        // `check_library_file_versions`).
+        self.check_library_file_versions(pkg, &lib_file_sonames, out);
 
         // A policy-named package with no library files at all. The
         // one credited exception is the KDE categories-only split,

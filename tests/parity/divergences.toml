@@ -3734,6 +3734,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "SharedLibraryPolicyCheck"
+kind = "behaviour"
+reason = "New port-only Error: a versioned shared library package shipping an unversioned or wrong-generation library file (a bare `.so` regular file, a file with no DT_SONAME, or a plain dotted-digit filename version whose leading component differs from the package number) emits E shlib-policy-wrong-library-version with the file path and reason as detail, one finding per file. The reference has no such finding. SONAME mismatches stay with shlib-policy-name-error, and decorated filename tails (23.11-1, suse0, 0d, word tails) stay with the SONAME arms; symlinks, %ghost entries and debug paths stay quiet. Pinned by unit tests in shared_library_policy.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "SignatureCheck"
 kind = "behaviour"
 reason = "Signature verification runs in-process through librpm (a verified `PackageHeader::from_file` read against the rpmdb keyring, with the verification flags masking the digest checks \u2014 a deliberate flag difference from `rpm -Kv`, whose default flag set verifies the digests as well) where the reference shells out to `rpm -Kv` and scrapes its output (SignatureCheck.py; pkg.py). Verdicts come from the structured result; the `unknown-key` key ID is read from the signature packet's issuer subpacket, falling back to the issuer-fingerprint subpacket when the packet carries no issuer subpacket (the key ID is that fingerprint's low 64 bits), and is formatted as the low 32 bits, as `rpm -Kv` prints it; a verification failure is reported as `invalid-signature` only when a signature packet is itself unparsable \u2014 a parseable signature that fails verification, and digest failures, stay silent, matching the reference's text patterns. The library and keyring configuration are the same ones `rpm -Kv` uses, so findings agree; parity is pinned by the fixture pin matrix (the unsigned, signed, corrupt-packet, bad-math, broken-payload and bad-digest fixture RPMs, each generation-checked against empty and key-holding rpmdb states, together with the v6 OPENPGP-container fixtures (container-only, classic-tag control, mixed classic+container and dual-signature forms, generation-checked the same way against an rpm 6 `rpm -Kv`) and a Factory-corpus before/after diff (plusky/rpmcrab#704))."
