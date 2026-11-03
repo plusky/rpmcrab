@@ -5259,6 +5259,13 @@ fn soundness_hits(
     hits
 }
 
+/// A bundled `set` option token ending in `o` (`-euo`, `+eo`): a single
+/// leading sign, at least one option letter, and a trailing `o`. The
+/// exact `-o`/`+o` forms are matched by the caller, not here.
+fn is_bundled_o(tok: &str, sign: char) -> bool {
+    tok.len() > 2 && tok.starts_with(sign) && !tok.starts_with("--") && tok.ends_with('o')
+}
+
 fn soundness_block(
     section: &str,
     phys: &[BodyLine],
@@ -5449,16 +5456,28 @@ fn soundness_block(
     for c in &cmds {
         let mut row = Vec::with_capacity(c.stmts.len());
         for s in &c.stmts {
-            // Only `set -o pipefail` enables protection; `set +o
+            // `set -o pipefail` enables protection; `set +o
             // pipefail` disables it again (and a later `-o`
-            // re-enables). A bare `pipefail` mention is neither.
+            // re-enables). Bundled forms count the same way: a
+            // token ending in `o` (`-euo`) enables when the next
+            // word is `pipefail`, and an attached `-*opipefail`
+            // token enables on its own; the `+o` forms disable
+            // symmetrically. A bare `pipefail` mention is neither.
             if command_word(&s.text).as_deref() == Some("set") {
                 let mut prev = "";
                 for tok in s.text.split_whitespace().skip(1) {
                     if tok == "pipefail" {
-                        if prev == "-o" && pipefail_before.is_none() {
+                        if (prev == "-o" || is_bundled_o(prev, '-')) && pipefail_before.is_none() {
                             pipefail_before = Some(flat);
-                        } else if prev == "+o" {
+                        } else if prev == "+o" || is_bundled_o(prev, '+') {
+                            pipefail_before = None;
+                        }
+                    } else if let Some(pre) = tok.strip_suffix("pipefail") {
+                        if pre == "-o" || is_bundled_o(pre, '-') {
+                            if pipefail_before.is_none() {
+                                pipefail_before = Some(flat);
+                            }
+                        } else if pre == "+o" || is_bundled_o(pre, '+') {
                             pipefail_before = None;
                         }
                     }
@@ -10619,6 +10638,32 @@ Patch0: foo.patch
         assert!(
             !has(&results, "check-pipeline-status-masked"),
             "unexpected: {results:?}"
+        );
+        // Bundled enable protects: `set -euo pipefail` and the
+        // attached `-opipefail` form count as `-o pipefail`.
+        let results = run_mini("Name: foo\n%check\nset -euo pipefail\nmake test | tee log\n");
+        assert!(
+            !has(&results, "check-pipeline-status-masked"),
+            "unexpected: {results:?}"
+        );
+        let results = run_mini("Name: foo\n%check\nset -opipefail\nmake test | tee log\n");
+        assert!(
+            !has(&results, "check-pipeline-status-masked"),
+            "unexpected: {results:?}"
+        );
+        // Bundled disable unprotects symmetrically.
+        let results = run_mini(
+            "Name: foo\n%check\nset -o pipefail\nset +euo pipefail\nmake test | tee log\n",
+        );
+        assert!(
+            has(&results, "check-pipeline-status-masked"),
+            "missing: {results:?}"
+        );
+        let results =
+            run_mini("Name: foo\n%check\nset -o pipefail\nset +opipefail\nmake test | tee log\n");
+        assert!(
+            has(&results, "check-pipeline-status-masked"),
+            "missing: {results:?}"
         );
         // PIPESTATUS read after the pipe.
         let results = run_mini("Name: foo\n%check\nmake test | tee log\nexit ${PIPESTATUS[0]}\n");

@@ -168,16 +168,14 @@ impl TagsCheck {
                 .then(|| Regex::new(&format!("(?i){invalid_url}")).ok())
                 .flatten(),
             use_epoch: get_bool("UseEpoch"),
-            // A negative limit must fail loud here: `as usize`
-            // would wrap it to `usize::MAX` and silently disable
-            // the summary/description length checks.
+            // A negative limit is rejected by `Config::finalize`
+            // before any check is constructed; `as usize` on a
+            // negative here would wrap it to `usize::MAX` and
+            // silently disable the summary/description length checks.
             max_line_len: match tbl
                 .get("MaxLineLength")
                 .and_then(toml::Value::as_integer)
             {
-                Some(v) if v < 0 => {
-                    panic!("TagsCheck: MaxLineLength must not be negative, got {v}")
-                }
                 Some(v) => v as usize,
                 None => 79,
             },
@@ -2967,8 +2965,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "MaxLineLength must not be negative")]
-    fn negative_max_line_length_panics() {
+    fn negative_max_line_length_fails_at_finalize() {
         // A negative limit used to wrap to `usize::MAX` and
         // silently disable the length checks; it must fail loud
         // at config load instead.
@@ -2982,8 +2979,13 @@ mod tests {
             toml::Value::Array(vec![]),
         );
         tbl.insert("InvalidRequires".to_string(), toml::Value::Array(vec![]));
-        config.finalize().expect("fixture config");
-        let _check = TagsCheck::new(&config);
+        let err = config
+            .finalize()
+            .expect_err("negative MaxLineLength must fail at load");
+        assert!(
+            err.contains("must not be negative"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
