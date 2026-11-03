@@ -263,6 +263,21 @@ fn is_owned_regex_factory(line: &str) -> bool {
     false
 }
 
+/// The violation for the factory starting at `lines[i]`, if any: the
+/// detector, the allowlist check and the message all consult the same
+/// joined signature, not the first line alone. A fragment on a
+/// continuation line allowlists the factory (as the liveness predicate
+/// already assumes), and the message shows the return type that made
+/// it a factory instead of a bare `fn name(` line.
+fn owned_factory_violation(file: &str, lines: &[&str], i: usize) -> Option<String> {
+    let sig = signature_at(lines, i)?;
+    if is_owned_regex_factory(&sig) && !is_allowlisted(file, &sig) {
+        Some(format!("{}:{}: {}", file, i + 1, sig.trim()))
+    } else {
+        None
+    }
+}
+
 #[test]
 fn owned_regex_factory_detector() {
     // Pins the detector directly against string inputs, independently of
@@ -325,6 +340,22 @@ fn multi_line_signatures_join_for_the_detector() {
     // No terminator within the window: not a signature we can judge.
     let unterminated = ["fn f(", ") -> Regex"];
     assert!(signature_at(&unterminated, 0).is_none());
+}
+
+#[test]
+fn owned_factory_violation_consults_the_joined_signature() {
+    // A fragment on a continuation line allowlists the factory: the
+    // first line alone carries no allowlist fragment here.
+    let lines = ["fn make_re(", "    f_name: &str,", ") -> Regex {"];
+    assert_eq!(owned_factory_violation("binaries.rs", &lines, 0), None);
+    // The same factory in a file with no such fragment is a violation,
+    // and the message shows the joined signature including the return
+    // type, not the bare first line.
+    let violation = owned_factory_violation("other.rs", &lines, 0).expect("violation");
+    assert!(violation.starts_with("other.rs:1: "), "{violation}");
+    assert!(violation.contains("-> Regex"), "{violation}");
+    // Not a factory start: no violation at all.
+    assert_eq!(owned_factory_violation("other.rs", &lines, 1), None);
 }
 
 #[test]
@@ -415,11 +446,8 @@ fn no_owned_regex_factories() {
         let src = std::fs::read_to_string(entry.path()).unwrap();
         let lines: Vec<&str> = src.lines().collect();
         for i in 0..lines.len() {
-            let Some(sig) = signature_at(&lines, i) else {
-                continue;
-            };
-            if is_owned_regex_factory(&sig) && !is_allowlisted(&fname, lines[i]) {
-                violations.push(format!("{}:{}: {}", fname, i + 1, lines[i].trim()));
+            if let Some(violation) = owned_factory_violation(&fname, &lines, i) {
+                violations.push(violation);
             }
         }
     }

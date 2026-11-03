@@ -448,6 +448,29 @@ fn a_repeated_argument_is_counted_once() {
     );
 }
 
+/// A directory plus the file beneath it names one package twice: the
+/// header counts CLI arguments (2, the directory and the file), the
+/// footer counts validated packages (1). The two counts must stay
+/// distinct, or a swap of the two passes unnoticed. (An exactly
+/// repeated argument cannot pin this: `dedup_files` collapses it
+/// before the header count, so header and footer are both 1 there.)
+#[test]
+fn overlapping_directory_and_file_count_once_in_footer() {
+    let rpm = corpus_rpm();
+    let dir = rpm.parent().unwrap();
+    let out = rpmcrab(&[dir.to_str().unwrap(), rpm.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(64));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("1 packages and 0 specfiles checked"),
+        "overlapping arguments counted twice in footer: {stdout}"
+    );
+    assert!(
+        stdout.contains(", packages: 2"),
+        "header must carry the CLI-argument count, not the validated count: {stdout}"
+    );
+}
+
 /// Progress lines (`checking … (n of m)`, rpmcrab#286) are emitted in
 /// worker-pickup order, so a parallel run orders them differently than a
 /// sequential one, and each carries a wall-clock timestamp; the set of

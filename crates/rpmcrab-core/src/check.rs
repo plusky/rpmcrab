@@ -387,9 +387,6 @@ fn errors_only_skips(check: &dyn Check, config: &Config) -> bool {
     config.errors_only && !config.strict && check.max_severity() != Level::Error
 }
 
-/// How many checks `--errors-only` would drop from this selection. The CLI
-/// warns instead of silently running nothing when the whole selection is
-/// dropped.
 /// Split a `--checks` selection on `,`, trimming whitespace and
 /// dropping empty items, so `"TagsCheck, FilesCheck"` narrows to both
 /// checks instead of silently running only the first.
@@ -416,6 +413,9 @@ pub fn unmatched_checks(config: &Config, selected: Option<&str>) -> Vec<String> 
         .collect()
 }
 
+/// How many checks `--errors-only` would drop from this selection. The CLI
+/// warns instead of silently running nothing when the whole selection is
+/// dropped.
 pub fn errors_only_dropped(config: &Config, selected: Option<&str>) -> usize {
     let selected = parse_selected(selected);
     config

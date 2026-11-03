@@ -46,7 +46,10 @@ fn run_with_mixed_findings(format: &str) -> String {
         .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm");
     let mut lint = Lint::new(config, make_checks(), Color::for_tty(false), 80).unwrap();
     lint.check_batch(vec![Task::File(rpm)], 1, &make_checks, true);
-    lint.render_report(format, "rpmcrab", env!("CARGO_PKG_VERSION"), 1, false, 0.1)
+    // The header counts CLI arguments, the footer counts validated
+    // packages: pass 3 here while the run validates 1, so the two
+    // counts cannot be swapped without a test failing.
+    lint.render_report(format, "rpmcrab", env!("CARGO_PKG_VERSION"), 3, false, 0.1)
 }
 
 #[test]
@@ -56,9 +59,16 @@ fn text_report_has_no_per_class_summary_line() {
         !out.contains("defect-pattern findings"),
         "per-class summary line in the default text report:\n{out}"
     );
-    // The footer's own line keeps its frozen shape.
+    // The footer's own line keeps its frozen shape, and the header
+    // carries the distinct argument count, not the validated count.
     assert!(
-        out.contains("1 errors, 2 warnings, 0 filtered; has taken 0.1 s"),
+        out.contains("checks: 1, packages: 3"),
+        "header must carry the CLI-argument count, not the validated count:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "1 packages and 0 specfiles checked; 1 errors, 2 warnings, 0 filtered; has taken 0.1 s"
+        ),
         "footer changed shape:\n{out}"
     );
 }
@@ -97,4 +107,7 @@ fn json_summary_carries_the_footer_validated_counters() {
     let doc: serde_json::Value = serde_json::from_str(&out).expect("JSON document");
     assert_eq!(doc["summary"]["packages"], 1);
     assert_eq!(doc["summary"]["specfiles"], 0);
+    // The top-level count is the header (CLI-argument) count, not the
+    // summary's validated count: the two must stay distinct.
+    assert_eq!(doc["packages"], 3);
 }
