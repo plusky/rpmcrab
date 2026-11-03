@@ -167,20 +167,59 @@ fn is_allowlisted(file: &str, line: &str) -> bool {
     })
 }
 
+/// Strip one leading function qualifier word (`async`, `unsafe`,
+/// `const`) or an `extern` qualifier with its optional ABI string
+/// (`extern "C"`), returning the remainder. `None` when the line does
+/// not start with that qualifier word.
+fn strip_qualifier_word<'a>(line: &'a str, word: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(word)?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    if word == "extern"
+        && let Some(quoted) = rest.strip_prefix('"')
+    {
+        let end = quoted.find('"')?;
+        return Some(quoted[end + 1..].trim_start());
+    }
+    Some(rest)
+}
+
 /// The remainder of a line after stripping a visibility prefix (`pub`,
-/// `pub(crate)`, `pub(super)`, `pub(in path)`), or the line itself when
-/// it carries none. `None` only for a malformed `pub(` group.
+/// `pub(crate)`, `pub(super)`, `pub(in path)`) and any function
+/// qualifiers (`async`, `unsafe`, `const`, `extern "C"`), or the line
+/// itself when it carries none. `None` only for a malformed `pub(`
+/// group; an unterminated `extern` ABI string simply leaves the line
+/// un-stripped, so it cannot match `fn `. Without the qualifier
+/// strip, a qualified factory (`async fn f() -> Regex`) never starts
+/// with `fn ` after this helper and evades the detector entirely.
 fn strip_visibility(line: &str) -> Option<&str> {
     let t = line.trim();
-    let Some(rest) = t.strip_prefix("pub") else {
-        return Some(t);
-    };
-    let rest = rest.trim_start();
-    if let Some(after) = rest.strip_prefix('(') {
-        let close = after.find(')')?;
-        Some(after[close + 1..].trim_start())
+    let stripped = if let Some(rest) = t.strip_prefix("pub") {
+        let rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix('(') {
+            let close = after.find(')')?;
+            after[close + 1..].trim_start()
+        } else {
+            rest
+        }
     } else {
-        Some(rest)
+        t
+    };
+    let mut stripped = stripped;
+    loop {
+        let mut advanced = false;
+        for word in ["async", "unsafe", "const", "extern"] {
+            if let Some(rest) = strip_qualifier_word(stripped, word) {
+                stripped = rest;
+                advanced = true;
+                break;
+            }
+        }
+        if !advanced {
+            return Some(stripped);
+        }
     }
 }
 
@@ -298,6 +337,17 @@ fn owned_regex_factory_detector() {
     assert!(!is_owned_regex_factory("fn f() {"));
     // Visibility prefixes do not hide a factory.
     assert!(is_owned_regex_factory("pub fn f() -> Regex {"));
+    // Function qualifiers do not hide one either: a qualified
+    // factory (no such factory exists today) must still be flagged.
+    assert!(is_owned_regex_factory("async fn f() -> Regex {"));
+    assert!(is_owned_regex_factory("unsafe fn f() -> Regex {"));
+    assert!(is_owned_regex_factory("const fn f() -> Regex {"));
+    assert!(is_owned_regex_factory("extern \"C\" fn f() -> Regex {"));
+    assert!(is_owned_regex_factory("pub async unsafe fn f() -> Regex {"));
+    assert!(is_owned_regex_factory("pub extern \"C\" fn f() -> Regex {"));
+    // Qualified reference returns are still not factories.
+    assert!(!is_owned_regex_factory("async fn f() -> &'static Regex {"));
+    assert!(!is_owned_regex_factory("extern \"C\" fn f() -> &Regex {"));
     assert!(is_owned_regex_factory("pub(crate) fn f() -> Regex {"));
     assert!(is_owned_regex_factory("pub(super) fn f() -> Regex {"));
     assert!(is_owned_regex_factory(
@@ -330,6 +380,10 @@ fn multi_line_signatures_join_for_the_detector() {
         "}",
     ];
     let sig = signature_at(&lines, 0).expect("signature");
+    assert!(is_owned_regex_factory(&sig));
+    // A qualified multi-line signature joins the same way.
+    let qualified = ["pub async fn f(", ") -> Regex {"];
+    let sig = signature_at(&qualified, 0).expect("qualified signature");
     assert!(is_owned_regex_factory(&sig));
     assert!(signature_at(&lines, 1).is_none());
     assert!(signature_at(&lines, 2).is_none());

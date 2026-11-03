@@ -963,7 +963,14 @@ fn expand_filelist_into(
 ) {
     for path in files {
         if path.is_file() && has_package_suffix(path) {
-            packages.push(path.clone());
+            // Canonicalise file paths the same way the directory
+            // branch below canonicalises for its visited set: the
+            // same package reached via different spellings (`./x.rpm`
+            // vs `x.rpm`, a symlinked path) then spells identically,
+            // so the caller's lexical sort + dedup collapses it to
+            // one task instead of checking it twice. A path that
+            // cannot be canonicalised falls back to its own spelling.
+            packages.push(std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()));
         } else if path.is_dir() {
             if !top_level
                 && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
@@ -1187,6 +1194,44 @@ mod tests {
         let found = expand_filelist(&[link]);
         assert_eq!(found.len(), 1, "got {found:?}");
         assert_eq!(found[0].file_name().unwrap(), "a.rpm");
+    }
+
+    #[test]
+    fn expand_filelist_canonicalizes_different_spellings_of_one_file() {
+        // The same package reached as `a.rpm`, `./a.rpm`, and through
+        // a symlink canonicalises to one path, so the caller's lexical
+        // sort + dedup (as in `run`) collapses it to a single task
+        // instead of checking it twice with duplicated findings.
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("a.rpm");
+        std::fs::write(&real, b"x").unwrap();
+        let link = dir.path().join("link.rpm");
+        symlink(&real, &link).unwrap();
+        let dotted = dir.path().join("./a.rpm");
+        let other = dir.path().join("b.rpm");
+        std::fs::write(&other, b"x").unwrap();
+
+        let mut found = expand_filelist(&[real.clone(), dotted, link, other]);
+        found.sort();
+        found.dedup();
+        assert_eq!(found.len(), 2, "got {found:?}");
+        assert_eq!(found[0], std::fs::canonicalize(&real).unwrap());
+        assert!(found[1].file_name().unwrap() == "b.rpm");
+    }
+
+    #[test]
+    fn expand_filelist_file_plus_directory_overlap_is_one_task() {
+        // A file passed alongside its own directory reaches expansion
+        // twice; both spellings canonicalise, so the caller's lexical
+        // dedup leaves one task.
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("a.rpm");
+        std::fs::write(&pkg, b"x").unwrap();
+        let mut found = expand_filelist(&[dir.path().to_path_buf(), pkg]);
+        found.sort();
+        found.dedup();
+        assert_eq!(found.len(), 1, "got {found:?}");
     }
 
     #[test]

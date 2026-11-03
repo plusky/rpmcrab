@@ -126,6 +126,47 @@ def test_clean_manifest_passes():
     assert _run(manifest) == 0, manifest
 
 
+def _run_in(tmp):
+    """Run the gate with `tmp` as the working directory."""
+    proc = subprocess.run(
+        ["bash", SCRIPT], cwd=tmp, capture_output=True, text=True
+    )
+    return proc.returncode
+
+
+def test_missing_manifest_fails():
+    """No manifest at all is a failure, not a vacuous pass."""
+    with tempfile.TemporaryDirectory() as tmp:
+        assert _run_in(tmp) == 1
+
+
+def test_unreadable_manifest_fails():
+    """An unreadable manifest is a failure, not a vacuous pass."""
+    if os.geteuid() == 0:
+        return  # root reads through mode 000, so the gate cannot fail
+    with tempfile.TemporaryDirectory() as tmp:
+        core = os.path.join(tmp, "crates", "rpmcrab-core")
+        os.makedirs(core)
+        manifest = os.path.join(core, "Cargo.toml")
+        with open(manifest, "w", encoding="utf-8") as fh:
+            fh.write("[package]\nname = \"rpmcrab-core\"\n")
+        os.chmod(manifest, 0)
+        try:
+            assert _run_in(tmp) == 1
+        finally:
+            os.chmod(manifest, 0o644)
+
+
+def test_grep_error_fails():
+    """A manifest grep cannot read (here: a directory in place of
+    the manifest file, so grep exits 2) fails instead of passing
+    vacuously like a no-match."""
+    with tempfile.TemporaryDirectory() as tmp:
+        core = os.path.join(tmp, "crates", "rpmcrab-core")
+        os.makedirs(os.path.join(core, "Cargo.toml"))
+        assert _run_in(tmp) == 1
+
+
 def test_real_manifest_passes():
     """The gate still passes on the real core manifest."""
     proc = subprocess.run(

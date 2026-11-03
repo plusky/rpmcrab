@@ -202,5 +202,33 @@ class VerdictTest(unittest.TestCase):
         self.assertIn("1/2 entries live (test fixture)", out)
 
 
+class LoadTableTest(unittest.TestCase):
+    def load(self, table_text):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stems.toml"
+            path.write_text(table_text, encoding="utf-8")
+            return _mod.load_table(str(path))
+
+    def test_blank_stems_fail_validation(self):
+        # Empty and whitespace-only stems used to pass validation and
+        # then collapse to an empty stem pattern; both are malformed.
+        for stems in ['[""]', '[" "]', '["gobject", "  "]']:
+            table = (
+                "[[PythonModuleStems]]\n"
+                'module = "pygobject"\n'
+                f"stems = {stems}\n"
+            )
+            with self.assertRaises(ValueError, msg=stems):
+                self.load(table)
+
+    def test_valid_stems_still_load(self):
+        table = (
+            "[[PythonModuleStems]]\n"
+            'module = "pygobject"\n'
+            'stems = ["gobject"]\n'
+        )
+        self.assertEqual(self.load(table), [("pygobject", ["gobject"])])
+
+
 if __name__ == "__main__":
     unittest.main()
