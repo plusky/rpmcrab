@@ -24,7 +24,7 @@ use librpm::Tag;
 use super::is_match;
 use super::shared::{
     binary_source_key, devel_infix_regex, devel_regex, devel_underscore_regex,
-    explicit_lib_package_regex, macro_regex, source_package_keys,
+    explicit_lib_package_regex, is_ghost_file, macro_regex, source_package_keys,
 };
 use super::spdx::suggest_licenses;
 use crate::check::{Check, add_info, make_finding};
@@ -36,6 +36,7 @@ use crate::pkg::dep::{
     DepInfo, RPMSENSE_EQUAL, RPMSENSE_FIND_REQUIRES, RPMSENSE_GREATER, RPMSENSE_LESS,
     version_to_string,
 };
+use crate::pkg::pkgfile::is_reg;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -100,6 +101,14 @@ pub struct TagsCheck {
     /// Candidates of binary packages that carry no `SOURCERPM` key:
     /// they belong to no build the run can judge and always fire.
     obs_unkeyed: Vec<ObsoleteCandidate>,
+    /// Uppercase basenames of shipped executable regular files, per
+    /// build key (`SOURCERPM`): the run-scoped sibling program credit
+    /// for deferred `spelling-error` verdicts.
+    spell_programs: HashMap<String, HashSet<String>>,
+    /// Deferred `spelling-error` candidates in encounter order; the
+    /// verdict waits for `after_checks`, where the sibling credit is
+    /// judged, so emission order is preserved.
+    spell_candidates: Vec<SpellingCandidate>,
 }
 
 /// One `obsolete-not-provided` candidate of a binary package: an
@@ -127,6 +136,54 @@ struct ObsoleteState {
     order: Vec<String>,
     builds: HashMap<String, ObsoleteBuild>,
     unkeyed: Vec<ObsoleteCandidate>,
+}
+
+/// One deferred `spelling-error` candidate: the finding text is built
+/// at check time, but the verdict waits for `after_checks`, where the
+/// run-scoped sibling program credit is judged (plusky/rpmcrab#1481).
+struct SpellingCandidate {
+    pkg_name: String,
+    arch: String,
+    /// Build keys the candidate answers to: the binary's `SOURCERPM`
+    /// for a binary package, the source package's `SOURCERPM`
+    /// spellings for a source package, empty for a keyless package,
+    /// which belongs to no build the run can judge and always fires.
+    source_keys: Vec<String>,
+    /// The word as found, uppercased for the credit comparison (the
+    /// per-package ignored comparison is case-insensitive too).
+    word_upper: String,
+    /// The full finding detail (`Summary(C) word -> suggestions`).
+    detail: String,
+}
+
+/// Cross-package spelling state, merged before `after_checks`.
+struct SpellingState {
+    /// Uppercase basenames of shipped executable regular files, per
+    /// build key.
+    programs: HashMap<String, HashSet<String>>,
+    /// Candidates in encounter order.
+    candidates: Vec<SpellingCandidate>,
+}
+
+/// Cross-package state exported by `TagsCheck`: the obsolete verdict
+/// state plus the spelling state.
+struct TagsRunState {
+    obsolete: ObsoleteState,
+    spelling: SpellingState,
+}
+
+/// Whether a deferred spelling candidate earns the sibling program
+/// credit: one of its build keys ships the word as an executable
+/// program name. Pure so the scoping pins without fixture packages.
+fn spelling_credited(
+    programs: &HashMap<String, HashSet<String>>,
+    cand: &SpellingCandidate,
+) -> bool {
+    cand.source_keys.iter().any(|key| {
+        programs
+            .get(key)
+            .is_some_and(|set| set.contains(&cand.word_upper))
+    })
 }
 
 static URL_ESCAPE_RE: OnceLock<Regex> = OnceLock::new();
@@ -196,6 +253,8 @@ impl TagsCheck {
             obs_order: Vec::new(),
             obs_builds: HashMap::new(),
             obs_unkeyed: Vec::new(),
+            spell_programs: HashMap::new(),
+            spell_candidates: Vec::new(),
         }
     }
 
@@ -238,7 +297,7 @@ impl TagsCheck {
 
 impl TagsCheck {
     /// The reference `check()`: runs for binary and source packages alike.
-    fn run(&self, pkg: &Pkg, out: &mut Filter) {
+    fn run(&mut self, pkg: &Pkg, out: &mut Filter) {
         let tag_str = |t| pkg.tag_str(t).unwrap_or_default();
         let epoch: Option<i64> = pkg.tag_i64(Tag::EPOCH);
         let group = pkg.tag_str(Tag::GROUP).unwrap_or_default();
@@ -1110,7 +1169,7 @@ impl TagsCheck {
     }
 
     fn check_summary_tag(
-        &self,
+        &mut self,
         pkg: &Pkg,
         out: &mut Filter,
         summary: &str,
@@ -1132,7 +1191,7 @@ impl TagsCheck {
     }
 
     fn check_summary(
-        &self,
+        &mut self,
         pkg: &Pkg,
         out: &mut Filter,
         summary: &str,
@@ -1145,14 +1204,24 @@ impl TagsCheck {
         if let Some(checker) = &self.spellchecker
             && crate::spellcheck::spellcheckable_language(lang)
         {
-            for (word, suggestions) in checker.check(summary, &pkg.name, ignored) {
+            let found = checker.check(summary, &pkg.name, ignored);
+            // Deferred: the verdict waits for `after_checks`, where
+            // the run-scoped sibling program credit is judged
+            // (plusky/rpmcrab#1481); emitting here would credit only
+            // the packages already checked, in run order.
+            for (word, suggestions) in found {
                 let sug = if suggestions.is_empty() {
                     String::new()
                 } else {
                     format!(" -> {}", suggestions.join(", "))
                 };
-                let detail = format!("Summary({lang}) {word}{sug}");
-                add_info(out, Level::Warning, pkg, "spelling-error", &[&detail]);
+                self.spell_candidates.push(SpellingCandidate {
+                    pkg_name: pkg.name.clone(),
+                    arch: pkg.arch.clone(),
+                    source_keys: Self::spelling_keys(pkg),
+                    word_upper: word.to_uppercase(),
+                    detail: format!("Summary({lang}) {word}{sug}"),
+                });
             }
         }
         let lang_err = Self::lang_for_error(lang);
@@ -1249,7 +1318,7 @@ impl TagsCheck {
     }
 
     fn check_description_tag(
-        &self,
+        &mut self,
         pkg: &Pkg,
         out: &mut Filter,
         description: &str,
@@ -1283,7 +1352,7 @@ impl TagsCheck {
     }
 
     fn check_description(
-        &self,
+        &mut self,
         pkg: &Pkg,
         out: &mut Filter,
         description: &str,
@@ -1296,14 +1365,22 @@ impl TagsCheck {
         if let Some(checker) = &self.spellchecker
             && crate::spellcheck::spellcheckable_language(lang)
         {
-            for (word, suggestions) in checker.check(description, &pkg.name, ignored) {
+            let found = checker.check(description, &pkg.name, ignored);
+            // Deferred, as in `check_summary`: the verdict waits for
+            // `after_checks` and its run-scoped sibling program credit.
+            for (word, suggestions) in found {
                 let sug = if suggestions.is_empty() {
                     String::new()
                 } else {
                     format!(" -> {}", suggestions.join(", "))
                 };
-                let detail = format!("%description -l {lang} {word}{sug}");
-                add_info(out, Level::Warning, pkg, "spelling-error", &[&detail]);
+                self.spell_candidates.push(SpellingCandidate {
+                    pkg_name: pkg.name.clone(),
+                    arch: pkg.arch.clone(),
+                    source_keys: Self::spelling_keys(pkg),
+                    word_upper: word.to_uppercase(),
+                    detail: format!("%description -l {lang} {word}{sug}"),
+                });
             }
         }
         let lang_err = Self::lang_for_error(lang);
@@ -1663,6 +1740,46 @@ impl TagsCheck {
         }
     }
 
+    /// The build keys a package's deferred spelling candidates answer
+    /// to: the binary's `SOURCERPM` for a binary package, the source
+    /// package's `SOURCERPM` spellings for a source package. A keyless
+    /// binary answers to no key and always fires.
+    fn spelling_keys(pkg: &Pkg) -> Vec<String> {
+        if pkg.is_source {
+            source_package_keys(pkg)
+        } else {
+            binary_source_key(pkg).into_iter().collect()
+        }
+    }
+
+    /// The run-scoped sibling program credit: a binary package's
+    /// shipped executable regular files, keyed by its build, so a
+    /// sibling subpackage's metadata naming the program is not a
+    /// spelling finding (plusky/rpmcrab#1481). Source packages ship
+    /// no installed programs and contribute nothing; a keyless binary
+    /// belongs to no build the run can judge. Ghost files are not
+    /// shipped content and never credit.
+    fn accumulate_spelling(&mut self, pkg: &Pkg) {
+        if pkg.is_source {
+            return;
+        }
+        let Some(key) = binary_source_key(pkg) else {
+            return;
+        };
+        let programs = self.spell_programs.entry(key).or_default();
+        for file in &pkg.files {
+            if is_ghost_file(pkg, file) {
+                continue;
+            }
+            if !is_reg(file.mode) || file.mode & 0o111 == 0 {
+                continue;
+            }
+            if let Some(base) = file.name.rsplit('/').next().filter(|b| !b.is_empty()) {
+                programs.insert(base.to_uppercase());
+            }
+        }
+    }
+
     fn check_obsolete_not_provided(&self, pkg: &Pkg, out: &mut Filter, prov_names: &[&str]) {
         for obs in &pkg.obsoletes {
             // Plain names: rpm rejects rich dependencies in both Obsoletes
@@ -1871,6 +1988,7 @@ impl Check for TagsCheck {
         Self::register_error_details(config, out);
         self.run(pkg, out);
         self.accumulate_obsolete(pkg);
+        self.accumulate_spelling(pkg);
     }
 
     /// The deferred `obsolete-not-provided` verdict: a candidate is
@@ -1895,6 +2013,28 @@ impl Check for TagsCheck {
                 emit_obsolete_not_provided(out, cand);
             }
         }
+        // The deferred `spelling-error` verdict: a candidate is
+        // credited only when a package of its own build ships the
+        // word as an executable program name. Every other candidate
+        // fires, so keyless, single-package and cross-build runs
+        // report exactly the per-package verdict. Candidates emit in
+        // encounter order, so the rendered order is unchanged (the
+        // output sort keys on the check name, and equal keys keep
+        // insertion order).
+        for cand in &self.spell_candidates {
+            let credited = spelling_credited(&self.spell_programs, cand);
+            if credited {
+                continue;
+            }
+            out.add_info(make_finding(
+                &cand.pkg_name,
+                &cand.arch,
+                Level::Warning,
+                "spelling-error",
+                vec![cand.detail.clone()],
+                None,
+            ));
+        }
     }
 
     fn reset(&mut self) {
@@ -1902,23 +2042,31 @@ impl Check for TagsCheck {
         self.obs_order.clear();
         self.obs_builds.clear();
         self.obs_unkeyed.clear();
+        self.spell_programs.clear();
+        self.spell_candidates.clear();
     }
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
-        Some(Box::new(ObsoleteState {
-            sources: std::mem::take(&mut self.obs_sources),
-            order: std::mem::take(&mut self.obs_order),
-            builds: std::mem::take(&mut self.obs_builds),
-            unkeyed: std::mem::take(&mut self.obs_unkeyed),
+        Some(Box::new(TagsRunState {
+            obsolete: ObsoleteState {
+                sources: std::mem::take(&mut self.obs_sources),
+                order: std::mem::take(&mut self.obs_order),
+                builds: std::mem::take(&mut self.obs_builds),
+                unkeyed: std::mem::take(&mut self.obs_unkeyed),
+            },
+            spelling: SpellingState {
+                programs: std::mem::take(&mut self.spell_programs),
+                candidates: std::mem::take(&mut self.spell_candidates),
+            },
         }))
     }
 
     fn import_state(&mut self, state: Box<dyn std::any::Any + Send>) {
-        if let Ok(mut state) = state.downcast::<ObsoleteState>() {
-            self.obs_sources.extend(state.sources.drain());
-            self.obs_unkeyed.append(&mut state.unkeyed);
-            for key in std::mem::take(&mut state.order) {
-                let Some(data) = state.builds.remove(&key) else {
+        if let Ok(mut state) = state.downcast::<TagsRunState>() {
+            self.obs_sources.extend(state.obsolete.sources.drain());
+            self.obs_unkeyed.append(&mut state.obsolete.unkeyed);
+            for key in std::mem::take(&mut state.obsolete.order) {
+                let Some(data) = state.obsolete.builds.remove(&key) else {
                     continue;
                 };
                 match self.obs_builds.get_mut(&key) {
@@ -1932,6 +2080,10 @@ impl Check for TagsCheck {
                     }
                 }
             }
+            for (key, names) in state.spelling.programs.drain() {
+                self.spell_programs.entry(key).or_default().extend(names);
+            }
+            self.spell_candidates.append(&mut state.spelling.candidates);
         }
     }
 }
@@ -2916,6 +3068,7 @@ mod tests {
         let mut check = TagsCheck::new(&config);
         check.set_test_spellchecker();
         check.check(pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
         out.results().to_vec()
     }
 
@@ -2939,7 +3092,7 @@ mod tests {
         // description must warn.
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-longsummary-1.0-1.noarch.rpm");
         let config = test_config();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_description_tag(
             &pkg,
@@ -2995,7 +3148,7 @@ mod tests {
         // however many bytes it occupies; 80 characters fire.
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-longsummary-1.0-1.noarch.rpm");
         let config = test_config();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         // 41 characters, 81 bytes: within the limit.
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_summary(
@@ -3047,7 +3200,7 @@ mod tests {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         for summary in ["389 Directory Server", "7zip archiver"] {
             check.check_summary(&pkg, &mut out, summary, "C", &[]);
         }
@@ -3063,7 +3216,7 @@ mod tests {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         check.check_summary(&pkg, &mut out, "lowercase summary", "C", &[]);
         let results = out.results().to_vec();
         let hits: Vec<_> = results
@@ -3082,7 +3235,7 @@ mod tests {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         check.check_summary(
             &pkg,
             &mut out,
@@ -3107,7 +3260,7 @@ mod tests {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         check.check_summary(&pkg, &mut out, "Foo\u{00ae} bar", "C", &[]);
         let results = out.results().to_vec();
         let hits: Vec<_> = results
@@ -3126,7 +3279,7 @@ mod tests {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         check.check_summary(&pkg, &mut out, "Foo\u{2122} and Bar\u{00ae}", "C", &[]);
         let results = out.results().to_vec();
         let hits: Vec<_> = results
@@ -3141,7 +3294,7 @@ mod tests {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         for summary in ["Plain summary", "Copyright \u{00a9} 2024 stuff"] {
             check.check_summary(&pkg, &mut out, summary, "C", &[]);
         }
@@ -3159,7 +3312,7 @@ mod tests {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         for summary in ["xSGE display manager", "oneAPI Level Zero loader"] {
             check.check_summary(&pkg, &mut out, summary, "C", &[]);
         }
@@ -3175,7 +3328,7 @@ mod tests {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         check.check_summary(&pkg, &mut out, "wxWidgets's ribbon", "C", &[]);
         let results = out.results().to_vec();
         assert!(
@@ -3189,7 +3342,7 @@ mod tests {
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
         let config = test_config();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         check.check_summary(&pkg, &mut out, "foo's bar", "C", &[]);
         let results = out.results().to_vec();
         let hits: Vec<_> = results
@@ -3218,7 +3371,7 @@ mod tests {
             let (_tmp, pkg) = fixture_pkg("tags-emission-pins-badsummary-1.0-1.noarch.rpm");
             let config = test_config();
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-            let check = TagsCheck::new(&config);
+            let mut check = TagsCheck::new(&config);
             check.check_summary(&pkg, &mut out, summary, "C", &[]);
             let results = out.results().to_vec();
             let hits: Vec<_> = results
@@ -3278,7 +3431,7 @@ mod tests {
         // many bytes they occupy; an 80-character line fires.
         let (_tmp, pkg) = fixture_pkg("tags-emission-pins-longdesc-1.0-1.noarch.rpm");
         let config = test_config();
-        let check = TagsCheck::new(&config);
+        let mut check = TagsCheck::new(&config);
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         // 41 characters, 123 bytes (the karukan/VFlib3 shape: Japanese
         // description lines the byte count flagged as too long).
@@ -3340,6 +3493,7 @@ mod tests {
         // A language the checker has no dictionary for is not checked.
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_description(&pkg, &mut out, "hello wrld", "de", &[]);
+        check.after_checks(&config, &mut out);
         let results = out.results().to_vec();
         assert!(
             tag_hits(&results, "spelling-error").is_empty(),
@@ -3348,6 +3502,7 @@ mod tests {
         // The same text in the C locale is checked.
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_description(&pkg, &mut out, "hello wrld", "C", &[]);
+        check.after_checks(&config, &mut out);
         let results = out.results().to_vec();
         assert_eq!(
             tag_hits(&results, "spelling-error").len(),
@@ -3366,6 +3521,7 @@ mod tests {
         check.set_test_spellchecker();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_summary(&pkg, &mut out, "hello wrld", "de", &[]);
+        check.after_checks(&config, &mut out);
         let results = out.results().to_vec();
         assert!(
             tag_hits(&results, "spelling-error").is_empty(),
@@ -3373,6 +3529,7 @@ mod tests {
         );
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_summary(&pkg, &mut out, "hello wrld", "C", &[]);
+        check.after_checks(&config, &mut out);
         let results = out.results().to_vec();
         assert_eq!(
             tag_hits(&results, "spelling-error").len(),
@@ -3571,6 +3728,363 @@ mod tests {
             hits.is_empty(),
             "reset must drop the run's state: {results:?}"
         );
+    }
+
+    /// A synthetic package for spelling-credit tests: the fcprobe
+    /// fixture header, with the name and file list replaced. The
+    /// header `SOURCERPM` tag wins over the `source_rpm` field in
+    /// `binary_source_key`, so every package built this way answers
+    /// to the same key: one build, several subpackages. Cross-build
+    /// scoping is pinned on the pure predicate instead.
+    fn spelling_pkg(
+        name: &str,
+        files: Vec<crate::pkg::pkgfile::PkgFile>,
+    ) -> (tempfile::TempDir, Pkg) {
+        let (tmp, mut pkg) = fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.name = name.to_string();
+        pkg.arch = "x86_64".to_string();
+        pkg.files = files;
+        (tmp, pkg)
+    }
+
+    fn syn_exec(path: &str) -> crate::pkg::pkgfile::PkgFile {
+        crate::pkg::pkgfile::PkgFile {
+            name: path.to_string(),
+            path: path.to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        }
+    }
+
+    fn syn_plain(path: &str) -> crate::pkg::pkgfile::PkgFile {
+        crate::pkg::pkgfile::PkgFile {
+            name: path.to_string(),
+            path: path.to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }
+    }
+
+    /// `spelling-error` hits for one word: the detail carries the
+    /// word followed by ` -> suggestions` or by end of line, so a
+    /// plain substring would also match longer words containing it.
+    fn spelling_hits<'a>(results: &'a [(String, String)], word: &str) -> Vec<&'a (String, String)> {
+        let mid = format!(" {word} ");
+        let end = format!(" {word}");
+        results
+            .iter()
+            .filter(|(n, line)| {
+                n == "spelling-error" && (line.contains(&mid) || line.ends_with(&end))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn spelling_sibling_program_credited_in_summary() {
+        // plusky/rpmcrab#1481: `iiod` in a sibling Summary is a
+        // program name, not a typo: /usr/sbin/iiod ships in the same
+        // build daemon subpackage.
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let (_t2, daemon) = spelling_pkg("spelling-daemon", vec![syn_exec("usr/sbin/iiod")]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        // Candidate first, program second: deferral must not depend
+        // on run order.
+        check.check_summary(
+            &rules,
+            &mut out,
+            "Industrial I/O library -- iiod wrld",
+            "C",
+            &[],
+        );
+        check.check(&daemon, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            spelling_hits(&results, "iiod").is_empty(),
+            "sibling program must credit: {results:?}"
+        );
+        assert_eq!(
+            spelling_hits(&results, "wrld").len(),
+            1,
+            "an ordinary typo in the same text still fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_sibling_program_credited_in_description() {
+        // The Description branch defers through the same path.
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let (_t2, daemon) = spelling_pkg("spelling-daemon", vec![syn_exec("usr/sbin/iiod")]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_description(&rules, &mut out, "Library for iiod wrld", "C", &[]);
+        check.check(&daemon, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            spelling_hits(&results, "iiod").is_empty(),
+            "sibling program must credit in descriptions: {results:?}"
+        );
+        assert_eq!(
+            spelling_hits(&results, "wrld").len(),
+            1,
+            "an ordinary typo in the same text still fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_lone_package_keeps_finding() {
+        // No sibling in the run: the per-package verdict stands.
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_summary(&rules, &mut out, "Industrial I/O library -- iiod", "C", &[]);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            spelling_hits(&results, "iiod").len(),
+            1,
+            "without a sibling program the finding stands: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_lookalikes_not_credited() {
+        // Only an exact basename match credits: a longer word and a
+        // prefix of the program name still fire.
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let (_t2, daemon) = spelling_pkg("spelling-daemon", vec![syn_exec("usr/sbin/iiod")]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_summary(
+            &rules,
+            &mut out,
+            "Industrial I/O library -- iiodd iio",
+            "C",
+            &[],
+        );
+        check.check(&daemon, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            spelling_hits(&results, "iiodd").len(),
+            1,
+            "a longer lookalike still fires: {results:?}"
+        );
+        assert_eq!(
+            spelling_hits(&results, "iio").len(),
+            1,
+            "a prefix lookalike still fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_nonexecutable_basename_not_credited() {
+        // A data file named like the word is not a program.
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let (_t2, data) = spelling_pkg("spelling-data", vec![syn_plain("usr/share/doc/wrld")]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_summary(&rules, &mut out, "Library wrld", "C", &[]);
+        check.check(&data, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            spelling_hits(&results, "wrld").len(),
+            1,
+            "a non-executable basename must not credit: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_ghost_executable_not_credited() {
+        // A %ghost executable is not shipped content.
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let mut ghost = syn_exec("usr/sbin/iiod");
+        ghost.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        let (_t2, daemon) = spelling_pkg("spelling-daemon", vec![ghost]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_summary(&rules, &mut out, "Industrial I/O library -- iiod", "C", &[]);
+        check.check(&daemon, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            spelling_hits(&results, "iiod").len(),
+            1,
+            "a ghost executable must not credit: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_exact_program_match_wins_over_typo_reading() {
+        // The mechanism cannot read intent: a word that exactly
+        // matches a shipped program name is credited even when it
+        // reads like a typo. That is the accepted cost of the credit.
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let (_t2, daemon) = spelling_pkg("spelling-daemon", vec![syn_exec("usr/bin/wrld")]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_summary(&rules, &mut out, "Library wrld", "C", &[]);
+        check.check(&daemon, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            spelling_hits(&results, "wrld").is_empty(),
+            "an exact program match credits even a typo-like word: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_credit_predicate_scopes_to_its_build() {
+        // Pure scoping pins: same build credits, another build does
+        // not, and a keyless candidate never credits.
+        let mut programs: HashMap<String, HashSet<String>> = HashMap::new();
+        programs.insert(
+            "libiio-1.0.0-0.src.rpm".to_string(),
+            HashSet::from(["IIOD".to_string()]),
+        );
+        let base = |keys: Vec<String>, word: &str| SpellingCandidate {
+            pkg_name: "libiio-usb-udev-rules".to_string(),
+            arch: "x86_64".to_string(),
+            source_keys: keys,
+            word_upper: word.to_string(),
+            detail: String::new(),
+        };
+        assert!(spelling_credited(
+            &programs,
+            &base(vec!["libiio-1.0.0-0.src.rpm".to_string()], "IIOD")
+        ));
+        assert!(!spelling_credited(
+            &programs,
+            &base(vec!["other-1.0-1.src.rpm".to_string()], "IIOD")
+        ));
+        assert!(!spelling_credited(&programs, &base(vec![], "IIOD")));
+        assert!(!spelling_credited(
+            &programs,
+            &base(vec!["libiio-1.0.0-0.src.rpm".to_string()], "IIODD")
+        ));
+    }
+
+    #[test]
+    fn spelling_state_merges_across_export_import() {
+        // The production multi-worker path: the worker records the
+        // candidate and the program, the main instance merges both
+        // before `after_checks` (mirrors the obsolete worker test).
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let (_t2, daemon) = spelling_pkg("spelling-daemon", vec![syn_exec("usr/sbin/iiod")]);
+        let mut worker_out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut worker = TagsCheck::new(&config);
+        worker.set_test_spellchecker();
+        worker.check_summary(
+            &rules,
+            &mut worker_out,
+            "Industrial I/O library -- iiod wrld",
+            "C",
+            &[],
+        );
+        worker.check(&daemon, &config, &mut worker_out);
+        let state = worker.export_state().expect("run-scope state");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.import_state(state);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            spelling_hits(&results, "iiod").is_empty(),
+            "merged state must credit: {results:?}"
+        );
+        assert_eq!(
+            spelling_hits(&results, "wrld").len(),
+            1,
+            "merged candidates must still fire typos: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_reset_drops_the_run() {
+        // Mirrors the obsolete reset contract: a reset run emits no
+        // deferred findings.
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let (_t2, daemon) = spelling_pkg("spelling-daemon", vec![syn_exec("usr/sbin/iiod")]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_summary(&rules, &mut out, "Industrial I/O library -- iiod", "C", &[]);
+        check.check(&daemon, &config, &mut out);
+        check.reset();
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            tag_hits(&results, "spelling-error").is_empty(),
+            "reset must drop the run's state: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_deferred_findings_keep_encounter_order() {
+        // Deferral must not reorder: findings emit in the order the
+        // texts were checked.
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_summary(&rules, &mut out, "wrld zzqd", "C", &[]);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        let hits = tag_hits(&results, "spelling-error");
+        assert_eq!(hits.len(), 2, "all: {results:?}");
+        assert!(hits[0].1.contains(" wrld"), "first: {}", hits[0].1);
+        assert!(hits[1].1.contains(" zzqd"), "second: {}", hits[1].1);
     }
 
     #[test]
