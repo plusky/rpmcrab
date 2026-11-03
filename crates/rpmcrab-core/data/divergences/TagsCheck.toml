@@ -499,3 +499,10 @@ check = "spelling-error"
 kind = "behaviour"
 reason = "Function references are not spelling findings: a word immediately followed by `()` (e.g. `lex()` in 'each call to the lex() function will yield one token', plusky/rpmcrab#1476) is skipped - an empty parenthetical after a word is a function-call reference, never natural English prose, so the reference's flagging of such words (lex -> Alex, Mex, Rex) is noise. Non-empty parentheticals stay checked: `(s)` plurals and other `(...)` forms still flag their word, so the skip cannot hide a genuine typo."
 since = "0.4.2"
+
+[[divergence]]
+case = "global"
+check = "spelling-error"
+kind = "behaviour"
+reason = "Words naming a shipped program of the same build are not spelling findings: a word in a Summary or %description that exactly matches (case-insensitively) the basename of an executable regular file shipped by another binary package of the same SOURCERPM build is skipped (plusky/rpmcrab#1481: `iiod` in libiio-usb-udev-rules' Summary, where /usr/sbin/iiod ships in sibling libiio-daemon). The credit is build-scoped, not run-wide, so unrelated packages in one run do not credit each other, and keyless or single-package runs keep the per-package verdict. Non-executable files, %ghost files and lookalikes (iiodd, iio) do not credit: only an exact basename match of a shipped executable counts. The verdict is deferred to `after_checks`, where the run-scoped sibling credit is judged — the same pattern as `obsolete-not-provided` — so finding order is unchanged."
+since = "0.4.2"
