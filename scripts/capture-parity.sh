@@ -147,7 +147,7 @@ present_tools=()
 for t in checkbashisms dash desktop-file-validate readelf objdump ldd file appstreamcli; do
   command -v "$t" >/dev/null 2>&1 && present_tools+=("\"$t\"")
 done
-tools_joined="$(IFS=', '; echo ${present_tools[*]+"${present_tools[*]}"})"
+tools_joined="$(IFS=', '; echo "${present_tools[*]+"${present_tools[*]}"}")"
 {
     echo 'kind = "captured"'
     echo "rpmlint = \"$version\""
