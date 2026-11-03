@@ -49,6 +49,12 @@ while [ $# -gt 0 ]; do
   inputs+=("$1"); shift
 done
 
+# An empty input list (e.g. `case -- args`) must fail here, before the
+# case directory exists: with no inputs the staging loops and the
+# rpmlint invocation below would run over empty arrays, which fail
+# under `set -u` on bash 3.2 and would otherwise capture an empty run.
+[ ${#inputs[@]} -gt 0 ] || { echo "no inputs given" >&2; exit 2; }
+
 # Two distinct inputs sharing a basename would silently collapse to one
 # staged file below (the second copy overwrites the first, the sha list
 # records the second file's sha twice, and rpmlint runs one file twice).
@@ -85,7 +91,7 @@ done
 set +e
 (
   cd "$case_dir/input"
-  XDG_CONFIG_HOME="$xdg" "$rpmlint" "${extra[@]}" "${basenames[@]}" \
+  XDG_CONFIG_HOME="$xdg" "$rpmlint" ${extra[@]+"${extra[@]}"} ${basenames[@]+"${basenames[@]}"} \
     >"$case_dir/expected/stdout.raw" 2>"$case_dir/expected/stderr.raw"
   echo $? >"$case_dir/expected/exit"
 )
@@ -141,7 +147,7 @@ present_tools=()
 for t in checkbashisms dash desktop-file-validate readelf objdump ldd file appstreamcli; do
   command -v "$t" >/dev/null 2>&1 && present_tools+=("\"$t\"")
 done
-tools_joined="$(IFS=', '; echo "${present_tools[*]}")"
+tools_joined="$(IFS=', '; echo ${present_tools[*]+"${present_tools[*]}"})"
 {
     echo 'kind = "captured"'
     echo "rpmlint = \"$version\""
@@ -158,7 +164,7 @@ tools_joined="$(IFS=', '; echo "${present_tools[*]}")"
     argv_items=()
     for a in ${extra[@]+"${extra[@]}"}; do argv_items+=("\"$a\""); done
     for b in "${basenames[@]}"; do argv_items+=("\"$b\""); done
-    printf -v argv_joined '%s, ' "${argv_items[@]}"
+    printf -v argv_joined '%s, ' ${argv_items[@]+"${argv_items[@]}"}
     echo "argv = [${argv_joined%, }]"
     echo "captured = \"$(date +%F)\""
   echo
@@ -168,7 +174,7 @@ tools_joined="$(IFS=', '; echo "${present_tools[*]}")"
   echo '[tools]'
   echo "present = [$tools_joined]"
   echo
-  for l in "${sha_lines[@]}"; do echo "$l"; echo; done
+  for l in ${sha_lines[@]+"${sha_lines[@]}"}; do echo "$l"; echo; done
 } > "$case_dir/meta.toml"
 
 echo "captured $case_name (exit $(cat "$case_dir/expected/exit"), rpmlint $version)"

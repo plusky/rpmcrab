@@ -70,6 +70,14 @@ impl Progress {
     }
 }
 
+/// Reset one check without letting a panic escape: a panicking reset
+/// must not skip the remaining checks' resets (the documented
+/// panic-becomes-fatal-result contract). Returns true when the reset
+/// panicked, so the caller can decide whether the package is fatal.
+fn reset_guarded(check: &mut Box<dyn Check>) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check.reset())).is_err()
+}
+
 /// The structured per-package result (`worker.py:check_package`).
 pub struct TaskResult {
     /// The package's findings, suppression already applied.
@@ -133,7 +141,7 @@ impl<'a> Worker<'a> {
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let _ = check.export_state();
                     }));
-                    check.reset();
+                    let _ = reset_guarded(check);
                 }
                 TaskResult::fatal(
                     self.fresh_filter(),
@@ -284,10 +292,14 @@ impl<'a> Worker<'a> {
         if let Err(e) = checked {
             // Drop state accumulated before the failure so a package that
             // could not be checked never contributes to `after_checks`, and
-            // reset so the next package on this worker starts clean.
+            // reset so the next package on this worker starts clean. Both
+            // are guarded per check, as in the outer panic path: a
+            // panicking export must not skip the remaining resets.
             for check in &mut self.checks {
-                let _ = check.export_state();
-                check.reset();
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = check.export_state();
+                }));
+                let _ = reset_guarded(check);
             }
             return TaskResult::fatal(
                 filter,
@@ -313,9 +325,17 @@ impl<'a> Worker<'a> {
                 states.push((check.name().to_string(), state));
             }
         }
-        // Restore per-package check state for the next package.
+        // Restore per-package check state for the next package. A
+        // panicking reset must not skip the remaining checks, so each
+        // reset is guarded; if any reset panicked, re-panic only after
+        // all of them ran, so the outer catch turns the package fatal
+        // instead of silently keeping its findings with dirty state.
+        let mut reset_panicked = false;
         for check in &mut self.checks {
-            check.reset();
+            reset_panicked |= reset_guarded(check);
+        }
+        if reset_panicked {
+            panic!("panic while resetting checks after the package");
         }
 
         TaskResult {
@@ -802,6 +822,150 @@ mod tests {
                 "reset",
             ]
         );
+    }
+
+    /// A reset that panics on the first package must not skip the
+    /// remaining checks' resets, and the package becomes fatal
+    /// instead of escaping `check_package`.
+    #[test]
+    fn reset_panic_resets_remaining_checks_and_is_fatal() {
+        struct PanicOnFirstReset {
+            panicked: Arc<std::sync::atomic::AtomicBool>,
+            log: Arc<Mutex<Vec<String>>>,
+        }
+        impl Check for PanicOnFirstReset {
+            fn name(&self) -> &'static str {
+                "PanicOnFirstReset"
+            }
+            fn check(&mut self, _pkg: &Pkg, _config: &Config, _out: &mut Filter) {}
+            fn check_spec(&mut self, _pkg: &SpecPkg, _config: &Config, _out: &mut Filter) {}
+            fn reset(&mut self) {
+                if !self
+                    .panicked
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    panic!("boom-reset");
+                }
+                self.log.lock().unwrap().push("first-reset".to_string());
+            }
+        }
+        struct LogResets {
+            log: Arc<Mutex<Vec<String>>>,
+        }
+        impl Check for LogResets {
+            fn name(&self) -> &'static str {
+                "LogResets"
+            }
+            fn check(&mut self, _pkg: &Pkg, _config: &Config, _out: &mut Filter) {}
+            fn check_spec(&mut self, _pkg: &SpecPkg, _config: &Config, _out: &mut Filter) {}
+            fn reset(&mut self) {
+                self.log.lock().unwrap().push("second-reset".to_string());
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let panicked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let tasks: Vec<Task> = ["good1", "good2"]
+            .into_iter()
+            .map(|name| {
+                let spec = dir.path().join(format!("{name}.spec"));
+                std::fs::write(&spec, format!("Name: {name}\n")).unwrap();
+                Task::File(spec)
+            })
+            .collect();
+        let config = Config::default();
+        let panicked2 = Arc::clone(&panicked);
+        let log2 = Arc::clone(&log);
+        let log3 = Arc::clone(&log);
+        let results = run_tasks(
+            tasks,
+            1,
+            &config,
+            &move || {
+                vec![
+                    Box::new(PanicOnFirstReset {
+                        panicked: Arc::clone(&panicked2),
+                        log: Arc::clone(&log2),
+                    }) as Box<dyn Check>,
+                    Box::new(LogResets {
+                        log: Arc::clone(&log3),
+                    }) as Box<dyn Check>,
+                ]
+            },
+            Color::for_tty(false),
+        );
+        assert_eq!(results.len(), 2);
+        assert!(results[0].fatal.is_some(), "reset panic must be fatal");
+        assert!(results[1].fatal.is_none());
+        let log = log.lock().unwrap();
+        // good1: normal-loop reset (second check) + panic-handler reset
+        // (both checks); good2: normal-loop reset (both checks).
+        assert_eq!(
+            log.iter().filter(|e| e.as_str() == "second-reset").count(),
+            3,
+            "remaining reset must run despite the first reset panicking: {log:?}"
+        );
+        assert_eq!(
+            log.iter().filter(|e| e.as_str() == "first-reset").count(),
+            2,
+            "{log:?}"
+        );
+    }
+
+    /// A reset that panics while handling a panicking check must not
+    /// escape `check_package`: the package is fatal and the next one
+    /// still runs.
+    #[test]
+    fn reset_panic_in_panic_handler_does_not_escape() {
+        struct PanicCheckAndReset {
+            armed: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Check for PanicCheckAndReset {
+            fn name(&self) -> &'static str {
+                "PanicCheckAndReset"
+            }
+            fn check(&mut self, _pkg: &Pkg, _config: &Config, _out: &mut Filter) {}
+            fn check_spec(&mut self, pkg: &SpecPkg, _config: &Config, _out: &mut Filter) {
+                if pkg.name.contains("bad") {
+                    self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    panic!("boom-check");
+                }
+            }
+            fn reset(&mut self) {
+                if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    panic!("boom-reset");
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tasks: Vec<Task> = ["good1", "bad", "good2"]
+            .into_iter()
+            .map(|name| {
+                let spec = dir.path().join(format!("{name}.spec"));
+                std::fs::write(&spec, format!("Name: {name}\n")).unwrap();
+                Task::File(spec)
+            })
+            .collect();
+        let config = Config::default();
+        let armed2 = Arc::clone(&armed);
+        let results = run_tasks(
+            tasks,
+            1,
+            &config,
+            &move || {
+                vec![Box::new(PanicCheckAndReset {
+                    armed: Arc::clone(&armed2),
+                }) as Box<dyn Check>]
+            },
+            Color::for_tty(false),
+        );
+        assert_eq!(results.len(), 3);
+        assert!(results[0].fatal.is_none());
+        assert!(results[1].fatal.is_some());
+        assert!(results[2].fatal.is_none());
     }
 
     /// Results reassemble in task order even when workers finish out of order:
