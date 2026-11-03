@@ -951,7 +951,8 @@ fn dedup_files(files: &[PathBuf]) -> Vec<PathBuf> {
 fn expand_filelist(files: &[PathBuf]) -> Vec<PathBuf> {
     let mut packages = Vec::new();
     let mut visited = HashSet::new();
-    expand_filelist_into(files, &mut packages, &mut visited, true);
+    let mut seen_files = HashSet::new();
+    expand_filelist_into(files, &mut packages, &mut visited, &mut seen_files, true);
     packages
 }
 
@@ -959,18 +960,25 @@ fn expand_filelist_into(
     files: &[PathBuf],
     packages: &mut Vec<PathBuf>,
     visited: &mut HashSet<PathBuf>,
+    seen_files: &mut HashSet<PathBuf>,
     top_level: bool,
 ) {
     for path in files {
         if path.is_file() && has_package_suffix(path) {
-            // Canonicalise file paths the same way the directory
-            // branch below canonicalises for its visited set: the
-            // same package reached via different spellings (`./x.rpm`
-            // vs `x.rpm`, a symlinked path) then spells identically,
-            // so the caller's lexical sort + dedup collapses it to
-            // one task instead of checking it twice. A path that
-            // cannot be canonicalised falls back to its own spelling.
-            packages.push(std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()));
+            // The canonical path is only the dedup key, never the
+            // pushed spelling: the same package reached via different
+            // spellings (`./x.rpm` vs `x.rpm`, a symlinked path)
+            // collapses to one task (first spelling wins), while the
+            // task list keeps the caller's spelling for display.
+            // Pushing the canonical path instead lost the as-given
+            // spelling wherever a prefix resolves (macOS: /var ->
+            // /private/var under TMPDIR), breaking the pinned
+            // progress lines. A path that cannot be canonicalised
+            // falls back to its own spelling as its key.
+            let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            if seen_files.insert(key) {
+                packages.push(path.clone());
+            }
         } else if path.is_dir() {
             if !top_level
                 && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
@@ -985,7 +993,7 @@ fn expand_filelist_into(
                 continue;
             };
             let nested: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-            expand_filelist_into(&nested, packages, visited, false);
+            expand_filelist_into(&nested, packages, visited, seen_files, false);
         }
     }
 }
@@ -1199,9 +1207,10 @@ mod tests {
     #[test]
     fn expand_filelist_canonicalizes_different_spellings_of_one_file() {
         // The same package reached as `a.rpm`, `./a.rpm`, and through
-        // a symlink canonicalises to one path, so the caller's lexical
-        // sort + dedup (as in `run`) collapses it to a single task
-        // instead of checking it twice with duplicated findings.
+        // a symlink collapses to one task via the canonical-key set
+        // (the caller's lexical sort + dedup in `run` is a backstop),
+        // and the kept spelling is the first one given, not the
+        // resolved path.
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("a.rpm");
@@ -1216,8 +1225,31 @@ mod tests {
         found.sort();
         found.dedup();
         assert_eq!(found.len(), 2, "got {found:?}");
-        assert_eq!(found[0], std::fs::canonicalize(&real).unwrap());
+        assert_eq!(found[0], real);
         assert!(found[1].file_name().unwrap() == "b.rpm");
+    }
+
+    #[test]
+    fn expand_filelist_keeps_caller_spelling_through_a_symlinked_prefix() {
+        // The macOS shape (TMPDIR under /var -> /private/var): a
+        // package reached through a symlinked directory prefix keeps
+        // the as-given spelling for display, while still collapsing
+        // with the same package reached directly.
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let pkg = real_dir.join("a.rpm");
+        std::fs::write(&pkg, b"x").unwrap();
+        let link_dir = dir.path().join("linkdir");
+        symlink(&real_dir, &link_dir).unwrap();
+        let via_link = link_dir.join("a.rpm");
+
+        let mut found = expand_filelist(&[via_link.clone(), pkg]);
+        found.sort();
+        found.dedup();
+        assert_eq!(found.len(), 1, "got {found:?}");
+        assert_eq!(found[0], via_link);
     }
 
     #[test]
