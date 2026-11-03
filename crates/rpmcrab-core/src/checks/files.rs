@@ -7023,12 +7023,19 @@ impl FilesCheck {
         // .cargo_vcs_info.json is the second metadata file cargo writes
         // into a vendored crate tree, next to .cargo-checksum.json: it
         // records the upstream VCS revision of the vendored sources.
+        // find-debuginfo --run-dwz writes the partial DWARF index to
+        // /usr/lib/debug/.dwz/<package>, so the .dwz directory entry
+        // itself is a deliberate toolchain artifact, not a hidden
+        // payload dir. Files beneath it are already silent by the
+        // final-component rule above (their final components are not
+        // hidden), so exempting the directory entry is the whole fix.
         if is_hidden
             && !fname.starts_with("/etc/skel/")
             && !fname.starts_with("/usr/etc/skel/")
             && !fname.ends_with("/.build-id")
             && !fname.ends_with("/.cargo-checksum.json")
             && !fname.ends_with("/.cargo_vcs_info.json")
+            && !fname.ends_with("/.dwz")
         {
             add_info(out, Level::Warning, pkg, "hidden-file-or-dir", &[fname]);
         }
@@ -10463,6 +10470,53 @@ mod tests {
             // Suffix match, not substring match: the firing .json.bak
             // line contains the credited .cargo_vcs_info.json path as a
             // substring, so a substring test cannot tell them apart.
+            let got = flagged.iter().any(|f| f.ends_with(name));
+            assert_eq!(
+                got, *want,
+                "hidden-file-or-dir for {name}: want flagged={want}, got lines {flagged:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_file_or_dir_dwz() {
+        // Fix-and-diverge (plusky/rpmcrab#1477): find-debuginfo
+        // --run-dwz writes the partial DWARF index to
+        // /usr/lib/debug/.dwz/<package>, so the .dwz directory entry
+        // is a deliberate toolchain artifact. The credit is
+        // name-exact and location-free like the /.build-id one; an
+        // extended suffix keeps firing. Files beneath .dwz are silent
+        // by the final-component rule, not by this credit — a hidden
+        // file beneath it still fires.
+        let extra = [
+            ("/usr/lib/debug/.dwz", false), // the filed case: dir entry itself
+            ("/usr/lib/debug/.dwz/ucpp-1.3.6-0.x86_64", false), // file beneath, final component not hidden
+            ("/srv/data/.dwz", false), // name-exact, location-free like /.build-id
+            ("/usr/lib/debug/.dwz.bak", true), // suffix must be exact
+            ("/usr/lib/debug/.dwz/.hidden", true), // hidden file beneath still fires
+        ];
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = extra
+            .iter()
+            .map(|(name, _)| PkgFile {
+                name: (*name).to_string(),
+                path: (*name).to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let config = test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = FilesCheck::new(&config);
+        check.check(&pkg, &config, &mut out);
+        let flagged: Vec<&str> = out
+            .results()
+            .iter()
+            .filter(|(n, _)| n == "hidden-file-or-dir")
+            .map(|(_, line)| line.as_str())
+            .collect();
+        for (name, want) in &extra {
             let got = flagged.iter().any(|f| f.ends_with(name));
             assert_eq!(
                 got, *want,

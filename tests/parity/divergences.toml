@@ -2724,6 +2724,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "hidden-file-or-dir"
+kind = "behaviour"
+reason = "Fix-and-diverge: the /.dwz directory entry is exempt alongside /.build-id. find-debuginfo --run-dwz writes the partial DWARF index to /usr/lib/debug/.dwz/<package>, so the .dwz directory entry is a deliberate toolchain artifact, not a hidden payload dir (plusky/rpmcrab#1477, filed on the ucpp debuginfo package's /usr/lib/debug/.dwz finding). The credit is name-exact and location-free exactly like the /.build-id one; an extended suffix keeps firing. Files beneath .dwz need no credit: the check tests only the final path component, so their non-hidden final components are already silent — a hidden file beneath .dwz still fires. Pinned by hidden_file_or_dir_dwz in files.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "I18NCheck"
 kind = "detail"
 reason = "Port-only in-code `--explain` descriptions for the dynamic `incorrect-i18n-tag-*` and `incorrect-locale-*` findings (one per `INCORRECT_LOCALES` entry): the reference emits these findings but ships no descriptions. Registered in code at check time."
