@@ -144,6 +144,20 @@ impl Config {
         self.filters = self.get_strings("Filters")?;
         self.filter_titles = self.get_strings("FilterErrorTitles")?;
         self.blocked_filters = self.get_strings("BlockedFilters")?;
+        // A negative `MaxLineLength` is a fatal configuration error:
+        // `TagsCheck` reads it as `usize`, so a negative would wrap
+        // to `usize::MAX` and silently disable the length checks.
+        // It must fail loud at load, where the value is still signed.
+        match self
+            .configuration
+            .get("MaxLineLength")
+            .and_then(toml::Value::as_integer)
+        {
+            Some(v) if v < 0 => {
+                return Err(format!("'MaxLineLength' must not be negative, got {v}"));
+            }
+            _ => {}
+        }
         // Keys #699 removed (`BadnessThreshold`, `PermissiveByDefault`)
         // are read by nothing, but a config that still carries one
         // records a load warning instead of going silently inert — the
