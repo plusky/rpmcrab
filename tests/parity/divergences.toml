@@ -4824,6 +4824,13 @@ since = "0.4.2"
 
 [[divergence]]
 case = "global"
+check = "spelling-error"
+kind = "behaviour"
+reason = "Package-name skipping is exact parts plus possessives only: the reference skips any error word that occurs inside the full uppercased package name (spellcheck.py: `if upperword in uppername or upperword in upperparts`), so a truncated fragment of the package name (the test's one-letter-short fragment for `something`) - or any single letter occurring in the name - is skipped there and reported here. The substring arm was removed deliberately: a substring match hides genuine typos that merely occur inside a long hyphenated name. Pinned by package_name_substring_is_not_skipped in spellcheck.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
 reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."
@@ -4981,6 +4988,13 @@ kind = "behaviour"
 reason = "-T/--profile is removed entirely, and the --file/--info aliases for -r/-v are dropped; only -r/--rpmlintrc and -v/--verbose remain. All three are live in the pinned reference (cli.py:78,79,83): this is deliberate straightening of the option surface per the #1595 design, not something the reference dropped. A wrapper passing --info now gets exit 2."
 since = "0.1.0"
 upstream = "https://github.com/rpm-software-management/rpmlint/pull/1595"
+
+[[divergence]]
+case = "global"
+check = "cli"
+kind = "behaviour"
+reason = "Expanded inputs are deduplicated: after expanding directories and sorting, rpmcrab checks each distinct path once (lib.rs sort + dedup). The reference sorts its expanded filelist without deduplicating it (lint.py:265-271), so a package reached twice - a file argument alongside its directory argument, or overlapping directory arguments - is checked twice there, with its findings duplicated and its footer count doubled. Deduplicating the CLI arguments themselves matches the reference (cli.py collects them into a set); only the post-expansion dedup differs, and it is exact-path only - the same package reached via different spellings of its path is still checked twice (plusky/rpmcrab#1483). Pinned by expanded_inputs_are_deduplicated in binary_cli.rs."
+since = "0.4.2"
 
 [[divergence]]
 case = "global"

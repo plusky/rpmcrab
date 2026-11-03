@@ -265,6 +265,25 @@ fn a_directory_argument_expands_to_its_packages() {
     );
 }
 
+/// A package reached twice through expansion — once as a file argument,
+/// once through its directory argument — is checked once, not twice: the
+/// reference sorts its expanded filelist without deduplicating it
+/// (`lint.py:265-271`), so it would check the package twice; rpmcrab
+/// deduplicates the expanded inputs (ledgered in `divergences.toml`).
+#[test]
+fn expanded_inputs_are_deduplicated() {
+    let dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/parity/cases/llvm21-gold/input");
+    let file = dir.join("llvm21-gold-21.1.8-9.2.aarch64.rpm");
+    let out = rpmcrab(&[dir.to_str().unwrap(), file.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(64));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("1 packages and 0 specfiles checked"),
+        "the twice-reached package is checked once: {stdout}"
+    );
+}
+
 /// `-t` prints the time report between the results and the footer.
 #[test]
 fn time_report_flag_prints_the_report() {

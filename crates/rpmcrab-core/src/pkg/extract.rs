@@ -713,16 +713,19 @@ impl<'a> Extractor<'a> {
     /// sticky bits everywhere, matching the reference (GNU tar) on Linux.
     fn fixup(&self) -> Result<(), ExtractError> {
         for f in &self.fixups {
+            // One no-follow stat per fixup serves both guards below: the
+            // symlink skip and the special-file mtime skip read only the
+            // file type, which the `set_permissions` between them does
+            // not change, so the second stat the mtime arm used to take
+            // is dropped.
+            let meta = fs::symlink_metadata(&f.path).ok();
             // A later entry may have replaced this path with a symlink
             // (duplicate paths, or case collisions on case-insensitive
             // filesystems): the recorded mode/mtime belongs to the old file,
             // and following the link — possibly a self-loop — would ELOOP and
             // abort the whole extraction. tar's delayed mode restore and the
             // reference's `chmod -R +rX` never follow symlinks, so skip these.
-            let is_link = fs::symlink_metadata(&f.path)
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false);
-            if is_link {
+            if meta.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
                 continue;
             }
             let mut perm = f.perm | 0o444;
@@ -736,9 +739,10 @@ impl<'a> Extractor<'a> {
                 // FIFO entry that replaced this file on a case-insensitive
                 // filesystem — blocks on a read open (FIFO) or fails it;
                 // a FIFO's own mtime is None by construction, so there is
-                // nothing to restore here.
+                // nothing to restore here. A stat failure falls through
+                // to the open below, which reports it, as before.
                 if !f.is_dir
-                    && let Ok(meta) = fs::symlink_metadata(&f.path)
+                    && let Some(meta) = &meta
                 {
                     let ft = meta.file_type();
                     if ft.is_fifo() || ft.is_socket() || ft.is_block_device() || ft.is_char_device()

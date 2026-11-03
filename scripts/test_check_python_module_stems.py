@@ -6,6 +6,7 @@ import importlib.util
 import io
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -177,6 +178,20 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("STALE  vanished -> ['vanished']", out)
         self.assertIn("module (no dist() reference in repodata)", out)
+
+    def test_missing_config_exits_two_without_traceback(self):
+        # A missing config must take the clean exit-2 path, not a
+        # traceback (exit 1): `open()` raises `OSError`, which the
+        # `ValueError` handler alone does not catch.
+        script = Path(__file__).with_name("check-python-module-stems.py")
+        missing = Path(tempfile.gettempdir()) / "rpmcrab-no-such-stems.toml"
+        proc = subprocess.run(
+            [sys.executable, str(script), "--config", str(missing), "dummy.xml"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("cannot read PythonModuleStems table", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
 
     def test_mixed_entries_report_counts(self):
         rc, out = self.run_report([

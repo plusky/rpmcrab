@@ -576,6 +576,143 @@ mod tests {
         );
     }
 
+    /// A fatal result still carries the package's phase durations: the
+    /// worker folds `Pkg.timers` into the result durations before the
+    /// checks run, so a check that panics inside the guarded loop must
+    /// not lose the `ExtractRpm` phase — `Lint::replay` merges fatal
+    /// results' durations into the `-t` report like any other result.
+    #[test]
+    fn fatal_result_keeps_phase_durations() {
+        struct Panics;
+        impl Check for Panics {
+            fn name(&self) -> &'static str {
+                "Panics"
+            }
+            fn check(&mut self, _pkg: &Pkg, _config: &Config, _out: &mut Filter) {
+                panic!("boom");
+            }
+        }
+
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm")
+            .canonicalize()
+            .expect("corpus rpm is committed");
+        let config = Config::default();
+        let results = run_tasks(
+            vec![Task::File(rpm)],
+            1,
+            &config,
+            &|| vec![Box::new(Panics) as Box<dyn Check>],
+            Color::for_tty(false),
+        );
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].fatal.is_some(),
+            "the panicking check is a fatal result"
+        );
+        let names: Vec<&str> = results[0].durations.iter().map(|(name, _)| name).collect();
+        assert!(
+            names.contains(&"ExtractRpm"),
+            "phase durations survive the fatal path: {names:?}"
+        );
+    }
+
+    /// The happy path carries the same phase durations: a normally
+    /// checked file package's result names `ExtractRpm` in its durations
+    /// map, which is what the `-t` report reads (the phase row itself
+    /// stays below the report's 0.1s cut-off, so it is pinned here on
+    /// the map, not on the rendered report).
+    #[test]
+    fn checked_result_keeps_phase_durations() {
+        struct Noop;
+        impl Check for Noop {
+            fn name(&self) -> &'static str {
+                "Noop"
+            }
+            fn check(&mut self, _pkg: &Pkg, _config: &Config, _out: &mut Filter) {}
+        }
+
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm")
+            .canonicalize()
+            .expect("corpus rpm is committed");
+        let config = Config::default();
+        let results = run_tasks(
+            vec![Task::File(rpm)],
+            1,
+            &config,
+            &|| vec![Box::new(Noop) as Box<dyn Check>],
+            Color::for_tty(false),
+        );
+        assert_eq!(results.len(), 1);
+        assert!(results[0].fatal.is_none());
+        let names: Vec<&str> = results[0].durations.iter().map(|(name, _)| name).collect();
+        assert!(
+            names.contains(&"ExtractRpm"),
+            "phase durations reach the task result: {names:?}"
+        );
+    }
+
+    /// The outer-panic fatal path carries no durations at all: a panic
+    /// outside the guarded check loop (here: in `export_state`) is
+    /// caught by `check_package`, which returns `Durations::default()` —
+    /// unlike the guarded-error path, the phase timers folded in before
+    /// the checks do not survive. Both fatal shapes are pinned, so a
+    /// later change to either is visible.
+    #[test]
+    fn outer_panic_fatal_carries_no_durations() {
+        struct PanicOnExport {
+            armed: Arc<Mutex<bool>>,
+        }
+        impl Check for PanicOnExport {
+            fn name(&self) -> &'static str {
+                "PanicOnExport"
+            }
+            fn check(&mut self, _pkg: &Pkg, _config: &Config, _out: &mut Filter) {
+                *self.armed.lock().unwrap() = true;
+            }
+            fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+                // Panic once, so the outer panic path's own
+                // export-and-reset pass can run instead of panicking
+                // again.
+                if *self.armed.lock().unwrap() {
+                    *self.armed.lock().unwrap() = false;
+                    panic!("boom-export");
+                }
+                None
+            }
+        }
+
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm")
+            .canonicalize()
+            .expect("corpus rpm is committed");
+        let config = Config::default();
+        let armed = Arc::new(Mutex::new(false));
+        let armed2 = Arc::clone(&armed);
+        let results = run_tasks(
+            vec![Task::File(rpm)],
+            1,
+            &config,
+            &move || {
+                vec![Box::new(PanicOnExport {
+                    armed: Arc::clone(&armed2),
+                }) as Box<dyn Check>]
+            },
+            Color::for_tty(false),
+        );
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].fatal.is_some(),
+            "the export panic is a fatal result"
+        );
+        assert!(
+            results[0].durations.iter().next().is_none(),
+            "the outer-panic fatal path carries no durations: {:?}",
+            results[0].durations.iter().collect::<Vec<_>>()
+        );
+    }
+
     /// A panic outside the guarded check loop (here: in `export_state`,
     /// which runs after the loop) resets the worker's checks too, so
     /// the next package starts clean instead of reusing stale state.
