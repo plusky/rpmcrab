@@ -1056,30 +1056,28 @@ def test_prune_stale_filters_keeps_shared_group_comment():
     assert len(pruned) == 1, pruned
 
 
-def test_prune_stale_filters_keeps_format_constructed_family_member():
+def test_prune_stale_filters_prunes_killed_format_constructed_family_member():
     """A PRUNE_CANDIDATES entry naming a format!-constructed finding
-    family member survives: `known_findings` can only report the
-    family's literal prefix (e.g. `dir-or-file-in-`), never the full
-    name, so prefix membership is what keeps a live filter from being
-    pruned as stale."""
+    family member prunes: there is no prefix exemption -- the member
+    dir-or-file-in-opt is killed by FilelistCheck coverage and the
+    port can never emit it, so keeping it would defeat the kill-list."""
     text = (
         'Filters = [\n'
         "    '.*dir-or-file-in-opt.*',\n"
         ']\n'
     )
     pruned, dropped, retargeted = [], [], []
-    out = gen.prune_stale_filters(
-        text, (set(), {"dir-or-file-in-"}), pruned, dropped, retargeted
-    )
-    assert out == text, out
-    assert pruned == [], pruned
-    # Control: without the prefix, the same entry prunes.
-    pruned, dropped, retargeted = [], [], []
-    out = gen.prune_stale_filters(
-        text, (set(), set()), pruned, dropped, retargeted
-    )
+    out = gen.prune_stale_filters(text, set(), pruned, dropped, retargeted)
     assert "dir-or-file-in-opt" not in out, out
     assert len(pruned) == 1, pruned
+
+
+def test_known_findings_returns_plain_set():
+    """known_findings returns a plain set of literal names, not a
+    (names, prefixes) pair: the dynamic-prefix exemption is gone, so
+    no caller can reintroduce prefix-kept filters."""
+    known = gen.known_findings()
+    assert isinstance(known, set), type(known)
 
 
 def test_prune_stale_filters_drops_filter_error_titles():
