@@ -556,6 +556,55 @@ impl SharedLibraryPolicyCheck {
         }
     }
 
+    /// The `shlib-policy-wrong-library-version` link scan: a symlink
+    /// name in a versioned shared library package must not carry a
+    /// version for another SONAME generation. A link carries no
+    /// SONAME, so the name alone is judged: the leading numeric
+    /// component of the tail (before the first `.` or non-digit)
+    /// must equal the package number (leading zeroes normalised
+    /// away). Matching names, word tails (no numeric version to
+    /// judge), and bare `.so` links stay quiet — a bare link name
+    /// carries no version at all — as do %ghost entries (never in
+    /// the scan set), debug paths, and dangling links, which stay
+    /// with the dangling-symlink checks.
+    fn check_library_link_versions(&self, pkg: &Pkg, links: &[&str], out: &mut Filter) {
+        let Some((stem, number)) = soname_package_parts(&self.re_soname_pkg, &pkg.name) else {
+            return;
+        };
+        for fname in links {
+            if fname.starts_with("/usr/lib/debug/") {
+                continue;
+            }
+            let base = fname.rsplit('/').next().unwrap_or(fname);
+            let Some(lib_stem) = base.split_once(".so").map(|(s, _)| s) else {
+                continue;
+            };
+            if lib_stem != stem.as_str() {
+                continue;
+            }
+            let Some((_, tail)) = base.split_once(".so.") else {
+                continue;
+            };
+            let lead: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if lead.is_empty() {
+                continue;
+            }
+            let first = lead.trim_start_matches('0');
+            let first = if first.is_empty() { "0" } else { first };
+            if first != number {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "shlib-policy-wrong-library-version",
+                    &[&format!(
+                        "{fname} (symlink version {first}, expected {number})"
+                    )],
+                );
+            }
+        }
+    }
+
     /// `(soname, needed)` from an ELF file, or the parse failure reason.
     fn elf_dynamic(path: &str) -> Result<(Option<String>, Vec<String>), String> {
         let data = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -855,6 +904,10 @@ impl Check for SharedLibraryPolicyCheck {
         // `shlib-policy-wrong-library-version` scan below: %ghost
         // entries are not shipped payload and never join.
         let mut lib_file_sonames: Vec<(&str, Option<String>)> = Vec::new();
+        // Symlink names for the link-name scan below: a
+        // wrong-versioned link name is judged on the name alone
+        // (a link carries no SONAME). %ghost entries never join.
+        let mut lib_link_names: Vec<&str> = Vec::new();
         // DT_NEEDED of every ELF file in the package, library-named or
         // not: the link-time consumer set for the same credit. The
         // reference never computes this - it only walks library-named
@@ -883,6 +936,12 @@ impl Check for SharedLibraryPolicyCheck {
         let mut readelf_failed: Option<(&str, String)> = None;
         for file in &pkg.files {
             let fname = file.name.as_str();
+            if is_symlink(file.mode)
+                && !file.is_ghost()
+                && (fname.contains(".so.") || fname.ends_with(".so"))
+            {
+                lib_link_names.push(fname);
+            }
             if file.mode & S_IFMT != S_IFREG {
                 continue;
             }
@@ -928,8 +987,11 @@ impl Check for SharedLibraryPolicyCheck {
 
         // A library file in a versioned package that is unversioned or
         // versioned for another SONAME generation (see
-        // `check_library_file_versions`).
+        // `check_library_file_versions`), and a link name in such a
+        // package that is versioned for another generation (see
+        // `check_library_link_versions`).
         self.check_library_file_versions(pkg, &lib_file_sonames, out);
+        self.check_library_link_versions(pkg, &lib_link_names, out);
 
         // A policy-named package with no library files at all. The
         // one credited exception is the KDE categories-only split,
