@@ -3489,9 +3489,10 @@ struct BinariesState {
     /// The filename keeps two distinct packages that share a name
     /// and arch (two versions in one invocation) from collapsing
     /// into one contributor. The count is the invocation-mode
-    /// switch in `after_checks`: one contributing package
-    /// resolves with the system fallback, a wider batch resolves
-    /// inside the invocation's set alone.
+    /// switch in `after_checks`: a single contributing package
+    /// resolves against its own set, wider batches against every
+    /// set the batch ships; the system libraries join the closure
+    /// in both cases.
     contributors: Vec<(String, String, String)>,
 }
 
@@ -9152,10 +9153,9 @@ impl Check for BinariesCheck {
     /// A batch with one contributing package resolves against that
     /// package's providers plus the system -- the single-package
     /// model extracted packages have always used. A wider batch
-    /// resolves inside the invocation's set alone: the system the
-    /// scan happens to run on is not part of the install the
-    /// invocation describes, and its libraries must not mask a
-    /// provider the invocation itself lacks.
+    /// resolves against every set the batch ships, and the system
+    /// libraries join the closure in both cases
+    /// (plusky/rpmcrab#1475).
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
         if self.deferred_state.is_empty() {
             return;
