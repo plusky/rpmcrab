@@ -213,8 +213,8 @@ def main():
     parser.add_argument("repodata", nargs="+",
                         help="primary.xml[.gz|.zst] files (provides + requires)")
     parser.add_argument("--config",
-                        default="crates/rpmcrab-core/data/distro/opensuse/opensuse.toml",
-                        help="opensuse.toml carrying [[PythonModuleStems]]")
+                        default="crates/rpmcrab-core/data/distro/opensuse/python-stems.toml",
+                        help="python-stems.toml carrying [[PythonModuleStems]]")
     parser.add_argument("--modules", default="",
                         help="comma-separated module names to check (default: all)")
     args = parser.parse_args()
