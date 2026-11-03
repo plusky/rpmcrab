@@ -52,3 +52,11 @@ path is the library file itself, install the library under its SONAME
 instead; if a short name has to stay, ship it from a package whose name
 does not carry the SONAME generation.
 """
+shlib-policy-wrong-library-version = """
+A library file in this versioned shared library package is
+unversioned or versioned for a different SONAME generation: a bare
+`.so` regular file, a file with no DT_SONAME, or a plain
+dotted-digit filename version whose leading component differs from
+the SONAME generation number of the package. Each library file
+belongs in the package named for its generation.
+"""
