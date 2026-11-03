@@ -8,3 +8,10 @@ check = "SysVInitOnSystemdCheck"
 kind = "behaviour"
 reason = "The reference accumulates basenames in sets (SysVInitOnSystemdCheck.py:11-13), so a basename reachable by two init scripts yields one finding; the port sorts and dedups explicitly, giving the same single finding in sorted order rather than set order."
 since = "0.1.0"
+
+[[divergence]]
+case = "global"
+check = "SysVInitOnSystemdCheck"
+kind = "behaviour"
+reason = "New port-only Warning: a shipped (non-%ghost) symlink named rc* in /usr/sbin or /sbin pointing at `service` emits W deprecated-rc-symlink with the link path as detail, one finding per link. The reference has no such finding: its SysVInitOnSystemdCheck classifies init basenames only and never inspects sbindir symlinks. Warning only: the link is inert compat, not a broken install. Pinned by unit tests in sysv_init_on_systemd.rs."
+since = "0.4.2"

@@ -2,7 +2,8 @@
 //!
 //! Ported from `rpmlint/checks/SysVInitOnSystemdCheck.py`. Findings:
 //! `obsolete-insserv-requirement`, `deprecated-boot-script`,
-//! `deprecated-init-script`, `systemd-shadowed-initscript`.
+//! `deprecated-init-script`, `systemd-shadowed-initscript`,
+//! `deprecated-rc-symlink`.
 
 use std::path::Path;
 
@@ -10,6 +11,7 @@ use crate::check::{Check, add_info};
 use crate::config::Config;
 use crate::filter::Filter;
 use crate::level::Level;
+use crate::pkg::pkgfile::is_symlink;
 use crate::pkg::{GhostFiles, Pkg};
 
 pub struct SysVInitOnSystemdCheck;
@@ -123,6 +125,37 @@ impl Check for SysVInitOnSystemdCheck {
                     &[filename],
                 );
             }
+        }
+
+        // Deprecated rcFOO compat symlinks: a symlink named `rc*`
+        // in sbindir pointing at `service` is the SysV compat
+        // scheme; systemd systems address the service units
+        // directly, so the link is deprecated. Warning only: the
+        // link is inert compat, not a broken install.
+        for file in &pkg.files {
+            if file.is_ghost() || !is_symlink(file.mode) {
+                continue;
+            }
+            let Some((parent, base)) = file.name.rsplit_once('/') else {
+                continue;
+            };
+            if parent != "/usr/sbin" && parent != "/sbin" {
+                continue;
+            }
+            if !base.starts_with("rc") || base.len() <= 2 {
+                continue;
+            }
+            let target = file.linkto.rsplit('/').next().unwrap_or("");
+            if target != "service" {
+                continue;
+            }
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "deprecated-rc-symlink",
+                &[file.name.as_str()],
+            );
         }
     }
 }

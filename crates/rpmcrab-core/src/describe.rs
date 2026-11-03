@@ -450,7 +450,7 @@ mod tests {
             ),
             (
                 "SysVInitOnSystemdCheck.toml",
-                "f080982b5136ff3661b84510e3a9e7dcda5410a287a39f83b67fdbdadec0ddd6",
+                "5dabe3d84d697b91c2857f9896cbd882ac5f4c5d1a5703c36f51ae67621a9c32",
             ),
             (
                 "SystemdInstallCheck.toml",
