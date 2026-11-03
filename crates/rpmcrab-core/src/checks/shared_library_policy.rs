@@ -503,16 +503,43 @@ impl SharedLibraryPolicyCheck {
                 None => reasons.push("unversioned file name".to_string()),
                 Some((_, tail)) => {
                     if !is_dotted_digits(tail) {
-                        continue;
-                    }
-                    if soname.is_none() {
-                        reasons.push("no SONAME".to_string());
-                    }
-                    let first = tail.split('.').next().unwrap_or("");
-                    let first = first.trim_start_matches('0');
-                    let first = if first.is_empty() { "0" } else { first };
-                    if first != number {
-                        reasons.push(format!("version {first}, expected {number}"));
+                        // Decorated tail: fine only when the file
+                        // name starts with the full SONAME plus a
+                        // '.' or '-' separator, so
+                        // `libfoo.so.1-suse0` under SONAME
+                        // `libfoo.so.1` stays quiet while
+                        // `libfoo.so.0-suse0` (or any decorated
+                        // name without a SONAME) fires.
+                        let starts_with_soname = match soname {
+                            Some(s) => {
+                                base.starts_with(s.as_str())
+                                    && (base.len() == s.len()
+                                        || matches!(
+                                            base.as_bytes().get(s.len()),
+                                            Some(b'.') | Some(b'-')
+                                        ))
+                            }
+                            None => false,
+                        };
+                        if starts_with_soname {
+                            continue;
+                        }
+                        reasons.push(match soname {
+                            Some(s) => {
+                                format!("decorated file name does not start with SONAME {s}")
+                            }
+                            None => "decorated file name without SONAME".to_string(),
+                        });
+                    } else {
+                        if soname.is_none() {
+                            reasons.push("no SONAME".to_string());
+                        }
+                        let first = tail.split('.').next().unwrap_or("");
+                        let first = first.trim_start_matches('0');
+                        let first = if first.is_empty() { "0" } else { first };
+                        if first != number {
+                            reasons.push(format!("version {first}, expected {number}"));
+                        }
                     }
                 }
             }
