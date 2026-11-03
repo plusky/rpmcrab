@@ -4674,6 +4674,83 @@ mod tests {
     }
 
     #[test]
+    fn wrong_library_version_wrong_version_link_fires() {
+        // A link name versioned for another generation fires on the
+        // name alone, even though the link carries no SONAME.
+        let lines = wrong_version_details(
+            "badlink",
+            "libfoo1",
+            vec![wrongver_link("/usr/lib64/libfoo.so.0", "libfoo.so.1")],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.so.0 (symlink version 0, expected 1)"),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn wrong_library_version_decorated_link_mismatch_fires() {
+        // A decorated link name whose leading version differs from
+        // the package number fires on the name alone.
+        let lines = wrong_version_details(
+            "baddeclink",
+            "libfoo1",
+            vec![wrongver_link("/usr/lib64/libfoo.so.0-suse0", "libfoo.so.1")],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.so.0-suse0 (symlink version 0, expected 1)"),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn wrong_library_version_link_shapes_stay_quiet() {
+        // Link names judged on the name alone: a matching name, a
+        // decorated name with a matching leading version, a word
+        // tail, and a bare `.so` link (no version to judge) all
+        // stay quiet, as do non-stem names and %ghost links.
+        let mut ghost_link = wrongver_link("/usr/lib64/libfoo.so.0", "libfoo.so.1");
+        ghost_link.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        let cases: Vec<(&str, &str, PkgFile)> = vec![
+            (
+                "linkmatch",
+                "libfoo1",
+                wrongver_link("/usr/lib64/libfoo.so.1", "libfoo.so.1.0.0"),
+            ),
+            (
+                "linkdecorated",
+                "libfoo1",
+                wrongver_link("/usr/lib64/libfoo.so.1-suse0", "libfoo.so.1"),
+            ),
+            (
+                "linkword",
+                "libfoo1",
+                wrongver_link("/usr/lib64/libfoo.so.beta", "libfoo.so.1"),
+            ),
+            (
+                "linkbare",
+                "libfoo1",
+                wrongver_link("/usr/lib64/libfoo.so", "libfoo.so.1"),
+            ),
+            (
+                "linkstem",
+                "libfoo1",
+                wrongver_link("/usr/lib64/libbar.so.0", "libbar.so.1"),
+            ),
+            ("linkghost", "libfoo1", ghost_link),
+        ];
+        for (tag, name, file) in cases {
+            let lines = wrong_version_details(tag, name, vec![file]);
+            assert!(lines.is_empty(), "{tag}: no findings: {lines:?}");
+        }
+    }
+
+    #[test]
     fn wrong_library_version_quiet_shapes() {
         // Each shape stays quiet for a distinct reason: a plugin or
         // secondary library keeps its own versioning; a decorated
@@ -4712,11 +4789,6 @@ mod tests {
                 "lang",
                 "libfoo1-lang",
                 wrongver_elf_no_soname("lang", "lib", "/usr/lib64/libfoo.so.0"),
-            ),
-            (
-                "symlink",
-                "libfoo1",
-                wrongver_link("/usr/lib64/libfoo.so.0", "libfoo.so.1"),
             ),
             (
                 "ghost",
