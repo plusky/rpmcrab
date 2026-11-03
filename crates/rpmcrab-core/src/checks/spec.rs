@@ -5260,10 +5260,14 @@ fn soundness_hits(
 }
 
 /// A bundled `set` option token ending in `o` (`-euo`, `+eo`): a single
-/// leading sign, at least one option letter, and a trailing `o`. The
-/// exact `-o`/`+o` forms are matched by the caller, not here.
+/// leading sign, ASCII option letters only after it, and a trailing `o`.
+/// The exact `-o`/`+o` forms are matched by the caller, not here.
 fn is_bundled_o(tok: &str, sign: char) -> bool {
-    tok.len() > 2 && tok.starts_with(sign) && !tok.starts_with("--") && tok.ends_with('o')
+    tok.len() > 2
+        && tok.starts_with(sign)
+        && !tok.starts_with("--")
+        && tok.ends_with('o')
+        && tok[1..].chars().all(|c| c.is_ascii_alphabetic())
 }
 
 fn soundness_block(
@@ -5463,9 +5467,14 @@ fn soundness_block(
             // word is `pipefail`, and an attached `-*opipefail`
             // token enables on its own; the `+o` forms disable
             // symmetrically. A bare `pipefail` mention is neither.
+            // A `--` ends option scanning: words after it are operands, not options.
             if command_word(&s.text).as_deref() == Some("set") {
                 let mut prev = "";
                 for tok in s.text.split_whitespace().skip(1) {
+                    // Words after `--` are operands, not options.
+                    if tok == "--" {
+                        break;
+                    }
                     if tok == "pipefail" {
                         if (prev == "-o" || is_bundled_o(prev, '-')) && pipefail_before.is_none() {
                             pipefail_before = Some(flat);
@@ -10670,6 +10679,36 @@ Patch0: foo.patch
         assert!(
             !has(&results, "check-pipeline-status-masked"),
             "unexpected: {results:?}"
+        );
+        // A digit or second sign in the bundle is not an option
+        // bundle: `set -123o pipefail` and `set ++o pipefail` do
+        // not enable protection, so a later pipeline fires.
+        let results = run_mini("Name: foo\n%check\nset -123o pipefail\nmake test | tee log\n");
+        assert!(
+            has(&results, "check-pipeline-status-masked"),
+            "missing: {results:?}"
+        );
+        let results = run_mini("Name: foo\n%check\nset ++o pipefail\nmake test | tee log\n");
+        assert!(
+            has(&results, "check-pipeline-status-masked"),
+            "missing: {results:?}"
+        );
+        // Words after `--` are operands, not options: none of
+        // these enable protection.
+        let results = run_mini("Name: foo\n%check\nset -- -o pipefail\nmake test | tee log\n");
+        assert!(
+            has(&results, "check-pipeline-status-masked"),
+            "missing: {results:?}"
+        );
+        let results = run_mini("Name: foo\n%check\nset -e -- -o pipefail\nmake test | tee log\n");
+        assert!(
+            has(&results, "check-pipeline-status-masked"),
+            "missing: {results:?}"
+        );
+        let results = run_mini("Name: foo\n%check\nset -- -opipefail\nmake test | tee log\n");
+        assert!(
+            has(&results, "check-pipeline-status-masked"),
+            "missing: {results:?}"
         );
         // A pipe into a checker is not a pass-through (piglit).
         let results = run_mini("Name: foo\n%check\nmake test | grep -q FAILED\n");
