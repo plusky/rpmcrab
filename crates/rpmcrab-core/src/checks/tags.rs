@@ -1754,8 +1754,9 @@ impl TagsCheck {
 
     /// The run-scoped sibling program credit: a binary package's
     /// shipped executable regular files, keyed by its build, so a
-    /// sibling subpackage's metadata naming the program is not a
-    /// spelling finding (plusky/rpmcrab#1481). Source packages ship
+    /// a binary package of the same build's metadata naming the
+    /// program is not a spelling finding (candidate's own package
+    /// included) (plusky/rpmcrab#1481). Source packages ship
     /// no installed programs and contribute nothing; a keyless binary
     /// belongs to no build the run can judge. Ghost files are not
     /// shipped content and never credit.
@@ -3813,6 +3814,62 @@ mod tests {
             spelling_hits(&results, "wrld").len(),
             1,
             "an ordinary typo in the same text still fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_sibling_program_credited_mixed_case() {
+        // Case-insensitive credit: a sentence-start `Iiod` in a
+        // Summary is credited by the lowercase /usr/sbin/iiod shipped
+        // in the same build. All-uppercase words are never checked
+        // and CamelCase words are WikiWords, so a sentence-start
+        // capital is the only flaggable non-lowercase shape. A
+        // case-sensitive rewrite of either side of the match must
+        // fail this test.
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let (_t2, daemon) = spelling_pkg("spelling-daemon", vec![syn_exec("usr/sbin/iiod")]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_summary(&rules, &mut out, "Iiod library -- wrld", "C", &[]);
+        check.check(&daemon, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            spelling_hits(&results, "Iiod").is_empty(),
+            "mixed-case sibling program must credit: {results:?}"
+        );
+        assert_eq!(
+            spelling_hits(&results, "wrld").len(),
+            1,
+            "an ordinary typo in the same text still fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_mixed_case_fires_without_sibling() {
+        // Control for the mixed-case credit test: the sentence-start
+        // `Iiod` fires when no sibling ships the program, so the
+        // credit test above is not vacuous.
+        let config = test_config();
+        let (_t1, rules) = spelling_pkg(
+            "spelling-rules",
+            vec![syn_plain("usr/lib/udev/rules.d/90-libiio.rules")],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_summary(&rules, &mut out, "Iiod library -- wrld", "C", &[]);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            spelling_hits(&results, "Iiod").len(),
+            1,
+            "without a sibling program the finding stands: {results:?}"
         );
     }
 
