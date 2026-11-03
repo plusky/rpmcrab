@@ -70,6 +70,7 @@ FilterErrorTitles = [
 
 Filters = [
 # Output filters
+    ' dir-or-file-in-opt ',  # handled by CheckFilelist.py
     'unstripped-binary-or-object.*\.ko',
     'non-standard-dir-in-usr openwin',
     'ibcs2 non-standard-dir-in-usr i486-sysv4',

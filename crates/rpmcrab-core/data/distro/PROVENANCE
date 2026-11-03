@@ -60,7 +60,6 @@
 #   Filters: dropped 'non-standard-group' (killed: openSUSE dropped the Group tag)
 #   Filters: dropped 'spurious-bracket-in-' (killed: PostCheck stylistic nit)
 #   Filters: dropped 'one-line-command-in-' (killed: PostCheck stylistic nit)
-#   Filters: dropped 'dir-or-file-in-opt' (killed: FilelistCheck's filelist-forbidden-opt covers the same content (issue #883))
 #   Filters: dropped 'incoherent-version-in-changelog' (killed: changelog/version coherence is not an OBS build property (issue #883))
 #   Filters: dropped 'no-signature' (killed: autobuild redundancy, suppressed by openSUSE and Fedora)
 #   Filters: dropped 'symlink-crontab-file' (killed: no Factory package ships a crontab symlink (issue #883))
