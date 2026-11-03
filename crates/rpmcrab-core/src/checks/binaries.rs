@@ -9174,13 +9174,18 @@ impl Check for BinariesCheck {
             linked_providers
                 .subset(|id| contributor.is_some_and(|c| id.0 == c.0 && id.1 == c.1 && id.2 == c.2))
         };
-        let empty_system;
-        let system = if invocation_wide {
-            empty_system = SystemLibraries::empty();
-            &empty_system
-        } else {
-            &self.system_libraries
-        };
+        // The system fallback applies in every mode: the execution
+        // environment is the install target (a jailed container /
+        // build root), so the environment's libraries are the
+        // libraries the checked packages link against, and resolving
+        // DT_NEEDED entries against them mirrors the reference's
+        // `ldd -r` against the installed system. The mode switch
+        // above still governs the package provider index alone:
+        // single-contributor runs resolve against the
+        // contributor's set, wider batches against every set the
+        // batch ships -- but the system libraries join the closure
+        // in both cases (plusky/rpmcrab#1475).
+        let system = &self.system_libraries;
         let mut closures: HashMap<ClosureKey, Rc<HashSet<String>>> = HashMap::new();
         for package in &state.packages {
             let owner: PackageId = (
@@ -9302,9 +9307,8 @@ impl Check for BinariesCheck {
         // Linked-against resolution (Design A): the captured
         // consumers resolve their direct dependencies through the
         // unfiltered index above with the same system fallback as
-        // the undefined symbols — single-contributor runs add the
-        // system, wider batches resolve inside the invocation
-        // alone — and fire on the resolved path's prefix.
+        // the undefined symbols, in every mode, and fire on the
+        // resolved path's prefix.
         for package in &state.linked_packages {
             let owner: PackageId = (
                 package.pkg_name.clone(),
@@ -21703,12 +21707,14 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn system_provider_does_not_rescue_inside_an_invocation() {
-        // plusky/rpmcrab#701: the system fallback belongs to the
-        // single-package and installed cases. Inside a
-        // multi-package invocation the batch is the universe: a
-        // symbol only the host system provides keeps firing, so a
-        // scan's results do not depend on the host it runs on.
+    fn system_provider_rescues_inside_an_invocation() {
+        // plusky/rpmcrab#1475: the system fallback applies in every
+        // mode. Inside a multi-package invocation the batch's
+        // packages still resolve against each other first, but a
+        // symbol only the system provides is rescued there too:
+        // the execution environment is the install target (a jailed
+        // container / build root), so the environment's libraries
+        // are the libraries the checked packages link against.
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let sysroot = dir.path().join("sysroot");
         std::fs::create_dir(&sysroot).expect("mkdir sysroot");
@@ -21749,31 +21755,29 @@ description = "explicit priority string bypasses the system crypto policy"
             "system provider rescues a lone package: {alone:?}"
         );
 
-        // In a batch, it does not.
+        // In a batch, it does too.
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         check.system_libraries = SystemLibraries::with_roots(vec![sysroot], None);
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         run_invocation(&mut check, &[&consumer_pkg, &other_pkg], &config, &mut out);
         let results = out.results().to_vec();
-        let lines = lines_for(&results, "undefined-non-weak-symbol");
-        assert_eq!(
-            lines.len(),
-            1,
-            "host-only provider must not rescue: {results:?}"
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "system provider rescues inside an invocation too: {results:?}"
         );
-        assert!(lines[0].contains("sys_sym"), "names the symbol: {lines:?}");
     }
 
     #[test]
-    fn exe_only_package_does_not_flip_invocation_wide() {
-        // plusky/rpmcrab#735 review: a package shipping only
-        // executables contributes no provider library and no captured
-        // consumer (executables are never captured -- the shlib gate
-        // in `check_dependency`), so it must not count as an
-        // invocation contributor. Otherwise adding it to a batch
-        // disables the system fallback for a sibling package whose
-        // symbols the system provides, and the sibling's verdict
-        // depends on an unrelated package.
+    fn system_fallback_survives_batching() {
+        // plusky/rpmcrab#1475: batching never disables the system
+        // fallback, whatever the batch composition. A package
+        // shipping only executables still counts as no contributor
+        // (executables are never captured -- the shlib gate in
+        // `check_dependency` -- and it provides no library), and a
+        // genuine second contributor no longer switches the system
+        // fallback off either. Contributor counting itself still
+        // governs the package provider index; that is pinned by the
+        // #735/#799 index tests, not here.
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let sysroot = dir.path().join("sysroot");
         std::fs::create_dir(&sysroot).expect("mkdir sysroot");
@@ -21833,9 +21837,11 @@ description = "explicit priority string bypasses the system crypto policy"
             "exe-only package must not disable the system fallback: {results:?}"
         );
 
-        // A genuine contributor alongside still flips the batch:
-        // with a second library package in the invocation the system
-        // fallback is off and the host-only symbol fires.
+        // A genuine contributor alongside no longer switches the
+        // fallback off: with a second library package in the
+        // invocation the batch resolves invocation-wide for package
+        // providers, but the system provider still rescues the
+        // system-only symbol.
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         check.system_libraries = SystemLibraries::with_roots(vec![sysroot], None);
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
@@ -21846,13 +21852,10 @@ description = "explicit priority string bypasses the system crypto policy"
             &mut out,
         );
         let results = out.results().to_vec();
-        let lines = lines_for(&results, "undefined-non-weak-symbol");
-        assert_eq!(
-            lines.len(),
-            1,
-            "genuine contributor still flips the batch: {results:?}"
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "genuine contributor must not disable the system fallback: {results:?}"
         );
-        assert!(lines[0].contains("sys_sym"), "names the symbol: {lines:?}");
     }
 
     #[test]
@@ -22054,24 +22057,28 @@ description = "explicit priority string bypasses the system crypto policy"
         // (name, arch) collapses two distinct packages that share
         // a name and arch (two versions in one invocation) into
         // one contributor, so the batch wrongly stays in
-        // single-package mode and the system fallback rescues a
-        // symbol the invocation itself does not provide.
+        // single-package mode and the provider index subsets to
+        // the first contributor's set alone. The probe used to be
+        // a system-only symbol, whose rescue depended on the mode
+        // switch; since the system fallback now applies in every
+        // mode (plusky/rpmcrab#1475), the probe is a symbol only
+        // the sibling package provides: in invocation-wide mode
+        // every set resolves it, while a collapsed
+        // single-contributor index excludes the sibling's set in
+        // consumer-first order and the symbol fires. The system is
+        // empty here so only the package index can resolve.
         let dir = tempfile::TempDir::new().expect("tmpdir");
-        let sysroot = dir.path().join("sysroot");
-        std::fs::create_dir(&sysroot).expect("mkdir sysroot");
-        let syslib = craft_shlib_elf(false, None, Some("libsys.so.1"), &[("sys_sym", 1, 0, 1)]);
-        write_system_lib(&sysroot, "libsys.so.1", &syslib);
-        let consumer = craft_shlib_elf(
-            false,
-            Some("libsys.so.1"),
-            Some("libbar.so.1"),
-            &[("sys_sym", 1, 0, 0)],
-        );
         let other = craft_shlib_elf(
             false,
             None,
             Some("libother.so.1"),
             &[("other_sym", 1, 0, 1)],
+        );
+        let consumer = craft_shlib_elf(
+            false,
+            Some("libother.so.1"),
+            Some("libbar.so.1"),
+            &[("other_sym", 1, 0, 0)],
         );
         let mut consumer_pkg = synthetic_pkg(
             "samepkg",
@@ -22086,19 +22093,20 @@ description = "explicit priority string bypasses the system crypto policy"
         );
         other_pkg.filename = "samepkg-2.0-1.x86_64.rpm".to_string();
         let config = test_config();
-        let mut check = BinariesCheck::with_tool_dir(&config, None);
-        check.system_libraries = SystemLibraries::with_roots(vec![sysroot], None);
-        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
-        run_invocation(&mut check, &[&consumer_pkg, &other_pkg], &config, &mut out);
-        let results = out.results().to_vec();
-        let lines = lines_for(&results, "undefined-non-weak-symbol");
-        assert_eq!(
-            lines.len(),
-            1,
-            "two distinct same-name packages flip the batch to \
-             invocation-wide resolution: {results:?}"
-        );
-        assert!(lines[0].contains("sys_sym"), "names the symbol: {lines:?}");
+        for pkgs in [
+            &[&consumer_pkg, &other_pkg][..],
+            &[&other_pkg, &consumer_pkg][..],
+        ] {
+            let mut check = BinariesCheck::with_tool_dir(&config, None);
+            check.system_libraries = SystemLibraries::empty();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            run_invocation(&mut check, pkgs, &config, &mut out);
+            let results = out.results().to_vec();
+            assert!(
+                lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+                "two distinct same-name packages count as two contributors in either order: {results:?}"
+            );
+        }
     }
 
     #[test]
