@@ -492,3 +492,10 @@ check = "TagsCheck"
 kind = "behaviour"
 reason = "Emits a Warning-level `summary-with-trademark-symbol` finding when a package Summary contains a literal trademark symbol (™ or ®). The reference TagsCheck.py has no such check. Measured over the full Factory corpus (51,586 RPMs): a single current Summary hit, and every %description hit is legitimate prose (compatibility statements, attribution, copyright lines), so the check covers Summary only and excludes ©, whose only observed uses are legitimate attribution. Re-enumerated 2026-11-02 with `rpm -qp` header reads over the same corpus (51,586 RPMs; 51,589 files enumerated, 3 of them nosrc HTML error pages, not RPMs): the single Summary hit is perl-YAML (YAML Ain't Markup Language™); the 7 %description trademark hits (1 ™, 6 ®) and the single © record are all legitimate prose/attribution. Pinned by emission-path tests in tags.rs."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "spelling-error"
+kind = "behaviour"
+reason = "Function references are not spelling findings: a word immediately followed by `()` (e.g. `lex()` in 'each call to the lex() function will yield one token', plusky/rpmcrab#1476) is skipped - an empty parenthetical after a word is a function-call reference, never natural English prose, so the reference's flagging of such words (lex -> Alex, Mex, Rex) is noise. Non-empty parentheticals stay checked: `(s)` plurals and other `(...)` forms still flag their word, so the skip cannot hide a genuine typo."
+since = "0.4.2"

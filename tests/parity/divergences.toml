@@ -4795,6 +4795,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "spelling-error"
+kind = "behaviour"
+reason = "Function references are not spelling findings: a word immediately followed by `()` (e.g. `lex()` in 'each call to the lex() function will yield one token', plusky/rpmcrab#1476) is skipped - an empty parenthetical after a word is a function-call reference, never natural English prose, so the reference's flagging of such words (lex -> Alex, Mex, Rex) is noise. Non-empty parentheticals stay checked: `(s)` plurals and other `(...)` forms still flag their word, so the skip cannot hide a genuine typo."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
 reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."

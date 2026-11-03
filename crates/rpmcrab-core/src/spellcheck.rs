@@ -305,6 +305,15 @@ impl Spellchecker {
                 continue;
             }
 
+            // Skip code identifiers: a word immediately followed by `()`
+            // is a function reference (e.g. `lex()`), never natural
+            // English prose — an empty parenthetical after a word has
+            // no prose reading, unlike `(s)` plurals, which stay
+            // checked.
+            if normalized[word_end..].starts_with("()") {
+                continue;
+            }
+
             if self.accepts(word) {
                 continue;
             }
@@ -612,6 +621,29 @@ SFX N 0 en [^ey]\n";
         let checker = test_checker();
         let result = checker.check("wrld wrld wrld", "testpkg", &[]);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn function_reference_with_empty_parens_is_skipped() {
+        let checker = test_checker();
+        let result = checker.check("hello lex() check", "testpkg", &[]);
+        assert!(result.is_empty(), "lex() is a code identifier: {result:?}");
+    }
+
+    #[test]
+    fn bare_word_without_parens_still_flagged() {
+        let checker = test_checker();
+        let result = checker.check("hello lex check", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "lex");
+    }
+
+    #[test]
+    fn non_empty_paren_form_still_checked() {
+        let checker = test_checker();
+        let result = checker.check("hello wrld(test) check", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "wrld");
     }
 
     /// The synthetic dictionary for the suggestion pins: every
