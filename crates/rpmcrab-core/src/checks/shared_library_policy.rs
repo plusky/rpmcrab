@@ -4375,4 +4375,279 @@ mod tests {
         assert_eq!(check.seen.len(), 2);
         drop(exported);
     }
+
+    /// A minimal ELF64 with no DT_SONAME entry: the unversioned
+    /// library shape (a NO_SONAME build).
+    fn minimal_elf_no_soname() -> Vec<u8> {
+        let strtab: Vec<u8> = vec![0];
+
+        // Dynamic entries are (i64 tag, u64 val).
+        let mut dynamic: Vec<u8> = Vec::new();
+        let mut push_dyn = |tag: i64, val: u64| {
+            dynamic.extend_from_slice(&tag.to_le_bytes());
+            dynamic.extend_from_slice(&val.to_le_bytes());
+        };
+        let ehsize: u64 = 64;
+        let dyn_off = ehsize + 2 * 56;
+        let strtab_off = dyn_off + 3 * 16;
+        push_dyn(5, strtab_off); // DT_STRTAB: vaddr == file offset (PT_LOAD at 0)
+        push_dyn(10, strtab.len() as u64); // DT_STRSZ
+        push_dyn(0, 0); // DT_NULL
+
+        let mut elf: Vec<u8> = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        elf.extend_from_slice(&3u16.to_le_bytes()); // ET_DYN
+        elf.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        elf.extend_from_slice(&1u32.to_le_bytes()); // version
+        elf.extend_from_slice(&0u64.to_le_bytes()); // entry
+        elf.extend_from_slice(&ehsize.to_le_bytes()); // phoff
+        elf.extend_from_slice(&0u64.to_le_bytes()); // shoff
+        elf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        elf.extend_from_slice(&64u16.to_le_bytes()); // ehsize
+        elf.extend_from_slice(&56u16.to_le_bytes()); // phentsize
+        elf.extend_from_slice(&2u16.to_le_bytes()); // phnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shentsize
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shnum
+        elf.extend_from_slice(&0u16.to_le_bytes()); // shstrndx
+
+        // PT_LOAD covering the whole file at vaddr 0, then PT_DYNAMIC.
+        let total = strtab_off + strtab.len() as u64;
+        let mut ph = |p_type: u32, flags: u32, offset: u64, filesz: u64| {
+            elf.extend_from_slice(&p_type.to_le_bytes());
+            elf.extend_from_slice(&flags.to_le_bytes());
+            elf.extend_from_slice(&offset.to_le_bytes());
+            elf.extend_from_slice(&offset.to_le_bytes()); // vaddr == offset
+            elf.extend_from_slice(&offset.to_le_bytes()); // paddr
+            elf.extend_from_slice(&filesz.to_le_bytes());
+            elf.extend_from_slice(&filesz.to_le_bytes()); // memsz
+            elf.extend_from_slice(&0x1000u64.to_le_bytes()); // align
+        };
+        ph(1, 5, 0, total); // PT_LOAD
+        ph(2, 6, dyn_off, dynamic.len() as u64); // PT_DYNAMIC
+
+        elf.extend_from_slice(&dynamic);
+        elf.extend_from_slice(&strtab);
+        assert_eq!(elf.len() as u64, total);
+        elf
+    }
+
+    /// Write `bytes` under the per-test payload dir and return the
+    /// path, for wrong-library-version fixture entries.
+    fn wrongver_payload_path(tag: &str, key: &str, bytes: &[u8]) -> String {
+        let dir = std::env::temp_dir().join(format!("rpmcrab-shlib-wrongver-{tag}"));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join(key);
+        std::fs::write(&path, bytes).expect("write payload");
+        path.to_string_lossy().into_owned()
+    }
+
+    fn wrongver_elf(tag: &str, key: &str, name: &str, soname: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: wrongver_payload_path(tag, key, &minimal_elf(soname)),
+            mode: 0o100644,
+            magic: "ELF 64-bit LSB shared object".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn wrongver_elf_no_soname(tag: &str, key: &str, name: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: wrongver_payload_path(tag, key, &minimal_elf_no_soname()),
+            mode: 0o100644,
+            magic: "ELF 64-bit LSB shared object".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn wrongver_link(name: &str, linkto: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode: 0o120777,
+            linkto: linkto.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn wrongver_ghost(tag: &str, key: &str, name: &str, soname: &str) -> PkgFile {
+        let mut file = wrongver_elf(tag, key, name, soname);
+        file.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        file
+    }
+
+    /// The rendered `shlib-policy-wrong-library-version` lines for a
+    /// fixture package with the given name and file list.
+    fn wrong_version_details(tag: &str, name: &str, files: Vec<PkgFile>) -> Vec<String> {
+        let dir = std::env::temp_dir().join(format!("rpmcrab-shlib-wrongver-{tag}"));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &dir, true).expect("open fixture pkg");
+        pkg.name = name.to_string();
+        pkg.files = files;
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SharedLibraryPolicyCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .filter(|(n, _)| n == "shlib-policy-wrong-library-version")
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
+
+    #[test]
+    fn wrong_library_version_libiio_shape_fires() {
+        // The motivating case: libiio.so.0 built NO_SONAME and
+        // shipped in libiio1 — no SONAME and version 0 against
+        // generation 1.
+        let lines = wrong_version_details(
+            "libiio",
+            "libiio1",
+            vec![wrongver_elf_no_soname(
+                "libiio",
+                "lib",
+                "/usr/lib64/libiio.so.0",
+            )],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libiio.so.0 (no SONAME; version 0, expected 1)"),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn wrong_library_version_filename_mismatch_fires() {
+        // The file's own SONAME matches its name, but the name is
+        // versioned for another generation than the package.
+        let lines = wrong_version_details(
+            "mismatch",
+            "libfoo1",
+            vec![wrongver_elf(
+                "mismatch",
+                "lib",
+                "/usr/lib64/libfoo.so.2",
+                "libfoo.so.2",
+            )],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.so.2 (version 2, expected 1)"),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn wrong_library_version_bare_so_fires() {
+        // A bare .so regular file in the library package: the link
+        // belongs in -devel, not here, even with a matching SONAME.
+        let lines = wrong_version_details(
+            "bare",
+            "libfoo1",
+            vec![wrongver_elf(
+                "bare",
+                "lib",
+                "/usr/lib64/libfoo.so",
+                "libfoo.so.1",
+            )],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.so (unversioned file name)"),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn wrong_library_version_matching_files_stay_quiet() {
+        let lines = wrong_version_details(
+            "matching",
+            "libfoo1",
+            vec![
+                wrongver_elf("matching", "lib1", "/usr/lib64/libfoo.so.1", "libfoo.so.1"),
+                wrongver_elf(
+                    "matching",
+                    "lib123",
+                    "/usr/lib64/libfoo.so.1.2.3",
+                    "libfoo.so.1",
+                ),
+            ],
+        );
+        assert!(lines.is_empty(), "no findings: {lines:?}");
+    }
+
+    #[test]
+    fn wrong_library_version_quiet_shapes() {
+        // Each shape stays quiet for a distinct reason: a plugin or
+        // secondary library keeps its own versioning; a decorated
+        // tail stays with the SONAME arms; a non-scheme name has no
+        // generation to compare against; -devel and -lang packages
+        // never enter the policy scan; symlinks and %ghost entries
+        // are not shipped library payload; leading zeroes normalise
+        // away.
+        let cases: Vec<(&str, &str, PkgFile)> = vec![
+            (
+                "plugin",
+                "libfoo1",
+                wrongver_elf("plugin", "lib", "/usr/lib64/libbar.so.0", "libbar.so.0"),
+            ),
+            (
+                "decorated",
+                "libfoo1",
+                wrongver_elf(
+                    "decorated",
+                    "lib",
+                    "/usr/lib64/libfoo.so.23.11-1",
+                    "libfoo.so.1",
+                ),
+            ),
+            (
+                "nonscheme",
+                "libfoo",
+                wrongver_elf_no_soname("nonscheme", "lib", "/usr/lib64/libfoo.so.0"),
+            ),
+            (
+                "devel",
+                "libfoo1-devel",
+                wrongver_elf_no_soname("devel", "lib", "/usr/lib64/libfoo.so.0"),
+            ),
+            (
+                "lang",
+                "libfoo1-lang",
+                wrongver_elf_no_soname("lang", "lib", "/usr/lib64/libfoo.so.0"),
+            ),
+            (
+                "symlink",
+                "libfoo1",
+                wrongver_link("/usr/lib64/libfoo.so.0", "libfoo.so.1"),
+            ),
+            (
+                "ghost",
+                "libfoo1",
+                wrongver_ghost("ghost", "lib", "/usr/lib64/libfoo.so.0", "libfoo.so.1"),
+            ),
+            (
+                "leadingzero",
+                "libfoo1",
+                wrongver_elf(
+                    "leadingzero",
+                    "lib",
+                    "/usr/lib64/libfoo.so.01",
+                    "libfoo.so.1",
+                ),
+            ),
+        ];
+        for (tag, name, file) in cases {
+            let lines = wrong_version_details(tag, name, vec![file]);
+            assert!(lines.is_empty(), "{tag}: no findings: {lines:?}");
+        }
+    }
 }
