@@ -1598,7 +1598,7 @@ impl PostCheck {
             // it (a known approximation).
             fn split_attached_payload(val: &str) -> Vec<&str> {
                 let val = trim(val);
-                // Fall back on a genuinely unclosed quote, not on
+                // Fall back on a quote-aware unclosed quote, not on
                 // global parity: a single quote inside double quotes
                 // is literal, so counting it breaks the quoted group
                 // (issue #1457).
@@ -1750,7 +1750,8 @@ impl PostCheck {
                                 // `--split-string` (separate form):
                                 // the next word is the split-string
                                 // argument; split it into argv words
-                                // like the attached form.
+                                // like the attached form, except that no
+                                // unclosed-quote fallback applies.
                                 "--split-string" => {
                                     let Some(arg) = words.pop_front() else {
                                         return false;
@@ -1834,7 +1835,8 @@ impl PostCheck {
                                         // word is the split-string
                                         // argument; split it into
                                         // argv words like the
-                                        // attached form.
+                                        // attached form, except that no
+                                        // unclosed-quote fallback applies.
                                         match words.pop_front() {
                                             Some(arg) => {
                                                 prepend = split_words(arg)
@@ -4408,7 +4410,7 @@ mod tests {
 
     #[test]
     fn dangerous_command_in_shell_fed_heredoc_env_split_string_unclosed_payload_fallback_fires() {
-        // A genuinely unclosed quote in the `-S` payload falls back
+        // A quote-aware unclosed quote in the `-S` payload falls back
         // to whitespace splitting: the first fallback word still
         // names the shell, so the body fires (issue #1461).
         let script = "env -Ssh' 'a'b' sh <<'EOF'\nrm -rf /foo\nEOF\n";
