@@ -416,6 +416,30 @@ fn setbadness_report_is_quiet_on_comments_and_addfilter() {
     );
 }
 
+/// `Pkg.timers` reaches the duration map the `-t` report reads: a file
+/// package records `ExtractRpm`, which is below the 0.1s cut-off so it
+/// does not print a row, but the report header does. The phase row's
+/// presence in the map itself is pinned at the worker level
+/// (`fatal_result_keeps_phase_durations` in `worker.rs`).
+#[test]
+fn package_phase_timers_reach_the_time_report() {
+    let log = Arc::new(Mutex::new(Log::default()));
+    let (mut lint, make_checks) = lint_with(
+        {
+            let log = Arc::clone(&log);
+            move || Recorder {
+                name: "Recorder",
+                log: Arc::clone(&log),
+                emit: false,
+            }
+        },
+        Config::default(),
+    );
+    lint.check_batch(tasks(1), 1, &make_checks, true);
+    let report = lint.time_report();
+    assert!(report.contains("Check time report"), "{report}");
+}
+
 /// Worker durations reach the `-t` report: a check slower than the 0.1s
 /// cut-off prints its row. Phase timers travel through the same worker
 /// durations map, but no committed fixture extracts slowly enough to push

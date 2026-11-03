@@ -221,6 +221,13 @@ def main():
 
     try:
         entries = load_table(args.config)
+    except OSError as exc:
+        # A missing or unreadable config is a clean exit-2 usage error,
+        # not a traceback (exit 1): `open()` raising `FileNotFoundError`
+        # or `PermissionError` used to propagate out of `load_table`
+        # past the `ValueError` handler below.
+        print(f"error: cannot read PythonModuleStems table {args.config}: {exc}", file=sys.stderr)
+        return 2
     except ValueError as exc:
         print(f"error: malformed PythonModuleStems table: {exc}", file=sys.stderr)
         return 2

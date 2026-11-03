@@ -28,17 +28,21 @@ HEADER_FORMS = [
 ]
 
 
-def _run(manifest):
-    """Run the gate against a synthetic manifest; return its exit code."""
+def _run_full(manifest):
+    """Run the gate against a synthetic manifest; return the process."""
     with tempfile.TemporaryDirectory() as tmp:
         core = os.path.join(tmp, "crates", "rpmcrab-core")
         os.makedirs(core)
         with open(os.path.join(core, "Cargo.toml"), "w", encoding="utf-8") as fh:
             fh.write(manifest)
-        proc = subprocess.run(
+        return subprocess.run(
             ["bash", SCRIPT], cwd=tmp, capture_output=True, text=True
         )
-        return proc.returncode
+
+
+def _run(manifest):
+    """Run the gate against a synthetic manifest; return its exit code."""
+    return _run_full(manifest).returncode
 
 
 def test_table_headers_fail():
@@ -48,6 +52,59 @@ def test_table_headers_fail():
             manifest = "[package]\nname = \"rpmcrab-core\"\n\n" + form.format(name=name) + "\n"
             rc = _run(manifest)
             assert rc == 1, (name, form, rc)
+
+
+def test_table_headers_with_whitespace_around_dot_fail():
+    """TOML dotted keys allow whitespace around the dot, so
+    `[dependencies . <name>]` (and the one-sided variants) must fail
+    like the tight spelling."""
+    forms = [
+        "[dependencies . {name}]",
+        "[dependencies. {name}]",
+        "[dependencies .{name}]",
+        "[dev-dependencies . {name}]",
+        "[target.'cfg(unix)'.dependencies . {name}]",
+    ]
+    for name in NAMES:
+        for form in forms:
+            manifest = "[package]\nname = \"rpmcrab-core\"\n\n" + form.format(name=name) + "\n"
+            rc = _run(manifest)
+            assert rc == 1, (name, form, rc)
+
+
+def test_renamed_dependencies_fail():
+    """A Cargo rename (`alias = { package = "<name>", ... }`, a
+    `[dependencies.alias]` table with a `package = "<name>"` line, or a
+    multi-line inline table) must fail like the plain spelling: the
+    dependency is the forbidden crate under another key."""
+    for name in NAMES:
+        forms = [
+            f'alias = {{ package = "{name}", version = "1" }}\n',
+            f'alias = {{ version = "1", package = "{name}" }}\n',
+            f"[dependencies.alias]\npackage = \"{name}\"\nversion = \"1\"\n",
+            f"alias = {{\n  package = \"{name}\",\n  version = \"1\",\n}}\n",
+            f"alias = {{ package = '{name}', version = '1' }}\n",
+        ]
+        for form in forms:
+            manifest = "[package]\nname = \"rpmcrab-core\"\n\n" + form
+            proc = _run_full(manifest)
+            assert proc.returncode == 1, (name, form, proc.stdout, proc.stderr)
+
+
+def test_renamed_clean_and_comment_mentions_pass():
+    """A rename of an unrelated crate passes, and a `package =` line in
+    a comment is not a dependency."""
+    manifest = (
+        "[package]\nname = \"rpmcrab-core\"\n\n"
+        'alias = { package = "serde", version = "1" }\n'
+    )
+    assert _run(manifest) == 0, manifest
+    manifest = (
+        "[package]\nname = \"rpmcrab-core\"\n\n"
+        '# myclap = { package = "clap" }\n'
+        "[dependencies]\nserde = \"1\"\n"
+    )
+    assert _run(manifest) == 0, manifest
 
 
 def test_bare_mention_passes():
