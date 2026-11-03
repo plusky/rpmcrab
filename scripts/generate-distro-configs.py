@@ -1182,16 +1182,15 @@ def known_findings():
     """Finding names rpmcrab can emit: staged description keys plus in-code
     set_error_detail registrations.
 
-    Returns (names, dynamic_prefixes): literal registrations give names,
-    while format!-constructed registrations (e.g.
-    `&format!("dir-or-file-in-{}", ...)`) give only the literal prefix
-    up to the first placeholder -- the placeholder values are runtime
-    data (a DisallowedDirs entry, a locale code), so the family can
-    never be enumerated statically, and the pruner must match on the
-    prefix instead of dropping the whole family as stale.
+    Returns a plain set of literal names. Format!-constructed
+    registrations (e.g. `&format!("dir-or-file-in-{}", ...)`) are not
+    enumerated: their placeholder values are runtime data, so no
+    literal name exists to keep, and a prefix exemption here would
+    defeat the kill-list -- the one PRUNE_CANDIDATES member matching
+    a dynamic prefix, dir-or-file-in-opt, is killed by
+    FilelistCheck coverage and the port can never emit it.
     """
     findings = set()
-    prefixes = set()
     key_re = re.compile(r'^(?:"([^"]+)"|([A-Za-z0-9_.\-%]+))\s*=')
     for toml_file in DESCRIPTIONS_DIR.glob("*.toml"):
         for line in toml_file.read_text(encoding="utf-8").splitlines():
@@ -1207,13 +1206,9 @@ def known_findings():
         text = rs_file.read_text(encoding="utf-8")
         findings.update(detail_re.findall(text))
         for template in format_re.findall(text):
-            if "{" in template:
-                prefix = template.split("{", 1)[0]
-                if prefix:
-                    prefixes.add(prefix)
-            else:
+            if "{" not in template:
                 findings.add(template)
-    return findings, prefixes
+    return findings
 
 
 def pure_finding_pattern(entry):
@@ -1289,15 +1284,6 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
     together with one adjacent blank line, so the surviving groups keep
     the file's spacing. A block that still heads a retained entry stays.
     """
-    # `known` is either a plain set of names (the historical call
-    # shape, kept for tests) or the (names, dynamic_prefixes)
-    # pair from `known_findings()`: a Filters entry naming a
-    # member of a format!-constructed family is live even though
-    # its full name is never a literal in the tree.
-    if isinstance(known, tuple):
-        known_names, dynamic_prefixes = known
-    else:
-        known_names, dynamic_prefixes = known, ()
     lines = text.splitlines(keepends=True)
     out = []
     in_list = None
@@ -1346,10 +1332,7 @@ def prune_stale_filters(text, known, pruned_log, dropped_log, retargeted_log):
             if (
                 finding is not None
                 and finding in PRUNE_CANDIDATES
-                and finding not in known_names
-                and not any(
-                    finding.startswith(prefix) for prefix in dynamic_prefixes
-                )
+                and finding not in known
             ):
                 pruned_log.append(
                     f"{in_list}: dropped {finding!r} ({PRUNE_CANDIDATES[finding]})"
