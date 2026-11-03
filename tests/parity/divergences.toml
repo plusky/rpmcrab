@@ -4213,6 +4213,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "SysVInitOnSystemdCheck"
+kind = "behaviour"
+reason = "New port-only Warning: a shipped (non-%ghost) symlink named rc* in /usr/sbin or /sbin pointing at `service` emits W deprecated-rc-symlink with the link path as detail, one finding per link. The reference has no such finding: its SysVInitOnSystemdCheck classifies init basenames only and never inspects sbindir symlinks. Warning only: the link is inert compat, not a broken install. Pinned by unit tests in sysv_init_on_systemd.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "SystemdUnitDir"
 kind = "behaviour"
 reason = "The unit directory comes from the SystemdUnitDir config key rather than rpm.expandMacro('%{_unitdir}') (SystemdInstallCheck.py). The shipped value matches this host's macro, so behaviour is identical today, but a host whose rpm sets a different _unitdir would not be followed."
