@@ -47,13 +47,17 @@
 //! with no DT_SONAME (the libiio.so.0 shape: built NO_SONAME and
 //! shipped in libiio1), a bare `.so` regular file, or a plain
 //! dotted-digit filename version whose leading component differs from
-//! the package number all fire. The scan is deliberately narrow: only
-//! scheme-named library packages, only regular ELF files whose
-//! library stem equals the package stem, and only plain filename
-//! versions — decorated tails (23.11-1, suse0, 0d, word tails) stay
-//! with the SONAME arms, as do SONAME mismatches (which stay with
-//! `shlib-policy-name-error`); symlinks, %ghost entries and debug
-//! paths stay quiet.
+//! the package number all fire. A decorated file name stays quiet
+//! only when it starts with the full SONAME plus a `.` or `-`
+//! separator; any other decorated name fires. A symlink name is
+//! judged on the name alone: a link name whose leading numeric
+//! version differs from the package number fires. The scan is
+//! deliberately narrow: only scheme-named library packages, only
+//! files whose library stem equals the package stem, and only the
+//! shapes above — SONAME mismatches stay with
+//! `shlib-policy-name-error`, dangling links stay with the
+//! dangling-symlink checks, and %ghost entries and debug paths
+//! stay quiet.
 //!
 //! `shlib-fixed-dependency` is likewise deferred: a versioned library
 //! package pinning a dependency at `=` is version lockstep, not a policy
@@ -467,17 +471,25 @@ impl SharedLibraryPolicyCheck {
     ///
     /// Deliberately narrow: only scheme-named packages (the
     /// `soname_package_parts` number is the generation to compare
-    /// against); only regular ELF files the walk read (symlinks, the
-    /// `-devel` link shape, stay quiet, as do %ghost entries, which
-    /// never join the scan set, and debug paths); only files whose
-    /// library stem equals the package stem (a plugin or secondary
-    /// library keeps its own versioning); only plain dotted-digit
-    /// filename versions (decorated tails such as `23.11-1`, `suse0`
-    /// or `0d` stay with the SONAME arms, whose matcher understands
-    /// them). A SONAME that mismatches the package name stays with
-    /// `shlib-policy-name-error`; a file whose filename version
-    /// mismatches fires here even when its SONAME matches, because
-    /// the file name itself is wrong.
+    /// against); only files whose library stem equals the package
+    /// stem (a plugin or secondary library keeps its own
+    /// versioning); only regular ELF files the walk read, plus
+    /// symlink names judged on the name alone (below); %ghost
+    /// entries never join the scan set, and debug paths stay quiet.
+    /// Plain dotted-digit filename versions compare by leading
+    /// component; a decorated tail (such as `23.11-1`, `suse0` or
+    /// `0d`) stays quiet only when the file name starts with the
+    /// full SONAME plus a `.` or `-` separator — a decorated name
+    /// that does not start with the SONAME, or a decorated name
+    /// without a SONAME, fires here. A SONAME that mismatches the
+    /// package name stays with `shlib-policy-name-error`; a file
+    /// whose filename version mismatches fires here even when its
+    /// SONAME matches, because the file name itself is wrong.
+    /// Symlink names carry no SONAME, so they are judged on the
+    /// name alone: a link name whose leading numeric version
+    /// differs from the package number fires; matching names, word
+    /// tails, and bare `.so` links stay quiet, and dangling links
+    /// stay with the dangling-symlink checks.
     fn check_library_file_versions(
         &self,
         pkg: &Pkg,
