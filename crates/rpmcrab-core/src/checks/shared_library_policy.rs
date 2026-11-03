@@ -4615,11 +4615,11 @@ mod tests {
     fn wrong_library_version_quiet_shapes() {
         // Each shape stays quiet for a distinct reason: a plugin or
         // secondary library keeps its own versioning; a decorated
-        // tail stays with the SONAME arms; a non-scheme name has no
-        // generation to compare against; -devel and -lang packages
-        // never enter the policy scan; symlinks and %ghost entries
-        // are not shipped library payload; leading zeroes normalise
-        // away.
+        // tail that starts with the full SONAME stays with the
+        // SONAME arms; a non-scheme name has no generation to
+        // compare against; -devel and -lang packages never enter
+        // the policy scan; %ghost entries are not shipped payload;
+        // leading zeroes normalise away.
         let cases: Vec<(&str, &str, PkgFile)> = vec![
             (
                 "plugin",
@@ -4633,7 +4633,7 @@ mod tests {
                     "decorated",
                     "lib",
                     "/usr/lib64/libfoo.so.23.11-1",
-                    "libfoo.so.1",
+                    "libfoo.so.23.11-1",
                 ),
             ),
             (
@@ -4676,5 +4676,102 @@ mod tests {
             let lines = wrong_version_details(tag, name, vec![file]);
             assert!(lines.is_empty(), "{tag}: no findings: {lines:?}");
         }
+    }
+
+    #[test]
+    fn wrong_library_version_decorated_soname_prefix_stays_quiet() {
+        // A decorated tail stays quiet when the file name starts
+        // with the full SONAME plus a separator.
+        let lines = wrong_version_details(
+            "decprefix",
+            "libfoo1",
+            vec![
+                wrongver_elf(
+                    "decprefix",
+                    "lib1",
+                    "/usr/lib64/libfoo.so.1-suse0",
+                    "libfoo.so.1",
+                ),
+                wrongver_elf(
+                    "decprefix",
+                    "lib2",
+                    "/usr/lib64/libfoo.so.1.0.0-suse0",
+                    "libfoo.so.1",
+                ),
+            ],
+        );
+        assert!(lines.is_empty(), "no findings: {lines:?}");
+    }
+
+    #[test]
+    fn wrong_library_version_decorated_soname_mismatch_fires() {
+        // A decorated tail that does not start with the SONAME
+        // fires, even though SONAME-prefixed decorated tails stay
+        // with the SONAME arms.
+        let lines = wrong_version_details(
+            "decmismatch",
+            "libfoo1",
+            vec![wrongver_elf(
+                "decmismatch",
+                "lib",
+                "/usr/lib64/libfoo.so.0-suse0",
+                "libfoo.so.1",
+            )],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains(
+                "/usr/lib64/libfoo.so.0-suse0 (decorated file name does not start with SONAME libfoo.so.1)"
+            ),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn wrong_library_version_decorated_without_soname_fires() {
+        // A decorated name without any SONAME cannot start with the
+        // full SONAME, so it fires.
+        let lines = wrong_version_details(
+            "decnosoname",
+            "libfoo1",
+            vec![wrongver_elf_no_soname(
+                "decnosoname",
+                "lib",
+                "/usr/lib64/libfoo.so.1-suse0",
+            )],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.so.1-suse0 (decorated file name without SONAME)"),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn wrong_library_version_decorated_no_separator_fires() {
+        // The SONAME as a bare string prefix is not enough: the
+        // next character must be a '.' or '-' separator, so
+        // `libfoo.so.1suse0` under SONAME `libfoo.so.1` fires.
+        let lines = wrong_version_details(
+            "decnosep",
+            "libfoo1",
+            vec![wrongver_elf(
+                "decnosep",
+                "lib",
+                "/usr/lib64/libfoo.so.1suse0",
+                "libfoo.so.1",
+            )],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(
+            lines[0].contains(
+                "/usr/lib64/libfoo.so.1suse0 (decorated file name does not start with SONAME libfoo.so.1)"
+            ),
+            "detail: {}",
+            lines[0]
+        );
     }
 }
