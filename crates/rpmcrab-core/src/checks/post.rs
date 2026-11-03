@@ -4479,6 +4479,25 @@ mod tests {
     }
 
     #[test]
+    fn dangerous_command_phantom_opener_in_multiline_quote_stays_blanked() {
+        // The dangerous-command blanking scan reads each line with a
+        // fresh quote stack, unlike the tmpfiles scan, which threads
+        // quote state across lines: a `<<` on a multi-line-quote
+        // continuation line is read as an opener here, and its body
+        // stays blanked. A genuine command between the quote close
+        // and the phantom terminator is silenced by it: a
+        // false-negative-only, narrow, pre-existing limitation.
+        let script = "X=\"aaa\n<<EOF\n\"\nrm -rf /foo\nEOF\n";
+        let found = check().check_scriptlet("/bin/sh", script, "%post", &[], &[]);
+        assert!(
+            !found
+                .iter()
+                .any(|(_, f, _)| f == "dangerous-command-in-%post"),
+            "must stay silent: {found:?}"
+        );
+    }
+
+    #[test]
     fn dangerous_command_in_plain_heredoc_body_is_silent() {
         // Unquoted delimiter: the body is still written out, not
         // executed, so the named command stays silent.
