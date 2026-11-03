@@ -87,6 +87,9 @@ def load_table(config_path):
         if not all(isinstance(s, str) for s in stems):
             raise ValueError(
                 f"PythonModuleStems entry {i} ({module}) has a non-string stem")
+        if not all(s.strip() for s in stems):
+            raise ValueError(
+                f"PythonModuleStems entry {i} ({module}) has a blank stem")
         entries.append((module, stems))
     return entries
 

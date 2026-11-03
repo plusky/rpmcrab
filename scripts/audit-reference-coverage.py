@@ -2195,10 +2195,15 @@ def find_rs_wrappers(src):
         pend = match_paren(src, pstart)
         if pend < 0:
             continue
-        # removeprefix, not lstrip: lstrip strips a character set, so it
-        # would mangle names starting with those letters ("message" ->
+        # Strip "&" before "mut ": "&mut self" must parse as "self",
+        # not "mut self" (the old order stripped "mut " first, which
+        # matches nothing after "&", and left "mut self" behind, so a
+        # &mut-self wrapper was not recognised as a method and its
+        # forwarding call went UNRESOLVED). removeprefix, not lstrip,
+        # for "mut ": lstrip strips a character set, so it would
+        # mangle names starting with those letters ("message" ->
         # "essage"); only an exact "mut " prefix is a mut binding.
-        pnames = [p.split(":")[0].strip().removeprefix("mut ").lstrip("&").strip()
+        pnames = [p.split(":")[0].strip().lstrip("&").strip().removeprefix("mut ").strip()
                   for p in split_top_level(src[pstart + 1:pend])]
         bstart = src.find("{", pend)
         if bstart < 0:

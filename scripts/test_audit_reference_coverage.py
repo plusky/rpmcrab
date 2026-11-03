@@ -1292,6 +1292,30 @@ def test_port_severity_inventory_reads_the_real_snapshot():
     assert len(levels) > 300, len(levels)
 
 
+def test_wrapper_amp_mut_self_is_a_method():
+    # "&mut self" must parse to the "self" receiver, not "mut self":
+    # the old strip order left "mut self" behind, so the wrapper was
+    # not recognised as a method, its call-arg index was off by one,
+    # and callers of it went UNRESOLVED.
+    mod = _load()
+    src = (
+        "impl Foo {\n"
+        "    fn emit(&mut self, out: &mut Filter, pkg: &Pkg, name: &str) {\n"
+        "        add_info(out, Level::Warning, pkg, name, &[]);\n"
+        "    }\n"
+        "    fn report(&self, out: &mut Filter, pkg: &Pkg, message: &str) {\n"
+        "        add_info(out, Level::Warning, pkg, message, &[]);\n"
+        "    }\n"
+        "}\n"
+    )
+    wrappers = mod.find_rs_wrappers(src)
+    assert "emit" in wrappers, wrappers
+    # emit(out, pkg, name): the name is call argument 2.
+    assert wrappers["emit"][0] == 2, wrappers
+    assert "report" in wrappers, wrappers
+    assert wrappers["report"][0] == 2, wrappers
+
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
