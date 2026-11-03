@@ -257,4 +257,86 @@ mod tests {
             "unexpected line: {line}"
         );
     }
+
+    fn rc_link(name: &str, linkto: &str) -> PkgFile {
+        PkgFile {
+            name: name.to_string(),
+            path: name.to_string(),
+            mode: 0o120777,
+            linkto: linkto.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The rendered `deprecated-rc-symlink` lines for a fixture
+    /// package with the given file list.
+    fn rc_symlink_lines(files: Vec<PkgFile>) -> Vec<String> {
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture header");
+        pkg.name = "iiod".to_string();
+        pkg.files = files;
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = SysVInitOnSystemdCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        out.results()
+            .iter()
+            .filter(|(n, _)| n == "deprecated-rc-symlink")
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
+
+    #[test]
+    fn rc_symlink_to_service_warns() {
+        // The motivating case: /usr/sbin/rciiod pointing at `service`.
+        let lines = rc_symlink_lines(vec![rc_link("/usr/sbin/rciiod", "service")]);
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/sbin/rciiod"),
+            "detail names the link: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn rc_symlink_absolute_service_target_warns() {
+        let lines = rc_symlink_lines(vec![rc_link("/usr/sbin/rciiod", "/usr/sbin/service")]);
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+    }
+
+    #[test]
+    fn rc_symlink_in_sbin_warns() {
+        // The pre-usrmerge spelling of the same scheme.
+        let lines = rc_symlink_lines(vec![rc_link("/sbin/rciiod", "service")]);
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+    }
+
+    #[test]
+    fn rc_symlink_quiet_shapes() {
+        // Each shape stays quiet for a distinct reason: the target
+        // is not `service`; the name is not an rc link; the link
+        // is outside sbindir; %ghost entries are not shipped
+        // payload; a bare `rc` is not an rcFOO link; a regular
+        // file is not a link however its linkto reads.
+        let mut ghost = rc_link("/usr/sbin/rciiod", "service");
+        ghost.flags = crate::pkg::pkgfile::RPMFILE_GHOST;
+        let mut regular = rc_link("/usr/sbin/rciiod", "service");
+        regular.mode = 0o100644;
+        let cases: Vec<(&str, PkgFile)> = vec![
+            ("other-target", rc_link("/usr/sbin/rciiod", "foo")),
+            ("non-rc-name", rc_link("/usr/sbin/food", "service")),
+            ("non-sbindir", rc_link("/usr/bin/rciiod", "service")),
+            ("ghost", ghost),
+            ("bare-rc", rc_link("/usr/sbin/rc", "service")),
+            ("regular-file", regular),
+        ];
+        for (tag, file) in cases {
+            let lines = rc_symlink_lines(vec![file]);
+            assert!(lines.is_empty(), "{tag}: no findings: {lines:?}");
+        }
+    }
 }
