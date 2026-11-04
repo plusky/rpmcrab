@@ -29,7 +29,7 @@ use super::fhs::cross_sysroot_matches;
 use super::filelist::sysconfig_good_matches;
 use super::is_match;
 use super::shared::{
-    class_header_detail, devel_regex, is_mingw_package, macro_regex, python_str_repr,
+    class_header_detail, devel_regex, is_ghost_file, is_mingw_package, macro_regex, python_str_repr,
 };
 use crate::check::{Check, add_info, make_finding};
 use crate::config::Config;
@@ -3912,13 +3912,16 @@ fn fillup_template_without_call_reports(pkg: &Pkg) -> Vec<FillupTemplateReport> 
 /// The sysconfig/fillup uses of one package, as one evidence phrase per
 /// category, in category order. `scriptlets` pairs each scriptlet's
 /// macro name with its body; `units` pairs each shipped unit file's name
-/// with its contents. The payload category skips files matching the
-/// `Good` patterns of the `filelist-forbidden-sysconfig` rule (see
+/// with its contents. `ghosts` names the package's `%ghost` entries:
+/// a ghost template ships no content, so the template arm skips it.
+/// The payload category skips files matching the `Good` patterns of
+/// the `filelist-forbidden-sysconfig` rule (see
 /// `sysconfig_good_matches`).
 fn sysconfig_fillup_uses(
     files: &[&str],
     scriptlets: &[(&str, &str)],
     units: &[(&str, &str)],
+    ghosts: &[&str],
 ) -> Vec<String> {
     let mut uses = Vec::new();
     // A payload file the `filelist-forbidden-sysconfig` rule blesses
@@ -3932,8 +3935,10 @@ fn sysconfig_fillup_uses(
         uses.push(format!("ships file {path}"));
     }
     if let Some(path) = files.iter().find(|name| {
-        name.rsplit_once('/')
-            .is_some_and(|(parent, _)| parent.split('/').any(|c| c == "fillup-templates"))
+        !ghosts.contains(name)
+            && name
+                .rsplit_once('/')
+                .is_some_and(|(parent, _)| parent.split('/').any(|c| c == "fillup-templates"))
     }) {
         uses.push(format!("ships fillup template {path}"));
     }
@@ -4189,7 +4194,13 @@ impl FilesCheck {
             .iter()
             .map(|(name, content)| (*name, content.as_str()))
             .collect();
-        let uses = sysconfig_fillup_uses(&files, &scriptlet_refs, &unit_refs);
+        let ghost_names: Vec<&str> = pkg
+            .files
+            .iter()
+            .filter(|f| is_ghost_file(pkg, f))
+            .map(|f| f.name.as_str())
+            .collect();
+        let uses = sysconfig_fillup_uses(&files, &scriptlet_refs, &unit_refs, &ghost_names);
         if !uses.is_empty() {
             add_info(
                 out,
@@ -22607,15 +22618,37 @@ reason = "warning hook: executable and %config by design"
     #[test]
     fn sysconfig_uses_collector_edges() {
         // The bare directories are not uses: only entries below them.
-        assert!(sysconfig_fillup_uses(&["/etc/sysconfig"], &[], &[]).is_empty());
-        assert!(sysconfig_fillup_uses(&["/usr/share/fillup-templates"], &[], &[]).is_empty());
+        assert!(sysconfig_fillup_uses(&["/etc/sysconfig"], &[], &[], &[]).is_empty());
+        assert!(sysconfig_fillup_uses(&["/usr/share/fillup-templates"], &[], &[], &[]).is_empty());
         // A template under any fillup-templates directory counts.
         assert_eq!(
-            sysconfig_fillup_uses(&["/opt/fillup-templates/sysconfig.demo"], &[], &[]),
+            sysconfig_fillup_uses(&["/opt/fillup-templates/sysconfig.demo"], &[], &[], &[]),
             vec!["ships fillup template /opt/fillup-templates/sysconfig.demo".to_string()]
         );
         // A lookalike directory name does not count.
-        assert!(sysconfig_fillup_uses(&["/usr/share/fillup-templates-old/x"], &[], &[]).is_empty());
+        assert!(
+            sysconfig_fillup_uses(&["/usr/share/fillup-templates-old/x"], &[], &[], &[]).is_empty()
+        );
+        // A %ghost template ships no content, so it is not a use;
+        // the same name as a real file still counts.
+        assert!(
+            sysconfig_fillup_uses(
+                &["/usr/share/fillup-templates/sysconfig.demo"],
+                &[],
+                &[],
+                &["/usr/share/fillup-templates/sysconfig.demo"],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            sysconfig_fillup_uses(
+                &["/usr/share/fillup-templates/sysconfig.demo"],
+                &[],
+                &[],
+                &["/usr/share/fillup-templates/sysconfig.other"],
+            ),
+            vec!["ships fillup template /usr/share/fillup-templates/sysconfig.demo".to_string()]
+        );
         // Spacing around the `=` and a quoted value still resolve.
         assert_eq!(
             sysconfig_environment_file("[Service]\nEnvironmentFile = -/etc/sysconfig/demo\n"),
@@ -22677,6 +22710,75 @@ reason = "warning hook: executable and %config by design"
                 .1
                 .contains("/usr/share/fillup-templates/sysconfig.demo"),
             "detail names the template: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_ghost_template_is_quiet() {
+        // plusky/rpmcrab#1535: a %ghost entry ships no template
+        // content, so the template arm must not fire on its name.
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[],
+            &["/usr/share/fillup-templates/sysconfig.demo"],
+            &|_| {},
+        );
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "a ghost template is not a shipped template"
+        );
+    }
+
+    #[test]
+    fn sysconfig_ghost_template_with_real_template_fires_once() {
+        // The ghost filter is per entry: a real template alongside
+        // a ghost one still fires exactly once, naming the real one.
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[("/usr/share/fillup-templates/sysconfig.demo", "# template\n")],
+            &["/usr/share/fillup-templates/sysconfig.other"],
+            &|_| {},
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert!(
+            found[0]
+                .1
+                .contains("/usr/share/fillup-templates/sysconfig.demo"),
+            "detail names the real template: {}",
+            found[0].1
+        );
+        assert!(
+            !found[0].1.contains("sysconfig.other"),
+            "detail must not name the ghost template: {}",
+            found[0].1
+        );
+    }
+
+    #[test]
+    fn sysconfig_template_and_call_fire_once() {
+        // The kbd shape: a consumed template plus a fillup call is
+        // one finding naming both uses, not one per use.
+        let post =
+            "/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo\n";
+        let (pkg, _src, _extract) = sysconfig_test_pkg(
+            "demo",
+            &[("/usr/share/fillup-templates/sysconfig.demo", "# template\n")],
+            Some(post),
+        );
+        let found = sysconfig_findings(&pkg);
+        assert_eq!(found.len(), 1, "exactly one finding: {found:?}");
+        assert!(
+            found[0]
+                .1
+                .contains("ships fillup template /usr/share/fillup-templates/sysconfig.demo"),
+            "detail names the template: {}",
+            found[0].1
+        );
+        assert!(
+            found[0].1.contains("calls fillup from the %post scriptlet"),
+            "detail names the call: {}",
             found[0].1
         );
     }
@@ -23651,6 +23753,7 @@ x /etc/sysconfig/f - - - -
                     "%post",
                     "echo x=$(/bin/fillup -q /etc/sysconfig/demo /usr/share/fillup-templates/sysconfig.demo)\n"
                 )],
+                &[],
                 &[]
             ),
             vec!["calls fillup from the %post scriptlet".to_string()]
@@ -23671,14 +23774,19 @@ x /etc/sysconfig/f - - - -
     fn sysconfig_uses_blessed_subdirs_are_quiet() {
         // The Good patterns of the `filelist-forbidden-sysconfig` rule
         // bless these subtrees; a payload there is not a category-1 use.
-        assert!(sysconfig_fillup_uses(&["/etc/sysconfig/network/ifcfg-eth0"], &[], &[]).is_empty());
-        assert!(sysconfig_fillup_uses(&["/etc/sysconfig/scripts/ifup-route"], &[], &[]).is_empty());
-        assert!(sysconfig_fillup_uses(&["/etc/sysconfig/cbq"], &[], &[]).is_empty());
+        assert!(
+            sysconfig_fillup_uses(&["/etc/sysconfig/network/ifcfg-eth0"], &[], &[], &[]).is_empty()
+        );
+        assert!(
+            sysconfig_fillup_uses(&["/etc/sysconfig/scripts/ifup-route"], &[], &[], &[]).is_empty()
+        );
+        assert!(sysconfig_fillup_uses(&["/etc/sysconfig/cbq"], &[], &[], &[]).is_empty());
         // A blessed file does not mask an ordinary one: the ordinary
         // file is the use that is named.
         assert_eq!(
             sysconfig_fillup_uses(
                 &["/etc/sysconfig/network/ifcfg-eth0", "/etc/sysconfig/demo"],
+                &[],
                 &[],
                 &[]
             ),
