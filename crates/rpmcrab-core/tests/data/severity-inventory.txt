@@ -266,6 +266,7 @@ partial-relro = W
 patch-fuzz-is-changed = W
 patch-macro-old-format = E
 patch-not-applied = W
+patch-not-defined = W
 patchable-function-entry-in-archive = E
 pem-certificate = W
 pem-private-key = E

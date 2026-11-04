@@ -15,6 +15,10 @@ parse-time-cpu-count="""
 patch-not-applied="""
 A patch is included in your package but was not applied.
 """
+patch-not-defined="""
+A patch is applied with %patch but no matching PatchN: definition
+exists in the spec. Define the patch or drop the reference.
+"""
 patch-macro-old-format="""
 The usage of %patchN is not supported by RPM >= 4.20. The preferred way to
 apply patches are, in order:
