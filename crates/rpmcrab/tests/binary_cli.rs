@@ -212,15 +212,16 @@ fn unreadable_package_exits_three() {
 }
 
 /// A `.spec` input is linted through `check_spec` and counted in the
-/// footer as a specfile. A bare `Name:`-only spec fails to parse, which
+/// footer as a specfile. A bare `Name:` spec fails to parse, which
 /// draws the specfile-error finding; that finding is temporarily W
 /// (issue #699 levelling, pending #702), so the run exits 0 while the
-/// levelling stands.
+/// levelling stands. The `%changelog` header keeps the
+/// `no-%changelog-section` Error out of this exit-code assertion.
 #[test]
 fn spec_input_is_linted_and_counted() {
     let dir = tempfile::tempdir().unwrap();
     let spec = dir.path().join("thing.spec");
-    std::fs::write(&spec, b"Name: thing\n").unwrap();
+    std::fs::write(&spec, b"Name: thing\n%changelog\n").unwrap();
     let out = rpmcrab(&[spec.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);

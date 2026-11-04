@@ -200,6 +200,7 @@ missing-sysusers-provider = W
 more-than-one-%changelog-section = W
 multiple-entries = E
 name-repeated-in-summary = W
+no-%changelog-section = E
 no-binary = W
 no-buildhost-tag = E
 no-changelogname-tag = E
