@@ -340,9 +340,9 @@ impl<'a> Worker<'a> {
         // instead of silently keeping its findings with dirty state.
         let mut first_reset_panic = None;
         for check in &mut self.checks {
-            let panic = reset_guarded(check);
+            let reset_panic = reset_guarded(check);
             if first_reset_panic.is_none() {
-                first_reset_panic = panic;
+                first_reset_panic = reset_panic;
             }
         }
         if let Some((name, message)) = first_reset_panic {
@@ -627,7 +627,7 @@ mod tests {
         let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/buildenv-cap-unmarked-1.0-1.noarch.rpm")
             .canonicalize()
-            .expect("corpus rpm is committed");
+            .expect("fixture rpm is committed");
         let config = Config::default();
         let results = run_tasks(
             vec![Task::File(rpm)],
@@ -666,7 +666,7 @@ mod tests {
         let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/buildenv-cap-unmarked-1.0-1.noarch.rpm")
             .canonicalize()
-            .expect("corpus rpm is committed");
+            .expect("fixture rpm is committed");
         let config = Config::default();
         let results = run_tasks(
             vec![Task::File(rpm)],
@@ -717,7 +717,7 @@ mod tests {
         let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/buildenv-cap-unmarked-1.0-1.noarch.rpm")
             .canonicalize()
-            .expect("corpus rpm is committed");
+            .expect("fixture rpm is committed");
         let config = Config::default();
         let armed = Arc::new(Mutex::new(false));
         let armed2 = Arc::clone(&armed);
