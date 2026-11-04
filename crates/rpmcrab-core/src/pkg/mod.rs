@@ -169,7 +169,7 @@ pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, PkgError>) -> Result<T, P
 
 /// The message from a caught panic payload, which is a `String` for every
 /// `panic!` with a format argument (including librpm's own decoders).
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<String>() {
         s.clone()
     } else if let Some(s) = payload.downcast_ref::<&'static str>() {

@@ -72,10 +72,15 @@ impl Progress {
 
 /// Reset one check without letting a panic escape: a panicking reset
 /// must not skip the remaining checks' resets (the documented
-/// panic-becomes-fatal-result contract). Returns true when the reset
-/// panicked, so the caller can decide whether the package is fatal.
-fn reset_guarded(check: &mut Box<dyn Check>) -> bool {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check.reset())).is_err()
+/// panic-becomes-fatal-result contract). Returns the panicking
+/// check's name and payload message when the reset panicked, so the
+/// caller can name the failure in the fatal result instead of
+/// reporting a bare reset panic; `None` when the reset ran clean.
+fn reset_guarded(check: &mut Box<dyn Check>) -> Option<(String, String)> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check.reset())) {
+        Ok(()) => None,
+        Err(payload) => Some((check.name().to_string(), crate::pkg::panic_message(payload))),
+    }
 }
 
 /// The structured per-package result (`worker.py:check_package`).
@@ -129,7 +134,7 @@ impl<'a> Worker<'a> {
             self.check_package_inner(task, &display)
         })) {
             Ok(result) => result,
-            Err(_) => {
+            Err(payload) => {
                 // As on the guarded-error path, drop state accumulated
                 // before the failure and reset, so the next package on
                 // this worker starts clean instead of reusing the
@@ -149,7 +154,10 @@ impl<'a> Worker<'a> {
                     display,
                     None,
                     false,
-                    "panic while checking the package".to_string(),
+                    format!(
+                        "panic while checking the package: {}",
+                        crate::pkg::panic_message(payload)
+                    ),
                     Durations::default(),
                 )
             }
@@ -330,12 +338,15 @@ impl<'a> Worker<'a> {
         // reset is guarded; if any reset panicked, re-panic only after
         // all of them ran, so the outer catch turns the package fatal
         // instead of silently keeping its findings with dirty state.
-        let mut reset_panicked = false;
+        let mut first_reset_panic = None;
         for check in &mut self.checks {
-            reset_panicked |= reset_guarded(check);
+            let panic = reset_guarded(check);
+            if first_reset_panic.is_none() {
+                first_reset_panic = panic;
+            }
         }
-        if reset_panicked {
-            panic!("panic while resetting checks after the package");
+        if let Some((name, message)) = first_reset_panic {
+            panic!("panic while resetting check {name} after the package: {message}");
         }
 
         TaskResult {
@@ -966,6 +977,45 @@ mod tests {
         assert!(results[0].fatal.is_none());
         assert!(results[1].fatal.is_some());
         assert!(results[2].fatal.is_none());
+    }
+
+    /// A reset panic names the failing check and its payload in the
+    /// fatal result, so a reset failure is triagable from the output
+    /// instead of surfacing as a generic reset panic.
+    #[test]
+    fn reset_panic_fatal_names_check_and_payload() {
+        struct ResetBoomer;
+        impl Check for ResetBoomer {
+            fn name(&self) -> &'static str {
+                "ResetBoomer"
+            }
+            fn check(&mut self, _pkg: &Pkg, _config: &Config, _out: &mut Filter) {}
+            fn check_spec(&mut self, _pkg: &SpecPkg, _config: &Config, _out: &mut Filter) {}
+            fn reset(&mut self) {
+                panic!("boom-reset");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let spec = dir.path().join("good.spec");
+        std::fs::write(&spec, "Name: good\n").unwrap();
+        let config = Config::default();
+        let results = run_tasks(
+            vec![Task::File(spec)],
+            1,
+            &config,
+            &move || vec![Box::new(ResetBoomer) as Box<dyn Check>],
+            Color::for_tty(false),
+        );
+        assert_eq!(results.len(), 1);
+        let fatal = results[0]
+            .fatal
+            .as_deref()
+            .expect("reset panic must be fatal");
+        assert!(
+            fatal.contains("ResetBoomer") && fatal.contains("boom-reset"),
+            "fatal must name the check and payload: {fatal}"
+        );
     }
 
     /// Results reassemble in task order even when workers finish out of order:
