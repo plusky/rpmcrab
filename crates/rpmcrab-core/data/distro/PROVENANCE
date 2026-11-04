@@ -10,6 +10,7 @@
 #   Filters: added '^mingw64-.*arch-independent-package-contains-binary-or-object.*\\.a$' (mingw -filesystem packages' rpmlintrc)
 #   Filters: added ' binary-or-shlib-without-debuginfo /usr/src/linux-[^/]+-obj/' (kernel -obj build tools are stripped deliberately)
 #   Filters: added ' binary-or-shlib-without-debuginfo /usr/share/qemu/' (qemu guest firmware ships without debuginfo)
+#   Filters: added 'compat-usrmerge-tools.* statically-linked-binary /usr/libexec/xmv' (xmv is statically linked deliberately for upgrade-time use)
 #
 # Extra Checks appended (not from upstream; see EXTRA_CHECKS):
 #   Checks: added 'XinetdDepCheck' (deliberate rpmcrab divergence, ledgered in tests/parity/divergences.toml)
