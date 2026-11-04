@@ -204,6 +204,7 @@ no-%changelog-section = E
 no-binary = W
 no-buildhost-tag = E
 no-changelogname-tag = E
+no-copyright-comment = W
 no-dependency-on = E,W
 no-description-tag = E
 no-epoch-in-dependency = W
