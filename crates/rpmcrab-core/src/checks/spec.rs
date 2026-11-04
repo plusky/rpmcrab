@@ -2873,7 +2873,10 @@ impl SpecCheck {
                 .and_then(|m| m.as_str().parse().ok())
                 .unwrap_or(0);
             let detail = version.to_string();
-            if version > 0 && version < 1315 {
+            // 1320 is openSUSE 13.2 only: no SLE product shares the number,
+            // while 1315 stays quiet (shared with SLE 12) and 1500+ stays
+            // quiet (shared with SLE 15).
+            if version > 0 && (version < 1315 || version == 1320) {
                 self.info(
                     out,
                     pkg,
@@ -6306,6 +6309,16 @@ mod tests {
     }
 
     #[test]
+    fn obsolete_suse_version_check_fires_for_1320() {
+        // 1320 is openSUSE 13.2 only (no SLE product shares the number),
+        // so it is obsolete even though it is above the 1315 threshold.
+        let results = run_mini("Name: foo\n%if %{?suse_version} == 1320\n%endif\n");
+        let lines = lines_for(&results, "obsolete-suse-version-check");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("E: obsolete-suse-version-check 1320"));
+    }
+
+    #[test]
     fn invalid_suse_version_check_fires() {
         let results = run_mini("Name: foo\n%if %{?suse_version} > 1700\n%endif\n");
         let lines = lines_for(&results, "invalid-suse-version-check");
@@ -6379,9 +6392,10 @@ mod tests {
 
     #[test]
     fn suse_version_boundaries_are_quiet() {
-        // 0, 1315 and 1699 hit neither check (`version > 0`, `< 1315`,
-        // `> 1699` in the reference).
-        for v in [0, 1315, 1699] {
+        // 0, 1315, 1500, 1600 and 1699 hit neither check: 0 means the
+        // macro is undefined, 1315 is shared with SLE 12, 1500 with
+        // SLE 15, 1600 is SLE 16 / Leap 16, and 1699 is Tumbleweed.
+        for v in [0, 1315, 1500, 1600, 1699] {
             let results = run_mini(&format!(
                 "Name: foo\n%if %{{?suse_version}} == {v}\n%endif\n"
             ));

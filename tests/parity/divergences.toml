@@ -3886,6 +3886,13 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "obsolete-suse-version-check"
+kind = "behaviour"
+reason = "Fixed behaviour: 1320 (openSUSE 13.2 only, no SLE product shares the number) is also reported as obsolete; the frozen 2.10.0 reference only flags versions below 1315. 1315 stays quiet because SLE 12 shares it, and 1500 and above stay quiet because SLE 15 shares them."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "invalid-suse-version-check"
 kind = "behaviour"
 reason = "Fixed behaviour: the suse_version regex also matches the braced %{suse_version} form, which the frozen 2.10.0 reference's `%({\\?)?suse_version}?` misses (it only matches %suse_version and %{?suse_version})."
