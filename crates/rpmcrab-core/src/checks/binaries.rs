@@ -721,8 +721,8 @@ struct ReadelfInfo {
     /// needed or non-default version, `name@@VER` for the default
     /// version; `.symtab` entries print undecorated). The
     /// gethostbyname family pattern carries an `@GLIBC` arm that only
-    /// engages on the printed form, so that finder reads this set
-    /// instead of `functions`.
+    /// engages on the printed form, so that finder reads the
+    /// undefined subset of this set instead of `functions`.
     functions_printed: Vec<String>,
     /// The undefined subset of `functions_printed`, plus the decorated
     /// printed forms of STT_NOTYPE undefined imports, which
@@ -1444,15 +1444,6 @@ impl ReadelfInfo {
     /// site (the archive member implementing the function) stays silent.
     fn has_undefined_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
         self.undefined_function_refs
-            .iter()
-            .any(|s| regex.is_match(s).unwrap_or(false))
-    }
-
-    /// The printed-form view of `has_function_matching`: the pattern
-    /// runs over the symbol names as `readelf -s` prints them,
-    /// version decorations included -- the input the reference scans.
-    fn has_printed_function_matching(&self, regex: &fancy_regex::Regex) -> bool {
-        self.functions_printed
             .iter()
             .any(|s| regex.is_match(s).unwrap_or(false))
     }
@@ -8012,22 +8003,26 @@ impl BinariesCheck {
         // call-to-mktemp draws, so this finder charges no defined
         // match either.
         let tmpnam = info.has_undefined_function_matching(&self.tmpnam_call_regex);
-        // The family pattern runs over the printed symbol forms:
-        // its `@GLIBC` arm accepts a needed GLIBC version and
-        // rejects every other decoration, so a version-scripted
-        // namesake (an NSS module's `_nss_*_gethostbyname_r@@VER`
-        // export, an internal `sysdb_gethostbyname@VER` reference)
-        // is not the legacy call, while an unversioned wrapper
-        // reference (`net_gethostbyname`, `ares_gethostbyname`)
-        // still matches at the end of the name, as in the reference.
-        let gethostbyname = info.has_printed_function_matching(&self.gethostbyname_call_regex)
-            // Second disjunct covers dynsym imports typed STT_NOTYPE:
-            // fill_from_elf files those only under the printed
-            // undefined view, never under the FUNC-only
-            // `functions_printed` -- the disjunct shape the
-            // gets/unbounded_copy/shell finders use over
-            // `undefined_functions` (#1045).
-            || info.has_undefined_printed_function_matching(&self.gethostbyname_call_regex);
+        // The family pattern runs over the printed symbol forms of
+        // the undefined references only (#1498): its `@GLIBC` arm
+        // accepts a needed GLIBC version and rejects every other
+        // decoration, so a version-scripted namesake (an NSS
+        // module's `_nss_*_gethostbyname_r@@VER` export, an
+        // internal `sysdb_gethostbyname@VER` reference) is not the
+        // legacy call, while an unversioned wrapper reference
+        // (`net_gethostbyname`, `ares_gethostbyname`) still matches
+        // at the end of the name, as in the reference. A definition
+        // alone never fires: the library that implements the family
+        // (glibc's libc, an NSS module implementing the legacy
+        // entry points, a bundled replacement) is the provider, not
+        // a caller -- the same definition/call split the
+        // gets/tmpnam/unbounded_copy finders draw. The printed
+        // undefined view also carries dynsym imports typed
+        // STT_NOTYPE, which fill_from_elf files nowhere else (the
+        // shape the gets/unbounded_copy/shell finders use over
+        // `undefined_functions`, #1045).
+        let gethostbyname =
+            info.has_undefined_printed_function_matching(&self.gethostbyname_call_regex);
         // Legacy crypto primitives (#972 candidate 6): undefined
         // references to the low-level OpenSSL-style entry points.
         // The reference is the predicate -- the implementing
@@ -8126,20 +8121,13 @@ impl BinariesCheck {
             // itself carries privilege (setuid/setgid bits or file
             // capabilities), or the package ships systemd service or
             // socket units, i.e. the caller runs as a daemon. The
-            // Error form also requires a call — an undefined reference
-            // to the family, FUNC or NOTYPE alike: a NOTYPE import
-            // lands in the printed undefined view the gate reads, so
-            // it promotes exactly like a FUNC call. A file that only defines the symbols
-            // (an NSS module implementing the legacy entry points, a
-            // bundled replacement) carries the pattern without making
-            // the call and stays in the Warning population: the same
-            // definition/call split call-to-mktemp uses. The
-            // level rests on the
+            // predicate already requires a call -- an undefined
+            // reference to the family, FUNC or NOTYPE alike -- so a
+            // file that only defines the symbols stays silent even
+            // inside the gate (#1498). The level rests on the
             // Factory corpus measurement recorded in the divergence
             // ledger (#967).
-            if info.has_undefined_printed_function_matching(&self.gethostbyname_call_regex)
-                && (file_is_privileged(pkgfile) || ships_daemon)
-            {
+            if file_is_privileged(pkgfile) || ships_daemon {
                 add_info(
                     out,
                     Level::Error,
@@ -24112,10 +24100,13 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
         assert!(lines[0].contains("/usr/bin/foo"), "detail: {}", lines[0]);
 
-        // gethostbyname -> Warning.
+        // gethostbyname -> Warning (a caller: the undefined
+        // reference, not a definition, is what fires -- #1498).
         let mut info = syn_info();
         info.functions = vec!["gethostbyname".to_string()];
         info.functions_printed = info.functions.clone();
+        info.undefined_function_refs = info.functions.clone();
+        info.undefined_function_refs_printed = info.functions.clone();
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_security_functions(
             &pkg,
@@ -25288,6 +25279,16 @@ description = "explicit priority string bypasses the system crypto policy"
         assert!(lines.is_empty(), "namesake silent: {lines:?}");
         let lines = run(&[], &["my_rcmd"], &[]);
         assert!(lines.is_empty(), "namesake silent: {lines:?}");
+
+        // #1498, libresolv shape: defining inet_net_ntop/inet_neta
+        // does not by itself fire, and does not silence the genuine
+        // undefined inet_nsap_ntoa call the same file makes -- the
+        // tag fires on the call, never on a definition.
+        let lines = run(&["inet_nsap_ntoa"], &[], &["inet_net_ntop", "inet_neta"]);
+        assert_eq!(lines.len(), 1, "legacy call fires: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        let lines = run(&[], &[], &["inet_net_ntop", "inet_neta", "inet_net_pton"]);
+        assert!(lines.is_empty(), "inet_net definitions silent: {lines:?}");
     }
 
     #[test]
@@ -25320,7 +25321,8 @@ description = "explicit priority string bypasses the system crypto policy"
                 .collect()
         }
         // A file that only defines the pattern (no undefined
-        // reference): the pattern fires, the gate cannot promote it.
+        // reference) stays silent, inside the gates or out (#1498):
+        // the defining library is the provider, not a caller.
         fn run_definition_only(pkg: &Pkg, pkgfile: &PkgFile) -> Vec<String> {
             let config = test_config();
             let check = BinariesCheck::with_tool_dir(&config, None);
@@ -25423,18 +25425,16 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(lines.len(), 1, "one finding: {lines:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
 
-        // Near miss: a definition-only file in a daemon package
-        // (an NSS module implementing the legacy entry points)
-        // stays a Warning although the exposure gate matches.
+        // A definition-only file in a daemon package (an NSS
+        // module implementing the legacy entry points) stays silent
+        // although the exposure gate matches.
         let lines = run_definition_only(&svc_pkg, &plain);
-        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
-        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
 
-        // Near miss: a definition-only setuid file stays a Warning
-        // although the privilege gate matches.
+        // A definition-only setuid file stays silent although the
+        // privilege gate matches.
         let lines = run_definition_only(&bare_pkg, &suid);
-        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
-        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert!(lines.is_empty(), "no finding: {lines:?}");
 
         // Quiet shape: a privileged file in a daemon package that
         // resolves through getaddrinfo emits nothing.
@@ -25550,11 +25550,10 @@ description = "explicit priority string bypasses the system crypto policy"
         );
         assert_eq!(lines.len(), 0, "no finding: {lines:?}");
 
-        // An unversioned definition still fires at Warning: the
-        // definition-only population the gate leaves there.
+        // An unversioned definition stays silent (#1498): the
+        // defining library is the provider, not a caller.
         let lines = run(&bare_pkg, &plain, &["gethostbyname"], &[]);
-        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
-        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        assert_eq!(lines.len(), 0, "no finding: {lines:?}");
 
         // A NOTYPE undefined import reaches the finder only through
         // the printed undefined view (no FUNC printed form at all):
@@ -25570,15 +25569,122 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(lines.len(), 0, "no finding: {lines:?}");
 
         // The gate reads the printed forms too: a definition plus a
-        // namesake reference inside the gate stays a Warning -- the
-        // namesake is not the call that promotes.
+        // namesake reference inside the gate stays silent -- the
+        // namesake is not the call that promotes, and the definition
+        // is not a call at all (#1498).
         let lines = run(
             &svc_pkg,
             &plain,
             &["gethostbyname"],
             &["sysdb_gethostbyname@V_2.13.1"],
         );
-        assert_eq!(lines.len(), 1, "one finding: {lines:?}");
+        assert_eq!(lines.len(), 0, "no finding: {lines:?}");
+    }
+
+    #[test]
+    fn gethostbyname_definition_only_is_silent() {
+        // #1498: a library must not be flagged for calling an API it
+        // defines. The reported shapes are a defining libc, an NSS
+        // module implementing the legacy entry points, and a
+        // libresolv-style provider defining the res_ family -- all
+        // silent, bare and inside the gates. The controls pin the
+        // other side: a defining library that also calls the family,
+        // and a plain caller, still fire.
+        fn run(
+            pkg: &Pkg,
+            pkgfile: &PkgFile,
+            functions: &[&str],
+            undefined: &[&str],
+        ) -> Vec<String> {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let mut info = syn_info();
+            info.functions_printed = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs_printed =
+                undefined.iter().map(|s| s.to_string()).collect();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(
+                pkg,
+                pkgfile,
+                &info,
+                &daemon_exec_binaries(pkg),
+                pkg_ships_daemon_units(pkg),
+                &mut out,
+            );
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-gethostbyname")
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        let plain = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let mut suid = plain.clone();
+        suid.mode = 0o104755;
+        let bare_pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let svc_pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/lib/systemd/system/foo.service",
+                "ASCII text",
+            )],
+        );
+
+        // libc defines the family (its symtab bare names, plus the
+        // _nss_* entry points it ships): silent bare, silent setuid,
+        // silent in a daemon package.
+        let libc = &[
+            "gethostbyname",
+            "gethostbyname_r",
+            "gethostbyname2",
+            "gethostbyname2_r",
+            "_nss_dns_gethostbyname_r@@GLIBC_PRIVATE",
+        ];
+        assert!(run(&bare_pkg, &plain, libc, &[]).is_empty(), "libc silent");
+        assert!(
+            run(&bare_pkg, &suid, libc, &[]).is_empty(),
+            "libc silent setuid"
+        );
+        assert!(
+            run(&svc_pkg, &plain, libc, &[]).is_empty(),
+            "libc silent daemon"
+        );
+
+        // An NSS module defines only its own _nss_* entry points.
+        let nss = &[
+            "_nss_myhostname_gethostbyname_r",
+            "_nss_myhostname_gethostbyname2_r",
+            "_nss_myhostname_gethostbyname4_r",
+        ];
+        assert!(run(&bare_pkg, &plain, nss, &[]).is_empty(), "NSS silent");
+        assert!(
+            run(&svc_pkg, &plain, nss, &[]).is_empty(),
+            "NSS silent daemon"
+        );
+
+        // A libresolv-style provider defines the res_ family.
+        let resolv = &[
+            "res_gethostbyname@GLIBC_2.2.5",
+            "res_gethostbyname2@GLIBC_2.2.5",
+            "res_gethostbyaddr@GLIBC_2.2.5",
+        ];
+        assert!(
+            run(&bare_pkg, &plain, resolv, &[]).is_empty(),
+            "resolv silent"
+        );
+
+        // Control: a file that both defines and calls still fires --
+        // Warning bare, Error inside the daemon gate.
+        let lines = run(&bare_pkg, &plain, &["gethostbyname"], &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "define-and-call fires: {lines:?}");
+        assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+        let lines = run(&svc_pkg, &plain, &["gethostbyname"], &["gethostbyname"]);
+        assert_eq!(lines.len(), 1, "define-and-call fires gated: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+
+        // Control: a plain caller with no definition at all fires.
+        let lines = run(&bare_pkg, &plain, &[], &["gethostbyname@GLIBC_2.2.5"]);
+        assert_eq!(lines.len(), 1, "caller fires: {lines:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
     }
 

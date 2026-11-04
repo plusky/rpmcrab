@@ -655,6 +655,14 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "binary-or-shlib-calls-gethostbyname"
+kind = "behaviour"
+reason = "Fix-and-diverge (plusky/rpmcrab#1498): the reference fires this tag on every FUNC symbol matching the family pattern, defined or not -- its BinariesCheck reads readelf -s over both tables with no undefined filter, and the pattern is an unanchored search -- so the libraries that define the family fire: glibc's libc defines gethostbyname, libresolv defines res_gethostbyname*, and NSS modules define their _nss_*_gethostbyname_r entry points. rpmcrab fires only on an undefined reference to the family, FUNC or NOTYPE alike, in the printed form: a definition alone stays silent, bare and inside the privilege-or-exposure gate. The suffix behaviour is unchanged for genuine references: an unversioned wrapper reference (net_gethostbyname, ares_gethostbyname) still matches at the end of the name, and the @GLIBC arm still accepts a needed GLIBC version and rejects every other decoration. A file that both defines and calls the family still fires. Pinned by gethostbyname_definition_only_is_silent, gethostbyname_printed_forms and gethostbyname_gate_levels in binaries.rs."
+since = "0.4.2"
+upstream = "https://github.com/plusky/rpmcrab/issues/1498"
+
+[[divergence]]
+case = "global"
 check = "binary-or-shlib-calls-unbounded-copy"
 kind = "behaviour"
 reason = "rpmcrab reports undefined references to the unbounded string copy/format functions (strcpy, strcat, sprintf, vsprintf) as the Warning binary-or-shlib-calls-unbounded-copy (rpmcrab#972); the reference has no such call finding -- the names exist in its data only as fortify applicability markers. Full Factory snapshot measurement: 8,856 files in 2,866 binary packages (2,010 source packages) reference the family, and the privilege-or-exposure population is 508 files in 198 packages; the level is Warning in both populations because a call's reach depends on the call-site destination size, which the artefact does not carry."
