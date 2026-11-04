@@ -244,10 +244,18 @@ file in the package metadata.
 The spec file has no %changelog section. The section header must be
 present even though the changelog content itself lives in the
 .changes file.
+This finding applies to declarative specs too, while the missing
+prep, build, install and check section findings are exempt there.
 """
 no-copyright-comment="""
 The spec file contains no Copyright comment. Add a '# Copyright ...'
 comment line, as used by SUSE package specs.
+Only a single-hash, capital-C '# Copyright ...' line counts -- the
+form spec-cleaner writes ('# Copyright (c) ...'). Double-hash
+('## Copyright') and lowercase ('# copyright') lines do not quiet
+the finding. This finding applies to declarative specs too, while
+the missing prep, build, install and check section findings are
+exempt there.
 """
 check-exit-status-masked="""
 A test command in %check cannot fail the build: its exit status is
