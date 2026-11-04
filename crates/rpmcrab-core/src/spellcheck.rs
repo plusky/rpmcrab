@@ -1201,6 +1201,23 @@ SFX N 0 en [^ey]\n";
     }
 
     #[test]
+    fn elfutils_debug_terms_are_accepted() {
+        // elfutils prose terms from plusky/rpmcrab#1532: the libasm
+        // "asm" and "disasm" function names, the debuginfo term, and
+        // the libdwfl and debuginfod names from the package-names
+        // file. All five are absent from the pinned en_US dictionary.
+        let checker = test_checker().with_supplementary_words();
+        for word in ["asm", "disasm", "debuginfo", "libdwfl", "debuginfod"] {
+            assert!(
+                checker
+                    .check(&format!("hello {word} world"), "testpkg", &[])
+                    .is_empty(),
+                "{word} must be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn package_names_seed_entry_is_accepted() {
         // The package-names file carries issue-ruled package and
         // project names only; its seed entry must be accepted once

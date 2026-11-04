@@ -11,4 +11,6 @@
 #
 # Seed entry: funkoverage, the project name from issue 1284.
 #
+debuginfod
 funkoverage
+libdwfl
