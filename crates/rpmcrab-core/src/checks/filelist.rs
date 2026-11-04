@@ -189,7 +189,7 @@ impl FilelistCheck {
                         Some("issystemd") => Some(|p: &Pkg| {
                             p.name == "systemd"
                                 || p.source_rpm.as_deref().is_some_and(|srpm| {
-                                    crate::checks::files::source_pkg_name(srpm) == "systemd"
+                                    crate::checks::shared::source_pkg_name(srpm) == "systemd"
                                 })
                         }),
                         Some("isdebuginfo") => Some(|p: &Pkg| {

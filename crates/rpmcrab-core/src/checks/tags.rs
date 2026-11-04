@@ -24,7 +24,7 @@ use librpm::Tag;
 use super::is_match;
 use super::shared::{
     binary_source_key, devel_infix_regex, devel_regex, devel_underscore_regex,
-    explicit_lib_package_regex, is_ghost_file, macro_regex, source_package_keys,
+    explicit_lib_package_regex, is_ghost_file, macro_regex, source_package_keys, source_pkg_name,
 };
 use super::spdx::suggest_licenses;
 use crate::check::{Check, add_info, make_finding};
@@ -105,6 +105,10 @@ pub struct TagsCheck {
     /// build key (`SOURCERPM`): the run-scoped sibling program credit
     /// for deferred `spelling-error` verdicts.
     spell_programs: HashMap<String, HashSet<String>>,
+    /// Uppercase library stems of shipped `.so` files, per build key
+    /// (`SOURCERPM`): the run-scoped sibling library credit for
+    /// deferred `spelling-error` verdicts.
+    spell_lib_stems: HashMap<String, HashSet<String>>,
     /// Deferred `spelling-error` candidates in encounter order; the
     /// verdict waits for `after_checks`, where the sibling credit is
     /// judged, so emission order is preserved.
@@ -140,7 +144,7 @@ struct ObsoleteState {
 
 /// One deferred `spelling-error` candidate: the finding text is built
 /// at check time, but the verdict waits for `after_checks`, where the
-/// run-scoped sibling program credit is judged (plusky/rpmcrab#1481).
+/// sibling program, library-stem and source-name credits are judged (plusky/rpmcrab#1481, #1527).
 struct SpellingCandidate {
     pkg_name: String,
     arch: String,
@@ -161,6 +165,8 @@ struct SpellingState {
     /// Uppercase basenames of shipped executable regular files, per
     /// build key.
     programs: HashMap<String, HashSet<String>>,
+    /// Uppercase library stems of shipped `.so` files, per build key.
+    lib_stems: HashMap<String, HashSet<String>>,
     /// Candidates in encounter order.
     candidates: Vec<SpellingCandidate>,
 }
@@ -184,6 +190,54 @@ fn spelling_credited(
             .get(key)
             .is_some_and(|set| set.contains(&cand.word_upper))
     })
+}
+
+/// Whether a deferred spelling candidate earns the sibling library
+/// credit: one of its build keys ships a `.so` file whose stem is
+/// the word. Pure so the scoping pins without fixture packages.
+fn spelling_lib_credited(
+    lib_stems: &HashMap<String, HashSet<String>>,
+    cand: &SpellingCandidate,
+) -> bool {
+    cand.source_keys.iter().any(|key| {
+        lib_stems
+            .get(key)
+            .is_some_and(|set| set.contains(&cand.word_upper))
+    })
+}
+
+/// Whether a deferred spelling candidate earns the source-name
+/// credit: the word is a hyphen-separated part of the source package
+/// name its own build key names, or its possessive — the same
+/// exact-parts rule the per-package name skip applies to the binary
+/// name, extended to the source name, so a subpackage text naming
+/// its own source is not a spelling finding. The credit needs no
+/// sibling: the build key is the candidate's own `SOURCERPM`, so it
+/// applies in single-package runs too. Pure so the scoping pins
+/// without fixture packages.
+fn spelling_source_credited(cand: &SpellingCandidate) -> bool {
+    let bare = cand
+        .word_upper
+        .strip_suffix("'S")
+        .unwrap_or(&cand.word_upper);
+    cand.source_keys.iter().any(|key| {
+        source_pkg_name(key)
+            .split('-')
+            .any(|part| part.to_uppercase() == cand.word_upper || part.to_uppercase() == *bare)
+    })
+}
+
+/// The library stem of a shipped file basename: `libkbdfile` for
+/// `libkbdfile.so.1`, `libfoo` for `libfoo.so`. Only `.so` files
+/// count, and the stem must carry more than the `lib` prefix — a
+/// bare `lib.so` names no library. `None` for anything else.
+fn lib_stem(base: &str) -> Option<&str> {
+    let stem = base.strip_prefix("lib")?;
+    let (stem, rest) = stem.split_once(".so")?;
+    if stem.is_empty() || !(rest.is_empty() || rest.starts_with('.')) {
+        return None;
+    }
+    Some(&base[..3 + stem.len()])
 }
 
 static URL_ESCAPE_RE: OnceLock<Regex> = OnceLock::new();
@@ -254,6 +308,7 @@ impl TagsCheck {
             obs_builds: HashMap::new(),
             obs_unkeyed: Vec::new(),
             spell_programs: HashMap::new(),
+            spell_lib_stems: HashMap::new(),
             spell_candidates: Vec::new(),
         }
     }
@@ -1206,8 +1261,8 @@ impl TagsCheck {
         {
             let found = checker.check(summary, &pkg.name, ignored);
             // Deferred: the verdict waits for `after_checks`, where
-            // the run-scoped sibling program credit is judged
-            // (plusky/rpmcrab#1481); emitting here would credit only
+            // the sibling program, library-stem and source-name credits are judged
+            // (plusky/rpmcrab#1481, #1527); emitting here would credit only
             // the packages already checked, in run order.
             for (word, suggestions) in found {
                 let sug = if suggestions.is_empty() {
@@ -1367,7 +1422,7 @@ impl TagsCheck {
         {
             let found = checker.check(description, &pkg.name, ignored);
             // Deferred, as in `check_summary`: the verdict waits for
-            // `after_checks` and its run-scoped sibling program credit.
+            // `after_checks` and its sibling program, library-stem and source-name credits.
             for (word, suggestions) in found {
                 let sug = if suggestions.is_empty() {
                     String::new()
@@ -1767,14 +1822,15 @@ impl TagsCheck {
         }
     }
 
-    /// The run-scoped sibling program credit: a binary package's
-    /// shipped executable regular files, keyed by its build, so a
-    /// a binary package of the same build's metadata naming the
-    /// program is not a spelling finding (candidate's own package
-    /// included) (plusky/rpmcrab#1481). Source packages ship
-    /// no installed programs and contribute nothing; a keyless binary
-    /// belongs to no build the run can judge. Ghost files are not
-    /// shipped content and never credit.
+    /// The run-scoped sibling program and library credits: a binary
+    /// package's shipped executable regular files and `.so` library
+    /// stems, keyed by its build, so a binary package of the same
+    /// build's metadata naming the program or the library is not a
+    /// spelling finding (candidate's own package included)
+    /// (plusky/rpmcrab#1481, #1527). Source packages ship no
+    /// installed programs or libraries and contribute nothing; a
+    /// keyless binary belongs to no build the run can judge. Ghost
+    /// files are not shipped content and never credit.
     fn accumulate_spelling(&mut self, pkg: &Pkg) {
         if pkg.is_source {
             return;
@@ -1782,16 +1838,20 @@ impl TagsCheck {
         let Some(key) = binary_source_key(pkg) else {
             return;
         };
-        let programs = self.spell_programs.entry(key).or_default();
+        let programs = self.spell_programs.entry(key.clone()).or_default();
+        let stems = self.spell_lib_stems.entry(key).or_default();
         for file in &pkg.files {
-            if is_ghost_file(pkg, file) {
+            if is_ghost_file(pkg, file) || !is_reg(file.mode) {
                 continue;
             }
-            if !is_reg(file.mode) || file.mode & 0o111 == 0 {
+            let Some(base) = file.name.rsplit('/').next().filter(|b| !b.is_empty()) else {
                 continue;
-            }
-            if let Some(base) = file.name.rsplit('/').next().filter(|b| !b.is_empty()) {
+            };
+            if file.mode & 0o111 != 0 {
                 programs.insert(base.to_uppercase());
+            }
+            if let Some(stem) = lib_stem(base) {
+                stems.insert(stem.to_uppercase());
             }
         }
     }
@@ -2042,15 +2102,20 @@ impl Check for TagsCheck {
             }
         }
         // The deferred `spelling-error` verdict: a candidate is
-        // credited only when a package of its own build ships the
-        // word as an executable program name. Every other candidate
-        // fires, so keyless, single-package and cross-build runs
-        // report exactly the per-package verdict. Candidates emit in
+        // credited when a package of its own build ships the word
+        // as an executable program name or as a `.so` library stem,
+        // or when the word is a part of the source package name its
+        // own build key names (the last of these needs no sibling:
+        // it credits in single-package runs too). Every other
+        // candidate fires, so keyless and cross-build runs report
+        // exactly the per-package verdict. Candidates emit in
         // encounter order, so the rendered order is unchanged (the
         // output sort keys on the check name, and equal keys keep
         // insertion order).
         for cand in &self.spell_candidates {
-            let credited = spelling_credited(&self.spell_programs, cand);
+            let credited = spelling_credited(&self.spell_programs, cand)
+                || spelling_lib_credited(&self.spell_lib_stems, cand)
+                || spelling_source_credited(cand);
             if credited {
                 continue;
             }
@@ -2071,6 +2136,7 @@ impl Check for TagsCheck {
         self.obs_builds.clear();
         self.obs_unkeyed.clear();
         self.spell_programs.clear();
+        self.spell_lib_stems.clear();
         self.spell_candidates.clear();
     }
 
@@ -2084,6 +2150,7 @@ impl Check for TagsCheck {
             },
             spelling: SpellingState {
                 programs: std::mem::take(&mut self.spell_programs),
+                lib_stems: std::mem::take(&mut self.spell_lib_stems),
                 candidates: std::mem::take(&mut self.spell_candidates),
             },
         }))
@@ -2110,6 +2177,9 @@ impl Check for TagsCheck {
             }
             for (key, names) in state.spelling.programs.drain() {
                 self.spell_programs.entry(key).or_default().extend(names);
+            }
+            for (key, names) in state.spelling.lib_stems.drain() {
+                self.spell_lib_stems.entry(key).or_default().extend(names);
             }
             self.spell_candidates.append(&mut state.spelling.candidates);
         }
@@ -4011,6 +4081,144 @@ mod tests {
             spelling_hits(&results, "wrld").len(),
             1,
             "an ordinary typo in the same text still fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn lib_stem_shapes() {
+        assert_eq!(lib_stem("libkbdfile.so.1"), Some("libkbdfile"));
+        assert_eq!(lib_stem("libfoo.so"), Some("libfoo"));
+        assert_eq!(lib_stem("libfoo.a"), None);
+        assert_eq!(lib_stem("libfoo.solaris"), None);
+        assert_eq!(lib_stem("lib.so"), None);
+        assert_eq!(lib_stem("kbd"), None);
+    }
+
+    #[test]
+    fn spelling_source_name_credited_in_summary() {
+        // plusky/rpmcrab#1527: a subpackage Summary naming its own
+        // source package is not a typo — the word is a part of the
+        // source name the candidate's build key names, so it credits
+        // without any sibling in the run. Lookalikes still fire, and
+        // an underscore-joined component is not a hyphen part, so
+        // the #1523 `aaa` token in aaa_base debuginfo summaries
+        // still fires.
+        let config = test_config();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        let key = "kbd-2.10.0-1.1.src.rpm".to_string();
+        check.spell_candidates.push(SpellingCandidate {
+            pkg_name: "libkbdfile1".to_string(),
+            arch: "x86_64".to_string(),
+            source_keys: vec![key.clone()],
+            word_upper: "KBD".to_string(),
+            detail: "Summary(C) kbd -> Kb, kid".to_string(),
+        });
+        check.spell_candidates.push(SpellingCandidate {
+            pkg_name: "libkbdfile1".to_string(),
+            arch: "x86_64".to_string(),
+            source_keys: vec![key.clone()],
+            word_upper: "KBDD".to_string(),
+            detail: "Summary(C) kbdd".to_string(),
+        });
+        check.spell_candidates.push(SpellingCandidate {
+            pkg_name: "libkbdfile1".to_string(),
+            arch: "x86_64".to_string(),
+            source_keys: vec![key],
+            word_upper: "KBD'S".to_string(),
+            detail: "Summary(C) kbd's -> Kb, kid".to_string(),
+        });
+        check.spell_candidates.push(SpellingCandidate {
+            pkg_name: "aaa_base-debuginfo".to_string(),
+            arch: "x86_64".to_string(),
+            source_keys: vec!["aaa_base-1.0-1.src.rpm".to_string()],
+            word_upper: "AAA".to_string(),
+            detail: "Summary(C) aaa -> AAA, aah, aha".to_string(),
+        });
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            spelling_hits(&results, "kbd").is_empty(),
+            "source name must credit: {results:?}"
+        );
+        assert!(
+            spelling_hits(&results, "kbd's").is_empty(),
+            "source-name possessive must credit: {results:?}"
+        );
+        assert_eq!(
+            spelling_hits(&results, "kbdd").len(),
+            1,
+            "a lookalike that is not the source name still fires: {results:?}"
+        );
+        assert_eq!(
+            spelling_hits(&results, "aaa").len(),
+            1,
+            "an underscore-joined component is not a hyphen part: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_sibling_library_stem_credited_in_description() {
+        // plusky/rpmcrab#1527: `libkbdfile` in kbd-devel's
+        // description is the stem of libkbdfile.so.1 shipped by the
+        // sibling libkbdfile1 — not a typo. The stem needs no
+        // executable bit: the .so ships 0644.
+        let config = test_config();
+        let (_t1, devel) = spelling_pkg("spelling-devel", vec![]);
+        let (_t2, lib) = spelling_pkg("spelling-lib", vec![syn_plain("usr/lib64/libkbdfile.so.1")]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        // Candidate first, library second: deferral must not depend
+        // on run order.
+        check.check_description(
+            &devel,
+            &mut out,
+            "File I/O library -- libkbdfile libkbdfilex wrld",
+            "C",
+            &[],
+        );
+        check.check(&lib, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            spelling_hits(&results, "libkbdfile").is_empty(),
+            "sibling library stem must credit: {results:?}"
+        );
+        assert_eq!(
+            spelling_hits(&results, "libkbdfilex").len(),
+            1,
+            "a lookalike that is not the stem still fires: {results:?}"
+        );
+        assert_eq!(
+            spelling_hits(&results, "wrld").len(),
+            1,
+            "an ordinary typo in the same text still fires: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_ghost_library_stem_does_not_credit() {
+        // A %ghost .so is not shipped content, so its stem credits
+        // nothing — mirroring the program credit's ghost rule.
+        let config = test_config();
+        let (_t1, devel) = spelling_pkg("spelling-devel", vec![]);
+        let (_t2, mut lib) =
+            spelling_pkg("spelling-lib", vec![syn_plain("usr/lib64/libkbdfile.so.1")]);
+        lib.ghost_files
+            .push("usr/lib64/libkbdfile.so.1".to_string());
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_description(&devel, &mut out, "File I/O library -- libkbdfile", "C", &[]);
+        check.check(&lib, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            spelling_hits(&results, "libkbdfile").len(),
+            1,
+            "a ghost library stem must not credit: {results:?}"
         );
     }
 
