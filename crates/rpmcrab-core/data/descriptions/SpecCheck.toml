@@ -230,6 +230,11 @@ licence text with the package and marking it with %license installs
 it into the package's licence directory and records it as a licence
 file in the package metadata.
 """
+"no-%changelog-section"="""
+The spec file has no %changelog section. The section header must be
+present even though the changelog content itself lives in the
+.changes file.
+"""
 check-exit-status-masked="""
 A test command in %check cannot fail the build: its exit status is
 absorbed by a '||' fallback that itself cannot fail, or by an

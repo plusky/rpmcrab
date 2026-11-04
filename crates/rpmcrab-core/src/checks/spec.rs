@@ -2097,6 +2097,9 @@ impl Check for SpecCheck {
                 &[],
             );
         }
+        if self.section.get("changelog").copied().unwrap_or(0) == 0 {
+            self.info(out, pkg, Level::Error, "no-%changelog-section", &[]);
+        }
         if self.depscript_override && !self.depgen_disabled {
             self.info(
                 out,
@@ -6451,6 +6454,25 @@ Requires:       foo<bar\n";
         let tagged: Vec<_> = lines.iter().filter(|l| l.contains(" E: ")).collect();
         assert_eq!(tagged.len(), 1, "{results:?}");
         assert!(tagged[0].contains("Requires: dep\x01x"), "{:?}", tagged[0]);
+    }
+
+    #[test]
+    fn missing_changelog_section_errors_and_present_stays_quiet() {
+        let without = "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\n\n%description\nWobble.\n\n%prep\n%setup -q\n\n%files\n%{_bindir}/*\n";
+        let lines = lines_for(&run_mini(without), "no-%changelog-section");
+        assert_eq!(lines.len(), 1, "results: {lines:?}");
+        assert!(
+            lines[0].contains("E: no-%changelog-section"),
+            "line: {}",
+            lines[0]
+        );
+        let with = format!(
+            "{without}\n%changelog\n* Mon Jan 01 2024 Someone <someone@example.com> - 1.0-1\n- Initial version.\n"
+        );
+        assert!(
+            !has(&run_mini(&with), "no-%changelog-section"),
+            "must stay silent"
+        );
     }
 
     #[test]
