@@ -286,6 +286,12 @@ doesn't require logrotate to be installed. Because logrotate is not part of the 
 your package should explicitly depend on logrotate to make sure that your logrotate
 job is executed. If it is an optional feature of your package, recommend or suggest logrotate.
 """
+missing-sysusers-provider="""
+The package requires a user() or group() account but ships no
+sysusers.d fragment declaring it and no matching user()/group()
+Provides of its own. Ship the sysusers.d fragment that creates the
+account.
+"""
 read-error="""
 This file could not be read. A reason for this could be that the info about
 it in the rpm header indicates that it is supposed to be a readable normal file

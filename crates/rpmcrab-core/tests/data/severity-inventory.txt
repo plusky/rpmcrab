@@ -195,6 +195,7 @@ missing-hash-section = E
 missing-menu-command = W
 missing-relro = W
 missing-stack-protector = W
+missing-sysusers-provider = W
 more-than-one-%changelog-section = W
 multiple-entries = E
 name-repeated-in-summary = W
