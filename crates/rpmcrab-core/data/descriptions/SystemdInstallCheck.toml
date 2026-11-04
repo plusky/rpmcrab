@@ -1,12 +1,22 @@
 systemd-service-without-service_add_pre="""
-The package contains a systemd service but doesn't contain a %pre with
-a call to service_add_pre."""
+The package ships a systemd unit that distribution preset policy
+does not enable, and its %pre has no service_add_pre call for the
+unit. Add the call to %pre."""
 systemd-service-without-service_add_post="""
-The package contains a systemd service but doesn't contain a %post with
-a call to service_add_post."""
+The package ships a systemd unit that distribution preset policy
+does not enable, and its %post has no service_add_post call for the
+unit. Add the call to %post."""
 systemd-service-without-service_del_preun="""
-The package contains a systemd service but doesn't contain a %preun with
-a call to service_del_preun."""
+The package ships a systemd unit whose %preun has no
+service_del_preun call for the unit. Preset policy never covers
+removal, so the per-unit call is required: add it to %preun."""
 systemd-service-without-service_del_postun="""
-The package contains a systemd service but doesn't contain a %postun with
-a call to service_del_postun."""
+The package ships a systemd unit whose %postun has no
+service_del_postun call for the unit. Preset policy never covers
+restart, so the per-unit call is required: add it to %postun."""
+systemd-preset-enabled-without-service_add_pre="""
+The package ships a systemd unit that distribution preset policy
+enables, but its %pre has no service_add_pre call for the unit, so
+a systemd-only update will not enable it: preset-all runs only
+when the branding package is in the transaction. Add the unit to
+%systemd_pre in %pre."""

@@ -454,7 +454,7 @@ mod tests {
             ),
             (
                 "SystemdInstallCheck.toml",
-                "96be0fba5e6d82c65270088fd9c65c2e14f805e05effb2de95990bb2eea31491",
+                "dcfe742f664723a648f9dd8151ad467afff7b1d90dae564c9d011e08d16b7833",
             ),
             (
                 "SystemdTmpfilesCheck.toml",

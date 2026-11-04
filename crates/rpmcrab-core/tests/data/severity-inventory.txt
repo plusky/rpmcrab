@@ -370,6 +370,7 @@ symlink-loop = E
 symlink-should-be-relative = W
 symlink-to-binary-with-shebang = W
 sysconfig-fillup-usage = W
+systemd-preset-enabled-without-service_add_pre = W
 systemd-preset-packaged = W
 systemd-service-without-service_add_post = W
 systemd-service-without-service_add_pre = W
