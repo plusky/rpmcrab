@@ -2,7 +2,7 @@
 """Tests for the preset parser in generate-systemd-presets.py.
 
 The parser is the fail-closed core: a malformed preset line must
-raise, never silently produce a rule that mis-credits units at scan
+raise, never silently produce a rule that wrongly credits units at scan
 time. Fetching is not covered here (it needs the network); the
 generator's --check mode covers the fetch-to-file round trip.
 
