@@ -2765,21 +2765,22 @@ fn explain_staged_sysconfig_fillup_usage() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "sysconfig-fillup-usage:\nThe package uses the legacy sysconfig/fillup configuration scheme: it ships a\nfile below /etc/sysconfig or a fillup template, calls fillup from a scriptlet,\nor points a systemd unit's EnvironmentFile into /etc/sysconfig. Migrate to\ndaemon-native configuration, or to systemd drop-ins and an EnvironmentFile\npointing at a package-owned path, instead of configuration merged into\n/etc/sysconfig by fillup.\n\n\n",
+        "sysconfig-fillup-usage:\nThe package uses the legacy sysconfig/fillup configuration scheme: it ships a\nfile below /etc/sysconfig or a fillup template, calls fillup from a scriptlet,\nor points a systemd unit's EnvironmentFile into /etc/sysconfig. Migrate away\nfrom the fillup model: ship vendor defaults with the package, under /usr/etc\nor the application's native default location under /usr, and reserve /etc for\nadministrator overrides and drop-in snippets. For a KEY=value file read\nthrough a systemd EnvironmentFile, ship the vendor file under /usr and add an\noptional administrator file under /etc -- the two-layer pattern irqbalance\nadopted in March 2025. Use tmpfiles.d for file and directory creation and\nsysusers.d for users and groups instead of install-time generation, and prefer\nthe application's native configuration with built-in defaults over a\nshell-sourced /etc/sysconfig file. This is migration guidance; fillup is not\nformally deprecated.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
 }
 
-/// `--explain`: staged `FilesCheck.toml` resolves the port-only `fillup-usage-discouraged` instead of "Unknown message".
+/// `--explain`: the retired `fillup-usage-discouraged` tag no longer
+/// resolves to a staged description.
 #[test]
-fn explain_staged_fillup_usage_discouraged() {
+fn explain_retired_fillup_usage_discouraged_is_unknown() {
     let out = rpmcrab(&["-e", "fillup-usage-discouraged"]);
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "fillup-usage-discouraged:\nThe package uses fillup: it ships a fillup template or calls fillup from a\nscriptlet to create or merge its configuration. Migrate away from the fillup\nmodel: ship vendor defaults with the package, under /usr/etc or the\napplication's native default location under /usr, and reserve /etc for\nadministrator overrides and drop-in snippets. For a KEY=value file read\nthrough a systemd EnvironmentFile, ship the vendor file under /usr and add an\noptional administrator file under /etc -- the two-layer pattern irqbalance\nadopted in March 2025. Use tmpfiles.d for file and directory creation and\nsysusers.d for users and groups instead of install-time generation, and prefer\nthe application's native configuration with built-in defaults over a\nshell-sourced /etc/sysconfig file. This is migration guidance; fillup is not\nformally deprecated.\n\n\n",
+        "fillup-usage-discouraged:\nUnknown message, please report a bug if the description should be present.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
