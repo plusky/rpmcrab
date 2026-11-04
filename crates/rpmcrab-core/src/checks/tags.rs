@@ -207,14 +207,18 @@ fn spelling_lib_credited(
 }
 
 /// Whether a deferred spelling candidate earns the source-name
-/// credit: the word is a hyphen-separated part of the source package
-/// name its own build key names, or its possessive — the same
-/// exact-parts rule the per-package name skip applies to the binary
-/// name, extended to the source name, so a subpackage text naming
-/// its own source is not a spelling finding. The credit needs no
-/// sibling: the build key is the candidate's own `SOURCERPM`, so it
-/// applies in single-package runs too. Pure so the scoping pins
-/// without fixture packages.
+/// credit: the word is a hyphen- or underscore-separated part of
+/// the source package name its own build key names, or its
+/// possessive — the same exact-parts rule the per-package name skip
+/// applies to the binary name, extended to the source name, so a
+/// subpackage text naming its own source is not a spelling finding.
+/// Underscore parts count because generated debuginfo/debugsource
+/// summaries name the source verbatim (plusky/rpmcrab#1523: `aaa`
+/// in "Debug information for package aaa_base"), and the spec
+/// cannot reword generated texts. The credit needs no sibling: the
+/// build key is the candidate's own `SOURCERPM`, so it applies in
+/// single-package runs too. Pure so the scoping pins without
+/// fixture packages.
 fn spelling_source_credited(cand: &SpellingCandidate) -> bool {
     let bare = cand
         .word_upper
@@ -222,7 +226,7 @@ fn spelling_source_credited(cand: &SpellingCandidate) -> bool {
         .unwrap_or(&cand.word_upper);
     cand.source_keys.iter().any(|key| {
         source_pkg_name(key)
-            .split('-')
+            .split(['-', '_'])
             .any(|part| part.to_uppercase() == cand.word_upper || part.to_uppercase() == *bare)
     })
 }
@@ -4099,10 +4103,10 @@ mod tests {
         // plusky/rpmcrab#1527: a subpackage Summary naming its own
         // source package is not a typo — the word is a part of the
         // source name the candidate's build key names, so it credits
-        // without any sibling in the run. Lookalikes still fire, and
-        // an underscore-joined component is not a hyphen part, so
-        // the #1523 `aaa` token in aaa_base debuginfo summaries
-        // still fires.
+        // without any sibling in the run. Lookalikes still fire.
+        // plusky/rpmcrab#1523: an underscore-joined component is a
+        // part too, so the `aaa` token in aaa_base debuginfo
+        // summaries credits.
         let config = test_config();
         let mut check = TagsCheck::new(&config);
         check.set_test_spellchecker();
@@ -4151,10 +4155,73 @@ mod tests {
             1,
             "a lookalike that is not the source name still fires: {results:?}"
         );
+        assert!(
+            spelling_hits(&results, "aaa").is_empty(),
+            "an underscore-joined component of the source name must credit: {results:?}"
+        );
+    }
+
+    #[test]
+    fn spelling_source_name_underscore_credited_1523() {
+        // plusky/rpmcrab#1523: the exact case — `aaa` in the
+        // auto-generated debuginfo/debugsource summaries of
+        // aaa_base ("Debug information for package aaa_base" /
+        // "Debug sources for package aaa_base") is the first
+        // underscore-separated component of the source name, so it
+        // credits; the second component credits too, a hyphen part
+        // still credits, and a genuine typo in the same text still
+        // fires.
+        let config = test_config();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        let key = "aaa_base-1.0-1.src.rpm".to_string();
+        check.spell_candidates.push(SpellingCandidate {
+            pkg_name: "aaa_base-debuginfo".to_string(),
+            arch: "x86_64".to_string(),
+            source_keys: vec![key.clone()],
+            word_upper: "AAA".to_string(),
+            detail: "Summary(C) aaa -> AAA, aah, aha".to_string(),
+        });
+        check.spell_candidates.push(SpellingCandidate {
+            pkg_name: "aaa_base-debugsource".to_string(),
+            arch: "x86_64".to_string(),
+            source_keys: vec![key.clone()],
+            word_upper: "BASE".to_string(),
+            detail: "%description -l C base".to_string(),
+        });
+        check.spell_candidates.push(SpellingCandidate {
+            pkg_name: "aaa_base-debuginfo".to_string(),
+            arch: "x86_64".to_string(),
+            source_keys: vec![key.clone()],
+            word_upper: "WRLD".to_string(),
+            detail: "Summary(C) wrld".to_string(),
+        });
+        check.spell_candidates.push(SpellingCandidate {
+            pkg_name: "kbd-devel".to_string(),
+            arch: "x86_64".to_string(),
+            source_keys: vec!["kbd-2.10.0-1.1.src.rpm".to_string()],
+            word_upper: "KBD".to_string(),
+            detail: "Summary(C) kbd -> Kb, kid".to_string(),
+        });
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            spelling_hits(&results, "aaa").is_empty(),
+            "the #1523 token must credit: {results:?}"
+        );
+        assert!(
+            spelling_hits(&results, "base").is_empty(),
+            "the second underscore component must credit: {results:?}"
+        );
+        assert!(
+            spelling_hits(&results, "kbd").is_empty(),
+            "hyphen-part credit must still work: {results:?}"
+        );
         assert_eq!(
-            spelling_hits(&results, "aaa").len(),
+            spelling_hits(&results, "wrld").len(),
             1,
-            "an underscore-joined component is not a hyphen part: {results:?}"
+            "a genuine typo in the same text still fires: {results:?}"
         );
     }
 
