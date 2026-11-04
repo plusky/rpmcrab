@@ -4789,6 +4789,63 @@ mod tests {
     }
 
     #[test]
+    fn wrong_library_version_debug_paths_stay_quiet() {
+        // Both version arms skip /usr/lib/debug/: a wrong-version
+        // file and a wrong-version link under a debug path stay
+        // quiet, as debuginfo payload is not the shipped library.
+        let lines = wrong_version_details(
+            "debugpath",
+            "libfoo1",
+            vec![
+                wrongver_elf(
+                    "debugpath",
+                    "lib",
+                    "/usr/lib/debug/usr/lib64/libfoo.so.0",
+                    "libfoo.so.0",
+                ),
+                wrongver_link("/usr/lib/debug/usr/lib64/libfoo.so.0", "libfoo.so.1"),
+            ],
+        );
+        assert!(lines.is_empty(), "no findings: {lines:?}");
+    }
+
+    #[test]
+    fn wrong_library_version_link_leading_zero_stays_quiet() {
+        // The link arm normalises leading zeroes, as the file arm
+        // does: libfoo.so.01 in libfoo1 is generation 1, not a
+        // wrong-version name.
+        let lines = wrong_version_details(
+            "linkzero",
+            "libfoo1",
+            vec![wrongver_link("/usr/lib64/libfoo.so.01", "libfoo.so.1")],
+        );
+        assert!(lines.is_empty(), "no findings: {lines:?}");
+    }
+
+    #[test]
+    fn wrong_library_version_no_soname_matching_version_fires() {
+        // Pure no-SONAME shape, isolated from the libiio case: a
+        // matching-version file with no DT_SONAME fires with the
+        // no-SONAME reason alone, no version reason.
+        let lines = wrong_version_details(
+            "nosoname",
+            "libfoo1",
+            vec![wrongver_elf_no_soname(
+                "nosoname",
+                "lib",
+                "/usr/lib64/libfoo.so.1",
+            )],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.so.1 (no SONAME)"),
+            "detail: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
     fn wrong_library_version_quiet_shapes() {
         // Each shape stays quiet for a distinct reason: a plugin or
         // secondary library keeps its own versioning; a decorated
