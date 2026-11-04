@@ -3886,6 +3886,44 @@ fn linked_against_findings(
     verdict
 }
 
+/// The documented `proc_service` callback interface glibc's
+/// `libthread_db` expects its debugger host to define
+/// (`sysdeps/nptl/proc_service.h`: "Callback interface for
+/// libthread_db, functions users must define"): an undefined
+/// reference to one of these names in `libthread_db` itself is by
+/// design, not a missing dependency, so the
+/// `undefined-non-weak-symbol` finding exempts exactly these names
+/// in exactly that file. The filename scope is what keeps the
+/// exemption decidable from a single built RPM and narrow: the
+/// same names undefined in any other file still fire, and any other
+/// undefined symbol in `libthread_db` still fires.
+const LIBTHREAD_DB_PROC_SERVICE_SYMBOLS: [&str; 8] = [
+    "ps_pdread",
+    "ps_pdwrite",
+    "ps_pglobal_lookup",
+    "ps_getpid",
+    "ps_lgetregs",
+    "ps_lsetregs",
+    "ps_lgetfpregs",
+    "ps_lsetfpregs",
+];
+
+/// Whether `symbol`, undefined in the file at `file_name`, is a
+/// `libthread_db` `proc_service` callback (see
+/// `LIBTHREAD_DB_PROC_SERVICE_SYMBOLS`).
+fn is_libthread_db_proc_service_symbol(file_name: &str, symbol: &str) -> bool {
+    if !LIBTHREAD_DB_PROC_SERVICE_SYMBOLS.contains(&symbol) {
+        return false;
+    }
+    let base = basename(file_name);
+    if base == "libthread_db.so" {
+        return true;
+    }
+    base.strip_prefix("libthread_db.so.").is_some_and(|rest| {
+        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '.')
+    })
+}
+
 /// The detail of the aggregated `undefined-non-weak-symbol` finding:
 /// the count and the names of the file's undefined non-weak symbols,
 /// in the parenthesised shape the aggregated findings use (the
@@ -7784,15 +7822,25 @@ impl BinariesCheck {
                         });
                     }
                 }
-            } else if !ldd.undefined_symbols.is_empty() {
-                let detail = undefined_symbol_detail(&ldd.undefined_symbols);
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "undefined-non-weak-symbol",
-                    &[&pkgfile.name, &detail],
-                );
+            } else {
+                let reportable: Vec<String> = ldd
+                    .undefined_symbols
+                    .iter()
+                    .filter(|symbol| {
+                        !is_libthread_db_proc_service_symbol(&pkgfile.name, symbol.as_str())
+                    })
+                    .cloned()
+                    .collect();
+                if !reportable.is_empty() {
+                    let detail = undefined_symbol_detail(&reportable);
+                    add_info(
+                        out,
+                        Level::Warning,
+                        pkg,
+                        "undefined-non-weak-symbol",
+                        &[&pkgfile.name, &detail],
+                    );
+                }
             }
         }
         // Unused-dependency capture (deferred): every dynamically
@@ -9219,7 +9267,12 @@ impl Check for BinariesCheck {
                     .undefined_symbols
                     .iter()
                     .filter(|symbol| {
-                        !provided.contains(*symbol) && !consumer.defined_symbols.contains(*symbol)
+                        !provided.contains(*symbol)
+                            && !consumer.defined_symbols.contains(*symbol)
+                            && !is_libthread_db_proc_service_symbol(
+                                &consumer.file_name,
+                                symbol.as_str(),
+                            )
                     })
                     .cloned()
                     .collect();
@@ -23294,6 +23347,190 @@ description = "explicit priority string bypasses the system crypto policy"
             out.results().is_empty(),
             "must be quiet: {:?}",
             out.results()
+        );
+    }
+
+    #[test]
+    fn libthread_db_proc_service_symbol_shapes() {
+        // plusky/rpmcrab#1497: the exemption predicate's filename
+        // boundary -- the bare SONAME-less name, a versioned name,
+        // and the shapes that must NOT match (a trailing dot, a
+        // letter-suffixed version, a longer stem, a foreign symbol,
+        // another file).
+        assert!(is_libthread_db_proc_service_symbol(
+            "/usr/lib64/libthread_db.so",
+            "ps_pdread"
+        ));
+        assert!(is_libthread_db_proc_service_symbol(
+            "/usr/lib64/libthread_db.so.1",
+            "ps_pdread"
+        ));
+        assert!(is_libthread_db_proc_service_symbol(
+            "/usr/lib64/libthread_db.so.1.2",
+            "ps_lgetregs"
+        ));
+        assert!(!is_libthread_db_proc_service_symbol(
+            "/usr/lib64/libthread_db.so.",
+            "ps_pdread"
+        ));
+        assert!(!is_libthread_db_proc_service_symbol(
+            "/usr/lib64/libthread_db.so.1d",
+            "ps_pdread"
+        ));
+        assert!(!is_libthread_db_proc_service_symbol(
+            "/usr/lib64/alibthread_db.so.1",
+            "ps_pdread"
+        ));
+        assert!(!is_libthread_db_proc_service_symbol(
+            "/usr/lib64/libthread_db.so.1",
+            "missing_sym"
+        ));
+        assert!(!is_libthread_db_proc_service_symbol(
+            "/usr/lib64/libfoo.so.1",
+            "ps_pdread"
+        ));
+    }
+
+    #[test]
+    fn libthread_db_proc_service_callbacks_are_quiet() {
+        // plusky/rpmcrab#1497: glibc's libthread_db leaves the
+        // documented proc_service callbacks undefined by design --
+        // the debugger host defines them -- so the finding exempts
+        // exactly those names in exactly that file. Installed path:
+        // the callbacks alone stay quiet, a genuinely undefined
+        // symbol in the same file still fires without them, and the
+        // same callback name in any other file still fires.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_dynamically_linked = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.is_shlib = true;
+        let ps_symbols: Vec<String> = LIBTHREAD_DB_PROC_SERVICE_SYMBOLS
+            .iter()
+            .map(|symbol| symbol.to_string())
+            .collect();
+
+        let pkgfile = syn_file(
+            "/usr/lib64/libthread_db.so.1",
+            "ELF 64-bit LSB shared object",
+        );
+        let mut ldd = syn_ldd();
+        ldd.undefined_symbols = ps_symbols.clone();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, &pkgfile, &info, &ldd, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "proc_service callbacks in libthread_db must stay quiet: {results:?}"
+        );
+
+        // A genuinely undefined symbol in libthread_db still fires,
+        // and the detail names only it, not the exempt callbacks.
+        ldd.undefined_symbols = ps_symbols.clone();
+        ldd.undefined_symbols.push("missing_sym".to_string());
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, &pkgfile, &info, &ldd, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(
+            lines[0].contains("missing_sym"),
+            "detail names the genuine symbol: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("ps_pdread"),
+            "detail must not name an exempt callback: {}",
+            lines[0]
+        );
+
+        // The same callback name in another library still fires.
+        let pkgfile = syn_file("/usr/lib64/libfoo.so.1", "ELF 64-bit LSB shared object");
+        let mut ldd = syn_ldd();
+        ldd.undefined_symbols = vec!["ps_pdread".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, &pkgfile, &info, &ldd, &mut out);
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(
+            lines[0].contains("ps_pdread"),
+            "callback name in another file must fire: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn libthread_db_proc_service_callbacks_are_quiet_deferred() {
+        // plusky/rpmcrab#1497, deferred (extracted-package) path:
+        // the same exemption must hold in `after_checks`, with the
+        // same negative controls.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let callbacks = craft_shlib_elf(
+            false,
+            None,
+            Some("libthread_db.so.1"),
+            &[
+                ("ps_pdread", 1, 0, 0),
+                ("ps_pdwrite", 1, 0, 0),
+                ("ps_pglobal_lookup", 1, 0, 0),
+                ("ps_getpid", 1, 0, 0),
+                ("ps_lgetregs", 1, 0, 0),
+                ("ps_lsetregs", 1, 0, 0),
+                ("ps_lgetfpregs", 1, 0, 0),
+                ("ps_lsetfpregs", 1, 0, 0),
+            ],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libthread_db.so.1", &callbacks)],
+        );
+        let results = driver_results(&pkg, &test_config());
+        assert!(
+            lines_for(&results, "undefined-non-weak-symbol").is_empty(),
+            "proc_service callbacks in libthread_db must stay quiet: {results:?}"
+        );
+
+        let mixed = craft_shlib_elf(
+            false,
+            None,
+            Some("libthread_db.so.1"),
+            &[("ps_pdread", 1, 0, 0), ("missing_sym", 1, 0, 0)],
+        );
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libthread_db.so.1", &mixed)],
+        );
+        let results = driver_results(&pkg, &test_config());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(
+            lines[0].contains("missing_sym"),
+            "detail names the genuine symbol: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("ps_pdread"),
+            "detail must not name an exempt callback: {}",
+            lines[0]
+        );
+
+        let other = craft_shlib_elf(false, None, Some("libfoo.so.1"), &[("ps_pdread", 1, 0, 0)]);
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![shlib_pkgfile(dir.path(), "libfoo.so.1", &other)],
+        );
+        let results = driver_results(&pkg, &test_config());
+        let lines = lines_for(&results, "undefined-non-weak-symbol");
+        assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
+        assert!(
+            lines[0].contains("ps_pdread"),
+            "callback name in another file must fire: {}",
+            lines[0]
         );
     }
 
