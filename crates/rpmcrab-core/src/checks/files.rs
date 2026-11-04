@@ -4769,10 +4769,14 @@ impl FilesCheck {
         required.sort();
         required.dedup();
         for (group, name) in required {
+            // A name the distro's standard tables list is provided by
+            // the base system (plusky/rpmcrab#1512): the system-users
+            // package owns it, so requiring an own fragment for it
+            // would duplicate that ownership.
             let provided = if group {
-                groups.contains(&name)
+                groups.contains(&name) || self.standard_groups.contains(&name)
             } else {
-                users.contains(&name)
+                users.contains(&name) || self.standard_users.contains(&name)
             };
             if !provided {
                 let capability = if group {
@@ -11255,6 +11259,29 @@ print("hi")
             release: None,
         }];
         let config = test_config();
+        assert!(sysusers_provider_findings(&pkg, &config).is_empty());
+    }
+
+    #[test]
+    fn sysusers_requires_quiet_for_standard_table_accounts() {
+        // plusky/rpmcrab#1512: man is listed in both distro standard
+        // tables and tty in StandardGroups, so their Requires need no
+        // own fragment -- the system-users package provides them.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pkg = logfile_pkg(&dir, &[("/usr/lib/svc/state", "root", "root", b"")]);
+        pkg.requires = crate::pkg::dep::parse_dep_infos("user(man) group(man) group(tty)");
+        let mut config = test_config();
+        config.configuration.insert(
+            "StandardUsers".to_string(),
+            toml::Value::Array(vec![toml::Value::String("man".to_string())]),
+        );
+        config.configuration.insert(
+            "StandardGroups".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::String("man".to_string()),
+                toml::Value::String("tty".to_string()),
+            ]),
+        );
         assert!(sysusers_provider_findings(&pkg, &config).is_empty());
     }
 
