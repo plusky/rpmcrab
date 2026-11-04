@@ -1726,6 +1726,9 @@ pub struct SpecCheck {
     /// `Source` lines are tags rather than body text.
     license_preamble: bool,
     license_tag_seen: bool,
+    /// A `# Copyright` comment line was seen anywhere in the spec
+    /// (distinct from the obsolete `Copyright:` tag).
+    copyright_comment_seen: bool,
     license_tags_public_domain: bool,
     license_in_install: bool,
     license_install_dests: Vec<String>,
@@ -1863,6 +1866,7 @@ impl SpecCheck {
             license_section: None,
             license_preamble: true,
             license_tag_seen: false,
+            copyright_comment_seen: false,
             license_tags_public_domain: true,
             license_in_install: false,
             license_install_dests: Vec::new(),
@@ -2100,6 +2104,9 @@ impl Check for SpecCheck {
         if self.section.get("changelog").copied().unwrap_or(0) == 0 {
             self.info(out, pkg, Level::Error, "no-%changelog-section", &[]);
         }
+        if !self.copyright_comment_seen {
+            self.info(out, pkg, Level::Warning, "no-copyright-comment", &[]);
+        }
         if self.depscript_override && !self.depgen_disabled {
             self.info(
                 out,
@@ -2160,6 +2167,7 @@ impl Check for SpecCheck {
         self.license_section = None;
         self.license_preamble = true;
         self.license_tag_seen = false;
+        self.copyright_comment_seen = false;
         self.license_tags_public_domain = true;
         self.license_in_install = false;
         self.license_install_dests.clear();
@@ -2517,6 +2525,7 @@ impl SpecCheck {
         if self.checkline_section(pkg, out, line) {
             return;
         }
+        self.checkline_copyright_comment(line);
         self.note_body_line(pkg, line);
         self.checkline_buildroot_usage(pkg, out, line);
         self.checkline_make_check(pkg, out, line);
@@ -2985,6 +2994,32 @@ impl SpecCheck {
 }
 
 impl SpecCheck {
+    /// Note a `# Copyright` comment line, for the whole-spec
+    /// presence check flushed at the end of the run. The obsolete
+    /// `Copyright:` tag does not count -- only the comment form, and
+    /// only the whole word: `# Copyrighted` is not a copyright
+    /// notice.
+    fn checkline_copyright_comment(&mut self, line: &str) {
+        if self.copyright_comment_seen {
+            return;
+        }
+        let stripped = line.trim_start();
+        let Some(after_hash) = stripped.strip_prefix('#') else {
+            return;
+        };
+        let rest = after_hash.trim_start();
+        let Some(after_word) = rest.strip_prefix("Copyright") else {
+            return;
+        };
+        if after_word
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric())
+        {
+            self.copyright_comment_seen = true;
+        }
+    }
+
     fn checkline_changelog(&mut self, pkg: &SpecPkg, out: &mut Filter, line: &str) {
         if self.current_section == "changelog" {
             if let Some(token) = has_forbidden_controlchars(line) {
@@ -6473,6 +6508,36 @@ Requires:       foo<bar\n";
             !has(&run_mini(&with), "no-%changelog-section"),
             "must stay silent"
         );
+    }
+
+    #[test]
+    fn missing_copyright_comment_warns_and_present_stays_quiet() {
+        let base = "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\n\n%description\nWobble.\n\n%prep\n%setup -q\n\n%files\n%{_bindir}/*\n\n%changelog\n* Mon Jan 01 2024 Someone <someone@example.com> - 1.0-1\n- Initial version.\n";
+        let lines = lines_for(&run_mini(base), "no-copyright-comment");
+        assert_eq!(lines.len(), 1, "results: {lines:?}");
+        assert!(
+            lines[0].contains("W: no-copyright-comment"),
+            "line: {}",
+            lines[0]
+        );
+        // The comment form quiets it.
+        let with = format!("# Copyright (c) 2024 Someone\n{base}");
+        assert!(
+            !has(&run_mini(&with), "no-copyright-comment"),
+            "must stay silent"
+        );
+        // Near misses do not count: the obsolete tag form, prose
+        // mentioning copyright, and a longer word sharing the prefix.
+        let tag_form = base.replacen(
+            "License:        MIT",
+            "License:        MIT\nCopyright:      Someone",
+            1,
+        );
+        assert!(has(&run_mini(&tag_form), "no-copyright-comment"));
+        let prose = base.replacen("Wobble.\n", "Wobble, copyright by someone.\n", 1);
+        assert!(has(&run_mini(&prose), "no-copyright-comment"));
+        let longer = format!("# Copyrighted material\n{base}");
+        assert!(has(&run_mini(&longer), "no-copyright-comment"));
     }
 
     #[test]

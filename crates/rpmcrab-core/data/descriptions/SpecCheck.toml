@@ -235,6 +235,10 @@ The spec file has no %changelog section. The section header must be
 present even though the changelog content itself lives in the
 .changes file.
 """
+no-copyright-comment="""
+The spec file contains no Copyright comment. Add a '# Copyright ...'
+comment line, as used by SUSE package specs.
+"""
 check-exit-status-masked="""
 A test command in %check cannot fail the build: its exit status is
 absorbed by a '||' fallback that itself cannot fail, or by an
