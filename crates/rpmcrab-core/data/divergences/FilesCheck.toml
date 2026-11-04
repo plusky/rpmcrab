@@ -427,6 +427,20 @@ upstream = "https://github.com/plusky/rpmcrab/issues/883"
 
 [[divergence]]
 case = "global"
+check = "incorrect-fsf-address"
+kind = "severity"
+reason = "Severity recalibration (plusky/rpmcrab#1519): the port reports I where it previously reported W. A stale FSF postal address in a shipped licence text or licence header is a documentation defect with no artefact consequence, and canonical licence texts and upstream headers cannot be rewritten in the package, so the finding can never be removed by a legitimate package change and must not count toward a zero-warning run. The reference reports E and its shipped openSUSE config filters the finding entirely ('Too noisy, and usually not something downstream packagers can fix'); the port already recalibrated E to W in issue #883, and this moves it to I on the same rationale. Pinned by fsf_address_reports_at_info_and_skips_debugsource in files.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
+check = "incorrect-fsf-address"
+kind = "behaviour"
+reason = "Debugsource copies never fire (plusky/rpmcrab#1519): a file under /usr/src/debug/ is a verbatim copy of the upstream source used for the build, so its licence header is upstream's text by definition, not package content -- 'fixing' it would mean patching upstream source headers, which is not a packaging fix. The skip is path-exact to the debugsource tree; the debuginfo tree under /usr/lib/debug is untouched, and every other file still reports at info level. Pinned by fsf_address_reports_at_info_and_skips_debugsource in files.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "devel-file-in-non-devel-package"
 kind = "severity"
 reason = "Config-only (issue #594): the vendored configs carry no [Scoring] table (#594 dropped this entry via DROP_SCORING in the generator; #699 then removed the vendored scoring tables wholesale), so the port prints W where the reference prints E: devel-file-in-non-devel-package (Badness: 50) (both emit at W; the reference's [Scoring] entry promotes it to E via the b > 0 rule). The finding is a packaging-shape judgement with a documented false-positive family -- runtime soname symlinks (Mesa's libEGL_mesa.so) fire alongside genuinely misplaced devel libraries (FreeCAD's libE57Format.so) -- so the harm is conditional and the promotion fails the pass's always-implies-damage rule (626 promoted E lines in the 20261016 Factory sweep)."
