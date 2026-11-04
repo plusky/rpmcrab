@@ -1644,6 +1644,14 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "filelist-forbidden-systemd-userdirs"
+kind = "behaviour"
+reason = "Deliberate false-positive fix (issue #1500): the port exempts systemd itself from this rule -- the binary package named systemd, and any binary package built from the systemd source package (its SOURCERPM name) -- because systemd owns the directories the rule calls user dirs: /etc/systemd, /etc/modules-load.d and /etc/tmpfiles.d are systemd's own configuration directories, so the finding cannot be fixed in packaging. The reference has no IgnorePkgIf on this rule (its FilelistCheck.toml entry carries only the Bad patterns, and its FilelistCheck.py defines only isfilesystem, isdebuginfo and notnoarch), so it fires on systemd: 29 E on the systemd source's binaries (systemd 11, udev 7, systemd-journal-remote 4, systemd-networkd 3, systemd-experimental 2, systemd-container 1, systemd-resolved 1), measured with the pristine binary on the 262.1 build. Any other package shipping files under those paths still fires, including a systemd-prefixed binary built from another source. Pinned by systemd_userdirs_exempt_for_systemd_itself and systemd_userdirs_still_fires_for_other_packages in filelist.rs."
+since = "0.4.2"
+upstream = "https://github.com/plusky/rpmcrab/issues/1500"
+
+[[divergence]]
+case = "global"
 check = "postin-without-ldconfig"
 kind = "behaviour"
 reason = "The reference only searches the scriptlet body for ldconfig, ignoring the -p interpreter. rpmcrab honors -p ldconfig: %post -p /sbin/ldconfig satisfies the check. See rpmlint#1602 which fixes rpmlint#550."
