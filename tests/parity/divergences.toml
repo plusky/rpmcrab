@@ -4206,6 +4206,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1171"
 
 [[divergence]]
 case = "global"
+check = "no-%changelog-section"
+kind = "severity"
+reason = "Deliberate severity recalibration: the port reports E where the reference level resolves to W. The reference never emits this exact finding: its SpecCheck._check_no_s_section (pinned reference 84848c05, rpmlint/checks/SpecCheck.py:257) emits the templated 'no-%%%s-section' at W for a missing %prep, %build, %install or %check section, and the audit's printf_template resolves that template to 'no-%*-section', which matches this name, so the resolved reference level is W and the port's E is unledgered without this entry. The Error is deliberate: a spec with no %changelog section header is a Factory submission decline (factory-auto: <pkg>.spec does not contain a %changelog line, e.g. duckdb), so a warning would understate a submission-blocking defect."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "SysVInitOnSystemdCheck"
 kind = "behaviour"
 reason = "The reference accumulates basenames in sets (SysVInitOnSystemdCheck.py:11-13), so a basename reachable by two init scripts yields one finding; the port sorts and dedups explicitly, giving the same single finding in sorted order rather than set order."
