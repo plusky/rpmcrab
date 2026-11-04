@@ -2178,6 +2178,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/756"
 
 [[divergence]]
 case = "global"
+check = "missing-sysusers-provider"
+kind = "behaviour"
+reason = "Accounts the distro's standard tables list never fire (plusky/rpmcrab#1512): a user(name) or group(name) Requires whose name appears in StandardUsers or StandardGroups respectively is provided by the base system -- the system-users package owns it -- so requiring an own sysusers.d fragment for it would duplicate that ownership. The man package's user(man) and group(man) Requires and util-linux-tty-tools' group(tty) Requires are the filed instances; man is listed in both tables and tty in StandardGroups in the vendored openSUSE users-groups.toml. Own-snippet and own-Provides credit is unchanged, and a required account in neither table still fires. Pinned by sysusers_requires_quiet_for_standard_table_accounts in files.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "non-standard-uid"
 kind = "severity"
 reason = "The port reports `non-standard-uid` at error where the reference warns (issue #756): with declared accounts credited (see the FilesCheck behaviour entry for issue #756), a fired line's account has no in-set declaration through any of the three routes -- no snippet, no header Provides, no owning-package Requires -- so the files land owned by an unresolvable name or a recycled numeric id. The Factory corpus measurement behind that entry leaves a residue of 16 lines at error over 51,589 RPMs: the uid share of the 40 generator-stamp-only lines the behaviour entry records (16 uid, 24 gid), whose only account Requires entry is the dependency generator's stamp, so no genuine route credits them."
