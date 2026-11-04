@@ -60,6 +60,9 @@ changelog-not-in-sequence="""
 The %changelog entries are not in chronological order. Entries are
 listed newest first, so each entry must be dated no later than the
 one before it.
+One finding is emitted per out-of-order adjacent pair, so a
+changelog with several violations yields several findings. This
+is intended.
 """
 no-license="""
 There is no License tag in your spec file. You have to specify one license
