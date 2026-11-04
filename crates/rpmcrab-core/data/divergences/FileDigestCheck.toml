@@ -90,3 +90,11 @@ check = "FileDigestCheck"
 kind = "detail"
 reason = "Staged `--explain` texts for `cron-file-digest-mismatch`, `sudoers-file-digest-mismatch`, `sysctl-file-digest-mismatch` and `zypperplugin-file-digest-mismatch` opened with ungrammatical first sentences (`A whitelisted cron job related ...`, `A whitelisting related ...`); the sudoers and sysctl entries also said `drop in` for `drop-in` in the second sentence. Normalized to the form the permissions and polkit entries in the same file use: a <kind> file changed in content."
 since = "0.4.1"
+
+[[divergence]]
+case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "For varlink socket units, the port follows a symlink alias to its in-package target when checking authorization: an alias symlink whose resolved target is whitelisted is authorized, and a verified target digest covers the alias. The reference compares the restricted path literally against the whitelist, so it reports varlink-file-unauthorized for the alias name. Only varlink units follow aliases; other check types keep the literal comparison, and a non-alias file with a similar name still fires."
+since = "0.4.2"
+upstream = "https://github.com/plusky/rpmcrab/issues/1501"
