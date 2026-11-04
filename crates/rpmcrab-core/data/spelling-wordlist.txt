@@ -43,6 +43,7 @@ applicative
 analytics
 archiver/S
 arg/MS
+asm
 async
 asyncio
 auth
@@ -103,6 +104,7 @@ dataframe/MS
 dataset/MS
 datatypes
 datetime/MS
+debuginfo
 declaratively
 decompressor/S
 decrypt/DGS
@@ -115,6 +117,7 @@ destructor/MS
 detokenizer
 dialogs
 dicts
+disasm
 disassembler
 distro/S
 docstring/MS

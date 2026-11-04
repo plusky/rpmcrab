@@ -4603,6 +4603,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "spelling-error"
+kind = "behaviour"
+reason = "The bundled supplementary vocabulary gains three elfutils prose terms (plusky/rpmcrab#1532: asm and disasm for the libasm function names, debuginfo for the standard distro term), and the package-names file gains two issue-ruled names (libdwfl for the elfutils component library, debuginfod for the daemon and product name). All five are absent from the pinned en_US dictionary, so the reference flags them and the port stays silent. Verified against the pinned en_US dictionary and pinned by elfutils_debug_terms_are_accepted in spellcheck.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "invalid-license"
 kind = "severity"
 reason = "Emission level (issues #594, #699): the port emits invalid-license at E (tags.rs), while the reference emits W (TagsCheck.py:629) and its shipped base scoring does not promote it. #594 first carried the promotion in the vendored scoring.toml of both flavours (invalid-license = 100000, SCORING_ADDITIONS in the generator); #699 removed the vendored scoring tables and made E the emission level instead, because a license string that fails SPDX validation is a legal metadata defect in itself -- the always-implies-damage judgement #594 recorded. Near-miss spellings are covered by the separate I-level invalid-license-spellcheck suggestion, not by softening this one."
