@@ -58,7 +58,7 @@ unversioned or versioned for a different SONAME generation: a bare
 `.so` regular file, a file with no DT_SONAME, or a plain
 dotted-digit filename version whose leading component differs from
 the SONAME generation number of the package. A decorated file name
-must start with the full DT_SONAME, and a symlink name carrying a
+must equal the full DT_SONAME, or start with it plus a `.` or `-` separator and be versioned for the package's generation; a symlink name carrying a
 version for another generation fires on its name alone. Each library
 file belongs in the package named for its generation.
 """
