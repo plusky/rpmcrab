@@ -4876,6 +4876,14 @@ since = "0.4.2"
 
 [[divergence]]
 case = "global"
+check = "spelling-error"
+kind = "behaviour"
+reason = "Words naming the source package or a shipped library of the same build are not spelling findings (plusky/rpmcrab#1527: `kbd` and `libkbdfile`/`libkeymap`/`libkfont` in kbd subpackage texts). A word in a Summary or %description that exactly matches (case-insensitively) a hyphen-separated part of the source package name its own build key names, or its possessive, is skipped — the credit needs no sibling, since the build key is the candidate's own SOURCERPM; and a word that exactly matches the stem of a `.so` file shipped by a binary package of the same SOURCERPM build (candidate's own package included, any file mode, %ghost excluded) is skipped. Lookalikes do not credit: a longer word containing the name or stem still fires, and an underscore-joined component is not a hyphen part, so the #1523 `aaa` token in aaa_base debuginfo summaries still fires. The reference has no such credits."
+since = "0.4.2"
+upstream = "https://github.com/plusky/rpmcrab/issues/1527"
+
+[[divergence]]
+case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
 reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."

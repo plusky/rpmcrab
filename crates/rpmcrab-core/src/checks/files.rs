@@ -30,6 +30,7 @@ use super::filelist::sysconfig_good_matches;
 use super::is_match;
 use super::shared::{
     class_header_detail, devel_regex, is_mingw_package, macro_regex, python_str_repr,
+    source_pkg_name,
 };
 use crate::check::{Check, add_info, make_finding};
 use crate::config::Config;
@@ -3275,21 +3276,6 @@ fn own_requires_account(pkg: &Pkg, group: bool, name: &str) -> bool {
             .iter()
             .any(|leaf| leaf_account_capability(leaf) == Some((group, name)))
     })
-}
-
-/// The source package name a `SOURCERPM` value names: the value is
-/// `<name>-<version>-<release>.src.rpm`, and only the name is stable
-/// across the subpackages of one build. A value in any other shape is
-/// returned whole, so it never equals a real package name by accident.
-fn source_pkg_name(sourcerpm: &str) -> &str {
-    let stem = sourcerpm.strip_suffix(".src.rpm").unwrap_or(sourcerpm);
-    match stem.rsplit_once('-') {
-        Some((rest, _release)) => match rest.rsplit_once('-') {
-            Some((name, _version)) if !name.is_empty() => name,
-            _ => stem,
-        },
-        None => stem,
-    }
 }
 
 /// Whether a scriptlet slot can create a file when the package is
@@ -22564,20 +22550,6 @@ reason = "warning hook: executable and %config by design"
             .filter(|((n, _), _)| n == "sysconfig-fillup-usage")
             .map(|((n, line), l)| (n.clone(), line.clone(), *l))
             .collect()
-    }
-
-    #[test]
-    fn sysconfig_source_pkg_name_strips_version_and_release() {
-        assert_eq!(source_pkg_name("sysconfig-0.90.5-1.2.src.rpm"), "sysconfig");
-        assert_eq!(source_pkg_name("fillup-1.42-281.7.src.rpm"), "fillup");
-        assert_eq!(source_pkg_name("libvirt-12.7.0-3.1.src.rpm"), "libvirt");
-        assert_eq!(
-            source_pkg_name("python3.14-3.14.0-1.1.src.rpm"),
-            "python3.14"
-        );
-        // Builder-made packages carry the placeholder, which names no
-        // real source package.
-        assert_eq!(source_pkg_name("(none)"), "(none)");
     }
 
     #[test]

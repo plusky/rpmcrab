@@ -513,3 +513,11 @@ check = "spelling-error"
 kind = "behaviour"
 reason = "Package-name skipping is exact parts plus possessives only: the reference skips any error word that occurs inside the full uppercased package name (spellcheck.py: `if upperword in uppername or upperword in upperparts`), so a truncated fragment of the package name (the test's one-letter-short fragment for `something`) - or any single letter occurring in the name - is skipped there and reported here. The substring arm was removed deliberately: a substring match hides genuine typos that merely occur inside a long hyphenated name. Pinned by package_name_substring_is_not_skipped in spellcheck.rs."
 since = "0.4.2"
+
+[[divergence]]
+case = "global"
+check = "spelling-error"
+kind = "behaviour"
+reason = "Words naming the source package or a shipped library of the same build are not spelling findings (plusky/rpmcrab#1527: `kbd` and `libkbdfile`/`libkeymap`/`libkfont` in kbd subpackage texts). A word in a Summary or %description that exactly matches (case-insensitively) a hyphen-separated part of the source package name its own build key names, or its possessive, is skipped — the credit needs no sibling, since the build key is the candidate's own SOURCERPM; and a word that exactly matches the stem of a `.so` file shipped by a binary package of the same SOURCERPM build (candidate's own package included, any file mode, %ghost excluded) is skipped. Lookalikes do not credit: a longer word containing the name or stem still fires, and an underscore-joined component is not a hyphen part, so the #1523 `aaa` token in aaa_base debuginfo summaries still fires. The reference has no such credits."
+since = "0.4.2"
+upstream = "https://github.com/plusky/rpmcrab/issues/1527"
