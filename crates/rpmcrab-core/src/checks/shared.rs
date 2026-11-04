@@ -38,6 +38,21 @@ pub(crate) fn source_package_keys(pkg: &Pkg) -> Vec<String> {
         .collect()
 }
 
+/// The source package name a `SOURCERPM` value names: the value is
+/// `<name>-<version>-<release>.src.rpm`, and only the name is stable
+/// across the subpackages of one build. A value in any other shape is
+/// returned whole, so it never equals a real package name by accident.
+pub(crate) fn source_pkg_name(sourcerpm: &str) -> &str {
+    let stem = sourcerpm.strip_suffix(".src.rpm").unwrap_or(sourcerpm);
+    match stem.rsplit_once('-') {
+        Some((rest, _release)) => match rest.rsplit_once('-') {
+            Some((name, _version)) if !name.is_empty() => name,
+            _ => stem,
+        },
+        None => stem,
+    }
+}
+
 /// Whether a package file entry is a `%ghost`: the header flag on
 /// the entry and the package's ghost list are two spellings of the
 /// same fact, and either marks the entry as not shipped content.
@@ -414,6 +429,20 @@ pub(crate) fn class_header_detail(head: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_pkg_name_strips_version_and_release() {
+        assert_eq!(source_pkg_name("sysconfig-0.90.5-1.2.src.rpm"), "sysconfig");
+        assert_eq!(source_pkg_name("fillup-1.42-281.7.src.rpm"), "fillup");
+        assert_eq!(source_pkg_name("libvirt-12.7.0-3.1.src.rpm"), "libvirt");
+        assert_eq!(
+            source_pkg_name("python3.14-3.14.0-1.1.src.rpm"),
+            "python3.14"
+        );
+        // Builder-made packages carry the placeholder, which names no
+        // real source package.
+        assert_eq!(source_pkg_name("(none)"), "(none)");
+    }
 
     #[test]
     fn class_header_detail_judges_magic_and_length_only() {
