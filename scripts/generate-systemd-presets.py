@@ -117,7 +117,7 @@ def parse_preset_file(text, install_name):
     Comments and blank lines are dropped. A template pattern with
     trailing instance names expands to one rule per instance.
     Anything else malformed fails loudly: silently guessing at
-    preset policy would mis-credit units at scan time.
+    preset policy would wrongly credit units at scan time.
     """
     rules = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
