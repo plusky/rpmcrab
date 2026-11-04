@@ -49,7 +49,10 @@
 //! dotted-digit filename version whose leading component differs from
 //! the package number all fire. A decorated file name stays quiet
 //! only when it starts with the full SONAME plus a `.` or `-`
-//! separator; any other decorated name fires. A symlink name is
+//! separator and its leading numeric version matches the package
+//! number; a decorated name for another generation fires even when
+//! it starts with the SONAME, and any other decorated name fires.
+//! A symlink name is
 //! judged on the name alone: a link name whose leading numeric
 //! version differs from the package number fires. The scan is
 //! deliberately narrow: only scheme-named library packages, only
@@ -479,9 +482,13 @@ impl SharedLibraryPolicyCheck {
     /// Plain dotted-digit filename versions compare by leading
     /// component; a decorated tail (such as `23.11-1`, `suse0` or
     /// `0d`) stays quiet only when the file name starts with the
-    /// full SONAME plus a `.` or `-` separator — a decorated name
-    /// that does not start with the SONAME, or a decorated name
-    /// without a SONAME, fires here. A SONAME that mismatches the
+    /// full SONAME plus a `.` or `-` separator and its leading
+    /// numeric version matches the package number — a decorated
+    /// name that does not start with the SONAME, a decorated name
+    /// without a SONAME, or a decorated name for another generation
+    /// fires here. A file named exactly its SONAME carries no
+    /// decorated tail beyond the SONAME and stays with the SONAME
+    /// arms. A SONAME that mismatches the
     /// package name stays with `shlib-policy-name-error`; a file
     /// whose filename version mismatches fires here even when its
     /// SONAME matches, because the file name itself is wrong.
@@ -517,11 +524,18 @@ impl SharedLibraryPolicyCheck {
                     if !is_dotted_digits(tail) {
                         // Decorated tail: fine only when the file
                         // name starts with the full SONAME plus a
-                        // '.' or '-' separator, so
-                        // `libfoo.so.1-suse0` under SONAME
-                        // `libfoo.so.1` stays quiet while
+                        // '.' or '-' separator and the leading
+                        // numeric version matches the package
+                        // number, as the dotted arm already
+                        // requires — so `libfoo.so.1-suse0` under
+                        // SONAME `libfoo.so.1` stays quiet while
                         // `libfoo.so.0-suse0` (or any decorated
-                        // name without a SONAME) fires.
+                        // name without a SONAME) fires. A file
+                        // named exactly its SONAME carries no
+                        // decorated tail beyond the SONAME, so
+                        // the SONAME arms own it; a word tail
+                        // carries no version to judge and stays
+                        // quiet, as for links.
                         let starts_with_soname = match soname {
                             Some(s) => {
                                 base.starts_with(s.as_str())
@@ -534,14 +548,26 @@ impl SharedLibraryPolicyCheck {
                             None => false,
                         };
                         if starts_with_soname {
-                            continue;
-                        }
-                        reasons.push(match soname {
-                            Some(s) => {
-                                format!("decorated file name does not start with SONAME {s}")
+                            let exact = matches!(soname, Some(s) if base.len() == s.len());
+                            if !exact {
+                                let lead: String =
+                                    tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+                                if !lead.is_empty() {
+                                    let first = lead.trim_start_matches('0');
+                                    let first = if first.is_empty() { "0" } else { first };
+                                    if first != number {
+                                        reasons.push(format!("version {first}, expected {number}"));
+                                    }
+                                }
                             }
-                            None => "decorated file name without SONAME".to_string(),
-                        });
+                        } else {
+                            reasons.push(match soname {
+                                Some(s) => {
+                                    format!("decorated file name does not start with SONAME {s}")
+                                }
+                                None => "decorated file name without SONAME".to_string(),
+                            });
+                        }
                     } else {
                         if soname.is_none() {
                             reasons.push("no SONAME".to_string());
@@ -4847,6 +4873,33 @@ mod tests {
             ],
         );
         assert!(lines.is_empty(), "no findings: {lines:?}");
+    }
+
+    #[test]
+    fn wrong_library_version_decorated_generation_mismatch_fires() {
+        // A decorated tail starting with the full SONAME still
+        // fires when its leading numeric version is another
+        // generation than the package: libfoo.so.0-suse0 with
+        // SONAME libfoo.so.0 in libfoo1. The package still errors
+        // via shlib-policy-name-error for the SONAME mismatch; this
+        // is tag precision, not a newly caught error.
+        let lines = wrong_version_details(
+            "decgeneration",
+            "libfoo1",
+            vec![wrongver_elf(
+                "decgeneration",
+                "lib",
+                "/usr/lib64/libfoo.so.0-suse0",
+                "libfoo.so.0",
+            )],
+        );
+        assert_eq!(lines.len(), 1, "exactly one finding: {lines:?}");
+        assert!(lines[0].contains(" E: "), "Error level: {}", lines[0]);
+        assert!(
+            lines[0].contains("/usr/lib64/libfoo.so.0-suse0 (version 0, expected 1)"),
+            "detail: {}",
+            lines[0]
+        );
     }
 
     #[test]
