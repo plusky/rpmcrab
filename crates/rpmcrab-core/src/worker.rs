@@ -625,7 +625,7 @@ mod tests {
         }
 
         let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm")
+            .join("../../tests/parity/pkg/inputs/buildenv-cap-unmarked-1.0-1.noarch.rpm")
             .canonicalize()
             .expect("corpus rpm is committed");
         let config = Config::default();
@@ -664,7 +664,7 @@ mod tests {
         }
 
         let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm")
+            .join("../../tests/parity/pkg/inputs/buildenv-cap-unmarked-1.0-1.noarch.rpm")
             .canonicalize()
             .expect("corpus rpm is committed");
         let config = Config::default();
@@ -715,7 +715,7 @@ mod tests {
         }
 
         let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/parity/cases/llvm21-gold/input/llvm21-gold-21.1.8-9.2.aarch64.rpm")
+            .join("../../tests/parity/pkg/inputs/buildenv-cap-unmarked-1.0-1.noarch.rpm")
             .canonicalize()
             .expect("corpus rpm is committed");
         let config = Config::default();
