@@ -18,6 +18,12 @@ A patch is included in your package but was not applied.
 patch-not-defined="""
 A patch is applied with %patch but no matching PatchN: definition
 exists in the spec. Define the patch or drop the reference.
+When patches are applied by a macro (%autosetup, %autopatch, a
+configured patch-applying macro, or a declarative spec's implicit
+%prep), this finding stays quiet together with patch-not-applied.
+The two checks share one gate by design: once application is
+delegated to a macro, the checker does not judge explicit %patch
+references in either direction.
 """
 patch-macro-old-format="""
 The usage of %patchN is not supported by RPM >= 4.20. The preferred way to
