@@ -48,10 +48,11 @@
 //! shipped in libiio1), a bare `.so` regular ELF file, or a plain
 //! dotted-digit filename version whose leading component differs from
 //! the package number all fire. A decorated file name stays quiet
-//! only when it starts with the full SONAME plus a `.` or `-`
-//! separator and its leading numeric version matches the package
-//! number; a decorated name for another generation fires even when
-//! it starts with the SONAME, and any other decorated name fires.
+//! only when it equals the full SONAME, or when it starts with
+//! the SONAME plus a `.` or `-` separator and its leading numeric
+//! version matches the package number; a decorated name for another
+//! generation fires even when it starts with the SONAME, and any
+//! other decorated name fires.
 //! A symlink name is
 //! judged on the name alone: a link name whose leading numeric
 //! version differs from the package number fires. The scan is
