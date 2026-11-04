@@ -57,6 +57,7 @@ bundled-library-without-provides = W
 call-to-gets = E
 call-to-mktemp = E
 call-to-tmpnam = E
+changelog-not-in-sequence = E
 changelog-time-in-future = E
 changelog-time-overflow = W
 cmake-dangling-imported-location = W
