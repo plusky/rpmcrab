@@ -9250,8 +9250,16 @@ impl FilesCheck {
         // chunk for the FSF address, missing it in longer files. The port
         // scans the whole file instead (divergences.toml), streaming it in
         // bounded windows so a large file never sits in memory twice.
-        if self.fsf_address_matches(pkg, pkgfile, out) {
-            add_info(out, Level::Warning, pkg, "incorrect-fsf-address", &[fname]);
+        // Debugsource copies are verbatim upstream sources
+        // (plusky/rpmcrab#1519): their licence headers are upstream's
+        // text, not package content, so they never fire here. Every
+        // other file reports at info level: a stale FSF postal address
+        // is a documentation defect with no artefact consequence, and
+        // canonical licence texts and upstream headers cannot be
+        // rewritten in the package, so the finding can never block a
+        // zero-warning run by a legitimate package change.
+        if !fname.starts_with("/usr/src/debug/") && self.fsf_address_matches(pkg, pkgfile, out) {
+            add_info(out, Level::Info, pkg, "incorrect-fsf-address", &[fname]);
         }
     }
 
@@ -14069,9 +14077,46 @@ print("hi")
         assert_eq!(
             fsf,
             [
-                "fsf-address-fixture.noarch: W: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
-                "fsf-address-fixture.noarch: W: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
+                "fsf-address-fixture.noarch: I: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-early",
+                "fsf-address-fixture.noarch: I: incorrect-fsf-address /usr/share/doc/packages/fsf-address-fixture/LICENSE-late",
             ],
+        );
+    }
+
+    #[test]
+    fn fsf_address_reports_at_info_and_skips_debugsource() {
+        // plusky/rpmcrab#1519: a stale FSF address is info, not a
+        // warning -- canonical licence texts and upstream headers
+        // cannot be rewritten in the package -- and a debugsource
+        // copy of an upstream source never fires at all.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let content = b"GNU General Public License\n59 Temple Place, Boston\n";
+        let pkg = logfile_pkg(
+            &dir,
+            &[
+                ("/usr/src/debug/demo-1.0/demo.c", "root", "root", content),
+                (
+                    "/usr/share/doc/packages/demo/LICENSE",
+                    "root",
+                    "root",
+                    content,
+                ),
+            ],
+        );
+        let config = test_config();
+        let (results, levels) = run_files_check_pkgs(std::slice::from_ref(&pkg), &config);
+        let fsf: Vec<(&String, &Level)> = results
+            .iter()
+            .zip(levels.iter())
+            .filter(|((name, _), _)| name == "incorrect-fsf-address")
+            .map(|((_, line), level)| (line, level))
+            .collect();
+        assert_eq!(fsf.len(), 1, "only the licence text fires: {fsf:?}");
+        assert_eq!(*fsf[0].1, Level::Info);
+        assert!(
+            fsf[0].0.contains("/usr/share/doc/packages/demo/LICENSE"),
+            "the firing file is the licence text: {}",
+            fsf[0].0
         );
     }
 
