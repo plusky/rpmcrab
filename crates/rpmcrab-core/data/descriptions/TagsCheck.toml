@@ -56,6 +56,11 @@ the past.
 changelog-time-in-future="""
 The timestamp of the latest entry in %changelog is in the future.
 """
+changelog-not-in-sequence="""
+The %changelog entries are not in chronological order. Entries are
+listed newest first, so each entry must be dated no later than the
+one before it.
+"""
 no-license="""
 There is no License tag in your spec file. You have to specify one license
 for your program (eg. GPL-3.0-only).

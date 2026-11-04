@@ -1502,6 +1502,21 @@ impl TagsCheck {
                 }
             }
         }
+        // Changelog entries list newest first, so timestamps must be
+        // non-increasing: a later entry dated newer than its
+        // predecessor is out of sequence. Equal timestamps stay
+        // quiet -- same-day entries are common and unordered.
+        for pair in times.windows(2) {
+            if pair[1] as i64 > pair[0] as i64 {
+                add_info(
+                    out,
+                    Level::Error,
+                    pkg,
+                    "changelog-not-in-sequence",
+                    &[&format_date(pair[0] as i64), &format_date(pair[1] as i64)],
+                );
+            }
+        }
     }
 
     /// Split a license expression into the leaf pieces the validator
@@ -2298,6 +2313,57 @@ mod tests {
         (tmp, rpm_path)
     }
 
+    /// Copy a fixture RPM with every CHANGELOGTIME rewritten in order.
+    /// Companion to `patch_changelog_time` for multi-entry sequence
+    /// tests: the single-value helper only rewrites the first entry.
+    fn patch_changelog_times(
+        fixture: &str,
+        new_times: &[i64],
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        const TAG_CHANGELOGTIME: u32 = 1080;
+        const TYPE_INT32: u32 = 4;
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs")
+            .join(fixture);
+        let mut bytes = std::fs::read(&src).expect("read fixture rpm");
+        assert_eq!(&bytes[0..4], b"\xed\xab\xee\xdb", "rpm lead magic");
+        let u32_at = |off: usize| u32::from_be_bytes(bytes[off..off + 4].try_into().unwrap());
+        let mut off = 96;
+        assert_eq!(
+            &bytes[off..off + 3],
+            b"\x8e\xad\xe8",
+            "signature header magic"
+        );
+        off += 16 + u32_at(off + 8) as usize * 16 + u32_at(off + 12) as usize;
+        off = off.div_ceil(8) * 8;
+        assert_eq!(&bytes[off..off + 3], b"\x8e\xad\xe8", "main header magic");
+        let count = u32_at(off + 8) as usize;
+        let data = off + 16 + count * 16;
+        let mut patched = false;
+        for i in 0..count {
+            let e = off + 16 + i * 16;
+            if u32_at(e) == TAG_CHANGELOGTIME && u32_at(e + 4) == TYPE_INT32 {
+                let entries = u32_at(e + 12) as usize;
+                assert!(
+                    entries >= new_times.len(),
+                    "fixture has {entries} changelog entries, need {}",
+                    new_times.len()
+                );
+                let at = data + u32_at(e + 8) as usize;
+                for (j, t) in new_times.iter().enumerate() {
+                    bytes[at + j * 4..at + j * 4 + 4].copy_from_slice(&(*t as u32).to_be_bytes());
+                }
+                patched = true;
+                break;
+            }
+        }
+        assert!(patched, "CHANGELOGTIME missing in {fixture}");
+        let tmp = tempfile::tempdir().expect("tmpdir for patched rpm");
+        let rpm_path = tmp.path().join(fixture);
+        std::fs::write(&rpm_path, &bytes).expect("write patched rpm");
+        (tmp, rpm_path)
+    }
+
     fn wall_now() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2356,6 +2422,52 @@ mod tests {
             ),
             "unexpected line"
         );
+    }
+
+    /// Changelog sequence: a later entry dated newer than its
+    /// predecessor fires once, at Error, pinning both dates; ordered
+    /// and equal-timestamp entries stay quiet.
+    #[test]
+    fn changelog_sequence_fires_on_later_newer_entry() {
+        let (_tmp, tmp) = patch_changelog_times(
+            "changelog-author-fixture-1.0-1.noarch.rpm",
+            &[1_600_000_000, 1_700_000_000, 1_500_000_000],
+        );
+        let pkg = Pkg::open_no_extract(&tmp).expect("open patched pkg");
+        let results = run_check(&pkg);
+        let hits: Vec<_> = results
+            .iter()
+            .filter(|(name, _)| name.as_str() == "changelog-not-in-sequence")
+            .collect();
+        assert_eq!(hits.len(), 1, "expected one finding: {results:?}");
+        assert_eq!(
+            hits[0].1,
+            format!(
+                "changelog-author-fixture.noarch: E: changelog-not-in-sequence {} {}",
+                format_date(1_600_000_000),
+                format_date(1_700_000_000)
+            ),
+            "unexpected line"
+        );
+    }
+
+    #[test]
+    fn changelog_sequence_quiet_on_ordered_and_equal_entries() {
+        for times in [
+            [1_700_000_000, 1_600_000_000, 1_500_000_000],
+            [1_700_000_000, 1_700_000_000, 1_500_000_000],
+        ] {
+            let (_tmp, tmp) =
+                patch_changelog_times("changelog-author-fixture-1.0-1.noarch.rpm", &times);
+            let pkg = Pkg::open_no_extract(&tmp).expect("open patched pkg");
+            let results = run_check(&pkg);
+            assert!(
+                results
+                    .iter()
+                    .all(|(name, _)| name != "changelog-not-in-sequence"),
+                "unexpected findings for {times:?}: {results:?}"
+            );
+        }
     }
 
     // Upstream rpmlint#180: bot/invalid changelog authors.
