@@ -3281,7 +3281,7 @@ fn own_requires_account(pkg: &Pkg, group: bool, name: &str) -> bool {
 /// `<name>-<version>-<release>.src.rpm`, and only the name is stable
 /// across the subpackages of one build. A value in any other shape is
 /// returned whole, so it never equals a real package name by accident.
-fn source_pkg_name(sourcerpm: &str) -> &str {
+pub(crate) fn source_pkg_name(sourcerpm: &str) -> &str {
     let stem = sourcerpm.strip_suffix(".src.rpm").unwrap_or(sourcerpm);
     match stem.rsplit_once('-') {
         Some((rest, _release)) => match rest.rsplit_once('-') {

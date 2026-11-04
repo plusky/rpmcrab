@@ -186,6 +186,12 @@ impl FilelistCheck {
                     match check.get("IgnorePkgIf").and_then(|v| v.as_str()) {
                         Some("notnoarch") => Some(|p: &Pkg| p.arch != "noarch"),
                         Some("isfilesystem") => Some(|p: &Pkg| p.name == "filesystem"),
+                        Some("issystemd") => Some(|p: &Pkg| {
+                            p.name == "systemd"
+                                || p.source_rpm.as_deref().is_some_and(|srpm| {
+                                    crate::checks::files::source_pkg_name(srpm) == "systemd"
+                                })
+                        }),
                         Some("isdebuginfo") => Some(|p: &Pkg| {
                             p.name.ends_with("-debuginfo")
                                 || p.name.ends_with("-debuginfo-32bit")
@@ -1618,6 +1624,70 @@ mod tests {
                 .contains("E: filelist-forbidden-bashcomp-userdirs /etc/bash_completion.d/w6comp"),
             "name, level and detail: {}",
             lines[0]
+        );
+    }
+
+    // Issue #1500: systemd owns the directories this rule calls user
+    // dirs, so its own package must not fire on any of them: the
+    // binary package named systemd, and subpackages built from the
+    // systemd source package (their SOURCERPM name).
+    #[test]
+    fn systemd_userdirs_exempt_for_systemd_itself() {
+        let paths = [
+            "/etc/systemd/system.conf",
+            "/etc/modules-load.d/foo.conf",
+            "/etc/tmpfiles.d/foo.conf",
+        ];
+        let config = Config::default();
+        // By binary name alone, with no source package recorded.
+        let mut pkg = pkg_with_files(&paths);
+        pkg.name = "systemd".to_string();
+        pkg.source_rpm = None;
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-systemd-userdirs");
+        assert!(
+            lines.is_empty(),
+            "systemd itself must stay quiet: {lines:?}"
+        );
+        // By source package: a subpackage built from systemd.
+        let mut pkg = pkg_with_files(&paths);
+        pkg.name = "systemd-networkd".to_string();
+        pkg.source_rpm = Some("systemd-262.1-00.src.rpm".to_string());
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-systemd-userdirs");
+        assert!(
+            lines.is_empty(),
+            "systemd subpackage must stay quiet: {lines:?}"
+        );
+    }
+
+    // Negative control for #1500: the same paths in any other package
+    // still fire at Error, including a systemd-prefixed binary built
+    // from another source -- the exemption is the systemd source
+    // package, not the name prefix.
+    #[test]
+    fn systemd_userdirs_still_fires_for_other_packages() {
+        let paths = [
+            "/etc/systemd/system.conf",
+            "/etc/modules-load.d/foo.conf",
+            "/etc/tmpfiles.d/foo.conf",
+        ];
+        let config = Config::default();
+        let pkg = pkg_with_files(&paths);
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-systemd-userdirs");
+        assert_eq!(lines.len(), 3, "one Error per path: {lines:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.contains("E: filelist-forbidden-systemd-userdirs")),
+            "every path must stay an Error: {lines:?}"
+        );
+        let mut pkg = pkg_with_files(&paths);
+        pkg.name = "systemd-networkd".to_string();
+        pkg.source_rpm = Some("other-1.0-1.src.rpm".to_string());
+        let lines = lines_for(&run(&config, &pkg), "filelist-forbidden-systemd-userdirs");
+        assert_eq!(
+            lines.len(),
+            3,
+            "a systemd-prefixed name from another source must still fire: {lines:?}"
         );
     }
 }
