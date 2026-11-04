@@ -3851,6 +3851,37 @@ mod tests {
     }
 
     #[test]
+    fn spelling_own_package_program_credited_in_summary() {
+        // The sibling-program credit covers the candidate's own
+        // package too: a program name in a Summary is not a typo
+        // when the same package ships the executable.
+        let config = test_config();
+        let (_t, daemon) = spelling_pkg("spelling-daemon", vec![syn_exec("usr/sbin/iiod")]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = TagsCheck::new(&config);
+        check.set_test_spellchecker();
+        check.check_summary(
+            &daemon,
+            &mut out,
+            "Industrial I/O library -- iiod wrld",
+            "C",
+            &[],
+        );
+        check.check(&daemon, &config, &mut out);
+        check.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            spelling_hits(&results, "iiod").is_empty(),
+            "own-package program must credit: {results:?}"
+        );
+        assert_eq!(
+            spelling_hits(&results, "wrld").len(),
+            1,
+            "an ordinary typo in the same text still fires: {results:?}"
+        );
+    }
+
+    #[test]
     fn spelling_mixed_case_fires_without_sibling() {
         // Control for the mixed-case credit test: the sentence-start
         // `Iiod` fires when no sibling ships the program, so the
