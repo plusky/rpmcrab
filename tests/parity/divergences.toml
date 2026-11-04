@@ -4354,6 +4354,20 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "SystemdInstallCheck"
+kind = "behaviour"
+reason = "Preset delegation credit: a unit the vendored preset data enables draws neither systemd-service-without-service_add_pre nor systemd-service-without-service_add_post. At fresh install the branding package's %posttrans runs systemctl preset-all --preset-mode=enable-only, which enables every preset-enabled unit, so per-unit install calls are redundant there; upgrade coverage comes from the per-unit %systemd_pre call instead. Removal and restart findings are unchanged: preset policy never covers those. Measured on the systemd 262.1 tree (the motivating population): the credit moves no lines, because only one evaluated unit there is preset-enabled (remote-fs.target) and it draws only a del_preun finding; the remaining 242 add_pre and 170 add_post lines are units preset policy does not enable. Pinned by preset_enabled_unit_with_no_calls_draws_gap_plus_removal_only and flavour_selects_preset_data in systemd_install.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
+check = "systemd-preset-enabled-without-service_add_pre"
+kind = "behaviour"
+reason = "New port-only Warning with no reference counterpart: the reference fires systemd-service-without-service_add_pre at E for every unit lacking the per-unit call, with no preset awareness. The port reports the upgrade-coverage gap instead: a preset-enabled unit without a %pre service_add_pre call is not enabled on an update that leaves branding out of the transaction, since preset-all runs only when branding is in it. Warning, since a missing upgrade-coverage call is not a demonstrated defect. Pinned by preset_enabled_unit_with_no_calls_draws_gap_plus_removal_only, preset_enabled_unit_with_mark_install_draws_removal_only and preset_enabled_subdir_entry_draws_no_gap in systemd_install.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "systemd-tmpfile-parse-error"
 kind = "detail"
 reason = "The reference (TmpfilesParser.warn) formats parse warnings as 'source:line: msg'; the port formats 'source: msg' and passes the line as a separate finding detail. Only the warning string differs ('source: msg' vs 'source:line: msg'); the detail placement is argument-for-argument identical."

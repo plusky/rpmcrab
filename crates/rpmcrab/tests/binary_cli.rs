@@ -3017,7 +3017,7 @@ fn explain_staged_systemd_install_check() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout,
-        "systemd-service-without-service_add_pre:\nThe package contains a systemd service but doesn't contain a %pre with a call\nto service_add_pre.\n\n\n",
+        "systemd-service-without-service_add_pre:\nThe package ships a systemd unit that distribution preset policy does not\nenable, and its %pre has no service_add_pre call for the unit. Add the call to\n%pre.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
