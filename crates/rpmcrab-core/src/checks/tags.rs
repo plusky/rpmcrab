@@ -1919,13 +1919,25 @@ impl TagsCheck {
     /// A versioned Obsoletes entry that matches a Provides entry of the same
     /// name without reaching beyond the provided EVR is the documented
     /// package-merge pattern (e.g. `Provides: foo = 1.6.1` with
-    /// `Obsoletes: foo <= 1.6.1`) and is not reported.
+    /// `Obsoletes: foo <= 1.6.1`) and is not reported. Likewise, a
+    /// rename pair is not reported: when the collided name differs from
+    /// the package's own name and the Provides and Obsoletes bounds are
+    /// identical (e.g. `Provides: rpm-imaevmsign < 4.20.1` with
+    /// `Obsoletes: rpm-imaevmsign < 4.20.1` on `rpm-plugin-imaevmsign`),
+    /// the Obsoletes can only match old releases of the renamed-away
+    /// package, never the package itself. The self-name case and
+    /// differing bounds still report.
     fn check_self_obsoletion(&self, pkg: &Pkg, out: &mut Filter) {
         if pkg.obsoletes.is_empty() {
             return;
         }
         for prov in &pkg.provides {
             for obs in &pkg.obsoletes {
+                // #1516: the rename pattern. Identical bounds on a name
+                // the package does not itself carry cannot obsolete it.
+                if prov.name != pkg.name && prov == obs {
+                    continue;
+                }
                 if range_compare(obs, prov) {
                     add_info(
                         out,
@@ -2860,6 +2872,46 @@ mod tests {
                     .to_string(),
             )],
             "overreaching range must warn"
+        );
+    }
+
+    /// Emission-path port of #1516: the Provides+Obsoletes rename pair
+    /// stays silent, while the self-name case with identical bounds and
+    /// differing bounds on a foreign name still warn.
+    #[test]
+    fn self_obsoletion_rename_pattern_is_silent() {
+        // Provides: rpm-imaevmsign < 4.20.1, Obsoletes: rpm-imaevmsign
+        // < 4.20.1, on a package named fcprobe: the rename shape.
+        let prov = make_dep("rpm-imaevmsign", RPMSENSE_LESS, Some("4.20.1"));
+        let obs = make_dep("rpm-imaevmsign", RPMSENSE_LESS, Some("4.20.1"));
+        assert!(
+            self_obsoletion_results(prov, obs).is_empty(),
+            "rename pair must not warn"
+        );
+        // Self-name with identical bounds still warns: the package
+        // itself carries the collided name.
+        let prov = make_dep("fcprobe", RPMSENSE_LESS, Some("4.20.1"));
+        let obs = make_dep("fcprobe", RPMSENSE_LESS, Some("4.20.1"));
+        assert_eq!(
+            self_obsoletion_results(prov, obs),
+            [(
+                "self-obsoletion".to_string(),
+                "fcprobe.noarch: W: self-obsoletion fcprobe < 4.20.1 obsoletes fcprobe < 4.20.1"
+                    .to_string(),
+            )],
+            "self-name identical bounds must warn"
+        );
+        // Differing bounds on a foreign name still warn.
+        let prov = make_dep("rpm-imaevmsign", RPMSENSE_LESS, Some("4.20.1"));
+        let obs = make_dep("rpm-imaevmsign", RPMSENSE_LESS, Some("4.20.2"));
+        assert_eq!(
+            self_obsoletion_results(prov, obs),
+            [(
+                "self-obsoletion".to_string(),
+                "fcprobe.noarch: W: self-obsoletion rpm-imaevmsign < 4.20.2 obsoletes rpm-imaevmsign < 4.20.1"
+                    .to_string(),
+            )],
+            "differing bounds must warn"
         );
     }
 
