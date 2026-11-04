@@ -172,6 +172,7 @@ journaling
 jpeg
 keymap/MS
 keyring/S
+lastlog
 letterform/MS
 lexically
 librpm/MS
@@ -221,6 +222,7 @@ observability
 ogg
 opensource
 orchestrator
+pam
 parallelize/SD
 parametrize/DGS
 parsers

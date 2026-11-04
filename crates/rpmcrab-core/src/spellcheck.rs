@@ -1135,6 +1135,23 @@ SFX N 0 en [^ey]\n";
     }
 
     #[test]
+    fn pam_and_lastlog_are_accepted() {
+        // Common system terms from plusky/rpmcrab#1520: the PAM
+        // module name in pam_lastlog2 and the lastlog database name.
+        // Both are absent from the pinned en_US dictionary (pam only
+        // as the capitalised proper name Pam).
+        let checker = test_checker().with_supplementary_words();
+        for word in ["pam", "lastlog"] {
+            assert!(
+                checker
+                    .check(&format!("hello {word} world"), "testpkg", &[])
+                    .is_empty(),
+                "{word} must be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn ebpf_elf_terms_are_accepted() {
         // eBPF/ELF vocabulary the system dictionary lacks: the uprobes
         // facility, the .symtab/.dynsym section names, the BPF ring

@@ -4887,6 +4887,13 @@ since = "0.4.2"
 case = "global"
 check = "spelling-error"
 kind = "behaviour"
+reason = "The bundled supplementary vocabulary gains two common system terms (plusky/rpmcrab#1520: pam for the PAM module name in pam_lastlog2, lastlog for the legacy utility and database name). Both are absent from the pinned en_US dictionary as lowercase words (pam only as the capitalised proper name Pam), so the reference flags them and the port stays silent. Verified against the pinned en_US dictionary and pinned by pam_and_lastlog_are_accepted in spellcheck.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
+check = "spelling-error"
+kind = "behaviour"
 reason = "Words naming a shipped program of the same build are not spelling findings: a word in a Summary or %description that exactly matches (case-insensitively) the basename of an executable regular file shipped by a binary package of the same SOURCERPM build (candidate's own package included) is skipped (plusky/rpmcrab#1481: `iiod` in libiio-usb-udev-rules' Summary, where /usr/sbin/iiod ships in sibling libiio-daemon). The credit is build-scoped, not run-wide, so unrelated packages in one run do not credit each other, and keyless or single-package runs keep the per-package verdict. Non-executable files, %ghost files and lookalikes (iiodd, iio) do not credit: only an exact basename match of a shipped executable counts. The verdict is deferred to `after_checks`, where the run-scoped sibling credit is judged against the build-keyed executable basenames — the same deferral pattern as `obsolete-not-provided`, which likewise judges in `after_checks`; the credit source and gates are spelling-specific (executable regular file, non-ghost, exact basename; source packages ship no installed programs and contribute nothing, and a keyless binary belongs to no build the run can judge). Candidates emit in encounter order, so the rendered order is unchanged given the output sort, which keys on the check name and keeps insertion order for equal keys (pinned by spelling_deferred_findings_keep_encounter_order in tags.rs)."
 since = "0.4.2"
 
