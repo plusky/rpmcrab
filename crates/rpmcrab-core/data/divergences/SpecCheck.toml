@@ -373,3 +373,10 @@ kind = "behaviour"
 reason = "Fixed behaviour: a BuildArch: noarch declaration is credited only when its conditional context can hold at the same time as the %files line's -- a declaration and a %files line in mutually exclusive branches of the same condition (same condition text, different branch: %if against %elif/%else) never combine, while unrelated conditionals never exclude. The reference records noarch from any BuildArch line regardless of conditionals and warns on every branch pairing. Measured over the Factory spec corpus (16,501 specs): the tag drops 34 -> 23 findings; the 11 removed findings (libdbus-c++, muparserx, openmpi4, openmpi5) are each a declaration and %files lines in opposite branches of one repeated flavour condition, hand-verified; nothing is added."
 since = "0.4.1"
 upstream = "https://github.com/plusky/rpmcrab/issues/1171"
+
+[[divergence]]
+case = "global"
+check = "no-%changelog-section"
+kind = "severity"
+reason = "Deliberate severity recalibration: the port reports E where the reference level resolves to W. The reference never emits this exact finding: its SpecCheck._check_no_s_section (pinned reference 84848c05, rpmlint/checks/SpecCheck.py:257) emits the templated 'no-%%%s-section' at W for a missing %prep, %build, %install or %check section, and the audit's printf_template resolves that template to 'no-%*-section', which matches this name, so the resolved reference level is W and the port's E is unledgered without this entry. The Error is deliberate: a spec with no %changelog section header is a Factory submission decline (factory-auto: <pkg>.spec does not contain a %changelog line, e.g. duckdb), so a warning would understate a submission-blocking defect."
+since = "0.4.2"
