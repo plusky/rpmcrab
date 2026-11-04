@@ -2134,6 +2134,17 @@ impl Check for SpecCheck {
                     );
                 }
             }
+            // The inverse: a `%patch` reference to a `PatchN:` that is
+            // never defined. Same severity as `patch-not-applied`.
+            let mut referenced: Vec<i64> = self.applied_patches.clone();
+            referenced.sort_unstable();
+            referenced.dedup();
+            for pnum in referenced {
+                if !self.patches.contains_key(&pnum) {
+                    let tag = format!("Patch{pnum}:");
+                    self.info(out, pkg, Level::Warning, "patch-not-defined", &[&tag]);
+                }
+            }
         }
 
         if self.spec_file.is_none() {
@@ -6538,6 +6549,47 @@ Requires:       foo<bar\n";
         assert!(has(&run_mini(&prose), "no-copyright-comment"));
         let longer = format!("# Copyrighted material\n{base}");
         assert!(has(&run_mini(&longer), "no-copyright-comment"));
+    }
+
+    #[test]
+    fn patch_referenced_but_not_defined_warns() {
+        let spec = "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\nSource0:        wobble-1.0.tar.gz\nPatch0:         fix-it.patch\n\n%description\nWobble.\n\n%prep\n%setup -q\n%patch -P 0 -p1\n%patch 1 -p1\n\n%files\n%{_bindir}/*\n\n%changelog\n* Mon Jan 01 2024 Someone <someone@example.com> - 1.0-1\n- Initial version.\n";
+        let results = run_mini(spec);
+        let lines = lines_for(&results, "patch-not-defined");
+        assert_eq!(lines.len(), 1, "results: {results:?}");
+        assert!(
+            lines[0].contains("W: patch-not-defined Patch1:"),
+            "line: {}",
+            lines[0]
+        );
+        // The defined half stays quiet on both directions.
+        assert!(
+            lines_for(&results, "patch-not-applied").is_empty(),
+            "results: {results:?}"
+        );
+    }
+
+    #[test]
+    fn patch_not_defined_quiet_when_all_referenced_defined() {
+        let spec = "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\nSource0:        wobble-1.0.tar.gz\nPatch0:         fix-it.patch\nPatch1:         another.patch\n\n%description\nWobble.\n\n%prep\n%setup -q\n%patch -P 0 -p1\n%patch -P 1 -p1\n\n%files\n%{_bindir}/*\n\n%changelog\n* Mon Jan 01 2024 Someone <someone@example.com> - 1.0-1\n- Initial version.\n";
+        let results = run_mini(spec);
+        assert!(
+            lines_for(&results, "patch-not-defined").is_empty(),
+            "results: {results:?}"
+        );
+    }
+
+    #[test]
+    fn bare_patch_defaults_to_patch0_for_not_defined() {
+        // A bare `%patch` applies Patch0; with no Patch0 defined it fires.
+        let spec = "Name:           wobble\nVersion:        1.0\nRelease:        1\nSummary:        Wobble\nLicense:        MIT\nSource0:        wobble-1.0.tar.gz\n\n%description\nWobble.\n\n%prep\n%setup -q\n%patch -p1\n\n%files\n%{_bindir}/*\n\n%changelog\n* Mon Jan 01 2024 Someone <someone@example.com> - 1.0-1\n- Initial version.\n";
+        let lines = lines_for(&run_mini(spec), "patch-not-defined");
+        assert_eq!(lines.len(), 1, "lines: {lines:?}");
+        assert!(
+            lines[0].contains("W: patch-not-defined Patch0:"),
+            "line: {}",
+            lines[0]
+        );
     }
 
     #[test]
