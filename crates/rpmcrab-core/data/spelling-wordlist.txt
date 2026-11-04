@@ -326,6 +326,7 @@ traceback/MS
 tracepoint/MS
 triangulations
 typesafe
+udev
 uncompress/S
 uninstallation
 univariate

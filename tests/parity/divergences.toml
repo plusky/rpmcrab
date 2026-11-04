@@ -4871,6 +4871,13 @@ since = "0.4.2"
 case = "global"
 check = "spelling-error"
 kind = "behaviour"
+reason = "The bundled supplementary vocabulary gains udev (plusky/rpmcrab#1515): the device-manager name in package prose, absent from the pinned en_US dictionary, so the reference flags it and suggests evdev while the port now stays silent. Verified against the pinned en_US dictionary and pinned by udev_is_accepted in spellcheck.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
+check = "spelling-error"
+kind = "behaviour"
 reason = "Package-name skipping is exact parts plus possessives only: the reference skips any error word that occurs inside the full uppercased package name (spellcheck.py: `if upperword in uppername or upperword in upperparts`), so a truncated fragment of the package name (the test's one-letter-short fragment for `something`) - or any single letter occurring in the name - is skipped there and reported here. The substring arm was removed deliberately: a substring match hides genuine typos that merely occur inside a long hyphenated name. Pinned by package_name_substring_is_not_skipped in spellcheck.rs."
 since = "0.4.2"
 
