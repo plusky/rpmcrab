@@ -2930,6 +2930,7 @@ impl Check for FilesCheck {
         self.check_fillup_template_without_call(pkg, out);
         self.check_fillup_usage_discouraged(pkg, out);
         self.check_license_coverage(pkg, &st, out);
+        self.check_sysusers_requires(pkg, out);
         self.nodep_candidates.append(&mut st.nodep_candidates);
         self.bytecode_candidates.append(&mut st.bytecode_candidates);
     }
@@ -4717,6 +4718,65 @@ impl FilesCheck {
                 .entry(source)
                 .or_default()
                 .extend(groups);
+        }
+    }
+
+    /// A `user(<name>)` / `group(<name>)` Requires the package itself
+    /// does not provide for: it ships no sysusers.d snippet declaring
+    /// the account and no `user()` / `group()` Provides of its own.
+    /// The motivating shape is an installcheck decline ("nothing
+    /// provides user(owntone)") on a package whose spec never shipped
+    /// the fragment. Only this package's own declarations count: a
+    /// sibling subpackage's fragment does not install with this
+    /// package, so it is no provider here -- that known
+    /// false-positive class is why the finding warns instead of
+    /// erroring. Packager-written Requires reach `requires` and the
+    /// scriptlet-context `prereq` split alike; generator-derived
+    /// account Requires never reach either (the header loader drops
+    /// them), so they cannot fire this.
+    fn check_sysusers_requires(&self, pkg: &Pkg, out: &mut Filter) {
+        let (mut users, mut groups) = own_sysusers_declared(pkg);
+        for dep in &pkg.provides {
+            for leaf in dep.leaves() {
+                if let Some((group, name)) = leaf_account_capability(&leaf) {
+                    if group {
+                        groups.insert(name.to_string());
+                    } else {
+                        users.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        let mut required: Vec<(bool, String)> = Vec::new();
+        for dep in pkg.requires.iter().chain(pkg.prereq.iter()) {
+            for leaf in dep.leaves() {
+                if let Some((group, name)) = leaf_account_capability(&leaf) {
+                    required.push((group, name.to_string()));
+                }
+            }
+        }
+        required.sort();
+        required.dedup();
+        for (group, name) in required {
+            let provided = if group {
+                groups.contains(&name)
+            } else {
+                users.contains(&name)
+            };
+            if !provided {
+                let capability = if group {
+                    format!("group({name})")
+                } else {
+                    format!("user({name})")
+                };
+                add_info(
+                    out,
+                    Level::Warning,
+                    pkg,
+                    "missing-sysusers-provider",
+                    &[&capability],
+                );
+            }
         }
     }
 
@@ -11128,6 +11188,76 @@ print("hi")
             logfile_tag_levels(&[pkg], &config),
             user_group_levels(Level::Warning, Level::Warning)
         );
+    }
+
+    fn sysusers_provider_findings(pkg: &Pkg, config: &Config) -> Vec<(String, Level)> {
+        let (results, levels) = run_files_check_pkgs(std::slice::from_ref(pkg), config);
+        results
+            .iter()
+            .zip(levels.iter())
+            .filter(|((name, _), _)| name == "missing-sysusers-provider")
+            .map(|((_, line), level)| (line.clone(), *level))
+            .collect()
+    }
+
+    #[test]
+    fn sysusers_requires_fires_without_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pkg = logfile_pkg(&dir, &[("/usr/lib/svc/state", "root", "root", b"")]);
+        pkg.requires = crate::pkg::dep::parse_dep_infos("user(svc) group(svc)");
+        let config = test_config();
+        let tags = sysusers_provider_findings(&pkg, &config);
+        assert_eq!(tags.len(), 2);
+        assert!(tags.iter().all(|(_, level)| *level == Level::Warning));
+        assert!(tags.iter().any(|(line, _)| line.contains("user(svc)")));
+        assert!(tags.iter().any(|(line, _)| line.contains("group(svc)")));
+    }
+
+    #[test]
+    fn sysusers_requires_quiet_with_own_snippet() {
+        // A `u` line declares the user and its like-named primary group.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pkg = logfile_pkg(
+            &dir,
+            &[(
+                "/usr/lib/sysusers.d/svc.conf",
+                "root",
+                "root",
+                b"u svc - \"Service\" /var/lib/svc /sbin/nologin\n",
+            )],
+        );
+        pkg.requires = crate::pkg::dep::parse_dep_infos("user(svc) group(svc)");
+        let config = test_config();
+        assert!(sysusers_provider_findings(&pkg, &config).is_empty());
+    }
+
+    #[test]
+    fn sysusers_requires_quiet_with_own_provides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pkg = logfile_pkg(&dir, &[("/usr/lib/svc/state", "root", "root", b"")]);
+        pkg.requires = crate::pkg::dep::parse_dep_infos("user(svc)");
+        pkg.provides = vec![DepInfo {
+            name: "user(svc)".to_string(),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        }];
+        let config = test_config();
+        assert!(sysusers_provider_findings(&pkg, &config).is_empty());
+    }
+
+    #[test]
+    fn sysusers_requires_fires_on_prereq_route() {
+        // A packager-written `Requires(pre): user(svc)` lands in `prereq`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut pkg = logfile_pkg(&dir, &[("/usr/lib/svc/state", "root", "root", b"")]);
+        pkg.prereq = crate::pkg::dep::parse_dep_infos("user(svc)");
+        let config = test_config();
+        let tags = sysusers_provider_findings(&pkg, &config);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].1, Level::Warning);
+        assert!(tags[0].0.contains("user(svc)"));
     }
 
     #[test]
