@@ -1234,6 +1234,18 @@ SFX N 0 en [^ey]\n";
     }
 
     #[test]
+    fn udev_is_accepted() {
+        // The device-manager name from plusky/rpmcrab#1515: prose
+        // naming udev must not suggest evdev. udev is absent from
+        // the pinned en_US dictionary; evdev stays listed alongside.
+        let checker = test_checker().with_supplementary_words();
+        assert!(
+            checker.check("hello udev world", "testpkg", &[]).is_empty(),
+            "udev must be accepted"
+        );
+    }
+
+    #[test]
     fn supplementary_affix_flags_cover_derivations() {
         // One flagged entry covers its regular derivations, so the
         // bundled list names stems rather than every written form.
