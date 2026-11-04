@@ -1508,6 +1508,14 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "FileDigestCheck"
+kind = "behaviour"
+reason = "For varlink socket units, the port follows a symlink alias to its in-package target when checking authorization: an alias symlink whose resolved target is whitelisted is authorized, and a verified target digest covers the alias. The reference compares the restricted path literally against the whitelist, so it reports varlink-file-unauthorized for the alias name. Only varlink units follow aliases; other check types keep the literal comparison, and a non-alias file with a similar name still fires."
+since = "0.4.2"
+upstream = "https://github.com/plusky/rpmcrab/issues/1501"
+
+[[divergence]]
+case = "global"
 check = "filelist-forbidden-fhs23"
 kind = "behaviour"
 reason = "The reference emits filelist-forbidden-fhs23 once per matching Bad pattern, iterating a Python set (FilelistCheck.py:105); the port collects matches into a BTreeSet and emits one finding per FHS directory in sorted order, so one finding per pattern becomes one per directory and the order is sorted rather than set order."

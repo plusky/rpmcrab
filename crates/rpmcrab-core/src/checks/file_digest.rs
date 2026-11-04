@@ -918,6 +918,38 @@ impl FileDigestCheck {
             .collect()
     }
 
+    /// Resolve a path through its in-package symlink chain, if it is
+    /// one. A regular file, an unresolvable link and a link cycle all
+    /// resolve to the path itself, so only a genuine in-package alias
+    /// is affected.
+    fn resolved_path(pkg: &Pkg, path: &str) -> String {
+        let Some(pkgfile) = pkg.files.iter().find(|f| f.name == path) else {
+            return path.to_string();
+        };
+        pkg.readlink(pkgfile)
+            .map(|target| target.name.clone())
+            .unwrap_or_else(|| path.to_string())
+    }
+
+    /// Whether a candidate path matches a whitelisted path, honouring
+    /// `glob:` whitelist entries.
+    fn matches_known(known_paths: &HashSet<String>, candidate: &str) -> bool {
+        known_paths.iter().any(|known| {
+            candidate == known || (known.starts_with("glob:") && glob_match(&known[5..], candidate))
+        })
+    }
+
+    /// Whether this check type follows symlink aliases when resolving
+    /// a restricted path: varlink socket units only. A meson alias
+    /// (for example `systemd-udevd-control.socket` for the whitelisted
+    /// `systemd-udevd-varlink.socket`) ships as a symlink to the
+    /// whitelisted unit, so the alias name is that socket, not a new
+    /// unauthorized one. Any other check type keeps the literal
+    /// name comparison, so a similar-looking non-alias still fires.
+    fn follows_aliases(check: &CheckTypeConfig) -> bool {
+        check.content_check.as_deref() == Some("VarlinkServiceCheck")
+    }
+
     /// Complain about restricted files with no whitelisting entry. Returns
     /// the paths that are whitelisted (digests still to verify).
     fn check_for_unauthorized(
@@ -935,15 +967,16 @@ impl FileDigestCheck {
             }
         }
 
+        let follow_aliases = Self::follows_aliases(check);
         let mut whitelisted = Vec::new();
         for path in restricted_paths {
-            let mut found = false;
-            for known in &known_paths {
-                if path == known || (known.starts_with("glob:") && glob_match(&known[5..], path)) {
-                    found = true;
-                    whitelisted.push(path.clone());
-                    break;
-                }
+            let mut found = Self::matches_known(&known_paths, path);
+            if !found && follow_aliases {
+                let resolved = Self::resolved_path(pkg, path);
+                found = resolved != *path && Self::matches_known(&known_paths, &resolved);
+            }
+            if found {
+                whitelisted.push(path.clone());
             }
             if !found {
                 // The reference also appends a `({digest_hint})` detail listing
@@ -1074,6 +1107,18 @@ impl FileDigestCheck {
                 &mut mismatches,
                 out,
             );
+        }
+
+        // A symlink alias to a verified whitelisted socket is verified
+        // with its target: the alias carries no content of its own, so
+        // it must not linger as a violation once its target verifies.
+        if Self::follows_aliases(check) {
+            let aliases: Vec<String> = restricted_paths
+                .iter()
+                .filter(|path| verified_paths.contains(&Self::resolved_path(pkg, path)))
+                .cloned()
+                .collect();
+            verified_paths.extend(aliases);
         }
 
         let mut violations: HashSet<String> = HashSet::new();
@@ -1778,6 +1823,138 @@ ContentCheck = "VarlinkServiceCheck"
             names.iter().filter(|n| n.contains("unauthorized")).count(),
             1,
             "plain socket must be skipped by ContentCheck: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A varlink test config: a `sock` location with the varlink
+    /// content check, whitelisting only the varlink socket named by
+    /// `varlink_path` with the default digester over `content`.
+    fn varlink_config(varlink_path: &str, content: &[u8]) -> Config {
+        let extra = format!(
+            r#"
+[FileDigestLocation.sock]
+Locations = ["/usr/lib/systemd/system"]
+NamePatterns = ["*.socket"]
+FollowSymlinks = true
+Recursive = true
+ContentCheck = "VarlinkServiceCheck"
+
+[[FileDigestGroup]]
+type = "sock"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "{varlink_path}"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+"#,
+            sha256_hex(content)
+        );
+        test_config(&extra)
+    }
+
+    #[test]
+    fn varlink_alias_symlink_to_whitelisted_socket_is_authorized() {
+        // #1501: systemd-udevd-control.socket is a meson alias (a
+        // symlink in the package payload) to the whitelisted
+        // systemd-udevd-varlink.socket. The alias must not be flagged
+        // as unauthorized, and its target's verified digest covers it.
+        let dir = std::env::temp_dir().join("rpmcrab-fd-varlink-alias");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content =
+            b"[Socket]\nListenStream=/run/udev/io.systemd.Udev\nFileDescriptorName=varlink\n";
+        let ondisk = write_temp(&dir, "systemd-udevd-varlink.socket", content);
+
+        let config = varlink_config(
+            "/usr/lib/systemd/system/systemd-udevd-varlink.socket",
+            content,
+        );
+        let mut pkg = fixture_pkg();
+        let mut alias = pkgfile(
+            "/usr/lib/systemd/system/systemd-udevd-control.socket",
+            "/nonexistent-alias",
+            0o120777,
+        );
+        alias.linkto = "systemd-udevd-varlink.socket".to_string();
+        pkg.files = vec![
+            pkgfile(
+                "/usr/lib/systemd/system/systemd-udevd-varlink.socket",
+                &ondisk,
+                0o100644,
+            ),
+            alias,
+        ];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            results.is_empty(),
+            "alias to a whitelisted varlink socket must be clean: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn varlink_similar_name_without_alias_still_unauthorized() {
+        // The alias rule follows the symlink, never the name: a
+        // regular file called systemd-udevd-control.socket with
+        // varlink content, but no link to a whitelisted socket, is
+        // still unauthorized.
+        let dir = std::env::temp_dir().join("rpmcrab-fd-varlink-similar");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content = b"[Socket]\nListenStream=/run/evil.sock\nFileDescriptorName=varlink\n";
+        let ondisk = write_temp(&dir, "systemd-udevd-control.socket", content);
+
+        let config = varlink_config(
+            "/usr/lib/systemd/system/systemd-udevd-varlink.socket",
+            b"other",
+        );
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![pkgfile(
+            "/usr/lib/systemd/system/systemd-udevd-control.socket",
+            &ondisk,
+            0o100644,
+        )];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            results.iter().any(|(n, l)| n == "sock-file-unauthorized"
+                && l.contains("/usr/lib/systemd/system/systemd-udevd-control.socket")),
+            "similar-named non-alias varlink socket must be unauthorized: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn varlink_unlisted_socket_still_unauthorized() {
+        // Negative control: a genuinely unauthorized varlink socket
+        // still fires, alias handling or not.
+        let dir = std::env::temp_dir().join("rpmcrab-fd-varlink-unlisted");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content = b"[Socket]\nListenStream=/run/unlisted.sock\nFileDescriptorName=varlink\n";
+        let ondisk = write_temp(&dir, "unlisted-varlink.socket", content);
+
+        let config = varlink_config(
+            "/usr/lib/systemd/system/systemd-udevd-varlink.socket",
+            b"other",
+        );
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![pkgfile(
+            "/usr/lib/systemd/system/unlisted-varlink.socket",
+            &ondisk,
+            0o100644,
+        )];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            results.iter().any(|(n, _)| n == "sock-file-unauthorized"),
+            "unlisted varlink socket must be unauthorized: {results:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
