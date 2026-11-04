@@ -363,6 +363,14 @@ EXTRA_FILTERS = [
         r" binary-or-shlib-without-debuginfo /usr/share/qemu/",
         "qemu guest firmware ships without debuginfo",
     ),
+    # compat-usrmerge-tools xmv is built -static deliberately: it runs
+    # at upgrade time on a pre-usrmerge target system whose glibc
+    # predates the build system, so a dynamic link would fail there
+    # (compat-usrmerge.spec, issue #1509).
+    (
+        r"compat-usrmerge-tools.* statically-linked-binary /usr/libexec/xmv",
+        "xmv is statically linked deliberately for upgrade-time use",
+    ),
 ]
 
 # Extra Checks enabled in the openSUSE config that upstream rpmlint lists in

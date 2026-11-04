@@ -1316,6 +1316,49 @@ mod tests {
         ));
     }
 
+    /// The vendored openSUSE config suppresses the deliberately static
+    /// compat-usrmerge-tools xmv (#1509): it runs at upgrade time on a
+    /// pre-usrmerge target system, so a dynamic link would encode the
+    /// build glibc versions and fail there.
+    #[test]
+    fn vendored_opensuse_config_suppresses_compat_usrmerge_xmv_static() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let toml_path = manifest_dir.join("data/distro/opensuse/opensuse.toml");
+        let content = std::fs::read_to_string(&toml_path).expect("read opensuse.toml");
+        let value: toml::Value = toml::from_str(&content).expect("parse opensuse.toml");
+        let filters = value
+            .get("Filters")
+            .and_then(|v| v.as_array())
+            .expect("Filters list");
+        let patterns: Vec<&str> = filters.iter().filter_map(|v| v.as_str()).collect();
+
+        let xmv = patterns
+            .iter()
+            .find(|p| p.starts_with("compat-usrmerge-tools"))
+            .expect("xmv static filter in vendored opensuse.toml");
+
+        let re = fancy_regex::Regex::new(xmv).expect("compile xmv filter");
+        let is_match = |s: &str| re.find(s).unwrap().is_some();
+
+        // Suppressed: the deliberate upgrade-time static binary.
+        assert!(is_match(
+            "compat-usrmerge-tools.x86_64: E: statically-linked-binary /usr/libexec/xmv"
+        ));
+
+        // Not suppressed: another package's static binary on the same
+        // path, another finding on the same path, another path in the
+        // same package.
+        assert!(!is_match(
+            "foo.x86_64: E: statically-linked-binary /usr/libexec/xmv"
+        ));
+        assert!(!is_match(
+            "compat-usrmerge-tools.x86_64: E: shlib-policy-name-error /usr/libexec/xmv"
+        ));
+        assert!(!is_match(
+            "compat-usrmerge-tools.x86_64: E: statically-linked-binary /usr/libexec/other"
+        ));
+    }
+
     /// The vendored openSUSE config carries no spelling-error filter:
     /// the RPM-ecosystem jargon (librpm, scriptlet, init, namespace)
     /// is vocabulary of the
