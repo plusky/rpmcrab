@@ -45,7 +45,7 @@
 //! library package's own library files must be versioned, and their
 //! version must be the package's SONAME generation: a library file
 //! with no DT_SONAME (the libiio.so.0 shape: built NO_SONAME and
-//! shipped in libiio1), a bare `.so` regular file, or a plain
+//! shipped in libiio1), a bare `.so` regular ELF file, or a plain
 //! dotted-digit filename version whose leading component differs from
 //! the package number all fire. A decorated file name stays quiet
 //! only when it starts with the full SONAME plus a `.` or `-`
