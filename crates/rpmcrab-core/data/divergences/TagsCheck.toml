@@ -25,6 +25,14 @@ since = "0.1.0"
 
 [[divergence]]
 case = "global"
+check = "self-obsoletion"
+kind = "behaviour"
+reason = "The reference emits self-obsoletion for the Provides+Obsoletes rename pair (Provides: X < V with Obsoletes: X < V on a package not itself named X); rpmcrab exempts it when the collided name differs from the package's own name and the two bounds are identical, since such an Obsoletes can only match old releases of the renamed-away package, never the package itself. The self-name case and differing bounds still report."
+since = "0.4.2"
+upstream = "https://github.com/plusky/rpmcrab/issues/1516"
+
+[[divergence]]
+case = "global"
 check = "spelling-error"
 kind = "behaviour"
 reason = "Backend is the pure-Rust spellbook crate, not pyenchant; findings may differ from the reference on the same input even with a dictionary present. The port adds a bundled supplementary vocabulary (crates/rpmcrab-core/data/spelling-wordlist.txt) to the dictionary — entries carry hunspell affix flags where derivations are regular — so established technical vocabulary the reference's en_US-only backend flags is not a finding here; British spellings stay findings, as package descriptions are en_US text. URLs and email addresses are skipped whole, as the reference's URL and email filters skip them; the reference's tokenizer still checks some bare-host labels the port's host rule skips (docs and qwargl in docs.qwargl.io)."
