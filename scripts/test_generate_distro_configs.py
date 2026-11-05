@@ -2092,6 +2092,49 @@ def test_apply_digest_adjudications_rewrites_cups_record():
     assert out3 == text and log3 == [], (out3, log3)
 
 
+def test_apply_digest_adjudications_adds_arch_exclusion():
+    """The aaa_base 50-pid-max.conf record gains exclude_arches (#1524).
+
+    The file ships only on 64-bit (%ifnarch %{ix86} %{arm}); the check
+    cannot see that intent, so the record is scoped to ix86/arm here —
+    in the adjudication machinery, not by hand, so the daily sync keeps it.
+    """
+    text = (
+        '[[FileDigestGroup]]\n'
+        'package = "aaa_base"\n'
+        'type = "sysctl"\n'
+        '[[FileDigestGroup.digests]]\n'
+        'path = "/usr/lib/sysctl.d/50-default.conf"\n'
+        'digester = "shell"\n'
+        'hash = "c440fe069ee0bdfa77e5c3c594b473aa379788717e1ac55bb4cc5dc74812dc0e"\n'
+        '[[FileDigestGroup.digests]]\n'
+        'path = "/usr/lib/sysctl.d/50-pid-max.conf"\n'
+        'digester = "shell"\n'
+        'hash = "dd590458104d1bc68b9233e018575925d3c14e667217cfb69a410cbdf4cde9a7"\n'
+        '[[FileDigestGroup.digests]]\n'
+        'path = "/usr/lib/sysctl.d/51-network.conf"\n'
+        'digester = "shell"\n'
+        'hash = "4292c83e211bc30c928712a25708edf1cbeb94cf39d4d17b6594ad5559eef2e0"\n'
+    )
+    out, log = gen.apply_digest_adjudications(text, "sysctl-whitelist.toml")
+    assert 'exclude_arches = ["ix86", "arm"]' in out, out
+    # Only the 50-pid-max.conf entry is scoped; the siblings are untouched.
+    assert out.count('exclude_arches = ["ix86", "arm"]') == 1, out
+    assert "50-default.conf" in out and "51-network.conf" in out, out
+    assert len(log) == 1 and "50-pid-max.conf" in log[0] and "1524" in log[0], log
+    # The line lands after the hash line of its own entry.
+    assert (
+        'hash = "dd590458104d1bc68b9233e018575925d3c14e667217cfb69a410cbdf4cde9a7"\n'
+        'exclude_arches = ["ix86", "arm"]\n'
+        in out
+    ), out
+    # Idempotent, and a no-op for other files.
+    out2, log2 = gen.apply_digest_adjudications(out, "sysctl-whitelist.toml")
+    assert out2 == out and log2 == [], (out2, log2)
+    out3, log3 = gen.apply_digest_adjudications(text, "dbus-services.toml")
+    assert out3 == text and log3 == [], (out3, log3)
+
+
 # ---------------------------------------------------------------------------
 # fetch exhaustion: a dedicated exit code, never confused with drift
 # ---------------------------------------------------------------------------

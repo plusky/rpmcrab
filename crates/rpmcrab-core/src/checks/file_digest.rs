@@ -314,6 +314,11 @@ struct DigestInfo {
     algorithm: String,
     hash: String,
     digester: String,
+    /// Arch families (RPM macro names: `ix86`, `arm`) — or literal arches —
+    /// on which this file is not shipped, so its absence is not reported
+    /// as `{type}-whitelisted-file-missing`. A present file is still
+    /// digest-verified on those arches; the exclusion excuses absence only.
+    exclude_arches: Vec<String>,
 }
 
 /// A digest group: whitelisted paths for a package.
@@ -710,6 +715,30 @@ impl FileDigestCheck {
                     if !matches!(digester, "default" | "shell" | "xml" | "systemd-socket") {
                         panic!("FileDigestCheck: invalid digester \"{digester}\" for path {path}");
                     }
+                    // Optional arch scope: absent is no exclusion; a
+                    // present-but-malformed value is a config error and
+                    // fails loudly instead of silently defaulting.
+                    let exclude_arches: Vec<String> = match dt.get("exclude_arches") {
+                        None => Vec::new(),
+                        Some(v) => v
+                            .as_array()
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "FileDigestCheck: \"exclude_arches\" for path {path} must be an array of strings"
+                                )
+                            })
+                            .iter()
+                            .map(|a| {
+                                a.as_str()
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "FileDigestCheck: \"exclude_arches\" for path {path} must be an array of strings"
+                                        )
+                                    })
+                                    .to_string()
+                            })
+                            .collect(),
+                    };
                     // A digest entry without a hash would guarantee a
                     // mismatch finding; like a missing `path`, it is
                     // malformed config. (`skip` entries carry no hash
@@ -734,6 +763,7 @@ impl FileDigestCheck {
                         algorithm,
                         hash,
                         digester: digester.to_string(),
+                        exclude_arches,
                     });
                 }
             }
@@ -747,6 +777,7 @@ impl FileDigestCheck {
                             algorithm: "skip".to_string(),
                             hash: String::new(),
                             digester: "default".to_string(),
+                            exclude_arches: Vec::new(),
                         });
                     }
                 }
@@ -939,6 +970,24 @@ impl FileDigestCheck {
         })
     }
 
+    /// Whether `arch` is covered by one `exclude_arches` entry: the RPM
+    /// macro families `ix86` (i386/i486/i586/i686) and `arm` (32-bit armv*,
+    /// never aarch64), or a literal arch string.
+    fn arch_matches_exclusion(arch: &str, exclusion: &str) -> bool {
+        match exclusion {
+            "ix86" => matches!(arch, "i386" | "i486" | "i586" | "i686"),
+            "arm" => arch.starts_with("armv"),
+            other => arch == other,
+        }
+    }
+
+    /// Whether `arch` is excluded by any entry in `exclude_arches`.
+    fn arch_excluded(arch: &str, exclude_arches: &[String]) -> bool {
+        exclude_arches
+            .iter()
+            .any(|e| Self::arch_matches_exclusion(arch, e))
+    }
+
     /// Whether this check type follows symlink aliases when resolving
     /// a restricted path: varlink socket units only. A meson alias
     /// (for example `systemd-udevd-control.socket` for the whitelisted
@@ -1019,8 +1068,12 @@ impl FileDigestCheck {
             if pkg.files.iter().all(|f| f.name != *path) {
                 // This digest entry might not be needed anymore. Tolerate
                 // absent files as long as the existing ones verify; glob
-                // patterns are not supported here.
-                if !path.starts_with("glob:") {
+                // patterns are not supported here. A file the package
+                // never ships on this arch (exclude_arches, e.g. a
+                // 64-bit-only sysctl file on i586) is not missing.
+                if !path.starts_with("glob:")
+                    && !Self::arch_excluded(&pkg.arch, &digest_info.exclude_arches)
+                {
                     missing_files.push(path.clone());
                 }
                 continue;
@@ -1690,6 +1743,124 @@ hash = "deadbeef"
                 .any(|(n, _)| *n == "pam-file-digest-mismatch"),
             "unexpected mismatch: {results:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whitelisted_file_missing_arch_excluded() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-missing-arch");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content = b"auth required pam_unix.so\n";
+        let ondisk = write_temp(&dir, "login", content);
+
+        // Group lists two files; the absent one carries exclude_arches
+        // for the ix86 and arm families. Only the present file is in
+        // the package, so the absent one is missing — except on an
+        // excluded arch, where it is not shipped at all.
+        let extra = format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/gone"
+algorithm = "sha256"
+digester = "default"
+hash = "deadbeef"
+exclude_arches = ["ix86", "arm"]
+"#,
+            sha256_hex(content)
+        );
+        let config = test_config(&extra);
+
+        for (arch, expect_missing) in [
+            ("i586", false),
+            ("i686", false),
+            ("armv7hl", false),
+            ("x86_64", true),
+            ("aarch64", true),
+            ("noarch", true),
+        ] {
+            let mut pkg = fixture_pkg();
+            pkg.arch = arch.to_string();
+            pkg.files = vec![pkgfile("/etc/pam.d/login", &ondisk, 0o100644)];
+            let mut check = FileDigestCheck::new(&config);
+            let results = run_check(&pkg, &config, &mut check);
+            let missing: Vec<&(String, String)> = results
+                .iter()
+                .filter(|(n, _)| *n == "pam-whitelisted-file-missing")
+                .collect();
+            assert_eq!(
+                missing.len(),
+                usize::from(expect_missing),
+                "arch {arch}: expected missing={expect_missing}, got {results:?}"
+            );
+            if expect_missing {
+                // Still an error on a non-excluded arch: no downgrade.
+                assert!(
+                    missing[0].1.starts_with(&format!(
+                        "testpkg.{arch}: E: pam-whitelisted-file-missing /etc/pam.d/gone"
+                    )),
+                    "error level/detail: {}",
+                    missing[0].1
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn arch_excluded_file_still_verified_when_present() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-arch-present");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+
+        // The exclusion excuses absence only: a present file is still
+        // digest-verified, even on an excluded arch.
+        let extra = format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+exclude_arches = ["ix86", "arm"]
+"#,
+            sha256_hex(b"original\n")
+        );
+        let config = test_config(&extra);
+
+        // Tampered on i586: the mismatch still fires.
+        let ondisk = write_temp(&dir, "login", b"tampered\n");
+        let mut pkg = fixture_pkg();
+        pkg.arch = "i586".to_string();
+        pkg.files = vec![pkgfile("/etc/pam.d/login", &ondisk, 0o100644)];
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            results
+                .iter()
+                .any(|(n, _)| *n == "pam-file-digest-mismatch"),
+            "present-but-wrong must mismatch on an excluded arch: {results:?}"
+        );
+
+        // Correct on i586: verifies clean, nothing reported.
+        let ondisk = write_temp(&dir, "login", b"original\n");
+        let mut pkg = fixture_pkg();
+        pkg.arch = "i586".to_string();
+        pkg.files = vec![pkgfile("/etc/pam.d/login", &ondisk, 0o100644)];
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(results.is_empty(), "clean file must be quiet: {results:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

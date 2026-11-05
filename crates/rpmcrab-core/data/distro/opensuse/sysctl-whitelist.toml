@@ -51,6 +51,7 @@ hash = "c440fe069ee0bdfa77e5c3c594b473aa379788717e1ac55bb4cc5dc74812dc0e"
 path = "/usr/lib/sysctl.d/50-pid-max.conf"
 digester = "shell"
 hash = "dd590458104d1bc68b9233e018575925d3c14e667217cfb69a410cbdf4cde9a7"
+exclude_arches = ["ix86", "arm"]
 [[FileDigestGroup.digests]]
 path = "/usr/lib/sysctl.d/51-network.conf"
 digester = "shell"
