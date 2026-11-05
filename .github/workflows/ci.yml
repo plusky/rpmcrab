@@ -63,8 +63,9 @@ jobs:
       - run: cargo test --workspace --all-targets --locked
 
   # Platform spread: Homebrew ships librpm, so the crate builds natively on
-  # macOS too. Formatting is platform-independent, so macOS runs only clippy +
-  # test to catch platform-specific compilation or behavior issues.
+  # macOS too. Clippy is platform-independent and Linux clippy covers it
+  # (no macOS cfg code in the crates), so macOS runs only the test suite
+  # to catch platform-specific compilation or behavior issues.
   rust-macos:
     runs-on: macos-latest
     timeout-minutes: 30
@@ -75,7 +76,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
-          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
@@ -83,7 +83,11 @@ jobs:
       # Homebrew's rpm formula provides librpm and the headers.
       # librpm-sys links bare -lrpm/-lrpmio and bindgen needs the headers, so
       # export the locations for the cargo steps below.
+      # HOMEBREW_NO_AUTO_UPDATE=1 skips Homebrew's auto-update on every
+      # install, which is pure overhead on a fresh runner.
       - name: Install RPM via Homebrew
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
           brew install rpm popt dash desktop-file-utils appstream-glib
           # checkbashisms has no Homebrew formula (Debian devscripts only),
@@ -99,8 +103,6 @@ jobs:
       # looks in /opt/homebrew/share/hunspell on Apple Silicon Macs.
       - name: Install hunspell dictionaries
         run: sudo bash scripts/install-hunspell-dicts.sh /opt/homebrew/share/hunspell
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --features gen --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
 
   # Devel (beta) compiler, non-failing: an early-warning leg for upcoming
