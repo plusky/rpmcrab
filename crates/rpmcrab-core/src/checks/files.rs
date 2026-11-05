@@ -9159,6 +9159,14 @@ impl FilesCheck {
                 }
             } else if !fd.nonexec_file
                 && !(is_match(&self.lib_path_re, fname) && fname.ends_with(".la"))
+                // Binary data in a bin dir is not a script: the
+                // peek-based istext still calls short binary digests
+                // text (few control bytes, no NUL), so libmagic
+                // decides -- FIPS .hmac digests are "data", and a
+                // shebang would corrupt them. The finding says
+                // "This text file", so it fires only on
+                // libmagic-described text.
+                && magic_is_text(&pkgfile.magic)
             {
                 add_info(out, Level::Error, pkg, "script-without-shebang", &[fname]);
             }
@@ -12126,6 +12134,52 @@ print("hi")
         let pkg = spurious_exec_pkg(&dir, &[("/usr/share/data/nul.bin", "data", &[0x01; 120])]);
         let findings = check_spurious_script(&pkg, &config);
         assert_eq!(findings, [], "no finding where the reference is silent");
+    }
+
+    #[test]
+    fn script_without_shebang_silent_for_binary_hmac_digest() {
+        // FIPS .hmac digests (openssh): 32 bytes of binary digest, mode
+        // 0444, libmagic "data", sitting next to their binary in a bin
+        // dir. Only the "located in a bin dir" prong fires -- the file
+        // is not a script and not text, so a shebang would corrupt the
+        // digest and moving it breaks the FIPS sibling lookup. The
+        // finding's own description says "This text file", so it must
+        // not fire on libmagic-described binary data. The digest has
+        // no NUL byte, so the peek-based istext still calls it text
+        // (control fraction 4/32) -- the libmagic gate is what quiets it.
+        let config = test_config();
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[(
+                "/usr/bin/ssh.hmac",
+                0o100444,
+                "data",
+                b"\x9f\x3a\x71\x4d\x4b\xc2\x1e\x88\x55\x2f\xa1\x0d\x6e\xf3\x19\x77\x02\xb4\x44\x90\x0b\x63\xd8\x27\xae\x51\x0a\x36\xe5\x6c\x99\x41",
+            )],
+        );
+        let findings = check_spurious_script(&pkg, &config);
+        assert_eq!(
+            findings,
+            [],
+            "binary .hmac digest in a bin dir stays silent: {findings:?}"
+        );
+        // Control: a real text script without a shebang in the same
+        // bin dir, same mode, still fires.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let pkg = script_mode_pkg(
+            &dir,
+            &[("/usr/bin/noshebang", 0o100444, "ASCII text", b"echo hi\n")],
+        );
+        let findings = check_spurious_script(&pkg, &config);
+        assert!(
+            findings.iter().any(|(name, level, detail)| {
+                name == "script-without-shebang"
+                    && *level == Level::Error
+                    && detail.contains("/usr/bin/noshebang")
+            }),
+            "text script without shebang in a bin dir keeps firing: {findings:?}"
+        );
     }
 
     #[test]
