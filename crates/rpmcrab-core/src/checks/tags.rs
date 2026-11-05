@@ -536,6 +536,16 @@ impl TagsCheck {
         let requirer_is_component_devel = is_match(devel_infix_regex(), &pkg.name)
             || (pkg.name.starts_with("patterns-") && is_match(devel_underscore_regex(), &pkg.name))
             || pkg.name.ends_with("-jmods");
+        // Build-environment metapackages (`*-build`, issue #1517)
+        // exist to provide development files: `rpm-build` Requires
+        // the toolchain (`gcc`, `make`, `glibc-devel`, ...) so that
+        // `rpmbuild` works out of the box. The harm model — a runtime
+        // package dragging host development files onto end systems —
+        // does not apply to them, so their devel requirements must
+        // not trip devel-dependency. The exemption is
+        // devel-dependency-only: unlike the component-devel gate
+        // above it does not extend to explicit-lib-dependency.
+        let requirer_is_build_metapackage = pkg.name.ends_with("-build");
         // The requirer-side half of the cross-family credit (#861),
         // classified once per package: the per-leaf test then only
         // parses the leaf.
@@ -598,8 +608,13 @@ impl TagsCheck {
                     //   its `-source` requirement (the source tree it
                     //   rebuilds against, e.g. perf-rebuild on
                     //   kernel-source) is the package's purpose.
+                    // - a `*-build` requirer is a build-environment
+                    //   metapackage whose purpose is providing
+                    //   development files (issue #1517); classified
+                    //   once per package above, not per leaf.
                     if !devel_depend
                         && !requirer_is_component_devel
+                        && !requirer_is_build_metapackage
                         && is_match(&self.devel_re, &leaf.name)
                         && !family_requirer.credits(&leaf.name)
                         && !python_module_headers_leaf(&leaf.name)
@@ -5258,6 +5273,73 @@ mod rich_dep_emission_tests {
             let hits = named(&results, "devel-dependency");
             assert_eq!(hits.len(), 1, "requirer {requirer}: {results:?}");
         }
+    }
+
+    #[test]
+    fn devel_dependency_build_suffix_requirer_is_silent() {
+        // Build-environment metapackages (`*-build`, issue #1517)
+        // exist to provide development files: `rpm-build` Requires
+        // the toolchain, `glibc-devel` included, so that `rpmbuild`
+        // works out of the box. Their devel requirements must not
+        // trip devel-dependency — every devel leaf stays silent,
+        // not just the first.
+        let config = rich_test_config(&[], false);
+        for (requirer, dep) in [
+            ("rpm-build", "glibc-devel"),
+            ("rpm-build", "somelib-devel"),
+            ("foo-build", "somelib-devel"),
+        ] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep(dep)];
+            let results = run(&pkg, &config);
+            assert!(
+                named(&results, "devel-dependency").is_empty(),
+                "requirer {requirer} dep {dep}: {results:?}"
+            );
+        }
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.name = "rpm-build".to_string();
+        pkg.requires = vec![plain_dep("glibc-devel"), plain_dep("somelib-devel")];
+        let results = run(&pkg, &config);
+        assert!(
+            named(&results, "devel-dependency").is_empty(),
+            "all: {results:?}"
+        );
+    }
+
+    #[test]
+    fn devel_dependency_build_suffix_near_misses_still_fire() {
+        // The exemption is the `-build` suffix, not the word
+        // "build" anywhere in the name.
+        let config = rich_test_config(&[], false);
+        for requirer in ["rpm-builder", "foo-build-tools", "build", "mybuild"] {
+            let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+            pkg.name = requirer.to_string();
+            pkg.requires = vec![plain_dep("somelib-devel")];
+            let results = run(&pkg, &config);
+            let hits = named(&results, "devel-dependency");
+            assert_eq!(hits.len(), 1, "requirer {requirer}: {results:?}");
+            assert!(hits[0].1.ends_with(" somelib-devel"), "line: {}", hits[0].1);
+        }
+    }
+
+    #[test]
+    fn devel_dependency_build_suffix_explicit_lib_still_fires() {
+        // The `-build` exemption is devel-dependency-only: a build
+        // metapackage's explicit lib requirement still trips
+        // explicit-lib-dependency.
+        let mut pkg = rich_fixture_pkg("fcprobe-1-1.noarch.rpm");
+        pkg.name = "rpm-build".to_string();
+        pkg.requires = vec![plain_dep("libfoo1"), generated_dep("libfoo.so.1()(64bit)")];
+        let results = run(&pkg, &rich_test_config(&[], false));
+        let hits = named(&results, "explicit-lib-dependency");
+        assert_eq!(hits.len(), 1, "all: {results:?}");
+        assert!(hits[0].1.ends_with(" libfoo1"), "line: {}", hits[0].1);
+        assert!(
+            named(&results, "devel-dependency").is_empty(),
+            "all: {results:?}"
+        );
     }
 
     #[test]
