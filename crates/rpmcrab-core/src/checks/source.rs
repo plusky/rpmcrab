@@ -3722,6 +3722,39 @@ mod prebuilt_tests {
         );
     }
 
+    /// Fixture binaries (issue #1530) stay quiet: ELF members under
+    /// top-level `tests/` or `test/`, and inside an archive that itself
+    /// sits under `tests/`, emit nothing. A `tests` directory nested
+    /// deeper (`src/tests/`) and `testdata/` still fire.
+    #[test]
+    fn prebuilt_binaries_under_fixture_directories_stay_quiet() {
+        let inner = tarball(&[("nested/prebuilt.o", ELF)]);
+        let tar = tarball(&[
+            ("tests/fixture.o", ELF),
+            ("test/fixture2.o", ELF),
+            ("tests/inner.tar.gz", &gzip_bytes(&inner)),
+            ("src/tests/nested.o", ELF),
+            ("testdata/fixture.o", ELF),
+            ("src/prebuilt.o", ELF),
+        ]);
+        let (pkg, _src, _extract) = source_pkg(&[
+            ("prebuilt-test.spec", b"Name: prebuilt-test\n".to_vec()),
+            ("prebuilt-test-1.0.tar.gz", gzip_bytes(&tar)),
+        ]);
+        let findings = run_source(&pkg);
+        assert_eq!(
+            prebuilt_lines(&findings),
+            [
+                "prebuilt-test.src: W: prebuilt-binary-in-sources \
+                 prebuilt-test-1.0.tar.gz: src/prebuilt.o ELF binary",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources \
+                 prebuilt-test-1.0.tar.gz: src/tests/nested.o ELF binary",
+                "prebuilt-test.src: W: prebuilt-binary-in-sources \
+                 prebuilt-test-1.0.tar.gz: testdata/fixture.o ELF binary",
+            ]
+        );
+    }
+
     /// A package built from the shared fixture header (name
     /// `fcprobe`, version `1`, release `1`, `SOURCERPM`
     /// `fcprobe-1-1.src.rpm`), with name/arch/files replaced.
@@ -3915,6 +3948,21 @@ mod prebuilt_tests {
         assert!(!is_test_path("s.tar.gz: test"));
         assert!(!is_test_path("s.tar.gz: src/my test/x.o"));
         assert!(!is_test_path("s.tar.gz"));
+    }
+
+    /// Fixture-directory detection (issue #1530) is by first component
+    /// per chain segment, not substring and not any depth: `src/tests`
+    /// and `testdata` stay loud, as does a file named `test`.
+    #[test]
+    fn fixture_path_needs_a_top_level_test_directory() {
+        assert!(is_fixture_path("s.tar.gz: tests/data/f.bin"));
+        assert!(is_fixture_path("s.tar.gz: test/x.o"));
+        assert!(is_fixture_path("s.tar.gz: tests/data.zip: x.o"));
+        assert!(!is_fixture_path("s.tar.gz: src/tests/x.o"));
+        assert!(!is_fixture_path("s.tar.gz: src/testdata/x.o"));
+        assert!(!is_fixture_path("s.tar.gz: src/contest/x.o"));
+        assert!(!is_fixture_path("s.tar.gz: tests"));
+        assert!(!is_fixture_path("s.tar.gz"));
     }
 
     /// The handle hash (issue #1443): sha256_reader hashes an open
