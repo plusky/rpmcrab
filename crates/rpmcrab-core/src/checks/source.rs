@@ -80,6 +80,18 @@ fn is_test_path(path: &str) -> bool {
         .any(|c| matches!(*c, "test" | "tests" | "testdata"))
 }
 
+/// Whether a prebuilt display path sits under a top-level `test/` or
+/// `tests/` fixture directory (issue #1530): the chain joins members
+/// with `": "`, so each segment is judged on its own first component --
+/// a binary inside an archive that itself lives under `tests/` is a
+/// fixture too. Only the first component counts, so `src/tests/x.o`
+/// stays loud; a file merely named `test` or `tests` has no `/` after
+/// it and stays loud as well.
+fn is_fixture_path(path: &str) -> bool {
+    path.split(": ")
+        .any(|seg| seg.starts_with("test/") || seg.starts_with("tests/"))
+}
+
 /// The kind string of an archive record: the archive holds `n` hits.
 fn archive_kind(n: usize) -> String {
     if n == 1 {
@@ -351,7 +363,9 @@ impl SourceCheck {
              archive to remove them — that breaks source verification. Like \
              every warning, this one can be filtered out in the configuration. \
              A vendor archive the packager generates (cargo vendor, node_modules) \
-             is not an upstream archive: leave the binaries out when generating it."
+             is not an upstream archive: leave the binaries out when generating it. \
+             Binaries under a top-level test/ or tests/ fixture directory stay \
+             quiet: they are test inputs consumed by %check, not shipped code."
                 .to_string(),
         );
     }
@@ -547,6 +561,12 @@ impl SourceCheck {
             let mut groups: Vec<(String, String, prebuilt::BinaryKind, usize, String)> = Vec::new();
             for (kind, path) in &outcome.prebuilt {
                 let kind = *kind;
+                // Fixture binaries (issue #1530): test inputs under a
+                // top-level test/ or tests/ directory are consumed by
+                // %check, not shipped; they stay quiet.
+                if is_fixture_path(path) {
+                    continue;
+                }
                 if !kind.grouped() {
                     add_info(
                         out,
