@@ -174,29 +174,37 @@ DIGEST_ADJUDICATIONS = {
 }
 
 
-def apply_digest_adjudications(text, filename):
-    """Rewrite digest records named in DIGEST_ADJUDICATIONS to the
-    adjudicated hash sets. Returns (text, log lines).
+# Digest records whose whitelisted file is not shipped on some arches
+# (issue #1524): for these (file, stanza packages, path) records the
+# check must not report `{type}-whitelisted-file-missing` on the listed
+# arches. The file is intentionally arch-scoped in the package — aaa_base
+# ships /usr/lib/sysctl.d/50-pid-max.conf only on 64-bit, via
+# `%ifnarch %{ix86} %{arm}` (documented intent, bsc#1219038) — and the
+# check cannot see %ifnarch intent from a built RPM, so it fires a false
+# positive E on i586. The arch families are RPM macro names (`ix86`,
+# `arm`); a present file is still digest-verified on those arches, and
+# `check_for_unauthorized` is unaffected. Applied by generate() when
+# vendoring and by the daily sync's plan_merge to both sides of a merge,
+# like DIGEST_ADJUDICATIONS, so neither path can silently drop the scope.
+# Keys are (filename, frozenset(packages), path); the value is the
+# arch-exclusion list for that record.
+DIGEST_ARCH_EXCLUSIONS = {
+    (
+        "sysctl-whitelist.toml",
+        frozenset({"aaa_base"}),
+        "/usr/lib/sysctl.d/50-pid-max.conf",
+    ): ["ix86", "arm"],
+}
 
-    A record is identified by its file, the owning stanza's package
-    set and the digest entry's path. Digest entries are
-    ``[[<Group>.digests]]`` sub-tables carrying ``path =`` and
-    ``hash =`` lines; the entries for an adjudicated path are rebuilt
-    to carry exactly the adjudicated hashes. Text with no adjudicated
-    record in it passes through byte-identical.
+
+def _segment_digest_entries(lines):
+    """Segment digest-entry text for adjudication.
+
+    Returns (segments, by_record): segments is a list of ("raw", lines)
+    spans and ("entry", block, packages, path) digest-entry blocks, and
+    by_record maps (packages, path) to the entry segment indices.
+    `packages` is the package set of the stanza that owns the entry.
     """
-    log = []
-    targets = {}
-    for (fn, pkgs, path), hashes in DIGEST_ADJUDICATIONS.items():
-        if fn == filename:
-            targets.setdefault(pkgs, {})[path] = hashes
-    if not targets:
-        return text, log
-
-    lines = text.splitlines(keepends=True)
-    # Segment the text: ("raw", lines) spans and ("entry", lines,
-    # packages, path) digest-entry blocks. `packages` is the package
-    # set of the stanza that owns the entry.
     segments = []
     raw = []
     packages = set()
@@ -240,11 +248,124 @@ def apply_digest_adjudications(text, filename):
     if raw:
         segments.append(("raw", raw))
 
-    # Group entry segments by (packages, path); rebuild adjudicated ones.
     by_record = {}
     for idx, seg in enumerate(segments):
         if seg[0] == "entry":
             by_record.setdefault((seg[2], seg[3]), []).append(idx)
+    return segments, by_record
+
+
+def _apply_digest_arch_exclusions(text, filename):
+    """Ensure `exclude_arches` lines for records in DIGEST_ARCH_EXCLUSIONS.
+
+    Returns (text, log lines). An entry block for an excluded record
+    carries exactly `exclude_arches = [...]` (inserted after the `hash =`
+    line, or the `path =` line when there is no hash); a present line
+    with the same value is a no-op, so the pass is idempotent. Text with
+    no excluded record in it passes through byte-identical.
+    """
+    log = []
+    targets = {}
+    for (fn, pkgs, path), arches in DIGEST_ARCH_EXCLUSIONS.items():
+        if fn == filename:
+            targets.setdefault(pkgs, {})[path] = arches
+    if not targets:
+        return text, log
+
+    lines = text.splitlines(keepends=True)
+    segments, by_record = _segment_digest_entries(lines)
+    replace = {}
+    for (pkgs, path), idxs in by_record.items():
+        arches = targets.get(pkgs, {}).get(path)
+        if arches is None:
+            continue
+        wanted = "exclude_arches = [" + ", ".join(f'"{a}"' for a in arches) + "]"
+        for idx in idxs:
+            block = segments[idx][1]
+            excl_idx = next(
+                (j for j, l in enumerate(block)
+                 if re.match(r"\s*exclude_arches\s*=", l)),
+                None,
+            )
+            if excl_idx is not None:
+                if re.match(
+                    r"\s*" + re.escape(wanted) + r"\s*$",
+                    block[excl_idx].rstrip("\n"),
+                ):
+                    continue
+                newline = "\n" if block[excl_idx].endswith("\n") else ""
+                indent = re.match(
+                    r"(\s*)exclude_arches\s*=", block[excl_idx]
+                ).group(1)
+                rebuilt = list(block)
+                rebuilt[excl_idx] = f"{indent}{wanted}{newline}"
+                replace[idx] = rebuilt
+                log.append(
+                    f"digest: excluded {filename} record for "
+                    f"{', '.join(sorted(pkgs))} path {path} on arches "
+                    f"{', '.join(arches)} (issue #1524)"
+                )
+                continue
+            anchor_idx = next(
+                (j for j, l in enumerate(block)
+                 if re.match(r"\s*hash\s*=", l)),
+                None,
+            )
+            if anchor_idx is None:
+                anchor_idx = next(
+                    (j for j, l in enumerate(block)
+                     if re.match(r"\s*path\s*=", l)),
+                    None,
+                )
+            if anchor_idx is None:
+                continue
+            newline = "\n" if block[anchor_idx].endswith("\n") else ""
+            indent = re.match(
+                r"(\s*)(?:hash|path)\s*=", block[anchor_idx]
+            ).group(1)
+            rebuilt = list(block)
+            rebuilt.insert(anchor_idx + 1, f"{indent}{wanted}{newline}")
+            replace[idx] = rebuilt
+            log.append(
+                f"digest: excluded {filename} record for "
+                f"{', '.join(sorted(pkgs))} path {path} on arches "
+                f"{', '.join(arches)} (issue #1524)"
+            )
+    if not replace:
+        return text, log
+    out = []
+    for idx, seg in enumerate(segments):
+        if idx in replace:
+            out.extend(replace[idx])
+        else:
+            out.extend(seg[1])
+    return "".join(out), log
+
+
+def apply_digest_adjudications(text, filename):
+    """Rewrite digest records named in DIGEST_ADJUDICATIONS to the
+    adjudicated hash sets, and add `exclude_arches` lines for records
+    named in DIGEST_ARCH_EXCLUSIONS. Returns (text, log lines).
+
+    A record is identified by its file, the owning stanza's package
+    set and the digest entry's path. Digest entries are
+    ``[[<Group>.digests]]`` sub-tables carrying ``path =`` and
+    ``hash =`` lines; the entries for an adjudicated path are rebuilt
+    to carry exactly the adjudicated hashes. Text with no adjudicated
+    record in it passes through byte-identical.
+    """
+    log = []
+    targets = {}
+    for (fn, pkgs, path), hashes in DIGEST_ADJUDICATIONS.items():
+        if fn == filename:
+            targets.setdefault(pkgs, {})[path] = hashes
+    has_arch = any(fn == filename for (fn, _, _) in DIGEST_ARCH_EXCLUSIONS)
+    if not targets and not has_arch:
+        return text, log
+
+    segments, by_record = _segment_digest_entries(text.splitlines(keepends=True))
+
+    # Rebuild adjudicated entries.
     drop = set()
     replace = {}
     for (pkgs, path), idxs in by_record.items():
@@ -295,7 +416,9 @@ def apply_digest_adjudications(text, filename):
             out.extend(seg[1])
         else:
             out.extend(seg[1])
-    return "".join(out), log
+    text, arch_log = _apply_digest_arch_exclusions("".join(out), filename)
+    log.extend(arch_log)
+    return text, log
 
 
 # PROVENANCE lines owned by the daily sync (the TIP it merged).
