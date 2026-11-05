@@ -143,7 +143,11 @@ Rebuild with `%{optflags}` unmodified, which carries
 `-fstack-protector-strong`; do not append `-fstack-protector` after it,
 as the last directive wins and silently downgrades strong protection
 to basic. This check only verifies presence: basic and strong SSP both
-emit `__stack_chk_fail`, so it cannot tell the two apart.
+emit `__stack_chk_fail`, so it cannot tell the two apart. A binary
+whose `.text` loads the x86-64 TLS stack guard stays quiet even
+without `__stack_chk_fail`: the compiler did emit a canary, and the
+handler reference is missing only because no instrumented function
+returns.
 """
 missing-relro="""
 The binary or shared library has no GNU_RELRO segment, so parts of the

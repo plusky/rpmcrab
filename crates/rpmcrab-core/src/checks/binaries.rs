@@ -608,6 +608,34 @@ const X86_FEATURE_1_IBT_SHSTK: u32 = X86_FEATURE_1_IBT | X86_FEATURE_1_SHSTK;
 /// reached the compiler, independent of the merged property note.
 const ENDBR64: [u8; 4] = [0xf3, 0x0f, 0x1e, 0xfa];
 
+/// `mov r64, %fs:0x28`: the instruction the x86-64 stack protector
+/// emits to load the TLS stack guard (`__stack_chk_guard`) — in a
+/// canary prologue, to store it in the frame, and in a canary
+/// epilogue, to compare it against the stored copy. The encoding is
+/// fixed: `64` (FS override), a REX byte with W set (`48`/`49`/`4C`/
+/// `4D`), `8B`, a ModRM with mod 00 and r/m 100 (SIB follows), the
+/// SIB `25` (no index, disp32, no base) and the disp32 `28 00 00 00`.
+/// A `.text` hit proves the compiler emitted stack protection for at
+/// least one function, even when no `__stack_chk_fail` reference
+/// survives: a function that never returns (a noreturn `main`, a
+/// noreturn error helper) gets the prologue store but no epilogue
+/// check, so the only reference to the failure handler is optimised
+/// away (rpmcrab#1505). The load is the signal, not the store: the
+/// guard lives only in TLS slot 0x28, and the protector is its only
+/// compiler-generated reader.
+fn is_stack_guard_load(window: &[u8]) -> bool {
+    window.len() == 9
+        && window[0] == 0x64
+        && matches!(window[1], 0x48 | 0x49 | 0x4c | 0x4d)
+        && window[2] == 0x8b
+        && window[3] & 0xc7 == 0x04
+        && window[4] == 0x25
+        && window[5] == 0x28
+        && window[6] == 0x00
+        && window[7] == 0x00
+        && window[8] == 0x00
+}
+
 /// State of `GNU_PROPERTY_X86_FEATURE_1_AND` in an ELF's
 /// `.note.gnu.property`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -837,6 +865,12 @@ struct ReadelfInfo {
     /// compiled with `-fcf-protection` is present, whatever the merged
     /// property note records.
     has_endbr64: bool,
+    /// The binary's `.text` contains a stack-guard load
+    /// (`mov r64, %fs:0x28`): code compiled with the stack protector
+    /// is present, whether or not any `__stack_chk_fail` reference
+    /// survives (rpmcrab#1505). x86-64 only; other machines leave it
+    /// false.
+    has_stack_guard_load: bool,
     /// `e_machine` of every parsed ELF (for an archive: every member)
     /// that carries machine code: at least one `SHF_EXECINSTR`
     /// `SHT_PROGBITS` section whose file bytes are not all zero, or
@@ -939,6 +973,7 @@ impl ReadelfInfo {
             has_dynamic: false,
             x86_feature_1_and: X86Feature1And::Absent,
             has_endbr64: false,
+            has_stack_guard_load: false,
             code_machines: Vec::new(),
             failed: None,
             no_elf_members: false,
@@ -1099,6 +1134,8 @@ impl ReadelfInfo {
                     Some(".text") => {
                         self.has_endbr64 =
                             self.has_endbr64 || bytes.windows(4).any(|w| w == ENDBR64);
+                        self.has_stack_guard_load =
+                            self.has_stack_guard_load || bytes.windows(9).any(is_stack_guard_load);
                     }
                     _ => {}
                 }
@@ -4775,8 +4812,15 @@ fn is_fortify_applicable(info: &ReadelfInfo) -> bool {
 fn is_stack_protector_applicable(info: &ReadelfInfo) -> bool {
     // Pure loader shims implement no logic of their own (rpmcrab#447),
     // and a binary importing no SSP-relevant call has no buffer-shaped
-    // stack data for a canary to guard (rpmcrab#452).
+    // stack data for a canary to guard (rpmcrab#452). A binary whose
+    // `.text` loads the x86-64 TLS stack guard was instrumented by the
+    // compiler's stack protector: the `__stack_chk_fail` reference is
+    // missing only because no instrumented function returns, so its
+    // epilogue check — the sole reference to the handler — was
+    // optimised away (rpmcrab#1505). The flags reached the compiler,
+    // so the finding would be unactionable noise there.
     !is_pure_loader_shim(&info.undefined_functions)
+        && !(info.elf_machine == goblin::elf::header::EM_X86_64 && info.has_stack_guard_load)
         && hardening_call_set(info)
             .iter()
             .any(|s| is_ssp_relevant_import(s))
@@ -10563,6 +10607,7 @@ mod tests {
             let info = ReadelfInfo {
                 x86_feature_1_and: X86Feature1And::Absent,
                 has_endbr64: false,
+                has_stack_guard_load: false,
                 sections: Vec::new(),
                 program_headers: Vec::new(),
                 functions: Vec::new(),
@@ -12724,6 +12769,69 @@ mod tests {
     }
 
     #[test]
+    fn hardening_ssp_quiet_with_stack_guard_load() {
+        // rpmcrab#1505: a binary whose `.text` loads the TLS stack
+        // guard was instrumented by the compiler's stack protector,
+        // so the missing `__stack_chk_fail` is a noreturn artefact,
+        // not dropped flags — the kbd dumpkeys shape. The `memcpy`
+        // import keeps the binary SSP-applicable (rpmcrab#452), so
+        // the quiet outcome pins the guard-load gate rather than
+        // passing via inapplicability.
+        let run = |guard_load: bool| {
+            let config = test_config();
+            let check = BinariesCheck::with_tool_dir(&config, None);
+            let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+            let pkgfile = syn_file("/usr/bin/probe", "ELF 64-bit LSB pie executable");
+            let mut info = syn_info();
+            info.has_stack_guard_load = guard_load;
+            info.functions = vec!["malloc".to_string(), "memcpy".to_string()];
+            info.undefined_functions = vec!["malloc".to_string(), "memcpy".to_string()];
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+            out.results().to_vec()
+        };
+
+        // Without the guard load the finding fires.
+        let results = run(false);
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must fire without a guard load: {results:?}"
+        );
+        // With it the finding stays quiet.
+        let results = run(true);
+        assert!(
+            lines_for(&results, "missing-stack-protector").is_empty(),
+            "missing-stack-protector must not fire with a guard load: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hardening_ssp_guard_load_gate_is_x86_64_only() {
+        // The guard-load signal is the x86-64 TLS encoding
+        // (`mov r64, %fs:0x28`); on another machine the same flag
+        // must not quiet the finding — the encoding means nothing
+        // there, and the parser never sets it.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "aarch64", vec![]);
+        let pkgfile = syn_file("/usr/bin/probe", "ELF 64-bit LSB pie executable");
+        let mut info = syn_info();
+        info.elf_machine = goblin::elf::header::EM_AARCH64;
+        info.has_stack_guard_load = true;
+        info.functions = vec!["malloc".to_string(), "memcpy".to_string()];
+        info.undefined_functions = vec!["malloc".to_string(), "memcpy".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_hardening(&pkg, &pkgfile, &info, &mut out);
+        let results = out.results().to_vec();
+        assert_eq!(
+            lines_for(&results, "missing-stack-protector").len(),
+            1,
+            "missing-stack-protector must still fire off x86-64: {results:?}"
+        );
+    }
+
+    #[test]
     fn hardening_ssp_quiet_for_stdio_readers_only() {
         // rpmcrab#452 boundary: stdio buffered readers (`fread`, `fgets`)
         // are deliberately not SSP-relevant -- zoo's `fiz` reads into heap
@@ -13051,6 +13159,70 @@ mod tests {
         // The same bytes outside `.text` are not a code record.
         let rodata = parse_crafted_sections("cfendbrro", &[(".rodata", b"\xf3\x0f\x1e\xfa")]);
         assert!(!rodata.has_endbr64);
+    }
+
+    #[test]
+    fn stack_guard_load_pattern_matches_prologue_encodings() {
+        // The exact `mov r64, %fs:0x28` bytes the compiler emits: `%rax`
+        // in a noreturn main (the t1 repro) and `%r12` in kbd
+        // dumpkeys' main (rpmcrab#1505).
+        assert!(is_stack_guard_load(&[
+            0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00
+        ]));
+        assert!(is_stack_guard_load(&[
+            0x64, 0x4c, 0x8b, 0x24, 0x25, 0x28, 0x00, 0x00, 0x00
+        ]));
+        // REX.R for an extended register (%r8).
+        assert!(is_stack_guard_load(&[
+            0x64, 0x4d, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00
+        ]));
+        // Near misses: a different TLS slot, the GS segment, no REX.W
+        // (a 32-bit load), a ModRM with no SIB, a short window.
+        assert!(!is_stack_guard_load(&[
+            0x64, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00
+        ]));
+        assert!(!is_stack_guard_load(&[
+            0x65, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00
+        ]));
+        assert!(!is_stack_guard_load(&[
+            0x64, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, 0x00
+        ]));
+        assert!(!is_stack_guard_load(&[
+            0x64, 0x48, 0x8b, 0x05, 0x28, 0x00, 0x00, 0x00, 0x00
+        ]));
+        assert!(!is_stack_guard_load(&[
+            0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00
+        ]));
+    }
+
+    #[test]
+    fn stack_guard_load_is_detected_from_text_section_bytes() {
+        // The gate sensor end to end: `has_stack_guard_load` must come
+        // from the parsed `.text` bytes, not from a hand-set field — a
+        // wrong pattern or section-name drift would silently disable
+        // the gate and fire on every noreturn-protected binary. The
+        // positive bytes are dumpkeys' real main prologue: the guard
+        // load into %r12 followed by the store to the canary slot
+        // (rpmcrab#1505).
+        let with = parse_crafted_sections(
+            "cfguard",
+            &[(
+                ".text",
+                b"\x64\x4c\x8b\x24\x25\x28\x00\x00\x00\x4c\x89\xa4\x24\xf8\x02\x00\x00",
+            )],
+        );
+        assert!(
+            with.has_stack_guard_load,
+            "guard load in .text must be detected"
+        );
+        let without = parse_crafted_sections("cfnoguard", &[(".text", b"\x90\x90\xc3")]);
+        assert!(!without.has_stack_guard_load);
+        // The same bytes outside `.text` are not a code record.
+        let rodata = parse_crafted_sections(
+            "cfguardro",
+            &[(".rodata", b"\x64\x4c\x8b\x24\x25\x28\x00\x00\x00")],
+        );
+        assert!(!rodata.has_stack_guard_load);
     }
 
     #[test]
@@ -14073,6 +14245,7 @@ description = "explicit priority string bypasses the system crypto policy"
             let info = ReadelfInfo {
                 x86_feature_1_and: X86Feature1And::Absent,
                 has_endbr64: false,
+                has_stack_guard_load: false,
                 sections,
                 program_headers: Vec::new(),
                 functions: Vec::new(),
@@ -14231,6 +14404,7 @@ description = "explicit priority string bypasses the system crypto policy"
         ReadelfInfo {
             x86_feature_1_and: X86Feature1And::Absent,
             has_endbr64: false,
+            has_stack_guard_load: false,
             sections: Vec::new(),
             program_headers: Vec::new(),
             functions: Vec::new(),
