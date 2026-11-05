@@ -23137,20 +23137,18 @@ reason = "warning hook: executable and %config by design"
     }
 
     #[test]
-    fn fillup_merged_ghost_template_nudges() {
-        // A %ghost entry ships no template content, but the surviving
-        // tag's template arm reads file names without a ghost filter
-        // — pre-existing sysconfig behaviour, unchanged by the merge.
+    fn fillup_merged_ghost_template_is_quiet() {
+        // A %ghost entry ships no template content, so the merged
+        // tag's template arm skips it.
         let (pkg, _src, _extract) = fillup_test_pkg(
             "demo",
             &[],
             &["/usr/share/fillup-templates/sysconfig.demo"],
             &|_| {},
         );
-        assert_eq!(
-            sysconfig_findings(&pkg).len(),
-            1,
-            "the surviving tag fires on the ghost template name"
+        assert!(
+            sysconfig_findings(&pkg).is_empty(),
+            "the merged tag stays quiet on a ghost template name"
         );
     }
 
