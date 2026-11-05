@@ -888,9 +888,10 @@ finding is an error only when it always implies the damage, so style
 and judgement findings moved down: `description-line-too-long` and
 `files-duplicated-waste` print as warnings, `no-%check-section` as
 info, the `systemd-service-without-service_*` family as warnings.
-`missing-call-to-setgroups-before-setuid` prints as a warning at
-every file mode: its symbol pattern cannot tell an identity switch
-from an effective-id drop, so it does not always imply the damage. The vendored distro configs no longer bundle the
+`missing-call-to-setgroups-before-setuid` prints as a warning wherever
+it fires (since #1513 only on files installed setuid/setgid, archives
+excepted): its symbol pattern cannot tell an identity switch from an
+effective-id drop, so it does not always imply the damage. The vendored distro configs no longer bundle the
 strict scoring layer by default; `invalid-license` keeps its badness
 of 100000 in the base scoring, and six `[Scoring]` promotions that
 printed warnings as errors are gone. Text output renders

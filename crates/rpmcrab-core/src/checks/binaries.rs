@@ -5876,6 +5876,18 @@ fn file_is_privileged(pkgfile: &PkgFile) -> bool {
             .is_some_and(|caps| !caps.is_empty())
 }
 
+/// Setuid/setgid gate (#1513): the flagged file itself is
+/// installed setuid or setgid, so its setuid/setgid calls can in
+/// fact run elevated. A shared library or a plain 0755 binary
+/// (libman, util-linux eject/more/swapon) carries the calls but
+/// can never execute them with raised privilege, so the finding
+/// stays silent there. File capabilities are not in this gate:
+/// the ruling names the mode bits, and no case in the #1513
+/// evidence carries privilege by caps alone.
+fn file_is_setuid_or_setgid(pkgfile: &PkgFile) -> bool {
+    pkgfile.mode & (0o4000 | 0o2000) != 0
+}
+
 /// Exposure gate (#959): the package ships a systemd service or
 /// socket unit, so its binaries form daemon surface. Only units in
 /// the package's own file list count, and only `.service`/`.socket`
@@ -8180,7 +8192,23 @@ impl BinariesCheck {
                 .iter()
                 .any(|s| self.legacy_network_call_regex.is_match(s).unwrap_or(false));
 
-        if setgid && setuid && !setgroups && !interposer {
+        // Setuid/setgid gate (#1513): a linked object fires only
+        // when the flagged file itself carries the setuid or setgid
+        // bit -- only then can its setuid/setgid calls run elevated
+        // and drop groups wrongly. A library or a plain 0755 binary
+        // (libman, util-linux eject/more/swapon) stays silent: the
+        // calls are inert without a setuid binary to run them.
+        // Archives are exempt from the gate: an archive's mode can
+        // never confer privilege, and the eventual link product is
+        // unknown at scan time, so a member that references the pair
+        // still charges -- that reference is live once linked into
+        // a setuid binary.
+        if setgid
+            && setuid
+            && !setgroups
+            && !interposer
+            && (self.is_archive || file_is_setuid_or_setgid(pkgfile))
+        {
             // Warning unconditionally (fix-and-diverge, #743). The
             // reference splits the level on the setuid bit (E when
             // installed setuid, W otherwise). The symbol pattern
@@ -24532,8 +24560,9 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
 
-        // setuid+setgid without setgroups: Warning with or without
-        // the setuid bit (#743).
+        // setuid+setgid without setgroups: Warning on a setuid
+        // binary (#743). Without the setuid/setgid bit the calls
+        // are inert, so the finding stays silent (#1513).
         let mut info = syn_info();
         info.functions = vec!["setuid".to_string(), "setgid".to_string()];
         let mut pkgfile = syn_file("/usr/bin/setuidbin", "ELF 64-bit LSB executable");
@@ -24562,10 +24591,30 @@ description = "explicit priority string bypasses the system crypto policy"
             pkg_ships_daemon_units(&pkg),
             &mut out,
         );
+        assert!(
+            out.results().is_empty(),
+            "0755 binary must stay quiet (#1513): {:?}",
+            out.results()
+        );
+
+        // A setgid binary fires like a setuid one.
+        pkgfile.mode = 0o102755;
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_security_functions(
+            &pkg,
+            &pkgfile,
+            &info,
+            &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
+            &mut out,
+        );
         let results = out.results().to_vec();
         let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
         assert_eq!(lines.len(), 1, "exactly one finding: {results:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+
+        // The remaining firing cases run on a setuid file again.
+        pkgfile.mode = 0o104755;
 
         // Calling setgroups silences the finding.
         let mut info = syn_info();
@@ -24717,11 +24766,86 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
+    fn setgroups_setuid_bit_gate() {
+        // #1513: the finding fires only when the flagged file itself
+        // carries the setuid or setgid bit. A shared library (libman)
+        // or a plain 0755 binary (util-linux eject) stays silent
+        // even with the setuid/setgid pair; a setgid binary fires,
+        // and an archive member that references the pair still
+        // fires -- its mode confers no privilege either way.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let mut info = syn_info();
+        info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        let count = |pkgfile: &PkgFile| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(
+                &pkg,
+                pkgfile,
+                &info,
+                &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
+                &mut out,
+            );
+            let results = out.results().to_vec();
+            lines_for(&results, "missing-call-to-setgroups-before-setuid").len()
+        };
+
+        // libman shape: shared library, 0755, no setuid bit -> quiet.
+        let mut lib = syn_file(
+            "/usr/lib64/libman-2.13.1.so",
+            "ELF 64-bit LSB shared object",
+        );
+        lib.mode = 0o100755;
+        assert_eq!(count(&lib), 0, "library without setuid bit must stay quiet");
+
+        // util-linux eject shape: plain 0755 binary -> quiet.
+        let mut eject = syn_file("/usr/bin/eject", "ELF 64-bit LSB executable");
+        eject.mode = 0o100755;
+        assert_eq!(count(&eject), 0, "0755 binary must stay quiet");
+
+        // Setgid binary fires, like the setuid one pinned in
+        // security_function_findings.
+        let mut setgidbin = syn_file("/usr/bin/setgidbin", "ELF 64-bit LSB executable");
+        setgidbin.mode = 0o102755;
+        assert_eq!(count(&setgidbin), 1, "setgid binary must fire");
+
+        // Archive exception: a referenced pair still fires even
+        // though the archive itself carries no setuid bit.
+        let mut archive_check = BinariesCheck::with_tool_dir(&config, None);
+        archive_check.is_archive = true;
+        let mut archive_info = syn_info();
+        archive_info.functions = vec!["setuid".to_string(), "setgid".to_string()];
+        archive_info.undefined_function_refs = vec!["setuid".to_string(), "setgid".to_string()];
+        let archive_file = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        archive_check.check_security_functions(
+            &pkg,
+            &archive_file,
+            &archive_info,
+            &daemon_exec_binaries(&pkg),
+            pkg_ships_daemon_units(&pkg),
+            &mut out,
+        );
+        let results = out.results().to_vec();
+        let lines = lines_for(&results, "missing-call-to-setgroups-before-setuid");
+        assert_eq!(
+            lines.len(),
+            1,
+            "archive reference pair must still fire: {results:?}"
+        );
+    }
+
+    #[test]
     fn setgroups_interposer_credit() {
         let config = test_config();
         let check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
-        let pkgfile = syn_file("/usr/lib64/libtrace.so", "ELF 64-bit LSB shared object");
+        // Setuid so the firing cases below reach the #1513 gate;
+        // the credit cases stay quiet either way.
+        let mut pkgfile = syn_file("/usr/lib64/libtrace.so", "ELF 64-bit LSB shared object");
+        pkgfile.mode = 0o104755;
 
         // Interposer shape: defines setuid/setgid, references dlsym,
         // no setgroups -> quiet.
@@ -24842,7 +24966,10 @@ description = "explicit priority string bypasses the system crypto policy"
         let config = test_config();
         let check = BinariesCheck::with_tool_dir(&config, None);
         let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
-        let pkgfile = syn_file("/usr/lib64/libtrace.so", "ELF 64-bit LSB shared object");
+        // Setuid so the firing case below reaches the #1513 gate;
+        // the credit cases stay quiet either way.
+        let mut pkgfile = syn_file("/usr/lib64/libtrace.so", "ELF 64-bit LSB shared object");
+        pkgfile.mode = 0o104755;
 
         // A versioned dlsym reference credits like a bare one: the
         // test strips the version suffix before matching.

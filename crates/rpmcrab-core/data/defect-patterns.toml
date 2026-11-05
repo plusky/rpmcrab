@@ -126,6 +126,7 @@ family = "pattern"
 gate = "self"
 provenance = [
     "A process that calls setuid()/setgid() without setgroups()/initgroups() keeps its supplementary group memberships across the privilege drop, so the dropped-to identity retains group access it must not have.",
+    "Since #1513 the finder charges only a file installed setuid/setgid (archives excepted: a referenced pair still charges, as the eventual link product is unknown), because only such a file can run the calls elevated.",
 ]
 
 [[member]]
