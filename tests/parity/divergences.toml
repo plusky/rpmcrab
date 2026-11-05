@@ -3888,6 +3888,14 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1389"
 
 [[divergence]]
 case = "global"
+check = "SourceCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1530): `prebuilt-binary-in-sources` stays quiet for binaries under a top-level `test/` or `tests/` fixture directory, judged per archive level in the member chain, so a binary inside an archive that itself sits under `tests/` stays quiet too. These are test inputs consumed by `%check`, not shipped code (elfutils 0.196: 360 lines, every one under `tests/`). A `tests` directory nested deeper (for example `src/tests/`) still fires, as does a file merely named `test` or `tests`, and `testdata/` is not in the fixture set. The frozen 2.10.0 reference has no such check."
+since = "0.4.2"
+upstream = "https://github.com/plusky/rpmcrab/issues/1530"
+
+[[divergence]]
+case = "global"
 check = "buildarch-instead-of-exclusivearch-tag"
 kind = "behaviour"
 reason = "Fixed behaviour per rpmlint#1600 (fixes rpmlint#698): a trailing line-continuation backslash is stripped before comparing, so 'BuildArch: noarch \\' inside a multi-line macro is not reported as a real architecture. The frozen 2.10.0 reference reports it."
