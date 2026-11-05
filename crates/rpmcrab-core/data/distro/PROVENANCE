@@ -292,6 +292,7 @@
 # Adjudicated digest records (Factory content decides;
 # see DIGEST_ADJUDICATIONS):
 #   digest: adjudicated dbus-services.toml record for cups path /usr/share/dbus-1/system.d/cups.conf to the Factory-shipped hash set (issue #760)
+#   digest: excluded sysctl-whitelist.toml record for aaa_base path /usr/lib/sysctl.d/50-pid-max.conf on arches ix86, arm (issue #1524)
 #
 # Kept Filters entries (whole-finding suppressions kept
 # as rpmcrab's recorded decision; see KEEP_FILTERS):
