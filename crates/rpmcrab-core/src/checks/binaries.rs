@@ -8323,22 +8323,34 @@ impl BinariesCheck {
 
         // #972 (defect-patterns): system()/popen() hand a command
         // string to a shell. The call form fires only behind the
-        // privilege/exposure gates (the same gates as the
-        // gethostbyname finder above): ungated, the surface is
+        // privilege/exposure gates: ungated, the surface is
         // unremarkable, and binary facts cannot tell a fixed-string
         // call from one whose command is built from untrusted data,
         // so the gated form is a Warning — the maintainer audits
         // what reaches the command (the corpus classification is
-        // recorded in the divergences ledger). The second disjunct
-        // covers dynsym imports typed STT_NOTYPE: fill_from_elf
-        // files those only under `undefined_functions`, never under
-        // the FUNC-only `undefined_function_refs`.
+        // recorded in the divergences ledger). The daemon arm is
+        // narrowed (#1525): it counts only the binary a unit
+        // actually starts (ExecStart), not every file in a
+        // daemon-shipping package — the weak-prng narrowing's
+        // shape, shared through `file_is_daemon_exec` — so a
+        // package whose unit starts another binary stays silent
+        // (kbd: kbdsettings.service starts /usr/sbin/kbdsettings,
+        // never resizecons/spawn_console/spawn_login), while a
+        // package with an unresolvable unit still fails open to
+        // the package arm. Fixed-string-only calls still fire:
+        // no exemption, since a fixed string is a call-site
+        // property the binary facts do not decide. The second
+        // disjunct covers dynsym imports typed STT_NOTYPE:
+        // fill_from_elf files those only under
+        // `undefined_functions`, never under the FUNC-only
+        // `undefined_function_refs`.
         let shell_call = info.has_undefined_function_matching(&self.shell_call_regex)
             || info
                 .undefined_functions
                 .iter()
                 .any(|s| self.shell_call_regex.is_match(s).unwrap_or(false));
-        if (file_is_privileged(pkgfile) || ships_daemon) && shell_call {
+        if (file_is_privileged(pkgfile) || file_is_daemon_exec(pkgfile, daemon_exec)) && shell_call
+        {
             add_info(
                 out,
                 Level::Warning,
@@ -26399,8 +26411,9 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(lines.len(), 1, "one finding: {lines:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
 
-        // Package shipping a systemd service unit -> Warning; the
-        // versioned reference form fires through the same gate.
+        // An unreadable service unit fails open to the package arm
+        // -> Warning; the versioned reference form fires through
+        // the same gate.
         let svc_pkg = synthetic_pkg(
             "testpkg",
             "x86_64",
@@ -26416,7 +26429,7 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(lines.len(), 1, "one finding: {lines:?}");
         assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
 
-        // Package shipping a systemd socket unit -> Warning.
+        // An unreadable socket unit fails open the same way.
         let sock_pkg = synthetic_pkg(
             "testpkg",
             "x86_64",
@@ -26515,6 +26528,101 @@ description = "explicit priority string bypasses the system crypto policy"
         suid_svc.mode = 0o104755;
         let lines = run(&svc_pkg, &suid_svc, &["getaddrinfo"]);
         assert!(lines.is_empty(), "no finding: {lines:?}");
+    }
+
+    #[test]
+    fn shell_call_execstart_narrowing() {
+        // #1525: the daemon arm counts only the binary a unit
+        // actually starts (ExecStart), not every file in a
+        // daemon-shipping package — the weak-prng narrowing's
+        // shape, shared through `file_is_daemon_exec`. A package
+        // whose unit starts another binary stays silent (the kbd
+        // shape: kbdsettings.service starts /usr/sbin/kbdsettings,
+        // never resizecons/spawn_console/spawn_login); a unit the
+        // gate cannot resolve fails open to the package arm, and
+        // the privileged arm is unchanged. Fixed-string-only calls
+        // still fire: no exemption exists, since the binary facts
+        // cannot distinguish them — the gate is the only narrowing.
+        fn unit_file(dir: &std::path::Path, pkg_path: &str, content: &str) -> PkgFile {
+            let path = dir.join(pkg_path.trim_start_matches('/'));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, content).unwrap();
+            let mut f = syn_file(pkg_path, "ASCII text");
+            f.path = path.to_string_lossy().into_owned();
+            f
+        }
+
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let count = |pkg: &Pkg, pkgfile: &PkgFile, functions: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = info.functions.clone();
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(
+                pkg,
+                pkgfile,
+                &info,
+                &daemon_exec_binaries(pkg),
+                pkg_ships_daemon_units(pkg),
+                &mut out,
+            );
+            let results = out.results().to_vec();
+            lines_for(&results, "binary-or-shlib-calls-shell").len()
+        };
+
+        let dir = std::env::temp_dir().join(format!("rpmcrab-shell1525-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let foo = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let other = syn_file("/usr/bin/other", "ELF 64-bit LSB executable");
+
+        // ExecStart binary fires; a sibling the unit never starts
+        // stays silent — the kbd shape.
+        let unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/foo.service",
+            "[Service]\nExecStart=/usr/bin/foo --daemon\n",
+        );
+        let svc_pkg = synthetic_pkg("testpkg", "x86_64", vec![unit]);
+        assert_eq!(count(&svc_pkg, &foo, &["system"]), 1);
+        assert_eq!(count(&svc_pkg, &other, &["system"]), 0);
+        assert_eq!(count(&svc_pkg, &other, &["popen"]), 0);
+
+        // Socket through Service= reaches the service's ExecStart.
+        let sock = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/foosock.socket",
+            "[Socket]\nService=foo.service\n",
+        );
+        let sock_svc = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/foo.service",
+            "[Service]\nExecStart=/usr/bin/foo\n",
+        );
+        let sock_pkg = synthetic_pkg("testpkg", "x86_64", vec![sock, sock_svc]);
+        assert_eq!(count(&sock_pkg, &foo, &["system"]), 1);
+        assert_eq!(count(&sock_pkg, &other, &["system"]), 0);
+
+        // Specifier in the path makes the unit unresolvable, so the
+        // package-level arm survives (fail-open).
+        let spec_unit = unit_file(
+            &dir,
+            "/usr/lib/systemd/system/spec.service",
+            "[Service]\nExecStart=/usr/bin/%i\n",
+        );
+        let spec_pkg = synthetic_pkg("testpkg", "x86_64", vec![spec_unit]);
+        assert_eq!(count(&spec_pkg, &other, &["system"]), 1);
+
+        // Privileged arm is unchanged: a setuid file fires even when
+        // the package's unit starts another binary.
+        let mut suid = syn_file("/usr/bin/suidfoo", "ELF 64-bit LSB executable");
+        suid.mode = 0o104755;
+        assert_eq!(count(&svc_pkg, &suid, &["system"]), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
