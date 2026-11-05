@@ -2470,6 +2470,14 @@ pub struct FilesCheck {
     /// base dependency.
     nodep_candidates: Vec<NodepCandidate>,
     pkg_deps: HashMap<String, Vec<PkgDeps>>,
+    /// Session state for `manpage-dangling-so-ref` (issue #1531):
+    /// the `.so` targets no single package resolved, and every
+    /// package's shipped file names by package name, so
+    /// `after_checks` can resolve a `Requires` name to the required
+    /// package's contents. The finding is decided in `after_checks`,
+    /// once every package of the run has been seen.
+    manpage_so_ref_candidates: Vec<ManpageSoRefCandidate>,
+    pkg_contents: HashMap<String, HashSet<String>>,
     /// Decompressed bytes per file path for `manpage_text`
     /// (see `decompressed_bytes`); `None` entries
     /// record outputs that could not be obtained or exceeded the text
@@ -2597,6 +2605,8 @@ impl FilesCheck {
             declared_groups: HashMap::new(),
             nodep_candidates: Vec::new(),
             pkg_deps: HashMap::new(),
+            manpage_so_ref_candidates: Vec::new(),
+            pkg_contents: HashMap::new(),
             decompressed_cache: std::cell::RefCell::new(HashMap::new()),
         }
     }
@@ -2899,6 +2909,14 @@ impl Check for FilesCheck {
 
         self.session_files
             .extend(pkg.files.iter().map(|f| f.name.clone()));
+        self.pkg_contents
+            .entry(pkg.name.clone())
+            .or_default()
+            .extend(
+                pkg.files
+                    .iter()
+                    .map(|f| strip_man_compression_suffix(&f.name).to_string()),
+            );
         self.session_non_ghost_files.extend(
             pkg.files
                 .iter()
@@ -2922,7 +2940,7 @@ impl Check for FilesCheck {
             self.check_file(pkg, &f.name, f, &mut st, out);
         }
         self.check_manpage_compression(pkg, out);
-        self.check_manpage_so_refs(pkg, out);
+        self.check_manpage_so_refs(pkg);
         self.check_debug_files_in_non_debug_package(pkg, &st, out);
         self.check_debuginfo_without_sources(pkg, &st, out);
         self.check_bindir_exes(pkg, &st, out);
@@ -3064,6 +3082,29 @@ impl Check for FilesCheck {
                 None,
             ));
         }
+        // The session-aware `manpage-dangling-so-ref` decision (issue
+        // #1531): a candidate fires only when no package of the run
+        // that this package Requires by name ships its target -- the
+        // Requires edge resolved against the required package's
+        // contents. A sibling shipping the target without a declared
+        // Require credits nothing, and a Require naming a package
+        // that does not ship the target credits nothing either. A
+        // single-package run holds no sibling, so it reports exactly
+        // the per-package verdict. Candidates are in lint order,
+        // which the stable output sort preserves for equal keys.
+        for cand in &self.manpage_so_ref_candidates {
+            if self.manpage_so_ref_credited(cand) {
+                continue;
+            }
+            out.add_info(make_finding(
+                &cand.name,
+                &cand.arch,
+                Level::Warning,
+                "manpage-dangling-so-ref",
+                vec![cand.fname.clone(), cand.arg.clone()],
+                None,
+            ));
+        }
     }
 
     fn reset(&mut self) {
@@ -3078,6 +3119,8 @@ impl Check for FilesCheck {
         self.declared_groups.clear();
         self.nodep_candidates.clear();
         self.pkg_deps.clear();
+        self.manpage_so_ref_candidates.clear();
+        self.pkg_contents.clear();
         self.decompressed_cache.borrow_mut().clear();
     }
 
@@ -3093,6 +3136,8 @@ impl Check for FilesCheck {
             && self.declared_groups.is_empty()
             && self.nodep_candidates.is_empty()
             && self.pkg_deps.is_empty()
+            && self.manpage_so_ref_candidates.is_empty()
+            && self.pkg_contents.is_empty()
         {
             return None;
         }
@@ -3108,6 +3153,8 @@ impl Check for FilesCheck {
             declared_groups: std::mem::take(&mut self.declared_groups),
             nodep_candidates: std::mem::take(&mut self.nodep_candidates),
             pkg_deps: std::mem::take(&mut self.pkg_deps),
+            manpage_so_ref_candidates: std::mem::take(&mut self.manpage_so_ref_candidates),
+            pkg_contents: std::mem::take(&mut self.pkg_contents),
         }))
     }
 
@@ -3135,6 +3182,11 @@ impl Check for FilesCheck {
             for (name, deps) in state.pkg_deps {
                 self.pkg_deps.entry(name).or_default().extend(deps);
             }
+            self.manpage_so_ref_candidates
+                .extend(state.manpage_so_ref_candidates);
+            for (name, contents) in state.pkg_contents {
+                self.pkg_contents.entry(name).or_default().extend(contents);
+            }
         }
     }
 }
@@ -3143,8 +3195,9 @@ impl Check for FilesCheck {
 /// before `after_checks` (`rpmlint#1595`): the session-aware
 /// `dangling-relative-symlink` (issue #547), `non-standard-uid` /
 /// `non-standard-gid` (issue #756) and `no-dependency-on`
-/// (issue #862) decisions and the run-scoped
-/// `python-bytecode-without-source` credit.
+/// (issue #862) decisions, the run-scoped
+/// `python-bytecode-without-source` credit, and the
+/// `manpage-dangling-so-ref` decision (issue #1531).
 struct FilesSessionState {
     session_files: HashSet<String>,
     session_non_ghost_files: HashSet<String>,
@@ -3157,6 +3210,8 @@ struct FilesSessionState {
     declared_groups: HashMap<String, HashSet<String>>,
     nodep_candidates: Vec<NodepCandidate>,
     pkg_deps: HashMap<String, Vec<PkgDeps>>,
+    manpage_so_ref_candidates: Vec<ManpageSoRefCandidate>,
+    pkg_contents: HashMap<String, HashSet<String>>,
 }
 
 /// One `no-dependency-on` candidate from the perl/python base rules
@@ -3174,6 +3229,25 @@ struct NodepCandidate {
     version: String,
     /// The names the package's `Requires`/`PreReq` name: the possible
     /// anchors.
+    anchors: Vec<String>,
+}
+
+/// One `manpage-dangling-so-ref` candidate (issue #1531): a man
+/// page's `.so` target neither the package itself ships nor a file
+/// Require names, held until `after_checks` knows every package of
+/// the run and can resolve the package's `Requires` names against
+/// the required packages' contents.
+struct ManpageSoRefCandidate {
+    name: String,
+    arch: String,
+    /// The referencing page.
+    fname: String,
+    /// The `.so` argument as written.
+    arg: String,
+    /// The target's candidate paths, compression suffix stripped.
+    targets: Vec<String>,
+    /// The names the package's `Requires`/`PreReq` name: the
+    /// possible resolutions.
     anchors: Vec<String>,
 }
 
@@ -4565,6 +4639,28 @@ impl FilesCheck {
                         sib.source == cand.source
                             && base_credited(&sib.lists(), cand.base, &cand.version)
                     })
+                })
+        })
+    }
+
+    /// Whether a deferred `manpage-dangling-so-ref` candidate is
+    /// credited (issue #1531): one of the candidate's `Requires` /
+    /// `PreReq` names resolves to a package of the run whose shipped
+    /// contents include one of the target's candidate paths. The
+    /// names are the raw `req_names` entries, so a rich-expression
+    /// entry never matches a package name and only a plain (or
+    /// arch-qualified) requirement resolves; the contents are the
+    /// sibling's file names with the man compression suffix
+    /// stripped, the same normalisation the per-package shipped set
+    /// applies. The emitting package itself is not its own
+    /// resolution: the candidate exists only because the target is
+    /// not in its own shipped set.
+    fn manpage_so_ref_credited(&self, cand: &ManpageSoRefCandidate) -> bool {
+        cand.anchors.iter().any(|anchor| {
+            anchor != &cand.name
+                && self.pkg_contents.iter().any(|(name, contents)| {
+                    dep_name_matches(anchor, name)
+                        && cand.targets.iter().any(|t| contents.contains(t))
                 })
         })
     }
@@ -6248,17 +6344,21 @@ impl FilesCheck {
     /// A man page can redirect to another page with a `.so` line (a
     /// soelim include); when the target page is not shipped, `man`
     /// fails to display the referencing page. The reference is judged
-    /// within the package, like the reference's dangling-symlink
+    /// within the package first, like the reference's dangling-symlink
     /// family: a target shipped by another package satisfies it only
     /// when this package declares the dependency, through the same
     /// `req_names` escape `check_link_absolute` uses (a file Require
-    /// on the target page's path). The check deliberately stays
-    /// package-local even though the port's relative-symlink form is
-    /// session-aware (issue #547); the parity ledger records the
-    /// approximation. A shipped file, and likewise a file Require,
-    /// matches under any compression suffix, or none. One finding
-    /// per (referencing page, missing
-    /// target).
+    /// on the target page's path). A target neither shipped nor file
+    /// Required is held as a candidate and decided in `after_checks`
+    /// (issue #1531): it stays quiet when one of the package's
+    /// `Requires` names resolves to a package of the run whose
+    /// shipped contents include the target -- package-to-contents
+    /// resolution, not run-scoped co-presence (a sibling shipping
+    /// the target without a declared Require credits nothing) and
+    /// not the Require alone (a required package that does not ship
+    /// the target credits nothing). A shipped file, and likewise a
+    /// file Require, matches under any compression suffix, or none.
+    /// One finding per (referencing page, missing target).
     ///
     /// Resolution mirrors how the target is found at display time: a
     /// `man<section>/<page>` argument resolves against the man root,
@@ -6266,7 +6366,7 @@ impl FilesCheck {
     /// and a page under a locale directory (`/usr/share/man/de/...`)
     /// also resolves against that locale directory, which is where
     /// localised page sets keep their redirect targets.
-    fn check_manpage_so_refs(&self, pkg: &Pkg, out: &mut Filter) {
+    fn check_manpage_so_refs(&mut self, pkg: &Pkg) {
         let shipped: HashSet<&str> = pkg
             .files
             .iter()
@@ -6319,13 +6419,14 @@ impl FilesCheck {
                             .iter()
                             .any(|n| strip_man_compression_suffix(n) == *c)
                 }) {
-                    add_info(
-                        out,
-                        Level::Warning,
-                        pkg,
-                        "manpage-dangling-so-ref",
-                        &[&pkgfile.name, &arg],
-                    );
+                    self.manpage_so_ref_candidates.push(ManpageSoRefCandidate {
+                        name: pkg.name.clone(),
+                        arch: pkg.arch.clone(),
+                        fname: pkgfile.name.clone(),
+                        arg: arg.clone(),
+                        targets: candidates.iter().map(|c| (*c).to_string()).collect(),
+                        anchors: pkg.req_names.clone(),
+                    });
                 }
             }
         }
@@ -21107,6 +21208,9 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
 
     #[test]
     fn manpage_so_ref_missing_target_fires_warning() {
+        // The finding is decided in `after_checks` (issue #1531), so
+        // the test drives the session harness: a single-package run
+        // still fires, exactly the per-package verdict.
         let dir = tempfile::TempDir::new().expect("tmpdir");
         let pkg = manpage_pkg(
             &dir,
@@ -21116,7 +21220,7 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
                 b".so man3/popen.3\n".as_slice(),
             )],
         );
-        let results = run_check_binary(&pkg);
+        let (results, _) = run_files_check_pkgs(&[pkg], &test_config());
         let hits = so_ref_hits(&results);
         assert_eq!(
             hits.len(),
@@ -21214,6 +21318,123 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
         assert!(
             so_ref_hits(&results).is_empty(),
             "the /usr/man root candidate resolves: {results:?}"
+        );
+    }
+
+    /// The elfutils shape of issue #1531: an emitter package whose
+    /// man page redirects to a target the Required sibling ships,
+    /// and the sibling itself. The emitter Requires the sibling by
+    /// name, pinned `=` to the version as the real package does;
+    /// the sibling ships the target compressed, so the contents
+    /// match must strip the suffix. Each package gets its own
+    /// tempdir so the fixture extraction does not collide.
+    fn so_ref_sibling_pair() -> (Pkg, Pkg, tempfile::TempDir, tempfile::TempDir) {
+        let dir_emitter = tempfile::TempDir::new().expect("tmpdir");
+        let dir_sibling = tempfile::TempDir::new().expect("tmpdir");
+        let mut emitter = manpage_pkg(
+            &dir_emitter,
+            &[(
+                "/usr/share/man/man8/debuginfod.8",
+                0o100644,
+                b".so man7/debuginfod-client-config.7\n".as_slice(),
+            )],
+        );
+        emitter.name = "elfutils-debuginfod".to_string();
+        emitter.requires = vec![crate::pkg::dep::DepInfo {
+            name: "debuginfod-client".to_string(),
+            flags: 8, // RPMSENSE_EQUAL: the real package pins = %{version}
+            epoch: None,
+            version: Some("0.196".to_string()),
+            release: None,
+        }];
+        emitter.req_names = vec!["debuginfod-client".to_string()];
+        let mut sibling = manpage_pkg(
+            &dir_sibling,
+            &[(
+                "/usr/share/man/man7/debuginfod-client-config.7.gz",
+                0o100644,
+                b".TH debuginfod-client-config 7\n".as_slice(),
+            )],
+        );
+        sibling.name = "debuginfod-client".to_string();
+        (emitter, sibling, dir_emitter, dir_sibling)
+    }
+
+    #[test]
+    fn manpage_so_ref_required_sibling_contents_is_quiet() {
+        // Issue #1531: the target resolves against the required
+        // package's contents, so the pair stays quiet, in either
+        // lint order: the decision waits for `after_checks`, which
+        // sees the sibling whichever package was checked first.
+        for order in [false, true] {
+            let (emitter, sibling, _dir_emitter, _dir_sibling) = so_ref_sibling_pair();
+            let pkgs: Vec<Pkg> = if order {
+                vec![sibling, emitter]
+            } else {
+                vec![emitter, sibling]
+            };
+            let (results, _) = run_files_check_pkgs(&pkgs, &test_config());
+            assert!(
+                so_ref_hits(&results).is_empty(),
+                "required sibling contents satisfy the reference: {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn manpage_so_ref_sibling_without_require_fires() {
+        // Issue #1531: run-scoped co-presence alone credits nothing
+        // -- the sibling ships the target, but the emitter does not
+        // Require it, so the finding fires exactly as the
+        // per-package verdict.
+        let (mut emitter, sibling, _dir_emitter, _dir_sibling) = so_ref_sibling_pair();
+        emitter.requires.clear();
+        emitter.req_names.clear();
+        let (results, _) = run_files_check_pkgs(&[emitter, sibling], &test_config());
+        let hits = so_ref_hits(&results);
+        assert_eq!(
+            hits.len(),
+            1,
+            "an unrequired sibling credits nothing: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_required_sibling_without_target_fires() {
+        // Issue #1531: the Require alone credits nothing -- the
+        // required package must actually ship the target in its
+        // contents.
+        let (emitter, _sibling, _dir_emitter, _dir_sibling) = so_ref_sibling_pair();
+        let dir_other = tempfile::TempDir::new().expect("tmpdir");
+        let mut other = manpage_pkg(
+            &dir_other,
+            &[(
+                "/usr/share/man/man7/other.7",
+                0o100644,
+                b".TH other 7\n".as_slice(),
+            )],
+        );
+        other.name = "debuginfod-client".to_string();
+        let (results, _) = run_files_check_pkgs(&[emitter, other], &test_config());
+        let hits = so_ref_hits(&results);
+        assert_eq!(
+            hits.len(),
+            1,
+            "a required package without the target credits nothing: {results:?}"
+        );
+    }
+
+    #[test]
+    fn manpage_so_ref_required_sibling_absent_fires() {
+        // Issue #1531: a single-package run holds no sibling, so the
+        // Require cannot resolve and the per-package verdict stands.
+        let (emitter, _sibling, _dir_emitter, _dir_sibling) = so_ref_sibling_pair();
+        let (results, _) = run_files_check_pkgs(&[emitter], &test_config());
+        let hits = so_ref_hits(&results);
+        assert_eq!(
+            hits.len(),
+            1,
+            "an absent sibling resolves nothing: {results:?}"
         );
     }
 
@@ -21570,6 +21791,7 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
             let mut check = FilesCheck::with_tool_dir(&config, Some(tools.path()));
             let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
             check.check_binary(&pkg, &config, &mut out);
+            check.after_checks(&config, &mut out);
             let results = out.results().to_vec();
             assert_eq!(
                 so_ref_hits(&results).len(),
@@ -21727,7 +21949,7 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
                 ),
             ],
         );
-        let results = run_check_binary(&pkg);
+        let (results, _) = run_files_check_pkgs(&[pkg], &test_config());
         assert_eq!(
             so_ref_hits(&results).len(),
             1,
@@ -21755,7 +21977,7 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
                 ),
             ],
         );
-        let results = run_check_binary(&pkg);
+        let (results, _) = run_files_check_pkgs(&[pkg], &test_config());
         let hits = so_ref_hits(&results);
         assert_eq!(
             hits.len(),
@@ -21853,7 +22075,7 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
                 ),
             ],
         );
-        let results = run_check_binary(&pkg);
+        let (results, _) = run_files_check_pkgs(&[pkg], &test_config());
         let hits = so_ref_hits(&results);
         assert_eq!(
             hits.len(),
@@ -21878,7 +22100,7 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
                 b".so man1/a.1\n.so man1/a.1\n.so man1/a.1.gz\n.so man1/b.1\n".as_slice(),
             )],
         );
-        let results = run_check_binary(&pkg);
+        let (results, _) = run_files_check_pkgs(&[pkg], &test_config());
         assert_eq!(
             so_ref_hits(&results).len(),
             2,
@@ -21961,6 +22183,7 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
         let mut check = FilesCheck::with_tool_dir(&config, Some(dir.path()));
         let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
         check.check_binary(&pkg, &config, &mut out);
+        check.after_checks(&config, &mut out);
         let results = out.results().to_vec();
         assert_eq!(
             so_ref_hits(&results).len(),
