@@ -630,6 +630,13 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "missing-call-to-setgroups-before-setuid"
+kind = "behaviour"
+reason = "Fix-and-diverge (issue #1513): a linked object fires only when the flagged file itself is installed setuid or setgid. A shared library or a plain 0755 binary carries the calls but can never execute them with raised privilege (libman-2.13.1.so; util-linux eject/more/swapon), so the finding stays silent there. Archives are exempt: an archive's mode can never confer privilege, and the eventual link product is unknown at scan time, so a member that references the pair still charges. Pinned by setgroups_setuid_bit_gate in binaries.rs."
+since = "0.4.2"
+
+[[divergence]]
+case = "global"
 check = "ldd-failed"
 kind = "missing"
 reason = "Removed: the port parses ELF with goblin in both ReadelfInfo and LddInfo, so every input that fails the ldd parse already fails the readelf parse and emits readelf-failed first; ldd-failed is unreachable. The reference runs the ldd tool, whose distinct failure modes the goblin port has no equivalent for. The emission, its description entry, and its pinning test are removed."
