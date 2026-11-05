@@ -494,6 +494,16 @@ EXTRA_FILTERS = [
         r"compat-usrmerge-tools.* statically-linked-binary /usr/libexec/xmv",
         "xmv is statically linked deliberately for upgrade-time use",
     ),
+    # systemd-pcrextend.socket ships only in udev: the Factory
+    # systemd 261.4 udev RPM carries it, the systemd-experimental
+    # RPM carries no pcrextend file at all (and files.experimental
+    # lists none), so the upstream whitelist entry naming
+    # systemd-experimental draws a varlink-whitelisted-file-missing
+    # false positive for it (issue #1557, #1506).
+    (
+        r"systemd-experimental.* varlink-whitelisted-file-missing /usr/lib/systemd/system/systemd-pcrextend\.socket",
+        "pcrextend socket ships only in udev, not systemd-experimental",
+    ),
 ]
 
 # Extra Checks enabled in the openSUSE config that upstream rpmlint lists in

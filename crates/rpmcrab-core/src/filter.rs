@@ -1359,6 +1359,50 @@ mod tests {
         ));
     }
 
+    /// The vendored openSUSE config suppresses the varlink
+    /// whitelisted-file-missing false positive for
+    /// systemd-experimental on the pcrextend socket (#1557): the
+    /// socket ships only in udev, so the upstream whitelist entry
+    /// naming systemd-experimental is wrong for this file.
+    #[test]
+    fn vendored_opensuse_config_suppresses_systemd_experimental_pcrextend_varlink_missing() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let toml_path = manifest_dir.join("data/distro/opensuse/opensuse.toml");
+        let content = std::fs::read_to_string(&toml_path).expect("read opensuse.toml");
+        let value: toml::Value = toml::from_str(&content).expect("parse opensuse.toml");
+        let filters = value
+            .get("Filters")
+            .and_then(|v| v.as_array())
+            .expect("Filters list");
+        let patterns: Vec<&str> = filters.iter().filter_map(|v| v.as_str()).collect();
+
+        let pcrextend = patterns
+            .iter()
+            .find(|p| p.starts_with("systemd-experimental"))
+            .expect("pcrextend varlink filter in vendored opensuse.toml");
+
+        let re = fancy_regex::Regex::new(pcrextend).expect("compile pcrextend filter");
+        let is_match = |s: &str| re.find(s).unwrap().is_some();
+
+        // Suppressed: systemd-experimental does not ship the socket.
+        assert!(is_match(
+            "systemd-experimental.x86_64: E: varlink-whitelisted-file-missing /usr/lib/systemd/system/systemd-pcrextend.socket"
+        ));
+
+        // Not suppressed: another package missing the same path,
+        // another finding on the same path, another path in the
+        // same package.
+        assert!(!is_match(
+            "udev.x86_64: E: varlink-whitelisted-file-missing /usr/lib/systemd/system/systemd-pcrextend.socket"
+        ));
+        assert!(!is_match(
+            "systemd-experimental.x86_64: E: varlink-file-unauthorized /usr/lib/systemd/system/systemd-pcrextend.socket"
+        ));
+        assert!(!is_match(
+            "systemd-experimental.x86_64: E: varlink-whitelisted-file-missing /usr/lib/systemd/system/systemd-mute-console.socket"
+        ));
+    }
+
     /// The vendored openSUSE config carries no spelling-error filter:
     /// the RPM-ecosystem jargon (librpm, scriptlet, init, namespace)
     /// is vocabulary of the
