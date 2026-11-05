@@ -1255,7 +1255,7 @@ impl Check for PythonCheck {
                 if full.is_file() {
                     add_info(
                         out,
-                        Level::Error,
+                        Level::Warning,
                         pkg,
                         "python-egg-info-distutils-style",
                         &[filename],
@@ -4703,6 +4703,56 @@ mod tests {
             }
             std::fs::remove_dir_all(pkg.dir_name().join(&root)).ok();
         }
+    }
+
+    #[test]
+    fn distutils_style_egg_info_file_warns_not_errors() {
+        use crate::color::Color;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+
+        // The legacy distutils layout is a plain file named `*.egg-info`
+        // (here a hand-generated `Metadata-Version: 1.0` file, the shape
+        // rpm's python-rpm ships from its own CMakeLists.txt, not
+        // setuptools). The finding is valid -- egg-info is deprecated --
+        // but no spec-side switch produces dist-info, so it fires as a
+        // Warning and must not fail the build.
+        let config = Config::default();
+        let mut check = PythonCheck::new(&config);
+        let mut pkg = fixture_pkg_with_requires(&[]);
+        pkg.requires = Vec::new();
+        pkg.provides = Vec::new();
+        let root = format!("egginfo-warn-{n}");
+        let rel = format!("{root}/usr/lib/python3.13/site-packages/rpm-4.20.1.egg-info");
+        let disk = pkg.dir_name().join(&rel);
+        std::fs::create_dir_all(disk.parent().unwrap()).expect("test dirs");
+        std::fs::write(&disk, "Metadata-Version: 1.0\nName: rpm\nVersion: 4.20.1\n")
+            .expect("test egg-info");
+        let mut pf = pkg.files[0].clone();
+        pf.name = format!("/{rel}");
+        pf.path = disk.to_string_lossy().into_owned();
+        pkg.files.push(pf);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        let levels = out.result_levels().to_vec();
+        let findings: Vec<_> = out
+            .results()
+            .iter()
+            .zip(levels)
+            .filter(|((name, _), _)| name == "python-egg-info-distutils-style")
+            .map(|((name, line), level)| (name.clone(), level, line.clone()))
+            .collect();
+        assert_eq!(findings.len(), 1, "results: {:?}", out.results());
+        let (name, level, line) = &findings[0];
+        assert_eq!(name, "python-egg-info-distutils-style");
+        assert_eq!(*level, Level::Warning);
+        assert_eq!(
+            line,
+            &format!("python-test.noarch: W: python-egg-info-distutils-style /{rel}")
+        );
+        std::fs::remove_dir_all(pkg.dir_name().join(&root)).ok();
     }
 
     #[test]
