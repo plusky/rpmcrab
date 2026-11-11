@@ -1117,7 +1117,7 @@ fn tokenize(text: &str) -> Vec<Tok> {
                 let mut op = String::new();
                 if in_word && word.iter().all(|d| d.is_ascii_digit()) {
                     op = word.iter().collect();
-                    word = Vec::new();
+                    word.clear();
                     dynamic = false;
                     in_word = false;
                 } else {
