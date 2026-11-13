@@ -46,6 +46,7 @@ const STAGED: &[&str] = &[
     include_str!("../data/descriptions/SELinuxIndependentModuleCheck.toml"),
     include_str!("../data/descriptions/SUIDPermissionsCheck.toml"),
     include_str!("../data/descriptions/SharedLibraryPolicyCheck.toml"),
+    include_str!("../data/descriptions/ShellSyntaxCheck.toml"),
     include_str!("../data/descriptions/SignatureCheck.toml"),
     include_str!("../data/descriptions/SourceCheck.toml"),
     include_str!("../data/descriptions/SpecCheck.toml"),
@@ -435,6 +436,10 @@ mod tests {
             (
                 "SharedLibraryPolicyCheck.toml",
                 "54f902f6eb95e9d24c6d47d2632f793699a8eef3275ba2d5beda4c486b80dbca",
+            ),
+            (
+                "ShellSyntaxCheck.toml",
+                "f2a4e1b3eef62f2ca22bc5adb15ee116a224743492a3d11ec37919d061d478f3",
             ),
             (
                 "SignatureCheck.toml",

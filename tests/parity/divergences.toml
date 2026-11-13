@@ -3815,6 +3815,20 @@ since = "0.4.2"
 
 [[divergence]]
 case = "global"
+check = "ShellSyntaxCheck"
+kind = "behaviour"
+reason = "Deliberate config divergence: rpmcrab enables ShellSyntaxCheck in its bundled default config (crates/rpmcrab-core/data/configdefaults.toml) and in the vendored openSUSE flavour config (crates/rpmcrab-core/data/distro/opensuse/opensuse.toml, appended by EXTRA_CHECKS in scripts/generate-distro-configs.py). The reference has no such check at all -- the rpminspect shellsyntax idea (a `bash -n` syntax validity pass over shell scripts) has no rpmlint counterpart -- so nothing runs there. The check only runs `bash -n` over Bourne-Again shell scripts; /bin/sh scripts stay with BashismsCheck's `dash -n` pass, so no script is checked twice."
+since = "0.4.3"
+
+[[divergence]]
+case = "global"
+check = "bash-syntax-error"
+kind = "detail"
+reason = "New port-only Warning with no reference counterpart: bash-syntax-error (ShellSyntaxCheck) fires once per Bourne-Again shell script that fails `bash -n`, naming the script and the first line of the syntax error. The level is Warning, matching the companion bin-sh-syntax-error: a real parse failure in a shipped script. Provenance: `crates/rpmcrab-core/data/descriptions/ShellSyntaxCheck.toml`."
+since = "0.4.3"
+
+[[divergence]]
+case = "global"
 check = "SignatureCheck"
 kind = "behaviour"
 reason = "Signature verification runs in-process through librpm (a verified `PackageHeader::from_file` read against the rpmdb keyring, with the verification flags masking the digest checks \u2014 a deliberate flag difference from `rpm -Kv`, whose default flag set verifies the digests as well) where the reference shells out to `rpm -Kv` and scrapes its output (SignatureCheck.py; pkg.py). Verdicts come from the structured result; the `unknown-key` key ID is read from the signature packet's issuer subpacket, falling back to the issuer-fingerprint subpacket when the packet carries no issuer subpacket (the key ID is that fingerprint's low 64 bits), and is formatted as the low 32 bits, as `rpm -Kv` prints it; a verification failure is reported as `invalid-signature` only when a signature packet is itself unparsable \u2014 a parseable signature that fails verification, and digest failures, stay silent, matching the reference's text patterns. The library and keyring configuration are the same ones `rpm -Kv` uses, so findings agree; parity is pinned by the fixture pin matrix (the unsigned, signed, corrupt-packet, bad-math, broken-payload and bad-digest fixture RPMs, each generation-checked against empty and key-holding rpmdb states, together with the v6 OPENPGP-container fixtures (container-only, classic-tag control, mixed classic+container and dual-signature forms, generation-checked the same way against an rpm 6 `rpm -Kv`) and a Factory-corpus before/after diff (plusky/rpmcrab#704))."

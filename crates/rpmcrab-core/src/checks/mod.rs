@@ -36,6 +36,7 @@ pub mod python;
 pub mod selinux_independent_module;
 pub mod shared;
 pub mod shared_library_policy;
+pub mod shell_syntax;
 pub mod signature;
 pub mod source;
 pub mod spdx;

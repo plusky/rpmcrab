@@ -1,0 +1,3 @@
+bash-syntax-error="""
+A /bin/bash shell script contains a bash syntax error, try bash -n <file> for
+more detailed error message."""

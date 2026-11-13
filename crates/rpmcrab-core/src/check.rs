@@ -281,6 +281,9 @@ pub fn build(name: &str, config: &Config) -> Option<Box<dyn Check>> {
         "BashismsCheck" => Some(Box::new(crate::checks::bashisms::BashismsCheck::new(
             config,
         ))),
+        "ShellSyntaxCheck" => Some(Box::new(
+            crate::checks::shell_syntax::ShellSyntaxCheck::new(config),
+        )),
         "FilelistCheck" => Some(Box::new(crate::checks::filelist::FilelistCheck::new(
             config,
         ))),
@@ -529,7 +532,7 @@ mod tests {
 
     #[test]
     fn warning_only_checks_report_warning_max_severity() {
-        // Every `add_info` call site in these seven passes `Level::Warning`
+        // Every `add_info` call site in these eight passes `Level::Warning`
         // (verified by audit); the annotation must match or `--errors-only`
         // would wrongly keep them.
         let config = Config::default();
@@ -539,6 +542,10 @@ mod tests {
         );
         assert_eq!(
             crate::checks::bashisms::BashismsCheck::new(&config).max_severity(),
+            Level::Warning
+        );
+        assert_eq!(
+            crate::checks::shell_syntax::ShellSyntaxCheck::new(&config).max_severity(),
             Level::Warning
         );
         assert_eq!(

@@ -24,6 +24,7 @@ arch-dependent-file-in-usr-share = E
 arch-independent-package-contains-binary-or-object = E
 backup-file-in-package = E
 bad-manual-page-folder = E
+bash-syntax-error = W
 beam-compile-info-missed = W
 beam-compiled-without-debuginfo = E
 beam-was-not-recompiled = W

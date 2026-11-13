@@ -1,0 +1,17 @@
+# Divergence ledger entries owned by `ShellSyntaxCheck`.
+# Assembled into tests/parity/divergences.toml by
+# scripts/generate-divergences-ledger.py.
+
+[[divergence]]
+case = "global"
+check = "ShellSyntaxCheck"
+kind = "behaviour"
+reason = "Deliberate config divergence: rpmcrab enables ShellSyntaxCheck in its bundled default config (crates/rpmcrab-core/data/configdefaults.toml) and in the vendored openSUSE flavour config (crates/rpmcrab-core/data/distro/opensuse/opensuse.toml, appended by EXTRA_CHECKS in scripts/generate-distro-configs.py). The reference has no such check at all -- the rpminspect shellsyntax idea (a `bash -n` syntax validity pass over shell scripts) has no rpmlint counterpart -- so nothing runs there. The check only runs `bash -n` over Bourne-Again shell scripts; /bin/sh scripts stay with BashismsCheck's `dash -n` pass, so no script is checked twice."
+since = "0.4.3"
+
+[[divergence]]
+case = "global"
+check = "bash-syntax-error"
+kind = "detail"
+reason = "New port-only Warning with no reference counterpart: bash-syntax-error (ShellSyntaxCheck) fires once per Bourne-Again shell script that fails `bash -n`, naming the script and the first line of the syntax error. The level is Warning, matching the companion bin-sh-syntax-error: a real parse failure in a shipped script. Provenance: `crates/rpmcrab-core/data/descriptions/ShellSyntaxCheck.toml`."
+since = "0.4.3"

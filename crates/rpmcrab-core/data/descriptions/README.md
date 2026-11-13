@@ -158,6 +158,9 @@ Provenance, verified against the pinned reference (`84848c0`):
 - `CMakeConfigCheck.toml` — a port-only file: the reference has no
   CMakeConfigCheck, so its one entry (`cmake-dangling-imported-location`)
   is written for the port. Ledgered in `tests/parity/divergences.toml`.
+- `ShellSyntaxCheck.toml` — a port-only file: the reference has no
+  shell-syntax check, so its one entry (`bash-syntax-error`) is written
+  for the port. Ledgered in `tests/parity/divergences.toml`.
 - `SELinuxIndependentModuleCheck.toml` — the reference file, with the
   `selinux-incorrect-if-file-location` entry reworded to state the layer
   directories the port credits (the devel Makefile collects interfaces

@@ -62,6 +62,11 @@ Checks = [
     # when the run holds the build's source package, and stays
     # silent on any partial input.
     "CMakeConfigCheck",
+    # Deliberate rpmcrab addition (ledgered in tests/parity/divergences.toml):
+    # the reference has no shell-syntax check at all (the rpminspect
+    # shellsyntax idea). The check runs `bash -n` over Bourne-Again
+    # shell scripts only; /bin/sh scripts stay with BashismsCheck.
+    "ShellSyntaxCheck",
 ]
 # List of error titles that should be filtered
 FilterErrorTitles = []

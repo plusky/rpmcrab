@@ -83,6 +83,7 @@ RUN_TOPICS = frozenset({
 # crates/rpmcrab-core/tests/divergences_missing.rs.
 PORT_ONLY_CHECKS = frozenset({
     "CMakeConfigCheck",
+    "ShellSyntaxCheck",
 })
 
 

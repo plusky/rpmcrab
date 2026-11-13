@@ -1941,7 +1941,7 @@ fn errors_only_header_reports_configured_check_count() {
     assert_eq!(out.status.code(), Some(64));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("checks: 46, packages: 1"),
+        stdout.contains("checks: 47, packages: 1"),
         "header reports the configured count, not the run count: {stdout}"
     );
 }
@@ -2025,7 +2025,7 @@ fn errors_only_json_finding_set_matches_full_run() {
     let eo_doc: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&eo.stdout)).expect("JSON");
     assert_eq!(full_doc["findings"], eo_doc["findings"]);
-    assert_eq!(eo_doc["checks"], 46);
+    assert_eq!(eo_doc["checks"], 47);
     assert_eq!(
         eo_doc["summary"]["exit_code"].as_i64(),
         eo.status.code().map(i64::from)
@@ -2598,6 +2598,20 @@ fn explain_staged_bashisms_check() {
     assert_eq!(
         stdout,
         "bin-sh-syntax-error:\nA /bin/sh shell script contains a POSIX shell syntax error. This might\nindicate a potential bash-specific feature being used, try dash -n <file> for\nmore detailed error message.\n\n\n",
+        "exact --explain stdout",
+    );
+    assert!(out.stderr.is_empty());
+}
+
+/// `--explain`: staged `ShellSyntaxCheck.toml` resolves `bash-syntax-error` instead of "Unknown message".
+#[test]
+fn explain_staged_shell_syntax_check() {
+    let out = rpmcrab(&["-e", "bash-syntax-error"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        "bash-syntax-error:\nA /bin/bash shell script contains a bash syntax error, try bash -n <file> for\nmore detailed error message.\n\n\n",
         "exact --explain stdout",
     );
     assert!(out.stderr.is_empty());
