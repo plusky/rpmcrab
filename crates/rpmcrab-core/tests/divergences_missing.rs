@@ -98,7 +98,7 @@ fn missing_entries_exactly_cover_unported_checks() {
     // scripts/generate-divergences-ledger.py, which keys the ledger
     // owner files): an unlisted foreign check is registry drift, such as
     // a typo'd or renamed module name.
-    const PORT_ONLY_CHECKS: &[&str] = &["CMakeConfigCheck"];
+    const PORT_ONLY_CHECKS: &[&str] = &["CMakeConfigCheck", "ShellSyntaxCheck"];
     let mut foreign: Vec<&String> = ported
         .difference(&reference)
         .filter(|name| !PORT_ONLY_CHECKS.contains(&name.as_str()))

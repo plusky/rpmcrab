@@ -521,6 +521,7 @@ EXTRA_CHECKS = [
     "XinetdDepCheck",
     "PAMModulesCheck",
     "CMakeConfigCheck",
+    "ShellSyntaxCheck",
 ]
 
 # Extra AtomicAllowedDirs entries appended to the openSUSE config that

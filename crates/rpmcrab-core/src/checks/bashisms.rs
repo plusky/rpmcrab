@@ -129,7 +129,7 @@ impl BashismsCheck {
 /// overlay/skeleton templates. The shipped file is rendered first, so a
 /// `dash -n` failure in it is unrendered template text, not a failure in
 /// any executed script.
-fn is_template_script(name: &str) -> bool {
+pub(crate) fn is_template_script(name: &str) -> bool {
     name.ends_with(".skel") || name.ends_with(".ww") || name.ends_with(".in")
 }
 
@@ -141,7 +141,7 @@ fn is_template_script(name: &str) -> bool {
 /// Limitation: the skip covers the whole file, so a genuine bashism
 /// on a pre-switch prologue line is silenced too, and both findings
 /// are suppressed (`bin-sh-syntax-error` and `potential-bashisms`).
-fn is_polyglot_wrapper(content: &str) -> bool {
+pub(crate) fn is_polyglot_wrapper(content: &str) -> bool {
     let mut self_vars: Vec<String> = Vec::new();
     let mut code_lines = 0;
     for line in content.lines() {
