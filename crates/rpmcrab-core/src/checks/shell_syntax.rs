@@ -55,20 +55,24 @@ impl ShellSyntaxCheck {
         self.bash.is_present()
     }
 
-    /// The first line of the `bash -n` error for a failed run, or `None`
-    /// when the run passed, the tool is absent, or the spawn failed.
+    /// The first non-empty line of the `bash -n` error for a failed run,
+    /// or `None` when the run passed, the tool is absent, the spawn
+    /// failed, or the exit status is not a syntax error. Only exit code
+    /// 2 counts: 127 is a missing file and 126 a directory, neither of
+    /// which is a syntax error in the script — like
+    /// `BashismsCheck::classify_bashisms`, which only counts exit 2 and
+    /// explicitly silences 127.
     /// Pure classification of the run's output, split out so tests can
     /// drive it without subprocesses.
     fn classify(output: Option<Output>) -> Option<String> {
         let output = output?;
-        if output.status.success() {
+        if output.status.code() != Some(2) {
             return None;
         }
         let first = String::from_utf8_lossy(&output.stderr)
             .lines()
-            .next()
             .map(str::trim)
-            .filter(|line| !line.is_empty())
+            .find(|line| !line.is_empty())
             .map(str::to_string);
         Some(first.unwrap_or_else(|| "bash -n reported a syntax error".to_string()))
     }
@@ -81,9 +85,19 @@ impl ShellSyntaxCheck {
         cmd.output().ok()
     }
 
-    /// The `bash -n` error detail for one script, if any.
+    /// The `bash -n` error detail for one script, if any. The error names
+    /// the extracted temp path `bash -n` was handed, so the leading
+    /// `{path}: ` prefix is stripped: a finding must never leak the
+    /// working directory (see `make_finding`), and a stripped detail is
+    /// stable across runs and stays correct when the md5 cache shares it
+    /// between identical-content scripts at different paths.
     fn check_script(&self, path: &str) -> Option<String> {
-        Self::classify(self.run_bash_n(path))
+        Self::classify(self.run_bash_n(path)).map(|detail| {
+            detail
+                .strip_prefix(&format!("{path}: "))
+                .map(str::to_string)
+                .unwrap_or(detail)
+        })
     }
 }
 
@@ -241,6 +255,35 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn non_syntax_exit_codes_are_quiet() {
+        // 127 is a missing file, 126 a directory, 1 is not a `bash -n`
+        // syntax error: only exit 2 counts, like BashismsCheck.
+        for code in [1, 126, 127] {
+            assert_eq!(
+                ShellSyntaxCheck::classify(Some(output_with(
+                    code,
+                    "/usr/bin/bad.sh: line 2: syntax error near unexpected token `then'\n"
+                ))),
+                None,
+                "exit {code} must stay silent"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failure_skips_leading_blank_lines() {
+        assert_eq!(
+            ShellSyntaxCheck::classify(Some(output_with(
+                2,
+                "\n/usr/bin/bad.sh: line 2: syntax error near unexpected token `then'\n"
+            ))),
+            Some("/usr/bin/bad.sh: line 2: syntax error near unexpected token `then'".to_string())
+        );
+    }
+
+    #[test]
     fn missing_tool_is_quiet() {
         assert_eq!(ShellSyntaxCheck::classify(None), None);
     }
@@ -317,7 +360,78 @@ mod tests {
         assert_eq!(name, "bash-syntax-error");
         assert!(line.contains("/usr/bin/bad.sh"), "script lost: {line}");
         assert!(line.contains("syntax error"), "bash -n error lost: {line}");
+        assert!(
+            !line.contains(scripts.path().to_str().unwrap()),
+            "rendered line leaks the temp path: {line}"
+        );
         assert_eq!(out.result_levels(), &[Level::Warning]);
+    }
+
+    /// The detail `check_script` returns never names the extracted temp
+    /// path `bash -n` was handed: the `{path}: ` prefix is stripped.
+    #[test]
+    #[cfg(unix)]
+    fn check_script_strips_temp_path() {
+        let tools = tempfile::tempdir().expect("tmpdir");
+        failing_bash(tools.path());
+        let scripts = tempfile::tempdir().expect("tmpdir");
+        let script = scripts.path().join("bad.sh");
+        std::fs::write(&script, "#!/bin/bash\nif then\n").expect("write script");
+        let check = ShellSyntaxCheck::with_tool_dir(Some(tools.path()));
+        let detail = check
+            .check_script(&script.to_string_lossy())
+            .expect("finding expected");
+        assert_eq!(detail, "line 2: syntax error near unexpected token `then'");
+        assert!(
+            !detail.contains(scripts.path().to_str().unwrap()),
+            "temp path leaked: {detail}"
+        );
+    }
+
+    /// Two identical-content scripts share one cached detail: with the
+    /// temp path stripped, neither rendered line names the other's file.
+    #[test]
+    #[cfg(unix)]
+    fn cached_detail_names_no_temp_path() {
+        let tools = tempfile::tempdir().expect("tmpdir");
+        failing_bash(tools.path());
+        let scripts = tempfile::tempdir().expect("tmpdir");
+        let first = scripts.path().join("one.sh");
+        let second = scripts.path().join("two.sh");
+        std::fs::write(&first, "#!/bin/bash\nif then\n").expect("write script");
+        std::fs::write(&second, "#!/bin/bash\nif then\n").expect("write script");
+        let mut pkg = pkg_with_script(
+            "/usr/bin/one.sh",
+            &first,
+            "Bourne-Again shell script, ASCII text executable",
+        );
+        let md5 = "0123456789abcdef0123456789abcdef".to_string();
+        pkg.files[0].md5 = Some(md5.clone());
+        pkg.files.push(PkgFile {
+            name: "/usr/bin/two.sh".to_string(),
+            path: second.to_string_lossy().into_owned(),
+            mode: 0o100755,
+            magic: "Bourne-Again shell script, ASCII text executable".to_string(),
+            md5: Some(md5),
+            ..Default::default()
+        });
+        let results = run_check(tools.path(), &pkg);
+        assert_eq!(results.len(), 2, "one finding per script: {results:?}");
+        let tmp = scripts.path().to_str().unwrap();
+        for (name, line) in &results {
+            assert_eq!(name, "bash-syntax-error");
+            assert!(!line.contains(tmp), "temp path leaked: {line}");
+        }
+        assert!(
+            results[0].1.contains("/usr/bin/one.sh"),
+            "first script lost: {:?}",
+            results[0]
+        );
+        assert!(
+            results[1].1.contains("/usr/bin/two.sh"),
+            "second script lost: {:?}",
+            results[1]
+        );
     }
 
     /// A `/bin/sh` script stays silent even when the fake `bash` exits 2:
