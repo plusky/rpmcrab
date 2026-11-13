@@ -2936,6 +2936,7 @@ impl Check for FilesCheck {
             .push(PkgDeps::snapshot(pkg));
         self.check_meta_package(pkg, &st, out);
         self.check_empty_debuginfo(pkg, &st, out);
+        self.check_empty_package(pkg, &st, out);
         for f in &pkg.files {
             self.check_file(pkg, &f.name, f, &mut st, out);
         }
@@ -4377,6 +4378,43 @@ impl FilesCheck {
         if pkg.files.is_empty() && (st.debuginfo_package || st.debugsource_package) {
             add_info(out, Level::Error, pkg, "empty-debuginfo-package", &[]);
         }
+    }
+
+    /// rpminspect `emptyrpm` idea: an RPM that ships no files at all is
+    /// usually a build accident (an install step that installed nothing,
+    /// a `%files` list that matched nothing), so it deserves a look.
+    /// Warning, not Error: legitimately empty packages exist beyond the
+    /// shapes exempted below (rpminspect itself carries an
+    /// `expected_empty` list for them), so this is a "verify" signal
+    /// rather than a build failure.
+    ///
+    /// Exemptions, all by name shape rather than an allowlist:
+    /// - debuginfo/debugsource packages: their emptiness already fires
+    ///   the specific `empty-debuginfo-package` error; reporting the
+    ///   same emptiness twice would be noise.
+    /// - meta packages (`MetaPackageRegexp`: bundle/task/patterns):
+    ///   empty by design -- the inverse finding `file-in-meta-package`
+    ///   fires when one of them ships files.
+    /// - `*-rebuild` packages: empty anchors whose requirement exists
+    ///   to trigger rebuilds (same suffix test as
+    ///   `TagsCheck::rebuild_source_anchor`).
+    ///
+    /// A package whose file list is only %ghost entries is out of scope:
+    /// it still lists files in its header, so it is not "no files".
+    fn check_empty_package(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
+        if !pkg.files.is_empty() {
+            return;
+        }
+        if st.debuginfo_package || st.debugsource_package {
+            return;
+        }
+        if is_match(&self.meta_package_re, &pkg.name) {
+            return;
+        }
+        if pkg.name.ends_with("-rebuild") {
+            return;
+        }
+        add_info(out, Level::Warning, pkg, "empty-package", &[]);
     }
 
     fn check_debuginfo_without_sources(&self, pkg: &Pkg, st: &PkgState, out: &mut Filter) {
@@ -21095,6 +21133,90 @@ KERNEL==\"hidraw*\", MODE=\"0660\"
                 .count(),
             1,
             "empty legacy -debug package must fire empty-debuginfo-package: {results:?}"
+        );
+    }
+
+    #[test]
+    fn empty_package_fires_for_package_without_files() {
+        let (pkg, _dir) = pkg_with_files(vec![]);
+        let results = run_check_binary(&pkg);
+        assert_eq!(
+            results.iter().filter(|(n, _)| n == "empty-package").count(),
+            1,
+            "package with no files must fire empty-package: {results:?}"
+        );
+    }
+
+    #[test]
+    fn empty_package_is_warning() {
+        // Legitimately empty packages exist, so this is a "verify"
+        // signal (Warning), not a build failure (Error).
+        let (pkg, _dir) = pkg_with_files(vec![]);
+        let config = test_config();
+        let (results, levels) = run_files_check_pkgs(std::slice::from_ref(&pkg), &config);
+        assert_eq!(
+            level_of(&results, &levels, "empty-package"),
+            Some(Level::Warning),
+            "empty-package must be a Warning: {results:?}"
+        );
+    }
+
+    #[test]
+    fn empty_package_quiet_for_package_with_files() {
+        let (pkg, _dir) = pkg_with_files(vec![mkfile("/usr/bin/foo", 0o100755, 21)]);
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results.iter().any(|(n, _)| n == "empty-package"),
+            "package with files must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn empty_package_quiet_for_meta_package() {
+        // Meta packages (bundle/task/patterns) are empty by design: the
+        // inverse finding `file-in-meta-package` fires when one ships
+        // files, so an empty one must stay quiet here.
+        let (mut pkg, _dir) = pkg_with_files(vec![]);
+        pkg.name = "patterns-base".to_string();
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results.iter().any(|(n, _)| n == "empty-package"),
+            "empty meta package must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn empty_package_quiet_for_rebuild_anchor() {
+        // `*-rebuild` packages are empty anchors whose requirement exists
+        // to trigger rebuilds; their emptiness is intended.
+        let (mut pkg, _dir) = pkg_with_files(vec![]);
+        pkg.name = "perf-rebuild".to_string();
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results.iter().any(|(n, _)| n == "empty-package"),
+            "empty *-rebuild anchor must stay quiet: {results:?}"
+        );
+    }
+
+    #[test]
+    fn empty_package_quiet_for_empty_debuginfo() {
+        // An empty debuginfo package already fires the specific
+        // `empty-debuginfo-package` error; the general check must not
+        // double-report the same emptiness.
+        let (mut pkg, _dir) = pkg_with_files(vec![]);
+        pkg.name = "foo-debuginfo".to_string();
+        let results = run_check_binary(&pkg);
+        assert!(
+            !results.iter().any(|(n, _)| n == "empty-package"),
+            "empty debuginfo package must stay quiet for the general check: {results:?}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(n, _)| n == "empty-debuginfo-package")
+                .count(),
+            1,
+            "empty debuginfo package must still fire its specific finding: {results:?}"
         );
     }
 
