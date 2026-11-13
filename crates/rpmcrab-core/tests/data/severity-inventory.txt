@@ -91,6 +91,7 @@ double-entries = E
 duplicate-executable = W
 empty-debuginfo-package = E
 empty-libalternatives-directory = E
+empty-package = W
 env-script-interpreter = E
 epoch-tag = E
 executable-crontab-file = E

@@ -264,6 +264,14 @@ packaged as arch dependent, or something else. Verify what the case is, and
 if there's no way to produce useful debuginfo out of it, disable creation of
 the debuginfo package.
 """
+empty-package="""
+This package contains no files. An empty package is usually a sign that
+files were lost during the build (e.g. an install step that installed
+nothing, or a %files list that matched nothing). Meta packages (see the
+option MetaPackageRegexp) and *-rebuild anchors are empty by design and
+are not reported. Verify that the package is intentionally empty, and if
+it is not, fix the build so it ships its files.
+"""
 debuginfo-without-sources="""
 This debuginfo package appears to contain debug symbols but no source files.
 This is often a sign of binaries being unexpectedly stripped too early during
