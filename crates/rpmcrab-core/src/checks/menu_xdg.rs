@@ -792,6 +792,20 @@ impl MenuXDGCheck {
         None
     }
 
+    /// Whether `path` resolves to a regular file anywhere in the
+    /// build, with no dependency-edge requirement. The `TryExec`
+    /// probe in `after_checks` only asks whether the entry is
+    /// shown, and a `TryExec` program a sibling ships shows the
+    /// entry whether or not the frontend hard-`Requires` the
+    /// sibling: the sibling may be installed alongside, or
+    /// pulled in through another dependency. Only a program
+    /// that resolves nowhere in the build hides the entry.
+    fn resolves_in_build(build: &DesktopBuild, path: &str) -> bool {
+        Self::candidate_paths(path)
+            .iter()
+            .any(|candidate| Self::resolve_in_build(build, candidate).is_some())
+    }
+
     /// Whether the Exec token is credited through the build: it
     /// resolves to a regular file the build ships, and the
     /// candidate's package is guaranteed to install alongside the
@@ -811,10 +825,11 @@ impl MenuXDGCheck {
     /// The path form of `credited_via_build`: whether `path`
     /// resolves to a regular file the build ships, with the same
     /// hard-edge guarantee for `pkg_name`/`requires`. Shared by
-    /// Exec candidates, deferred absolute-icon candidates (an
-    /// icon a sibling ships is credited under the same rule), and
-    /// the `TryExec` probe in `after_checks` (a `TryExec` program
-    /// a sibling ships, under a hard edge, shows the entry).
+    /// Exec candidates and deferred absolute-icon candidates (an
+    /// icon a sibling ships is credited under the same rule).
+    /// The `TryExec` probe does not use it: whether the entry is
+    /// shown depends only on the program resolving anywhere in
+    /// the build, not on a hard edge (see `resolves_in_build`).
     fn credited_via_build_path(
         build: &DesktopBuild,
         path: &str,
@@ -1287,8 +1302,9 @@ impl Check for MenuXDGCheck {
                             // that resolves nowhere hides the
                             // entry, so the missing Exec is moot.
                             // The probe runs in `after_checks`,
-                            // where the build can credit the
-                            // TryExec program through a sibling.
+                            // where the build can tell whether
+                            // the TryExec program resolves
+                            // anywhere in the build.
                             let tryexec = entry.get("tryexec").and_then(|value| {
                                 let program = Self::effective_exec_binary(value);
                                 if program.is_empty()
@@ -1359,18 +1375,14 @@ impl Check for MenuXDGCheck {
             for cand in &build.candidates {
                 if complete {
                     if let Some(tryexec) = &cand.tryexec {
-                        // The entry is shown only when its
-                        // TryExec program resolves in the build,
-                        // under the same hard-edge credit as the
-                        // Exec token. A TryExec that resolves
-                        // nowhere hides the entry, so the missing
-                        // Exec never fires.
-                        let shown = Self::credited_via_build_path(
-                            build,
-                            tryexec,
-                            &cand.pkg_name,
-                            &cand.requires,
-                        );
+                        // The entry is shown when its TryExec
+                        // program resolves anywhere in the build:
+                        // a sibling shipping it shows the entry
+                        // whether or not the frontend hard-Requires
+                        // the sibling. Only a TryExec program that
+                        // resolves nowhere in the build hides the
+                        // entry, so the missing Exec never fires.
+                        let shown = Self::resolves_in_build(build, tryexec);
                         if !shown {
                             continue;
                         }
@@ -3484,9 +3496,10 @@ mod tests {
 
     #[test]
     fn tryexec_shipped_by_sibling_keeps_without_binary() {
-        // The sibling ships the TryExec program under a hard
-        // edge, so the entry is shown and the missing Exec is a
-        // real broken launcher.
+        // The sibling ships the TryExec program, so the entry
+        // is shown and the missing Exec is a real broken
+        // launcher. (The fixture keeps its hard edge; the
+        // no-edge case is pinned by the next test.)
         let d0 = tempfile::tempdir().unwrap();
         let d1 = tempfile::tempdir().unwrap();
         let d2 = tempfile::tempdir().unwrap();
@@ -3500,6 +3513,35 @@ mod tests {
                 "/usr/bin/tryexec-prog",
             )],
             &["tryexec-pkg"],
+        );
+        let sibling = menu_pkg(&d1, "tryexec-pkg", vec![reg_entry("/usr/bin/tryexec-prog")]);
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn tryexec_shipped_by_unrequired_sibling_keeps_without_binary() {
+        // The sibling ships the TryExec program with no
+        // dependency edge from the frontend at all -- not even
+        // a Recommends: the entry is still shown wherever the
+        // sibling is installed alongside, so the missing Exec
+        // is a real broken launcher. Sharpest form: Exec and
+        // TryExec name the same binary, both shipped by the
+        // sibling, so the finding must fire exactly as it did
+        // before the TryExec probe existed.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "tryexec-frontend",
+            vec![desktop_entry_tryexec(
+                d0.path(),
+                "/usr/share/applications/tryexec.desktop",
+                "tryexec-prog",
+                "/usr/bin/tryexec-prog",
+            )],
         );
         let sibling = menu_pkg(&d1, "tryexec-pkg", vec![reg_entry("/usr/bin/tryexec-prog")]);
         let src = menu_src_pkg(&d2);
@@ -3680,9 +3722,13 @@ mod tests {
     fn directory_file_icon_missing_fires() {
         // A `.directory` file's absolute Icon defers like a
         // `.desktop` file's: missing everywhere in the run, it
-        // fires from `after_checks`.
+        // fires from `after_checks`. The on-disk name carries
+        // the package basename, as `run_desktop_named` does:
+        // desktop-file-validate judges the file it is handed,
+        // and rejects a Type=Directory entry in a file without
+        // a .directory extension.
         let d0 = tempfile::tempdir().unwrap();
-        let path = d0.path().join("test.desktop");
+        let path = d0.path().join("test.directory");
         std::fs::write(
             &path,
             "[Desktop Entry]\nType=Directory\nName=Test\nIcon=/usr/share/icons/hicolor/48x48/apps/app.png\n",
