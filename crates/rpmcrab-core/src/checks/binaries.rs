@@ -403,6 +403,7 @@ static UNBOUNDED_COPY_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static LEGACY_NETWORK_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 static SHELL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+static FORBIDDEN_FUNCTION_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const KERNEL_MODULES_PATHS: &[&str] = &["/lib/modules/", "/usr/lib/modules/"];
 const GLIBC_EMPTY_ARCHIVES: &[&str] = &["libanl", "libdl", "libpthread", "librt", "libutil"];
@@ -4690,6 +4691,7 @@ pub struct BinariesCheck {
     weak_prng_generator_regex: Regex,
     unbounded_copy_call_regex: Regex,
     legacy_network_call_regex: Regex,
+    forbidden_function_call_regex: Regex,
 
     shell_call_regex: Regex,
 
@@ -5792,6 +5794,118 @@ fn parse_arch_format_magics(raw: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// The embedded denylist of forbidden/unsafe functions
+/// (`data/forbidden-functions.toml`): C library entry points no
+/// binary or shared library should call, in the spirit of
+/// rpminspect's `badfuncs` inspection. Baked in like the
+/// defect-pattern registry so an installed binary needs no data dir
+/// next to it; the table's as-of date and the evidence for each
+/// entry are recorded in the file itself. The table is the gap the
+/// per-family finders in `check_security_functions` leave -- a name
+/// one of those finders already charges never belongs here, so one
+/// call is never charged twice.
+const FORBIDDEN_FUNCTIONS_TOML: &str = include_str!("../../data/forbidden-functions.toml");
+
+/// One denylisted function: the symbol name. The reason it is
+/// forbidden and the replacement callers should use instead are
+/// recorded in the table and validated at parse time, but not
+/// retained: the TOML file itself is the durable record, and the
+/// finder consumes only the names.
+struct ForbiddenFunction {
+    name: String,
+}
+
+/// The parsed denylist, parsed once (the
+/// `defect_pattern::registry` pattern).
+fn forbidden_functions() -> &'static [ForbiddenFunction] {
+    static FUNCTIONS: OnceLock<Vec<ForbiddenFunction>> = OnceLock::new();
+    FUNCTIONS.get_or_init(|| parse_forbidden_functions(FORBIDDEN_FUNCTIONS_TOML))
+}
+
+/// Parse and validate the denylist. Validation takes the
+/// staged-data posture (the registry's): a malformed table panics at
+/// startup instead of silently disabling the finder.
+fn parse_forbidden_functions(raw: &str) -> Vec<ForbiddenFunction> {
+    let table: toml::Table = raw.parse().expect("forbidden functions are valid TOML");
+    assert!(
+        table.get("as_of").and_then(toml::Value::as_str).is_some(),
+        "forbidden functions record an as_of date"
+    );
+    let records = table
+        .get("function")
+        .and_then(toml::Value::as_array)
+        .expect("forbidden functions have a [[function]] array");
+    assert!(!records.is_empty(), "forbidden functions are not empty");
+    let mut names = HashSet::new();
+    records
+        .iter()
+        .map(|record| {
+            let name = record
+                .get("name")
+                .and_then(toml::Value::as_str)
+                .expect("forbidden-function entry has a name");
+            assert!(
+                !name.is_empty()
+                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    && !name.as_bytes()[0].is_ascii_digit(),
+                "forbidden-function name is a plain C identifier: {name:?}"
+            );
+            assert!(
+                names.insert(name),
+                "forbidden-function name is listed once: {name:?}"
+            );
+            let reason = record
+                .get("reason")
+                .and_then(toml::Value::as_str)
+                .expect("forbidden-function entry has a reason");
+            assert!(
+                !reason.is_empty(),
+                "forbidden-function entry has a non-empty reason: {name:?}"
+            );
+            let replacement = record
+                .get("replacement")
+                .and_then(toml::Value::as_str)
+                .expect("forbidden-function entry has a replacement");
+            assert!(
+                !replacement.is_empty(),
+                "forbidden-function entry has a non-empty replacement: {name:?}"
+            );
+            ForbiddenFunction {
+                name: name.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// The denylisted calls one file makes: for every undefined
+/// reference (FUNC in `undefined_function_refs`, or a NOTYPE dynsym
+/// import in `undefined_functions`) matching the denylist regex,
+/// the table name it matched, in table order. A definition is never
+/// a call -- the library that implements a denylisted function is
+/// the provider, not a caller -- so only the undefined sets are
+/// read, the definition/call split the gets and unbounded-copy
+/// finders draw.
+fn forbidden_function_names(info: &ReadelfInfo, regex: &Regex) -> Vec<&'static str> {
+    let mut matched = HashSet::new();
+    for candidate in info
+        .undefined_function_refs
+        .iter()
+        .chain(info.undefined_functions.iter())
+    {
+        if let Ok(Some(caps)) = regex.captures(candidate)
+            && let Some(m) = caps.get(1)
+            && let Some(entry) = forbidden_functions().iter().find(|f| f.name == m.as_str())
+        {
+            matched.insert(entry.name.as_str());
+        }
+    }
+    forbidden_functions()
+        .iter()
+        .map(|f| f.name.as_str())
+        .filter(|name| matched.contains(name))
+        .collect()
+}
+
 /// Whether `pkgfile` is a compressed kernel module: a regular file
 /// under a kernel-module tree (`/lib/modules/` or `/usr/lib/modules/`)
 /// whose name carries the `.ko` suffix plus one of the compressors the
@@ -6479,6 +6593,23 @@ impl BinariesCheck {
                 .get_or_init(|| {
                     Regex::new(r"^((inet_addr|inet_aton|inet_ntoa|inet_nsap_addr|inet_nsap_ntoa|inet_makeaddr|inet_netof|inet_network|inet_neta|inet_net_ntop|inet_net_pton|rcmd|rexec|rresvport)(?:@\S+)?)(?:\s|$)")
                         .expect("static regex")
+                })
+                .clone(),
+            // Built from the embedded denylist, not a literal: the
+            // names are validated plain C identifiers at table-parse
+            // time, so the alternation needs no escaping. Compiled
+            // once here, like the other family regexes.
+            forbidden_function_call_regex: FORBIDDEN_FUNCTION_CALL_REGEX
+                .get_or_init(|| {
+                    Regex::new(&format!(
+                        r"^((?:{}))(?:@\S+)?(?:\s|$)",
+                        forbidden_functions()
+                            .iter()
+                            .map(|f| f.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    ))
+                    .expect("static regex")
                 })
                 .clone(),
 
@@ -8318,6 +8449,38 @@ impl BinariesCheck {
                 pkg,
                 "binary-or-shlib-calls-unbounded-copy",
                 &[&pkgfile.name],
+            );
+        }
+
+        // Forbidden/unsafe function denylist (rpminspect's badfuncs
+        // idea, as a data-driven table in
+        // `data/forbidden-functions.toml` rather than another
+        // hardcoded family regex): an undefined reference to any
+        // denylisted function reports at Warning, naming the
+        // functions in the detail. The table is the gap the
+        // per-family finders leave -- strcpy, strcat, sprintf and
+        // vsprintf are charged by the unbounded-copy finder above,
+        // gets/mktemp/tmpnam by their own Error finders, the
+        // gethostbyname and inet_*/rsh families by theirs -- so no
+        // call is charged twice; stpcpy, the wide unbounded copies
+        // (wcscpy, wcscat) and the no-safe-use getwd/getpass plus
+        // the DES-default crypt(3) are what this finder adds. The
+        // charge is the undefined reference itself, in archives and
+        // linked objects alike, FUNC or NOTYPE: a definition is
+        // never a call, and the fortified __*_chk spellings do not
+        // match the anchored pattern. Warning only -- whether a call
+        // can actually overflow, or whether crypt(3) really selects
+        // DES, depends on the call site, which the binary cannot
+        // decide, so the finding asks for a call-site audit and a
+        // switch to the replacement the table records.
+        let forbidden = forbidden_function_names(info, &self.forbidden_function_call_regex);
+        if !forbidden.is_empty() {
+            add_info(
+                out,
+                Level::Warning,
+                pkg,
+                "forbidden-function",
+                &[&pkgfile.name, &forbidden.join(" ")],
             );
         }
 
@@ -26292,7 +26455,9 @@ description = "explicit priority string bypasses the system crypto policy"
         // The fortified spellings are the checked form: silent.
         assert_eq!(count(&with(&["__strcpy_chk"], &["__strcpy_chk"])), 0);
         assert_eq!(count(&with(&["__sprintf_chk"], &["__sprintf_chk"])), 0);
-        // Bounded siblings and the out-of-set stpcpy stay silent.
+        // Bounded siblings stay silent. stpcpy stays silent for
+        // this finder too, but it is charged by the
+        // forbidden-function denylist instead.
         assert_eq!(count(&with(&["strncpy"], &["strncpy"])), 0);
         // xstrcpy is a different function (an allocating wrapper that
         // sizes the destination to the input): the anchored regex
@@ -26330,6 +26495,202 @@ description = "explicit priority string bypasses the system crypto policy"
             lines_for(&results, "binary-or-shlib-calls-unbounded-copy").len(),
             1,
             "archive reference must fire: {results:?}"
+        );
+    }
+
+    #[test]
+    fn forbidden_functions_table_is_well_formed() {
+        // The embedded denylist parses (staged-data validation) and
+        // carries the six evidenced entries, each with a reason and a
+        // replacement.
+        let names: Vec<&str> = forbidden_functions()
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["getwd", "getpass", "stpcpy", "wcscpy", "wcscat", "crypt"],
+            "denylist contents"
+        );
+        // Each entry's reason and replacement are validated
+        // non-empty by parse_forbidden_functions, which this test
+        // exercises through forbidden_functions() above.
+        // The table is the gap the per-family finders leave: no entry
+        // may name a function one of those finders already charges,
+        // or one call would fire two findings.
+        let already_charged = [
+            "strcpy",
+            "strcat",
+            "sprintf",
+            "vsprintf",
+            "gets",
+            "mktemp",
+            "tmpnam",
+            "tmpnam_r",
+            "tempnam",
+            "gethostbyname",
+            "gethostbyname2",
+            "gethostbyaddr",
+            "gethostbyname_r",
+            "gethostbyname2_r",
+            "gethostbyaddr_r",
+            "inet_addr",
+            "inet_aton",
+            "inet_ntoa",
+            "inet_nsap_addr",
+            "inet_nsap_ntoa",
+            "inet_makeaddr",
+            "inet_netof",
+            "inet_network",
+            "inet_neta",
+            "inet_net_ntop",
+            "inet_net_pton",
+            "rcmd",
+            "rexec",
+            "rresvport",
+            "MD5",
+            "MD5_Init",
+            "MD5_Update",
+            "MD5_Final",
+            "MD5_Transform",
+            "RC4",
+            "RC4_set_key",
+            "RC4_options",
+            "rand",
+            "random",
+            "rand_r",
+            "random_r",
+            "drand48",
+            "erand48",
+            "lrand48",
+            "nrand48",
+            "mrand48",
+            "jrand48",
+            "drand48_r",
+            "erand48_r",
+            "lrand48_r",
+            "nrand48_r",
+            "mrand48_r",
+            "jrand48_r",
+            "system",
+            "popen",
+        ];
+        for name in names {
+            assert!(
+                !already_charged.contains(&name),
+                "{name} is already charged by a per-family finder"
+            );
+        }
+    }
+
+    #[test]
+    fn forbidden_function_findings() {
+        // The denylist finder: an undefined reference to a listed
+        // function reports at Warning, naming the function; the
+        // definition alone stays silent, as do near-miss names and
+        // the fortified spellings.
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/bin/foo", "ELF 64-bit LSB executable");
+        let run = |info: &ReadelfInfo| {
+            let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+            check.check_security_functions(
+                &pkg,
+                &pkgfile,
+                info,
+                &daemon_exec_binaries(&pkg),
+                pkg_ships_daemon_units(&pkg),
+                &mut out,
+            );
+            out.results().to_vec()
+        };
+        let with = |functions: &[&str], refs: &[&str]| {
+            let mut info = syn_info();
+            info.functions = functions.iter().map(|s| s.to_string()).collect();
+            info.undefined_function_refs = refs.iter().map(|s| s.to_string()).collect();
+            info
+        };
+
+        // Every table member referenced is a call: fires, at Warning,
+        // naming the file and the function.
+        for sym in ["getwd", "getpass", "stpcpy", "wcscpy", "wcscat", "crypt"] {
+            let results = run(&with(&[sym], &[sym]));
+            let lines = lines_for(&results, "forbidden-function");
+            assert_eq!(lines.len(), 1, "{sym} referenced must fire: {results:?}");
+            assert!(lines[0].contains(" W: "), "Warning level: {}", lines[0]);
+            assert!(
+                lines[0].contains("/usr/bin/foo") && lines[0].contains(sym),
+                "finding names the file and the call: {}",
+                lines[0]
+            );
+        }
+        // A versioned reference is a call: fires.
+        assert_eq!(
+            lines_for(
+                &run(&with(&["stpcpy"], &["stpcpy@GLIBC_2.2.5"])),
+                "forbidden-function"
+            )
+            .len(),
+            1
+        );
+        // The definition alone (the provider's shape) is not a call: silent.
+        assert_eq!(
+            lines_for(&run(&with(&["getwd"], &[])), "forbidden-function").len(),
+            0
+        );
+        // The fortified spellings are the checked form: silent.
+        assert_eq!(
+            lines_for(
+                &run(&with(&["__wcscpy_chk"], &["__wcscpy_chk"])),
+                "forbidden-function"
+            )
+            .len(),
+            0
+        );
+        // Near-miss names stay silent.
+        assert_eq!(
+            lines_for(&run(&with(&["getwd2"], &["getwd2"])), "forbidden-function").len(),
+            0
+        );
+        assert_eq!(
+            lines_for(
+                &run(&with(&["mygetwd"], &["mygetwd"])),
+                "forbidden-function"
+            )
+            .len(),
+            0
+        );
+        // A NOTYPE dynsym import (the stripped-binary shape) lands
+        // only in `undefined_functions`, with no FUNC reference at
+        // all: fires.
+        let mut info = syn_info();
+        info.undefined_functions = vec!["crypt".to_string()];
+        assert_eq!(lines_for(&run(&info), "forbidden-function").len(), 1);
+        // Two denylisted calls in one file are one finding naming
+        // both, in table order.
+        let results = run(&with(&["crypt", "getwd"], &["crypt", "getwd"]));
+        let lines = lines_for(&results, "forbidden-function");
+        assert_eq!(lines.len(), 1, "one finding per file: {results:?}");
+        assert!(
+            lines[0].contains("getwd crypt"),
+            "detail lists both calls in table order: {}",
+            lines[0]
+        );
+        // A call the per-family finders already charge is not
+        // charged twice: strcpy fires the unbounded-copy finding
+        // and no forbidden-function finding.
+        let results = run(&with(&["strcpy"], &["strcpy"]));
+        assert_eq!(lines_for(&results, "forbidden-function").len(), 0);
+        assert_eq!(
+            lines_for(&results, "binary-or-shlib-calls-unbounded-copy").len(),
+            1,
+            "strcpy still fires its own finder: {results:?}"
+        );
+        // A clean binary stays silent.
+        assert_eq!(
+            lines_for(&run(&with(&["memcpy"], &["memcpy"])), "forbidden-function").len(),
+            0
         );
     }
 
