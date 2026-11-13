@@ -17,6 +17,10 @@ desktopfile-icon-not-readable="""
 The .desktop file refers to an icon file that is not world-readable,
 so the desktop cannot display it. Make the icon file world-readable.
 """
+desktopfile-exec-not-executable="""
+The .desktop file refers to a binary that is not executable by all,
+so the desktop cannot launch it. Make the binary world-executable.
+"""
 desktopfile-duplicate-section="""
 The .desktop file contains the mentioned section name twice, which
 can trigger parsing ambiguities. Remove the duplicate.
