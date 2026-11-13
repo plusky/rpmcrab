@@ -42,6 +42,49 @@ const SUPPLEMENTARY_WORDS: &str = include_str!("../data/spelling-wordlist.txt");
 /// otherwise be reported as a misspelling.
 const PACKAGE_NAMES: &str = include_str!("../data/spelling-package-names.txt");
 
+/// Curated misspelling -> correction table, one `misspelling -> correction`
+/// line per entry (`#` lines are comments). Mined from lintian's
+/// corrections list by scripts/mine-spelling-corrections.py; see the
+/// data file's header for the source revision and the mining rules.
+/// Consulted for suggestions only, never for acceptance: a flagged
+/// word with a known correction suggests it first, ahead of the
+/// hunspell suggester's candidates, so the finding names the fix
+/// instead of a guess.
+const SPELLING_CORRECTIONS: &str = include_str!("../data/spelling-corrections.txt");
+
+/// The corrections table, parsed once, keyed by lowercase misspelling.
+/// A plain `HashMap` is enough: it is only ever looked up by key, so
+/// its iteration order (which is not deterministic) never reaches output.
+static CORRECTIONS: LazyLock<std::collections::HashMap<String, String>> = LazyLock::new(|| {
+    let mut map = std::collections::HashMap::new();
+    for line in SPELLING_CORRECTIONS.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((wrong, right)) = line.split_once(" -> ") {
+            map.insert(wrong.to_string(), right.to_string());
+        }
+    }
+    map
+});
+
+/// The curated correction for `word`, if it has one. Lookup is on the
+/// lowercase form; a sentence-initial capital on the found word is
+/// carried onto the correction, so `Abandonned` suggests `Abandoned`.
+fn curated_correction(word: &str) -> Option<String> {
+    let correction = CORRECTIONS.get(&word.to_lowercase())?;
+    if word.chars().next().is_some_and(|c| c.is_uppercase()) {
+        let mut chars = correction.chars();
+        match chars.next() {
+            Some(first) => Some(first.to_uppercase().collect::<String>() + chars.as_str()),
+            None => Some(correction.clone()),
+        }
+    } else {
+        Some(correction.clone())
+    }
+}
+
 /// Well-known generic TLDs, for recognising a bare host (no scheme) as
 /// a URL. Country-code TLDs are absent on purpose: the reference checks
 /// the labels of `example.co.uk`-style hosts individually, and file
@@ -370,6 +413,15 @@ impl Spellchecker {
             // Sort before truncating so the kept suggestions are in a
             // canonical order.
             suggestions.sort();
+            // A curated correction goes first, ahead of the suggester's
+            // guesses: it is the known fix for exactly this misspelling.
+            // Any case variant of it the suggester already offered is
+            // dropped, so the correction is suggested once.
+            if let Some(correction) = curated_correction(word) {
+                let lower = correction.to_lowercase();
+                suggestions.retain(|s| s.to_lowercase() != lower);
+                suggestions.insert(0, correction);
+            }
             suggestions.truncate(3);
             result.push((word.to_string(), suggestions));
         }
@@ -1429,6 +1481,149 @@ SFX N 0 en [^ey]\n";
         }
         for lang in ["de", "fr", "cs", "uk", "zh_CN", "sr@latin"] {
             assert!(!spellcheckable_language(lang), "{lang}");
+        }
+    }
+
+    /// The dictionary for the correction tests: the tiny test words
+    /// plus the corrections of the probed misspellings, so the
+    /// corrected forms pass and only the misspellings are findings.
+    const CORRECTION_TEST_DIC: &str =
+        "9\nhello\nworld\ntest\npackage\ncheck\nabandoned\nseparate\noccurred\nreceive\n";
+
+    fn correction_checker() -> Spellchecker {
+        Spellchecker::from_strings(TEST_AFF, CORRECTION_TEST_DIC).expect("test dictionary")
+    }
+
+    #[test]
+    fn curated_correction_is_suggested_first() {
+        // A flagged word with a known correction suggests it first,
+        // ahead of whatever the hunspell suggester offers.
+        let checker = correction_checker();
+        for (word, correction) in [
+            ("abandonned", "abandoned"),
+            ("seperate", "separate"),
+            ("occured", "occurred"),
+            ("recieve", "receive"),
+        ] {
+            let result = checker.check(&format!("hello {word} world"), "testpkg", &[]);
+            assert_eq!(result.len(), 1, "word {word:?}: {result:?}");
+            assert_eq!(result[0].0, word);
+            assert_eq!(
+                result[0].1.first().map(String::as_str),
+                Some(correction),
+                "word {word:?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn curated_correction_keeps_sentence_initial_capital() {
+        // A sentence-initial capital on the found word is carried onto
+        // the correction.
+        let checker = correction_checker();
+        let result = checker.check("Abandonned hello world", "testpkg", &[]);
+        assert_eq!(result.len(), 1, "{result:?}");
+        assert_eq!(result[0].0, "Abandonned");
+        assert_eq!(
+            result[0].1.first().map(String::as_str),
+            Some("Abandoned"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn curated_correction_changes_suggestions_not_flagging() {
+        // The table shapes suggestions only: a word with a known
+        // correction is still a finding, a corrected word stays quiet,
+        // and an unknown misspelling is still reported with no curated
+        // correction in front.
+        let checker = correction_checker();
+        assert_eq!(
+            checker
+                .check("hello abandonned world", "testpkg", &[])
+                .len(),
+            1
+        );
+        assert!(
+            checker
+                .check("hello abandoned world", "testpkg", &[])
+                .is_empty()
+        );
+        let result = checker.check("hello wrld world", "testpkg", &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "wrld");
+        assert_eq!(curated_correction("wrld"), None);
+    }
+
+    #[test]
+    fn corrections_file_is_sorted_unique_and_well_formed() {
+        // Pins the data file's shape: every entry is `misspelling ->
+        // correction` with both sides a single lowercase word, the
+        // misspelling differs from the correction, entries are sorted
+        // by misspelling with no duplicates.
+        let mut previous: Option<&str> = None;
+        let mut count = 0;
+        for line in SPELLING_CORRECTIONS.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (wrong, right) = line
+                .split_once(" -> ")
+                .unwrap_or_else(|| panic!("correction entry {line:?} is not `wrong -> right`"));
+            for word in [wrong, right] {
+                assert!(
+                    !word.is_empty() && word.chars().all(|c| c.is_ascii_lowercase()),
+                    "correction entry {line:?} has a non-lowercase side"
+                );
+            }
+            assert_ne!(
+                wrong, right,
+                "correction entry {line:?} maps a word to itself"
+            );
+            if let Some(prev) = previous {
+                assert!(
+                    prev < wrong,
+                    "corrections out of order or duplicated: {prev:?} before {wrong:?}"
+                );
+            }
+            previous = Some(wrong);
+            count += 1;
+        }
+        assert!(count > 0, "corrections file carries no entries");
+    }
+
+    #[test]
+    fn corrections_are_live_against_the_pinned_dictionary() {
+        // Every shipped entry must be live: the misspelling is rejected
+        // by the pinned en_US dictionary (with the supplementary
+        // vocabulary added, as in production) and the correction is
+        // accepted by it, so a listed correction is always a real word
+        // and the misspelling is always actually flagged. A failure
+        // lists every dead entry: drop the entry from the data file,
+        // never weaken this test. Where no system dictionary is
+        // installed the checker is None and there is nothing to pin,
+        // as in `new_env_switch_child`.
+        if let Some(checker) = Spellchecker::new() {
+            let mut dead = Vec::new();
+            for line in SPELLING_CORRECTIONS.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let (wrong, right) = line.split_once(" -> ").expect("entry shape");
+                if checker.accepts(wrong) {
+                    dead.push(format!(
+                        "{wrong:?} is accepted, correction {right:?} is dead"
+                    ));
+                }
+                if !checker.accepts(right) {
+                    dead.push(format!(
+                        "correction {right:?} for {wrong:?} is not accepted"
+                    ));
+                }
+            }
+            assert!(dead.is_empty(), "dead corrections:\n{}", dead.join("\n"));
         }
     }
 }
