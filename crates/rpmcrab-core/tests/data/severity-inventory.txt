@@ -110,6 +110,7 @@ files-duplicate = W
 files-duplicated-waste = W
 fillup-template-without-fillup-call = E,W
 forbidden-controlchar-found = E,W
+forbidden-function = W
 forbidden-optflags = E
 ghost-file-with-buildroot-content = W
 ghost-files-without-postin = W

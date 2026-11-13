@@ -409,6 +409,20 @@ outside the caller's control must never be interpolated unsanitised;
 where no shell features are needed, run the program directly with an
 argv array instead.
 """
+forbidden-function="""
+The binary calls a forbidden/unsafe function from the embedded
+denylist (data/forbidden-functions.toml): getwd, getpass, stpcpy,
+wcscpy, wcscat or crypt. getwd has no length bound and was removed
+from POSIX; getpass reads into a static buffer; stpcpy, wcscpy and
+wcscat are unbounded copies in the strcpy family (CWE-120); and
+crypt(3) defaults to DES. Whether a given call can actually
+overflow, or whether crypt(3) really selects DES, depends on the
+call site, which the binary alone cannot decide -- treat the finding
+as a prompt to audit the call sites and switch to the replacement
+the denylist records (getcwd, an explicit passphrase read,
+stpncpy/wcsncpy/wcsncat or the strlcpy family, a modern password
+hash); the fix belongs in the upstream source, not in the package.
+"""
 binary-or-shlib-without-debuginfo="""
 This binary or shared library carries no symbol table and no
 .gnu_debuglink section, so no -debuginfo exists for it: either it

@@ -1,0 +1,70 @@
+# Forbidden/unsafe functions: a denylist of C library entry points no
+# binary or shared library should call, in the spirit of rpminspect's
+# `badfuncs` inspection (whose own list is the legacy network family
+# the per-family finders in `check_security_functions` already
+# charge through `binary-or-shlib-calls-legacy-network` and
+# `binary-or-shlib-calls-gethostbyname`). The entries here are the
+# gap those finders leave: functions with no safe use, or whose
+# unbounded form the existing unbounded-copy finder does not cover.
+# `check_security_functions` in src/checks/binaries.rs reads this
+# table and reports an undefined reference to any entry as the
+# Warning `forbidden-function`, naming the functions in the detail.
+#
+# Every entry carries the reason it is forbidden and the replacement
+# callers should use instead; the fix belongs in the upstream source
+# that ships the call, not in the package.
+#
+# Coverage rule: a name already charged by one of the per-family
+# finders in `check_security_functions` (strcpy, strcat, sprintf,
+# vsprintf; gets; mktemp; tmpnam, tmpnam_r, tempnam; the
+# gethostbyname family; the inet_* and rsh families; MD5, DES_*,
+# RC4; the rand/random/*48 generators; system, popen) does NOT
+# belong here -- this table is the gap, so one call is never charged
+# twice. The table test in binaries.rs pins the disjointness.
+#
+# Evidence base: the classic unsafe-C lists -- the C11/POSIX
+# removals and deprecations (getwd), the unbounded copy family
+# (strcpy et al. via CERT MSC24-C and the Microsoft SDL
+# banned-function lists), and the weak-crypto entry points
+# (crypt's DES default). `crypt` is the one judgement call in the
+# table: libcrypt's crypt(3) also serves modern hashes through
+# crypt_gensalt, so the symbol alone cannot prove a DES use -- the
+# finding is a Warning for exactly that reason, like the MD5/DES/RC4
+# finders.
+#
+# Maintenance: adding a function means adding a [[function]] entry
+# here with its reason and replacement recorded; the table test
+# fails if an entry duplicates a name the family finders already
+# charge. Removing a function means the calls go silent -- only
+# remove on evidence the function has a legitimate modern use.
+as_of = "2026-11-13"
+
+[[function]]
+name = "getwd"
+reason = "Removed from POSIX.1-2001: returns the working directory in a caller-supplied buffer with no length bound, so a long path overflows it; glibc keeps it only for binary compatibility."
+replacement = "getcwd(3)"
+
+[[function]]
+name = "getpass"
+reason = "Deprecated by glibc: reads a password into a static internal buffer with no length bound, so a long passphrase overflows it, and the shared buffer is not thread-safe."
+replacement = "read the passphrase explicitly with echo disabled (termios), or a prompt library"
+
+[[function]]
+name = "stpcpy"
+reason = "Unbounded string copy like strcpy (CWE-120): the destination size is never consulted, so an input longer than the destination overflows it. The unbounded-copy finder charges strcpy, strcat, sprintf and vsprintf; stpcpy is the same family and was explicitly out of that set."
+replacement = "stpncpy(3) or strlcpy(3)"
+
+[[function]]
+name = "wcscpy"
+reason = "Wide-character unbounded string copy, the wide half of the strcpy family (CWE-120): the destination size is never consulted."
+replacement = "wcsncpy(3) or wcslcpy(3)"
+
+[[function]]
+name = "wcscat"
+reason = "Wide-character unbounded string concatenation, the wide half of the strcat family (CWE-120): the destination size is never consulted."
+replacement = "wcsncat(3) or wcslcat(3)"
+
+[[function]]
+name = "crypt"
+reason = "DES-based one-way password hash: libcrypt's crypt(3) defaults to DES, whose 56-bit key is brute-forced routinely. The symbol alone cannot prove a DES use (modern hashes go through the same entry point), so the finding is a Warning, like the MD5/DES/RC4 finders."
+replacement = "a modern password hash via crypt_gensalt (yescrypt/argon2) or the application's credential store"
