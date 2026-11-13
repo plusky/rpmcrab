@@ -1690,8 +1690,15 @@ mod tests {
     /// files dispatch under their own name.
     fn run_desktop_named(content: &str, filename: &str) -> Vec<(String, String)> {
         // Unique temp file: tests run in parallel and must not share one.
+        // The on-disk name must carry the package filename's
+        // basename: desktop-file-validate judges the file it is
+        // handed, and rejects a Type=Directory entry in a file
+        // without a .directory extension.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("macrotest.desktop");
+        let basename = Path::new(filename)
+            .file_name()
+            .expect("desktop filename has a basename");
+        let path = dir.path().join(basename);
         std::fs::write(&path, content).unwrap();
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
