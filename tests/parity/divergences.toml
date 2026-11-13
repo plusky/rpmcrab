@@ -3081,6 +3081,41 @@ since = "0.4.1"
 
 [[divergence]]
 case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: `.directory` files under /usr/share/applications dispatch like `.desktop` files, matching the rpminspect desktop inspection, which validates both suffixes. A `.directory` file carries no Exec, but it is validated and its Icon is checked the same way. The frozen 2.10.0 reference only matches `.desktop`."
+since = "0.4.3"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: a new `desktopfile-exec-not-executable` warning from the rpminspect desktop inspection, which fails verification when a desktop file references an executable that is not executable by all. It fires when the Exec program resolves to a regular file in this package whose mode lacks the world-execute bit, judged on the file the token actually resolves to (through env/sh wrapper unwrapping and the merged-/usr counterpart). Base-system binaries never fire. Only the per-package resolution is judged: a binary credited through a sibling subpackage carries no mode in the build inventory, so its executability is not judged. A resolved path that is not a regular file stays silent. The frozen 2.10.0 reference checks existence only, never the mode."
+since = "0.4.3"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: an absolute Icon that resolves to no file in this package no longer fires immediately; it defers to `after_checks`, where a sibling subpackage of the same source build can credit it under the same source-complete gate and hard-`Requires`-edge rule as an Exec token, matching rpminspect, which searches every peer subpackage for the icon. Partial runs, single-package runs, and runs without the build's source package still fire exactly the per-package verdict, and an icon resolving only through another build's packages still fires. A sibling-credited icon's readability is not judged: the build inventory carries no modes. An absolute Icon naming a directory in this package still fires immediately, since no sibling can ship a regular file at a path this package claims as a directory."
+since = "0.4.3"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "behaviour"
+reason = "Fix-and-diverge: a `TryExec` program gates the `desktopfile-without-binary` verdict. The Desktop Entry specification shows the entry only when its TryExec program exists, so on a source-complete build where the TryExec program resolves nowhere in the build, the entry stays hidden and the missing Exec never fires. The TryExec program is unwrapped like Exec and judged under the same sibling credit (a sibling shipping it under a hard edge shows the entry); a TryExec naming a base-system binary or resolving in this package shows the entry, so the missing Exec still fires. Partial runs still fire: whether the entry is shown is undecidable without the build, and the per-package verdict stands. rpminspect reports the same shape as INFO whenever a TryExec key is present, without checking whether the TryExec program exists; this port checks the program instead, so a TryExec that itself resolves silences nothing."
+since = "0.4.3"
+
+[[divergence]]
+case = "global"
+check = "MenuXDGCheck"
+kind = "detail"
+reason = "Port-only `--explain` description for `desktopfile-exec-not-executable`: the reference emits no such finding and ships no description."
+since = "0.4.3"
+
+[[divergence]]
+case = "global"
 check = "file-parent-ownership-mismatch"
 kind = "severity"
 reason = "Deliberate severity recalibration: the port reports W where the reference reports E when the mismatched file is owned by root (or uid 0). Measured over the Factory corpus, 198 of the 199 findings are root-owned files in service-user directories: 183 are deliberate layouts -- web-app writable directories, daemon state/config/certificate directories, spool and tftpboot trees -- and 15 are hylafax+ scripts in the uucp-owned /var/spool/hylafax/bin that the root-running faxq daemon executes, the privilege-escalation shape this check exists to catch; the demotion keeps them visible without failing builds over the deliberate mass. Which uid executes a file is runtime wiring, not decidable from the package, so no exemption separates the classes. The one both-unprivileged finding -- munin-node, a nobody-owned plugin-state directory inside the munin-owned /var/lib/munin -- stays an error. Corpus effect: 199 E become 198 W and 1 E; no finding is dropped."

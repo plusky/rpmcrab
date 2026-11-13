@@ -5,11 +5,19 @@
 //! `desktopfile-duplicate-section`, `desktopfile-duplicate-option`,
 //! `non-utf8-desktopfile`, `desktopfile-without-binary`.
 //!
-//! Plus two findings the reference has no counterpart for, from the
-//! rpminspect desktop inspection (issue #1223): the Icon a desktop
-//! file names must resolve in this package when it is an absolute
-//! path (`desktopfile-icon-not-found`), and a resolved icon file
-//! must be world-readable (`desktopfile-icon-not-readable`).
+//! Plus findings from the rpminspect desktop inspection
+//! (`lib/inspect_desktop.c`, issue #1223 and its follow-ups): the
+//! Icon a desktop file names must resolve in this package when it
+//! is an absolute path (`desktopfile-icon-not-found`), and a
+//! resolved icon file must be world-readable
+//! (`desktopfile-icon-not-readable`); the Exec program a desktop
+//! file launches must be world-executable where it resolves in
+//! this package (`desktopfile-exec-not-executable`).
+//!
+//! Scope covers `.desktop` and `.directory` files under
+//! `/usr/share/applications`, like rpminspect: a `.directory`
+//! file carries no Exec, but it is validated and its Icon is
+//! checked the same way.
 //!
 //! The reference runs `desktop-file-validate` and then parses the file with
 //! `configparser`. This port runs `desktop-file-validate` when available and
@@ -85,6 +93,36 @@ struct DesktopBinaryCandidate {
     /// `Suggests` edge does not guarantee the sibling is installed
     /// alongside the frontend, so it never silences a launcher.
     requires: Vec<String>,
+    /// The entry's `TryExec` program, unwrapped like Exec, when
+    /// it names a binary that is neither a base-system binary nor
+    /// resolved in this package. The entry is shown only when
+    /// that program exists: on a source-complete build, if it
+    /// resolves nowhere in the build either, the entry stays
+    /// hidden and the missing Exec is moot, so `after_checks`
+    /// suppresses the candidate. `None` when there is no
+    /// `TryExec`, or when its program resolves in this package or
+    /// is a base-system binary: the entry is shown, and a missing
+    /// Exec is a real broken launcher.
+    tryexec: Option<String>,
+}
+
+/// One deferred `desktopfile-icon-not-found` candidate: an
+/// absolute Icon that resolves to no file in this package, held
+/// until `after_checks` so a sibling subpackage of the same
+/// source build can credit it, exactly like an Exec candidate.
+/// Only absolute icons defer: a bare or suffixed name never fires
+/// on absence, and a resolved icon's readability is judged
+/// immediately, in this package, where its mode is known.
+struct DesktopIconCandidate {
+    pkg_name: String,
+    arch: String,
+    filename: String,
+    icon: String,
+    /// Hard dependency edges of the candidate's package, as for
+    /// `DesktopBinaryCandidate`: only these gate the sibling
+    /// credit, since installing just the frontend would leave a
+    /// broken icon otherwise.
+    requires: Vec<String>,
 }
 
 /// Everything one build contributes to the run-scoped
@@ -95,6 +133,7 @@ struct DesktopBinaryCandidate {
 struct DesktopBuild {
     symlinks: HashMap<String, String>,
     candidates: Vec<DesktopBinaryCandidate>,
+    icon_candidates: Vec<DesktopIconCandidate>,
     /// Regular file path -> packages shipping it. A symlink chain
     /// resolves to a regular file; this names its owner(s) so the
     /// sibling credit can check the dependency edge to them.
@@ -112,6 +151,7 @@ struct DesktopBuildState {
     order: Vec<String>,
     builds: HashMap<String, DesktopBuild>,
     unkeyed: Vec<DesktopBinaryCandidate>,
+    unkeyed_icons: Vec<DesktopIconCandidate>,
 }
 
 pub struct MenuXDGCheck {
@@ -122,6 +162,7 @@ pub struct MenuXDGCheck {
     order: Vec<String>,
     builds: HashMap<String, DesktopBuild>,
     unkeyed: Vec<DesktopBinaryCandidate>,
+    unkeyed_icons: Vec<DesktopIconCandidate>,
 }
 
 impl MenuXDGCheck {
@@ -134,14 +175,18 @@ impl MenuXDGCheck {
         let (validator, _) = Tool::probe(&source, "desktop-file-validate", &[]);
         Self {
             // AbstractCheck.py:45 applies this with `re.match`; is_match
-            // searches, so anchor it explicitly.
-            file_regex: Regex::new(r"^/usr/share/applications/.*\.desktop$").expect("static regex"),
+            // searches, so anchor it explicitly. rpminspect's desktop
+            // inspection covers `.directory` files under the same
+            // directory too, so both suffixes dispatch.
+            file_regex: Regex::new(r"^/usr/share/applications/.*\.(?:desktop|directory)$")
+                .expect("static regex"),
             checked_files: 0,
             validator,
             sources: HashSet::new(),
             order: Vec::new(),
             builds: HashMap::new(),
             unkeyed: Vec::new(),
+            unkeyed_icons: Vec::new(),
         }
     }
 
@@ -518,6 +563,88 @@ impl MenuXDGCheck {
             .unwrap_or_default()
     }
 
+    /// The on-disk path an Exec token resolves to in this
+    /// package, mirroring `binary_exists` exactly: the literal
+    /// path for absolute tokens (plus the merged-/usr counterpart
+    /// for legacy `/bin` and `/sbin` spellings), the first
+    /// standard bin dir holding the file for bare tokens. `None`
+    /// when the token resolves nowhere in this package, and for
+    /// any path carrying a `..` segment, mirroring
+    /// `binary_exists`' refusal. Symlinks are not resolved here:
+    /// the caller reads metadata through them, so the mode judged
+    /// is the target's.
+    fn resolve_exec_path(pkg: &Pkg, binary: &str) -> Option<std::path::PathBuf> {
+        if binary.starts_with('/') {
+            if binary.split('/').any(|seg| seg == "..") {
+                return None;
+            }
+            let root = Path::new(pkg.dir_name());
+            let full = root.join(binary.trim_start_matches('/'));
+            if full.exists() {
+                return Some(full);
+            }
+            if let Some(rest) = binary.strip_prefix("/sbin/") {
+                let rest = rest.trim_start_matches('/');
+                if !rest.is_empty() {
+                    let merged = root.join("usr/sbin").join(rest);
+                    if merged.exists() {
+                        return Some(merged);
+                    }
+                }
+            }
+            if let Some(rest) = binary.strip_prefix("/bin/") {
+                let rest = rest.trim_start_matches('/');
+                if !rest.is_empty() {
+                    let merged = root.join("usr/bin").join(rest);
+                    if merged.exists() {
+                        return Some(merged);
+                    }
+                }
+            }
+            return None;
+        }
+        STANDARD_BIN_DIRS.iter().find_map(|d| {
+            let full = Path::new(pkg.dir_name())
+                .join(d.trim_start_matches('/'))
+                .join(binary);
+            full.exists().then_some(full)
+        })
+    }
+
+    /// Whether the Exec program the entry launches is executable
+    /// by all where it resolves in this package (rpminspect's
+    /// desktop inspection: a desktop file referencing an
+    /// executable that is not executable by all fails
+    /// verification). Only the per-package resolution is judged:
+    /// a binary credited through a sibling subpackage in
+    /// `after_checks` carries no mode in the build inventory, so
+    /// its executability is not judged. Base-system binaries
+    /// never fire. A resolved path that is not a regular file
+    /// stays silent: a directory named like the binary is a
+    /// `binary_exists` quirk, not a non-executable program.
+    fn check_exec_executable(pkg: &Pkg, out: &mut Filter, filename: &str, binary: &str) {
+        use std::os::unix::fs::MetadataExt;
+        if binary.is_empty() || Self::is_system_binary(binary) {
+            return;
+        }
+        let Some(path) = Self::resolve_exec_path(pkg, binary) else {
+            return;
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return;
+        };
+        if !meta.is_file() || meta.mode() & 0o001 != 0 {
+            return;
+        }
+        add_info(
+            out,
+            Level::Warning,
+            pkg,
+            "desktopfile-exec-not-executable",
+            &[filename, binary],
+        );
+    }
+
     /// Whether the Exec binary resolves (in the package or on the live root).
     fn binary_exists(pkg: &Pkg, binary: &str) -> bool {
         if binary.starts_with('/') {
@@ -678,24 +805,40 @@ impl MenuXDGCheck {
     /// candidate's own package ships is always credited: it is a
     /// resolution, not sibling credit.
     fn credited_via_build(build: &DesktopBuild, cand: &DesktopBinaryCandidate) -> bool {
-        for path in Self::candidate_paths(&cand.binary) {
-            let Some(final_path) = Self::resolve_in_build(build, &path) else {
+        Self::credited_via_build_path(build, &cand.binary, &cand.pkg_name, &cand.requires)
+    }
+
+    /// The path form of `credited_via_build`: whether `path`
+    /// resolves to a regular file the build ships, with the same
+    /// hard-edge guarantee for `pkg_name`/`requires`. Shared by
+    /// Exec candidates, deferred absolute-icon candidates (an
+    /// icon a sibling ships is credited under the same rule), and
+    /// the `TryExec` probe in `after_checks` (a `TryExec` program
+    /// a sibling ships, under a hard edge, shows the entry).
+    fn credited_via_build_path(
+        build: &DesktopBuild,
+        path: &str,
+        pkg_name: &str,
+        requires: &[String],
+    ) -> bool {
+        for candidate in Self::candidate_paths(path) {
+            let Some(final_path) = Self::resolve_in_build(build, &candidate) else {
                 continue;
             };
             let Some(owners) = build.file_owners.get(&final_path) else {
                 continue;
             };
-            if owners.contains(&cand.pkg_name) {
+            if owners.contains(pkg_name) {
                 return true;
             }
             // RPM file dependencies are exact-path: a Requires
             // matching any other candidate spelling (a bare token
             // spelling, a merged-/usr counterpart) is not an edge
             // to this file.
-            if cand.requires.iter().any(|req| req == &final_path) {
+            if requires.iter().any(|req| req == &final_path) {
                 return true;
             }
-            if cand.requires.iter().any(|req| {
+            if requires.iter().any(|req| {
                 build
                     .dep_owners
                     .get(req)
@@ -843,6 +986,19 @@ impl MenuXDGCheck {
             .collect()
     }
 
+    /// Emit one deferred `desktopfile-icon-not-found` verdict,
+    /// mirroring `emit_without_binary`.
+    fn emit_icon_not_found(out: &mut Filter, cand: &DesktopIconCandidate) {
+        out.add_info(make_finding(
+            &cand.pkg_name,
+            &cand.arch,
+            Level::Warning,
+            "desktopfile-icon-not-found",
+            vec![cand.filename.clone(), cand.icon.clone()],
+            None,
+        ));
+    }
+
     /// Icon existence for one desktop entry (issue #1223). Fire only
     /// where absence is decidable from this package alone: an absolute
     /// Icon path must resolve to a regular file in this package, and a
@@ -851,7 +1007,24 @@ impl MenuXDGCheck {
     /// it). Ghost entries, symlink chains leaving the package, and
     /// loops all stay silent. Only the `[Desktop Entry]` Icon is read;
     /// action icons are out of scope.
-    fn check_icon(pkg: &Pkg, out: &mut Filter, filename: &str, entry: &HashMap<String, String>) {
+    ///
+    /// An absolute Icon that resolves to no file in this package
+    /// does not fire here: it defers to `after_checks`, where a
+    /// sibling subpackage of the same source build can credit it
+    /// under the same hard-`Requires`-edge rule as an Exec
+    /// candidate (rpminspect searches every peer subpackage for
+    /// the icon). A sibling-credited icon's readability is not
+    /// judged: the build inventory carries no modes. An absolute
+    /// Icon naming a directory in this package still fires here:
+    /// no sibling can ship a regular file at a path this package
+    /// claims as a directory.
+    fn check_icon(
+        &mut self,
+        pkg: &Pkg,
+        out: &mut Filter,
+        filename: &str,
+        entry: &HashMap<String, String>,
+    ) {
         let Some(icon) = entry.get("icon") else {
             return;
         };
@@ -860,13 +1033,27 @@ impl MenuXDGCheck {
         }
         if icon.starts_with('/') {
             let Some(start) = pkg.files.iter().find(|f| f.name == *icon) else {
-                add_info(
-                    out,
-                    Level::Warning,
-                    pkg,
-                    "desktopfile-icon-not-found",
-                    &[filename, icon],
-                );
+                // No entry in this package at all: defer, so a
+                // sibling subpackage can still credit it.
+                let candidate = DesktopIconCandidate {
+                    pkg_name: pkg.name.clone(),
+                    arch: pkg.arch.clone(),
+                    filename: filename.to_string(),
+                    icon: icon.clone(),
+                    requires: pkg
+                        .requires
+                        .iter()
+                        .chain(pkg.prereq.iter())
+                        .map(|dep| dep.name.clone())
+                        .collect(),
+                };
+                match binary_source_key(pkg) {
+                    Some(key) => {
+                        let build = self.build_mut(&key);
+                        build.icon_candidates.push(candidate);
+                    }
+                    None => self.unkeyed_icons.push(candidate),
+                }
                 return;
             };
             if start.is_ghost() {
@@ -1081,6 +1268,10 @@ impl Check for MenuXDGCheck {
                         // silence a broken launcher behind a
                         // base-system binary.
                         let binary = Self::effective_exec_binary(exec);
+                        // A resolved program that no user can
+                        // execute is a broken launcher too, even
+                        // though the file exists.
+                        Self::check_exec_executable(pkg, out, filename, &binary);
                         // Base-system binaries never fire. Anything
                         // else the package itself does not resolve
                         // is held for `after_checks`, where the
@@ -1091,6 +1282,24 @@ impl Check for MenuXDGCheck {
                             && !Self::binary_exists(pkg, &binary)
                             && !Self::is_system_binary(&binary)
                         {
+                            // The entry is shown only when its
+                            // TryExec program exists: a TryExec
+                            // that resolves nowhere hides the
+                            // entry, so the missing Exec is moot.
+                            // The probe runs in `after_checks`,
+                            // where the build can credit the
+                            // TryExec program through a sibling.
+                            let tryexec = entry.get("tryexec").and_then(|value| {
+                                let program = Self::effective_exec_binary(value);
+                                if program.is_empty()
+                                    || Self::is_system_binary(&program)
+                                    || Self::binary_exists(pkg, &program)
+                                {
+                                    None
+                                } else {
+                                    Some(program)
+                                }
+                            });
                             let candidate = DesktopBinaryCandidate {
                                 pkg_name: pkg.name.clone(),
                                 arch: pkg.arch.clone(),
@@ -1102,6 +1311,7 @@ impl Check for MenuXDGCheck {
                                     .chain(pkg.prereq.iter())
                                     .map(|dep| dep.name.clone())
                                     .collect(),
+                                tryexec,
                             };
                             match binary_source_key(pkg) {
                                 Some(key) => {
@@ -1113,7 +1323,7 @@ impl Check for MenuXDGCheck {
                         }
                     }
                     if let Some(entry) = sections.get("Desktop Entry") {
-                        Self::check_icon(pkg, out, filename, entry);
+                        self.check_icon(pkg, out, filename, entry);
                     }
                 }
             }
@@ -1128,18 +1338,61 @@ impl Check for MenuXDGCheck {
     /// file whose owner the candidate's package hard-Requires).
     /// Every other candidate fires, so source-absent (partial) and
     /// single-package runs report exactly the per-package verdict.
+    /// On a source-complete build, a candidate whose `TryExec`
+    /// program resolves nowhere in the build never fires: the
+    /// entry stays hidden, so the missing Exec is moot. Partial
+    /// runs still fire for such candidates: whether the entry is
+    /// shown is undecidable without the build, and the
+    /// per-package verdict stands. Deferred absolute-icon
+    /// candidates follow the same rule: a sibling-credited icon
+    /// stays silent, every other absolute icon fires.
     fn after_checks(&mut self, _config: &Config, out: &mut Filter) {
         for cand in &self.unkeyed {
             Self::emit_without_binary(out, cand);
+        }
+        for cand in &self.unkeyed_icons {
+            Self::emit_icon_not_found(out, cand);
         }
         for key in &self.order {
             let build = &self.builds[key];
             let complete = self.sources.contains(key);
             for cand in &build.candidates {
-                if complete && Self::credited_via_build(build, cand) {
-                    continue;
+                if complete {
+                    if let Some(tryexec) = &cand.tryexec {
+                        // The entry is shown only when its
+                        // TryExec program resolves in the build,
+                        // under the same hard-edge credit as the
+                        // Exec token. A TryExec that resolves
+                        // nowhere hides the entry, so the missing
+                        // Exec never fires.
+                        let shown = Self::credited_via_build_path(
+                            build,
+                            tryexec,
+                            &cand.pkg_name,
+                            &cand.requires,
+                        );
+                        if !shown {
+                            continue;
+                        }
+                    }
+                    if Self::credited_via_build(build, cand) {
+                        continue;
+                    }
                 }
                 Self::emit_without_binary(out, cand);
+            }
+            for cand in &build.icon_candidates {
+                if complete
+                    && Self::credited_via_build_path(
+                        build,
+                        &cand.icon,
+                        &cand.pkg_name,
+                        &cand.requires,
+                    )
+                {
+                    continue;
+                }
+                Self::emit_icon_not_found(out, cand);
             }
         }
     }
@@ -1150,6 +1403,7 @@ impl Check for MenuXDGCheck {
         self.order.clear();
         self.builds.clear();
         self.unkeyed.clear();
+        self.unkeyed_icons.clear();
     }
 
     fn export_state(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
@@ -1158,6 +1412,7 @@ impl Check for MenuXDGCheck {
             order: std::mem::take(&mut self.order),
             builds: std::mem::take(&mut self.builds),
             unkeyed: std::mem::take(&mut self.unkeyed),
+            unkeyed_icons: std::mem::take(&mut self.unkeyed_icons),
         }))
     }
 
@@ -1165,6 +1420,7 @@ impl Check for MenuXDGCheck {
         if let Ok(mut state) = state.downcast::<DesktopBuildState>() {
             self.sources.extend(state.sources.drain());
             self.unkeyed.append(&mut state.unkeyed);
+            self.unkeyed_icons.append(&mut state.unkeyed_icons);
             for key in std::mem::take(&mut state.order) {
                 let Some(data) = state.builds.remove(&key) else {
                     continue;
@@ -1173,6 +1429,7 @@ impl Check for MenuXDGCheck {
                     Some(mine) => {
                         mine.symlinks.extend(data.symlinks);
                         mine.candidates.extend(data.candidates);
+                        mine.icon_candidates.extend(data.icon_candidates);
                         for (path, owners) in data.file_owners {
                             mine.file_owners.entry(path).or_default().extend(owners);
                         }
@@ -1347,6 +1604,66 @@ mod tests {
     }
 
     #[test]
+    fn file_pattern_matches_directory_files() {
+        // rpminspect's desktop inspection covers `.directory`
+        // files under the same directory: they carry no Exec, but
+        // they are validated and their Icon is checked.
+        let check = MenuXDGCheck::new(&Config::default());
+        assert!(is_match(
+            &check.file_regex,
+            "/usr/share/applications/w6.directory"
+        ));
+        assert!(!is_match(
+            &check.file_regex,
+            "/usr/share/applications/w6.directory.bak"
+        ));
+        assert!(!is_match(
+            &check.file_regex,
+            "/opt/vendor/usr/share/applications/v.directory"
+        ));
+        assert!(is_match(
+            &check.file_regex,
+            "/usr/share/applications/w6.desktop"
+        ));
+    }
+
+    #[test]
+    fn directory_file_without_header_is_invalid() {
+        // A `.directory` file dispatches like a `.desktop` file:
+        // the native parse flags a missing header.
+        let results = run_desktop_named("Name=Foo\n", "/usr/share/applications/w6.directory");
+        let names: Vec<&str> = results
+            .iter()
+            .filter(|(n, _)| n == "desktopfile-missing-header")
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(names.len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn directory_file_valid_is_quiet() {
+        let results = run_desktop_named(
+            "[Desktop Entry]\nName=Foo\nType=Directory\nIcon=foo\n",
+            "/usr/share/applications/w6.directory",
+        );
+        assert!(results.is_empty(), "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn directory_file_duplicate_option_is_flagged() {
+        let results = run_desktop_named(
+            "[Desktop Entry]\nName=Foo\nName=Bar\n",
+            "/usr/share/applications/w6.directory",
+        );
+        assert!(
+            results
+                .iter()
+                .any(|(n, _)| n == "desktopfile-duplicate-option"),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
     fn file_pattern_is_anchored_like_re_match() {
         // AbstractCheck.py:45 applies the pattern with `re.match`; is_match
         // searches, so without `^` a vendored copy under /opt would be
@@ -1365,6 +1682,13 @@ mod tests {
     /// Drive check_binary over a hand-written desktop file: the fcprobe
     /// header is only a shell, the payload is the temp file.
     fn run_desktop(content: &str) -> Vec<(String, String)> {
+        run_desktop_named(content, "/usr/share/applications/macrotest.desktop")
+    }
+
+    /// Like `run_desktop`, with the desktop file installed under
+    /// `filename` instead of the default name: `.directory`
+    /// files dispatch under their own name.
+    fn run_desktop_named(content: &str, filename: &str) -> Vec<(String, String)> {
         // Unique temp file: tests run in parallel and must not share one.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("macrotest.desktop");
@@ -1372,7 +1696,7 @@ mod tests {
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture pkg");
-        let name = "/usr/share/applications/macrotest.desktop";
+        let name = filename;
         pkg.files = vec![crate::pkg::pkgfile::PkgFile {
             name: name.to_string(),
             path: path.to_str().unwrap().to_string(),
@@ -1544,6 +1868,9 @@ mod tests {
         let mut out = Filter::new(&config, crate::color::Color::for_tty(false)).unwrap();
         let mut check = MenuXDGCheck::with_tool_dir(Some(&bin_dir));
         check.check_binary(&pkg, &config, &mut out);
+        // Absolute-icon absence defers to after_checks: run it so
+        // the deferred verdicts land in the collected results.
+        check.after_checks(&config, &mut out);
         let levels = out.result_levels().to_vec();
         let results: Vec<(String, String, Level)> = out
             .results()
@@ -1862,8 +2189,18 @@ mod tests {
     /// the given relative paths into the fixture package's extracted
     /// directory first so binary_exists can resolve against them.
     /// The extraction root is a fresh tempdir per call: tests run in
-    /// parallel and must not share a seeded directory.
+    /// parallel and must not share a seeded directory. Seeded files
+    /// are real binaries, so they are seeded executable (0755);
+    /// `run_desktop_seeded_modes` seeds exact modes instead.
     fn run_desktop_seeded(content: &str, seeded: &[&str]) -> Vec<(String, String)> {
+        let modes: Vec<(&str, u32)> = seeded.iter().map(|rel| (*rel, 0o755)).collect();
+        run_desktop_seeded_modes(content, &modes)
+    }
+
+    /// Like `run_desktop_seeded`, seeding each path with the given
+    /// on-disk mode: a 0644 seed names a shipped-but-not-executable
+    /// file, which is what `desktopfile-exec-not-executable` fires on.
+    fn run_desktop_seeded_modes(content: &str, seeded: &[(&str, u32)]) -> Vec<(String, String)> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seededtest.desktop");
         std::fs::write(&path, content).unwrap();
@@ -1872,12 +2209,14 @@ mod tests {
             .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
         let mut pkg = Pkg::open(&rpm, extract_root.path(), true).expect("open fixture pkg");
         let root = Path::new(pkg.dir_name()).to_path_buf();
-        for rel in seeded {
+        for (rel, mode) in seeded {
             let full = root.join(rel);
             if let Some(parent) = full.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
             std::fs::write(&full, b"").unwrap();
+            std::fs::set_permissions(&full, std::os::unix::fs::PermissionsExt::from_mode(*mode))
+                .unwrap();
         }
         let name = "/usr/share/applications/seededtest.desktop";
         pkg.files = vec![PkgFile {
@@ -1986,6 +2325,148 @@ mod tests {
         let results = run_desktop_seeded("[Desktop Entry]\nName=Foo\nExec=/sbin/yast2\n", &[]);
         let lines = without_binary(&results);
         assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+    }
+
+    fn exec_not_executable(results: &[(String, String)]) -> Vec<&String> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "desktopfile-exec-not-executable")
+            .map(|(_, l)| l)
+            .collect()
+    }
+
+    #[test]
+    fn exec_not_executable_fires_for_bare_token() {
+        // rpminspect's desktop inspection fails verification when
+        // the referenced executable is not executable by all.
+        let results = run_desktop_seeded_modes(
+            "[Desktop Entry]\nName=Foo\nExec=foo\n",
+            &[("usr/bin/foo", 0o644)],
+        );
+        let lines = exec_not_executable(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("W: desktopfile-exec-not-executable"),
+            "level: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("foo"),
+            "detail names the binary: {}",
+            lines[0]
+        );
+        // The file exists, so no without-binary fires alongside.
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn exec_executable_is_silent() {
+        let results = run_desktop_seeded_modes(
+            "[Desktop Entry]\nName=Foo\nExec=foo\n",
+            &[("usr/bin/foo", 0o755)],
+        );
+        assert!(
+            exec_not_executable(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn exec_not_executable_fires_for_absolute_token() {
+        let results = run_desktop_seeded_modes(
+            "[Desktop Entry]\nName=Foo\nExec=/usr/bin/foo\n",
+            &[("usr/bin/foo", 0o640)],
+        );
+        let lines = exec_not_executable(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("/usr/bin/foo"),
+            "detail names the binary: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn exec_not_executable_fires_via_usrmerge_counterpart() {
+        // /sbin/foo resolving through the merged /usr/sbin/foo
+        // is judged on the file it actually resolves to.
+        let results = run_desktop_seeded_modes(
+            "[Desktop Entry]\nName=Foo\nExec=/sbin/foo\n",
+            &[("usr/sbin/foo", 0o644)],
+        );
+        let lines = exec_not_executable(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("/sbin/foo"),
+            "detail names the Exec spelling: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn exec_not_executable_fires_behind_env_wrapper() {
+        // The program behind the wrapper is judged, not `env`.
+        let results = run_desktop_seeded_modes(
+            "[Desktop Entry]\nName=Foo\nExec=env FOO=1 foo\n",
+            &[("usr/bin/foo", 0o644)],
+        );
+        let lines = exec_not_executable(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+        assert!(
+            lines[0].contains("foo"),
+            "detail names the program: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn exec_not_executable_skips_system_binaries() {
+        // A base-system binary is accepted without any package
+        // shipping it, so its on-disk mode is never judged: even
+        // a non-executable seed of /usr/bin/true stays silent.
+        let results = run_desktop_seeded_modes(
+            "[Desktop Entry]\nName=Foo\nExec=/usr/bin/true\n",
+            &[("usr/bin/true", 0o644)],
+        );
+        assert!(
+            exec_not_executable(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn exec_not_executable_judges_other_execute_bit() {
+        // rpminspect's bar is executable by all (S_IXOTH): a
+        // group-executable file with no other-execute bit fails,
+        // an other-executable file passes even without group.
+        let results = run_desktop_seeded_modes(
+            "[Desktop Entry]\nName=Foo\nExec=foo\n",
+            &[("usr/bin/foo", 0o701)],
+        );
+        assert!(
+            exec_not_executable(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+        let results = run_desktop_seeded_modes(
+            "[Desktop Entry]\nName=Foo\nExec=foo\n",
+            &[("usr/bin/foo", 0o750)],
+        );
+        assert_eq!(
+            exec_not_executable(&results).len(),
+            1,
+            "unexpected: {results:?}"
+        );
     }
 
     #[test]
@@ -2122,6 +2603,56 @@ mod tests {
             mode: 0o100644,
             ..Default::default()
         }
+    }
+
+    /// A desktop file entry with a `TryExec` line alongside Exec:
+    /// the entry is shown only when the TryExec program exists.
+    fn desktop_entry_tryexec(
+        dir: &std::path::Path,
+        filename: &str,
+        exec: &str,
+        tryexec: &str,
+    ) -> PkgFile {
+        let path = dir.join("test.desktop");
+        std::fs::write(
+            &path,
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Test\nExec={exec}\nTryExec={tryexec}\n"
+            ),
+        )
+        .unwrap();
+        PkgFile {
+            name: filename.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }
+    }
+
+    /// A desktop file entry naming an absolute Icon, with a
+    /// base-system Exec so no `desktopfile-without-binary`
+    /// finding pollutes the icon verdicts.
+    fn desktop_entry_icon(dir: &std::path::Path, filename: &str, icon: &str) -> PkgFile {
+        let path = dir.join("test.desktop");
+        std::fs::write(
+            &path,
+            format!("[Desktop Entry]\nType=Application\nName=Test\nExec=true\nIcon={icon}\n"),
+        )
+        .unwrap();
+        PkgFile {
+            name: filename.to_string(),
+            path: path.to_str().unwrap().to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }
+    }
+
+    fn icon_not_found(results: &[(String, String)]) -> Vec<&String> {
+        results
+            .iter()
+            .filter(|(n, _)| n == "desktopfile-icon-not-found")
+            .map(|(_, l)| l)
+            .collect()
     }
 
     fn reg_entry(name: &str) -> PkgFile {
@@ -2916,6 +3447,252 @@ mod tests {
         let src = menu_src_pkg(&d2);
         let results = run_menu_multi(&[src, desktop, sibling]);
         assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn tryexec_missing_suppresses_without_binary_on_complete_build() {
+        // The entry is shown only when its TryExec program
+        // exists: on a source-complete build where no subpackage
+        // ships the TryExec program, the entry stays hidden and
+        // the missing Exec is moot.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "tryexec-frontend",
+            vec![desktop_entry_tryexec(
+                d0.path(),
+                "/usr/share/applications/tryexec.desktop",
+                "missing-prog",
+                "/usr/bin/also-missing",
+            )],
+        );
+        let src = menu_src_pkg(&d1);
+        let results = run_menu_multi(&[src, desktop]);
+        assert!(
+            without_binary(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn tryexec_shipped_by_sibling_keeps_without_binary() {
+        // The sibling ships the TryExec program under a hard
+        // edge, so the entry is shown and the missing Exec is a
+        // real broken launcher.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg_with_requires(
+            &d0,
+            "tryexec-frontend",
+            vec![desktop_entry_tryexec(
+                d0.path(),
+                "/usr/share/applications/tryexec.desktop",
+                "missing-prog",
+                "/usr/bin/tryexec-prog",
+            )],
+            &["tryexec-pkg"],
+        );
+        let sibling = menu_pkg(&d1, "tryexec-pkg", vec![reg_entry("/usr/bin/tryexec-prog")]);
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn tryexec_missing_still_fires_on_partial_build() {
+        // Without the build's source package, whether the entry
+        // is shown is undecidable: the per-package verdict stands
+        // and the missing Exec fires.
+        let d0 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "tryexec-frontend",
+            vec![desktop_entry_tryexec(
+                d0.path(),
+                "/usr/share/applications/tryexec.desktop",
+                "missing-prog",
+                "/usr/bin/also-missing",
+            )],
+        );
+        let results = run_menu_multi(&[desktop]);
+        assert_eq!(without_binary(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn tryexec_resolving_in_package_keeps_without_binary() {
+        // The TryExec program ships in this package, so the entry
+        // is shown and the missing Exec fires.
+        let results = run_desktop_seeded(
+            "[Desktop Entry]\nName=Foo\nExec=missing-prog\nTryExec=/usr/bin/present-prog\n",
+            &["usr/bin/present-prog"],
+        );
+        let lines = without_binary(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn tryexec_system_binary_keeps_without_binary() {
+        // A TryExec naming a base-system binary shows the entry,
+        // so the missing Exec fires.
+        let results = run_desktop_seeded(
+            "[Desktop Entry]\nName=Foo\nExec=missing-prog\nTryExec=/usr/bin/true\n",
+            &[],
+        );
+        let lines = without_binary(&results);
+        assert_eq!(lines.len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn sibling_icon_absolute_credited_on_complete_build() {
+        // rpminspect searches every peer subpackage for the icon:
+        // an absolute Icon shipped by a sibling, under a hard
+        // edge on a source-complete build, no longer fires.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg_with_requires(
+            &d0,
+            "icon-frontend",
+            vec![desktop_entry_icon(
+                d0.path(),
+                "/usr/share/applications/icon.desktop",
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+            )],
+            &["icon-pkg"],
+        );
+        let sibling = menu_pkg(
+            &d1,
+            "icon-pkg",
+            vec![reg_entry("/usr/share/icons/hicolor/48x48/apps/app.png")],
+        );
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert!(
+            icon_not_found(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn sibling_icon_absolute_fires_on_partial_build() {
+        // The sibling ships the icon, but the run holds no source
+        // package: the build is not judged complete and the
+        // candidate fires as the per-package verdict.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "icon-frontend",
+            vec![desktop_entry_icon(
+                d0.path(),
+                "/usr/share/applications/icon.desktop",
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+            )],
+        );
+        let sibling = menu_pkg(
+            &d1,
+            "icon-pkg",
+            vec![reg_entry("/usr/share/icons/hicolor/48x48/apps/app.png")],
+        );
+        let results = run_menu_multi(&[desktop, sibling]);
+        assert_eq!(icon_not_found(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn sibling_icon_absolute_fires_without_edge() {
+        // Same shape as the credited test, but the frontend has
+        // no edge to the sibling at all: installing just the
+        // frontend leaves a broken icon, so it fires.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "icon-frontend",
+            vec![desktop_entry_icon(
+                d0.path(),
+                "/usr/share/applications/icon.desktop",
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+            )],
+        );
+        let sibling = menu_pkg(
+            &d1,
+            "icon-pkg",
+            vec![reg_entry("/usr/share/icons/hicolor/48x48/apps/app.png")],
+        );
+        let src = menu_src_pkg(&d2);
+        let results = run_menu_multi(&[src, desktop, sibling]);
+        assert_eq!(icon_not_found(&results).len(), 1, "unexpected: {results:?}");
+    }
+
+    #[test]
+    fn sibling_icon_credit_survives_state_export_import() {
+        // The deferred icon verdict merges through export/import
+        // like the Exec verdict: the sibling's inventory arrives
+        // through `import_state`, and the candidate that arrived
+        // the other way is still credited.
+        let d0 = tempfile::tempdir().unwrap();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let desktop = menu_pkg_with_requires(
+            &d0,
+            "icon-frontend",
+            vec![desktop_entry_icon(
+                d0.path(),
+                "/usr/share/applications/icon.desktop",
+                "/usr/share/icons/hicolor/48x48/apps/app.png",
+            )],
+            &["icon-pkg"],
+        );
+        let sibling = menu_pkg(
+            &d1,
+            "icon-pkg",
+            vec![reg_entry("/usr/share/icons/hicolor/48x48/apps/app.png")],
+        );
+        let src = menu_src_pkg(&d2);
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut first = MenuXDGCheck::new(&config);
+        first.check(&src, &config, &mut out);
+        first.check(&sibling, &config, &mut out);
+        let state = first.export_state().expect("exported state");
+        let mut second = MenuXDGCheck::new(&config);
+        second.check(&desktop, &config, &mut out);
+        second.import_state(state);
+        second.after_checks(&config, &mut out);
+        let results = out.results().to_vec();
+        assert!(
+            icon_not_found(&results).is_empty(),
+            "unexpected: {results:?}"
+        );
+    }
+
+    #[test]
+    fn directory_file_icon_missing_fires() {
+        // A `.directory` file's absolute Icon defers like a
+        // `.desktop` file's: missing everywhere in the run, it
+        // fires from `after_checks`.
+        let d0 = tempfile::tempdir().unwrap();
+        let path = d0.path().join("test.desktop");
+        std::fs::write(
+            &path,
+            "[Desktop Entry]\nType=Directory\nName=Test\nIcon=/usr/share/icons/hicolor/48x48/apps/app.png\n",
+        )
+        .unwrap();
+        let desktop = menu_pkg(
+            &d0,
+            "dir-frontend",
+            vec![PkgFile {
+                name: "/usr/share/applications/test.directory".to_string(),
+                path: path.to_str().unwrap().to_string(),
+                mode: 0o100644,
+                ..Default::default()
+            }],
+        );
+        let results = run_menu_multi(&[desktop]);
+        assert_eq!(icon_not_found(&results).len(), 1, "unexpected: {results:?}");
     }
 
     #[test]
