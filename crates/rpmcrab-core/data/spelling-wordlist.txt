@@ -109,6 +109,7 @@ declaratively
 decompressor/S
 decrypt/DGS
 deduplicate/DGMNS
+defs
 deprecations
 deserialization
 deserialize/DGMRS
@@ -150,6 +151,7 @@ gameplay
 geocoding
 geolocation
 geospatial
+gid
 globals
 globbing
 glyphs
@@ -295,6 +297,7 @@ subclasses
 subclassing
 subcommand/MS
 subdirectory/MS
+subid
 submodule/MS
 subnet/S
 subpackage/MS
@@ -332,6 +335,7 @@ tracepoint/MS
 triangulations
 typesafe
 udev
+uid
 uncompress/S
 uninstallation
 univariate
@@ -417,6 +421,7 @@ ksh
 kubectl
 kubernetes
 libvirt
+linux
 lua
 lzma
 malloc

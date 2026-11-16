@@ -1218,6 +1218,51 @@ SFX N 0 en [^ey]\n";
     }
 
     #[test]
+    fn shadow_login_defs_terms_are_accepted() {
+        // The shadow package's summaries/descriptions name login.defs,
+        // subordinate uid/gid ranges and subid, and cite util-linux:
+        // the five words were flagged although the prose is correct
+        // (the pinned en_US dictionary lacks them), so the package
+        // reworded them to dodge the findings. They belong in the
+        // supplementary vocabulary instead; "login" and "util" are
+        // already accepted (dictionary and wordlist respectively) and
+        // stay out of the list.
+        let checker = test_checker().with_supplementary_words();
+        for word in ["defs", "uid", "gid", "subid", "linux"] {
+            assert!(
+                checker
+                    .check(&format!("hello {word} world"), "testpkg", &[])
+                    .is_empty(),
+                "{word} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn shadow_prose_lines_produce_no_spelling_findings() {
+        // The four original shadow lines, checked against the real
+        // pinned en_US dictionary plus the supplementary vocabulary:
+        // with the new words listed they produce no findings. Skips
+        // when no system dictionary is installed (CI installs the
+        // pinned pair); the synthetic-dictionary test above pins the
+        // words themselves in every environment.
+        let Some(checker) = Spellchecker::new() else {
+            return;
+        };
+        for line in [
+            "The login.defs configuration file",
+            "default login.defs configuration file as used by util-linux, pam and shadow.",
+            "A library to manage subordinate uid and gid ranges",
+            "Utility library that provides a way to manage subid ranges.",
+        ] {
+            assert!(
+                checker.check(line, "testpkg", &[]).is_empty(),
+                "{line:?} must not produce spelling findings"
+            );
+        }
+    }
+
+    #[test]
     fn package_names_seed_entry_is_accepted() {
         // The package-names file carries issue-ruled package and
         // project names only; its seed entry must be accepted once
