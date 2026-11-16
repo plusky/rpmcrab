@@ -5049,6 +5049,13 @@ upstream = "https://github.com/plusky/rpmcrab/issues/1527"
 
 [[divergence]]
 case = "global"
+check = "spelling-error"
+kind = "behaviour"
+reason = "The bundled supplementary vocabulary gains five shadow spelling terms (plusky/rpmcrab#1580: defs for the login.defs configuration file name, uid and gid for subordinate user and group ID ranges, subid for subordinate ID ranges, linux for the util-linux name). All five are absent from the pinned en_US dictionary, so the reference flags them and the port stays silent. Verified against the pinned en_US dictionary and pinned by shadow_login_defs_terms_are_accepted and shadow_prose_lines_produce_no_spelling_findings in spellcheck.rs."
+since = "0.4.3"
+
+[[divergence]]
+case = "global"
 check = "tmpfile-not-in-filelist"
 kind = "behaviour"
 reason = "The reference (TmpFilesCheck._check_tmpfile_in_filelist) emits one finding per matching tmpfiles.d line, preserving duplicates and file order; the port collects the missing paths, then sorts and dedups them, emitting one finding per path in sorted order. Duplicate lines for the same path produce one finding instead of several, and findings come out sorted rather than in file order."
