@@ -25,10 +25,21 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      # The cargo cache holds librpm-sys bindgen output, which is built
+      # against the system RPM headers: it is only valid for one OS
+      # release. Fold the runner OS release into the rust-cache key so a
+      # floating ubuntu-latest image (24.04 -> 26.04) never restores stale
+      # bindings onto a new distro.
+      - name: Compute OS release for cache keys
+        id: os-release
+        run: |
+          . /etc/os-release
+          echo "version=${VERSION_ID}" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
           workspaces: . -> target
+          prefix-key: v0-rust-${{ steps.os-release.outputs.version }}
       # librpm-sys generates bindings with bindgen, so the build needs the RPM
       # development headers (pkg-config `rpm.pc`); the tests also need the
       # `rpm` CLI (signature check) and `file` (libmagic). Extraction is
@@ -122,10 +133,21 @@ jobs:
         with:
           toolchain: beta
           components: rustfmt, clippy
+      # The cargo cache holds librpm-sys bindgen output, which is built
+      # against the system RPM headers: it is only valid for one OS
+      # release. Fold the runner OS release into the rust-cache key so a
+      # floating ubuntu-latest image (24.04 -> 26.04) never restores stale
+      # bindings onto a new distro.
+      - name: Compute OS release for cache keys
+        id: os-release
+        run: |
+          . /etc/os-release
+          echo "version=${VERSION_ID}" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
           workspaces: . -> target
+          prefix-key: v0-rust-${{ steps.os-release.outputs.version }}
           # This leg is expected to fail sometimes; with main the only cache
           # writer, a beta break would otherwise freeze the cache.
           cache-on-failure: true
@@ -247,9 +269,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
+      # The cargo cache holds librpm-sys bindgen output, which is built
+      # against the system RPM headers: it is only valid for one OS
+      # release. Fold the runner OS release into the rust-cache key so a
+      # floating ubuntu-latest image (24.04 -> 26.04) never restores stale
+      # bindings onto a new distro.
+      - name: Compute OS release for cache keys
+        id: os-release
+        run: |
+          . /etc/os-release
+          echo "version=${VERSION_ID}" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: . -> target
+          prefix-key: v0-rust-${{ steps.os-release.outputs.version }}
       # Building rpmcrab-gen links the rpmcrab lib, so this needs the same RPM
       # development headers as the main build.
       # The cache-apt-pkgs-action key is md5(packages + version + repos [+arch
@@ -398,10 +431,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
+      # The cargo cache holds librpm-sys bindgen output, which is built
+      # against the system RPM headers: it is only valid for one OS
+      # release. Fold the runner OS release into the rust-cache key so a
+      # floating ubuntu-latest image (24.04 -> 26.04) never restores stale
+      # bindings onto a new distro.
+      - name: Compute OS release for cache keys
+        id: os-release
+        run: |
+          . /etc/os-release
+          echo "version=${VERSION_ID}" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
           workspaces: . -> target
+          prefix-key: v0-rust-${{ steps.os-release.outputs.version }}
       # The cache-apt-pkgs-action key is md5(packages + version + repos [+arch
       # iff non-x86_64]) - no distro dimension. Fold the runner OS release into
       # `version` so a floating `ubuntu-latest` image (24.04 -> 26.04) never
@@ -474,9 +518,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
+      # The cargo cache holds librpm-sys bindgen output, which is built
+      # against the system RPM headers: it is only valid for one OS
+      # release. Fold the runner OS release into the rust-cache key so a
+      # floating ubuntu-latest image (24.04 -> 26.04) never restores stale
+      # bindings onto a new distro.
+      - name: Compute OS release for cache keys
+        id: os-release
+        run: |
+          . /etc/os-release
+          echo "version=${VERSION_ID}" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: . -> target
+          prefix-key: v0-rust-${{ steps.os-release.outputs.version }}
       # The lib links librpm, so compiling its tests needs the RPM headers.
       # The cache-apt-pkgs-action key is md5(packages + version + repos [+arch
       # iff non-x86_64]) - no distro dimension. Fold the runner OS release into
