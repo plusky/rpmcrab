@@ -124,6 +124,7 @@ applies the identical rules to both outputs before diffing:
 |---|---|
 | `has taken 0.1 s` (footer) and `--time-report` durations | `has taken <DURATION> s` |
 | Reference venv path in the `configuration:` header | `<VENV>` |
+| Python version inside the venv path (`lib/python3.12`) | `lib/python<PYVER>` |
 | Reference XDG config path in the `configuration:` header | `<XDG>` |
 | `(none): W: unable to init enchant, spellchecking disabled.` (stderr) | **stripped** (enchant is optional; its absence is host-dependent, not rpmcrab) |
 | Any host path, build root, home dir, or username | rejected by the **leak gate** |

@@ -99,6 +99,12 @@ def test_sanitize_and_enchant_strip():
     subs = [("/venv", "<VENV>"), ("/xdg", "<XDG>")]
     out = runner.sanitize("/venv/bin has taken 0.25 s", subs)
     assert out == "<VENV>/bin has taken <DURATION> s"
+    # The Python version inside the venv path is masked, so a distro
+    # Python upgrade does not break parity.
+    out = runner.sanitize("/venv/lib/python3.14/site-packages/rpmlint/x", subs)
+    assert out == "<VENV>/lib/python<PYVER>/site-packages/rpmlint/x"
+    out = runner.sanitize("/venv/lib/python3.12/site-packages/rpmlint/x", subs)
+    assert out == "<VENV>/lib/python<PYVER>/site-packages/rpmlint/x"
     text = "warning: x\n(none): W: unable to init enchant, disabled.\nlast\n"
     assert runner.strip_enchant(text) == "warning: x\nlast\n"
     # A trailing blank line survives the strip byte-for-byte.
