@@ -19,7 +19,8 @@ For each case the runner:
 
 Normalization is the capture script's (scripts/capture-parity.sh): venv /
 XDG / ref-dir / home / case-dir paths become <VENV>/<XDG>/<REF>/<HOME>/
-<CASE>, `has taken X s` becomes `has taken <DURATION> s`, and the
+<CASE>, the Python version inside the venv path becomes lib/python<PYVER>,
+`has taken X s` becomes `has taken <DURATION> s`, and the
 host-dependent `unable to init enchant` line is dropped from stderr.
 
 Both subprocesses run with HOME set to a scratch home whose .rpmmacros
@@ -72,6 +73,7 @@ FOOTER_RE = re.compile(
     r"(?P<filtered>\d+) filtered(?:, (?P<badness>\d+) badness)?; "
     r"has taken <DURATION> s\s*$")
 DURATION_RE = re.compile(r"has taken [0-9.]* s")
+PYVER_RE = re.compile(r"lib/python[0-9]+\.[0-9]+")
 ENCHANT_MARK = "unable to init enchant"
 RUN_TIMEOUT = 600
 
@@ -97,6 +99,7 @@ def sanitize(text, subs):
     """The capture script's normalization, in its application order."""
     for old, new in subs:
         text = text.replace(old, new)
+    text = PYVER_RE.sub("lib/python<PYVER>", text)
     return DURATION_RE.sub("has taken <DURATION> s", text)
 
 
