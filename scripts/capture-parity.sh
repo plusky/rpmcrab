@@ -7,6 +7,8 @@
 # output before diffing. The rules (see tests/parity/README.md):
 #   - `has taken X s` and any time-report durations are masked (wall-clock).
 #   - The reference venv / XDG config paths in the header become <VENV>/<XDG>.
+#   - The Python version inside the venv path (lib/python3.12) becomes
+#     lib/python<PYVER>, so a distro Python upgrade does not break parity.
 #   - No host path, build root, home dir or username may survive (leak gate).
 #
 # Capture preconditions (tests/parity/README.md, "Running the corpus"):
@@ -109,6 +111,7 @@ sanitize() {
       -e "s|$(sed_lhs "$ref_dir")|$(sed_rhs '<REF>')|g" \
       -e "s|$(sed_lhs "$HOME")|$(sed_rhs '<HOME>')|g" \
       -e "s|$(sed_lhs "$case_dir")|$(sed_rhs '<CASE>')|g" \
+      -e 's|lib/python[0-9][0-9]*\.[0-9][0-9]*|lib/python<PYVER>|g' \
       -e 's/has taken [0-9.]* s/has taken <DURATION> s/' \
       "$raw" > "$out"
 }
