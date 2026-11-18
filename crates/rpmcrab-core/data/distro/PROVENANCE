@@ -3,7 +3,7 @@
 # the monthly distro-config-sync CI job refreshes them.
 # upstream_repo = https://github.com/rpm-software-management/rpmlint
 # opensuse: opensuse @ 6cd551cdfe9e1d56e84074c45d247f7f192cef90 (2026-11-09)
-# opensuse-whitelists: opensuse @ 73b3b490bb51717250f0312eddc3e11871c0c83b (2026-11-17)
+# opensuse-whitelists: opensuse @ cf224387d195a8610b97b1da4f9319d49cb8e6da (2026-11-18)
 #
 # Extra Filters appended (not from upstream; see EXTRA_FILTERS):
 #   Filters: added '^mingw32-.*arch-independent-package-contains-binary-or-object.*\\.a$' (mingw -filesystem packages' rpmlintrc)
