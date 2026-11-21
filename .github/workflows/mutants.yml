@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       only_shard:
-        description: 'Run a single shard only (0-63); empty runs all 64. For re-running capped shards without spending another full-matrix run.'
+        description: 'Run a single shard only (0-127); empty runs all 128. For re-running capped shards without spending another full-matrix run.'
         required: false
         default: ''
 
@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   validate-shard:
-    # A typo'd only_shard must fail the run, not silently skip all 64 legs
+    # A typo'd only_shard must fail the run, not silently skip all 128 legs
     # into a green no-op with zero coverage and no failed-run alert.
     # Unset (schedule events) and empty both mean the full matrix.
     runs-on: ubuntu-latest
@@ -37,8 +37,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${ONLY_SHARD:-}" ]; then exit 0; fi
-          if ! [[ "$ONLY_SHARD" =~ ^(0|[1-9][0-9]?)$ ]] || [ "$ONLY_SHARD" -gt 63 ]; then
-            echo "::error::only_shard must be empty or 0-63, got '$ONLY_SHARD'"
+          if ! [[ "$ONLY_SHARD" =~ ^(0|[1-9][0-9]?|1[01][0-9]|12[0-7])$ ]] || [ "$ONLY_SHARD" -gt 127 ]; then
+            echo "::error::only_shard must be empty or 0-127, got '$ONLY_SHARD'"
             exit 1
           fi
   setup:
@@ -54,12 +54,12 @@ jobs:
           ONLY_SHARD: ${{ inputs.only_shard }}
         run: |
           set -euo pipefail
-          # Single value or the whole 0-63 range, as a JSON array for the
+          # Single value or the whole 0-127 range, as a JSON array for the
           # dynamic matrix below. Unset (schedule) means the full matrix.
           if [ -n "${ONLY_SHARD:-}" ]; then
             echo "shards=[$ONLY_SHARD]" >> "$GITHUB_OUTPUT"
           else
-              echo "shards=$(seq 0 63 | jq -R 'tonumber' | jq -cs .)" >> "$GITHUB_OUTPUT"
+              echo "shards=$(seq 0 127 | jq -R 'tonumber' | jq -cs .)" >> "$GITHUB_OUTPUT"
           fi
   mutants:
     # cargo-mutants over the whole workspace, weekly and NON-GATING. It does
@@ -81,11 +81,10 @@ jobs:
     # whole picture instead.
     runs-on: ubuntu-latest
     needs: setup
-    # Sizing (measured 2026-10-12, not guessed): full `cargo test --workspace`
-    # is 1288 passed in ~15s of tests under a ~90s incremental rebuild on a
-    # many-core box; call it ~150s per mutant on a 4-vCPU runner. 5252 mutants
-    # x 150s = ~219h total, so 64 shards hold each near 3.4h worst-case,
-    # inside this cap with margin for a timeout-floor mutant or two. A shard
+    # Sizing (re-measured 2026-11: the universe grew 5252 -> ~14,700 mutants
+    # as the suite grew): at ~150s per mutant on a 4-vCPU runner the total
+    # is ~613h, so 128 shards hold each near 4.8h worst-case, inside this
+    # cap with margin for a timeout-floor mutant or two. A shard
     # that outruns the cap has itself become the finding. Re-measure if the
     # suite's build or test time moves materially; the per-file `--list`
     # counts in the summary below are the drift signal.
@@ -97,10 +96,10 @@ jobs:
       matrix:
         # 0-based, per cargo-mutants' k/n. The full list lives in setup's
         # shard computation; only_shard selects one leg of it. The denominator
-        # is fixed at 64 (not strategy.job-total, which would read 1 on a
+        # is fixed at 128 (not strategy.job-total, which would read 1 on a
         # single-shard run): shard membership is by index, so a surgical
         # re-run covers exactly the same mutants as the full run did.
-        # 64 shards for ~5252 mutants (~82 each); see timeout-minutes.
+        # 128 shards for ~14,700 mutants (~115 each); see timeout-minutes.
         shard: ${{ fromJSON(needs.setup.outputs.shards) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -152,7 +151,7 @@ jobs:
           MUTANTS_SHARD: ${{ matrix.shard }}
           # Fixed denominator, not strategy.job-total: on a single-shard
           # re-run job-total reads 1 and `--shard 11/1` is invalid.
-          MUTANTS_SHARDS: "64"
+          MUTANTS_SHARDS: "128"
         run: |
           set -euo pipefail
           {
