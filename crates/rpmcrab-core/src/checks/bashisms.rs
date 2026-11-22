@@ -346,6 +346,31 @@ impl Check for BashismsCheck {
 mod tests {
     use super::*;
 
+    #[test]
+    fn e3_self_var_assignment_rejects_digit_leading_name() {
+        assert_eq!(self_var_assignment("argv0=$0"), Some("argv0".to_string()));
+        assert_eq!(self_var_assignment("1x=$0"), None);
+        assert_eq!(
+            self_var_assignment("export argv0=$0"),
+            Some("argv0".to_string())
+        );
+    }
+
+    #[test]
+    fn e3_exec_self_target_with_self_arg_is_not_a_switch() {
+        assert!(!exec_switch("exec $0 $0", &[]));
+        assert!(!exec_switch("exec ${0} ${0}", &[]));
+        assert!(exec_switch("exec wish $0", &[]));
+    }
+
+    #[test]
+    fn e3_checked_files_reports_actual_count() {
+        use crate::check::Check;
+        let mut check = BashismsCheck::new(&Config::default());
+        check.checked_files = 7;
+        assert_eq!(check.checked_files(), Some(7));
+    }
+
     use crate::color::Color;
     use crate::pkg::pkgfile::PkgFile;
 

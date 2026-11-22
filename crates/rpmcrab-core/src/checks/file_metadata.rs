@@ -339,6 +339,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn e3_filemode_renders_owner_bits() {
+        assert_eq!(filemode(0), "?---------");
+        assert_eq!(filemode(0o100644), "-rw-r--r--");
+    }
+
+    #[test]
+    fn e3_value_repr_renders_floats_and_booleans() {
+        assert_eq!(value_repr(&toml::Value::Float(1.05)), "1.05");
+        assert_eq!(value_repr(&toml::Value::Boolean(true)), "True".to_string());
+        assert_eq!(
+            value_repr(&toml::Value::Boolean(false)),
+            "False".to_string()
+        );
+    }
+
+    #[test]
     fn filemode_renders_known_modes() {
         // Values taken from the reference's own test config and tests.
         assert_eq!(filemode(0o60660), "brw-rw----");

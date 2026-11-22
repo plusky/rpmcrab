@@ -344,6 +344,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn e3_user_writable_detail_group_checks() {
+        let f = |user: &str, group: &str, mode: u32| PkgFile {
+            user: user.to_string(),
+            group: group.to_string(),
+            mode,
+            ..Default::default()
+        };
+        // Group-writable root-owned dir is fine.
+        assert_eq!(
+            user_writable_detail("/var/log/x", &f("root", "root", 0o775), &None),
+            None
+        );
+        // Non-writable other-group dir is fine.
+        assert_eq!(
+            user_writable_detail("/var/log/x", &f("root", "other", 0o755), &None),
+            None
+        );
+        // Group-writable other-group dir without an su owner fires.
+        assert!(user_writable_detail("/var/log/x", &f("root", "other", 0o775), &None).is_some());
+    }
+
+    #[test]
+    fn e3_non_logrotate_paths_are_not_scanned() {
+        use crate::color::Color;
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open(&rpm, &std::env::temp_dir(), true).expect("open fixture");
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let disk = dir.path().join("foo");
+        std::fs::write(&disk, "/var/log/x/*.log {\n}\n").expect("write decoy");
+        pkg.files = vec![PkgFile {
+            name: "/usr/bin/foo".to_string(),
+            path: disk.to_string_lossy().into_owned(),
+            mode: 0o100644,
+            ..Default::default()
+        }];
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = LogrotateCheck::new(&config);
+        check.check_binary(&pkg, &config, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "files outside logrotate.d must not be scanned: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
     fn parent_dir_of_nested_path() {
         assert_eq!(parent_dir("/var/log/samba/log.smbd"), "/var/log/samba");
     }

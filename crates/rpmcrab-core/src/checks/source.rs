@@ -2644,6 +2644,39 @@ mod prebuilt {
         }
         name
     }
+
+    #[cfg(test)]
+    mod e3_unit_tests {
+        use super::*;
+
+        #[test]
+        fn first_vcs_marker_wins() {
+            for (name, marker) in [("/a/.git/b/.hg/c", ".git"), ("/a/.hg/b/.git/c", ".hg")] {
+                let root = vcs_root(name).expect("a marker must match");
+                assert!(
+                    root.ends_with(marker) && !root.contains(".hg")
+                        || marker == ".hg" && root.ends_with(marker),
+                    "{name} -> {root}"
+                );
+            }
+        }
+
+        #[test]
+        fn minimal_indexed_archive_is_indexed() {
+            let mut data = Vec::new();
+            data.extend_from_slice(b"!<arch>\n");
+            data.extend_from_slice(b"/               ");
+            data.extend_from_slice(b"0           ");
+            data.extend_from_slice(b"0     ");
+            data.extend_from_slice(b"0     ");
+            data.extend_from_slice(b"0       ");
+            data.extend_from_slice(b"10        ");
+            data.extend_from_slice(b"`\n");
+            assert_eq!(data.len(), 68);
+            assert!(ar_indexed(&data));
+            assert!(!ar_indexed(b"!<arch>\n"));
+        }
+    }
 }
 
 /// The reference's `int(value, 8)`, faithfully: surrounding whitespace is

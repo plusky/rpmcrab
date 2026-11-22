@@ -553,6 +553,23 @@ mod tests {
         false
     }
 
+    #[test]
+    fn e3_find_duplicates_suffixes_long_lists() {
+        let files: Vec<PkgFile> = (1..=8)
+            .map(|i| pkgfile(&format!("/a/f{i}"), "aaa", 100, i))
+            .collect();
+        let refs: Vec<&PkgFile> = files.iter().collect();
+        let out = DuplicatesCheck::find_duplicates(&refs, 0, no_config, no_ghost, no_whitelist);
+        assert_eq!(out.len(), 1);
+        let DuplicateFinding::FilesDuplicate(_, description) = &out[0] else {
+            panic!("unexpected finding shape: {:?}", out[0]);
+        };
+        assert!(
+            description.contains("(and 2 more)"),
+            "long lists must carry the overflow suffix: {description}"
+        );
+    }
+
     /// The bundled defaults' whitelist pairs, via the real parse path.
     fn bundled_whitelist() -> Vec<WhitelistPair> {
         let table: toml::Table = toml::from_str(include_str!("../../data/configdefaults.toml"))

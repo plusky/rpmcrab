@@ -2951,6 +2951,47 @@ fn tmpfiles_declared_paths(pkg: &Pkg) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn e3_rm_double_dash_consumes_exactly_the_separator() {
+        assert!(PostCheck::rm_var_state_credit(
+            "%post",
+            "rm",
+            "-- /var/lib/foo"
+        ));
+        assert!(!PostCheck::rm_var_state_credit(
+            "%post",
+            "rm",
+            "-f /var/lib/foo 2"
+        ));
+        assert!(PostCheck::rm_var_state_credit(
+            "%post",
+            "rm",
+            "-rf /var/lib/foo"
+        ));
+    }
+
+    #[test]
+    fn e3_delimiter_after_at_end_of_input_is_none() {
+        assert_eq!(PostCheck::delimiter_after("cat <<", 4), None);
+        assert_eq!(
+            PostCheck::delimiter_after("cat <<EOF", 4),
+            Some(("EOF".to_string(), false, 9))
+        );
+    }
+
+    #[test]
+    fn e3_code_only_is_length_preserving() {
+        for script in ["\"a\\b\"", "a\\;b", "$(a)(b)", "echo hi"] {
+            let out = PostCheck::code_only(script);
+            assert_eq!(out.len(), script.len(), "{script:?} -> {out:?}");
+        }
+    }
+
+    #[test]
+    fn e3_code_only_blanks_escaped_separator() {
+        assert_eq!(PostCheck::code_only("a\\;b"), "a\\ b");
+    }
     use crate::color::Color;
     use std::path::Path;
 

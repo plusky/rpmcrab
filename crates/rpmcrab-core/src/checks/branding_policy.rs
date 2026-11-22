@@ -407,6 +407,36 @@ impl Check for BrandingPolicyCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn e3_elf_capability_spellings() {
+        assert!(BrandingPolicyCheck::is_elf_capability("libfoo.so.1"));
+        assert!(BrandingPolicyCheck::is_elf_capability("libfoo.so.1.2"));
+        assert!(!BrandingPolicyCheck::is_elf_capability("libfoo.so.foo"));
+        assert!(!BrandingPolicyCheck::is_elf_capability("vim"));
+    }
+
+    #[test]
+    fn e3_nested_and_conjunct_credits_flavour() {
+        use crate::pkg::dep::parse_dep_expr;
+        assert!(flavour_conjunct(
+            &parse_dep_expr("(a and (b and branding-openSUSE))"),
+            "branding-openSUSE"
+        ));
+        assert!(!flavour_conjunct(
+            &parse_dep_expr("(a and b)"),
+            "branding-openSUSE"
+        ));
+    }
+
+    #[test]
+    fn e3_nested_and_gate_credits_flavour() {
+        use crate::pkg::dep::parse_dep_expr;
+        assert!(flavour_gate(&parse_dep_expr(
+            "(bla and (bla-common and branding-openSUSE))"
+        )));
+        assert!(!flavour_gate(&parse_dep_expr("(bla and bla-common)")));
+    }
     use std::path::Path;
 
     use crate::color::Color;

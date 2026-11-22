@@ -925,6 +925,20 @@ mod tests {
         results.iter().any(|(n, _)| n == name)
     }
 
+    #[test]
+    fn e3_group_and_options_tags_are_silent() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let pkg = libalternatives_pkg(
+            dir.path(),
+            &[("x.conf", "binary=/usr/bin/x\ngroup = foo\noptions = bar\n")],
+        );
+        let results = findings_for(&pkg);
+        assert!(
+            !has(&results, "wrong-tag-found"),
+            "group/options must stay silent: {results:?}"
+        );
+    }
+
     /// `man_found` resets for every `.conf` file (like the reference),
     /// so two files each with one `man` line are not `double-entries`.
     #[test]

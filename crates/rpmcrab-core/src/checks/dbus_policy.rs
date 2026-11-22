@@ -481,6 +481,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn e3_pinned_interface_rule_still_needs_destination() {
+        let xml = r#"<busconfig><policy user="root">
+<allow own="org.foo"/>
+<allow send_interface="org.foo"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "a rule naming a pinned interface must draw the finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn e3_pinned_agent_interface_rule_still_needs_destination() {
+        let xml = r#"<busconfig><policy user="root">
+<allow send_destination="org.foo.Agent"/>
+<allow send_interface="org.foo.Agent"/>
+</policy></busconfig>"#;
+        let findings = check_content(xml).expect("parses");
+        assert!(
+            findings
+                .iter()
+                .any(|(_, f, _)| *f == "dbus-policy-allow-without-destination"),
+            "a rule naming a pinned agent interface must draw the finding: {findings:?}"
+        );
+    }
+
+    #[test]
     fn policy_directories_are_recognized() {
         assert!(DBusPolicyCheck::is_policy_file(
             "/etc/dbus-1/system.d/foo.conf"

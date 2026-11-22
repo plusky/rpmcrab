@@ -195,6 +195,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn e3_debug_paths_are_skipped() {
+        let today = format_date(time::OffsetDateTime::now_utc());
+        let results = findings_for_content("/usr/lib/debug/foo", &today);
+        assert!(
+            results.is_empty(),
+            "debug payload must stay silent: {results:?}"
+        );
+    }
+
+    #[test]
     fn run_day_shape() {
         // `%b %e %Y`: month abbrev, space-padded day, year.
         let check = BuildRootAndDateCheck::with_datetime(time::OffsetDateTime::now_utc());

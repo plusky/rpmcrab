@@ -1466,6 +1466,16 @@ impl Check for MenuXDGCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn e3_usrmerge_counterpart_rejects_empty_remainder() {
+        assert_eq!(
+            MenuXDGCheck::usrmerge_counterpart("/bin/foo"),
+            Some("/usr/bin/foo".to_string())
+        );
+        assert_eq!(MenuXDGCheck::usrmerge_counterpart("/bin/"), None);
+        assert_eq!(MenuXDGCheck::usrmerge_counterpart("/etc/foo"), None);
+    }
     use std::path::Path;
 
     use crate::color::Color;
