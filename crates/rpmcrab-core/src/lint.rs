@@ -731,3 +731,107 @@ mod durations_tests {
         assert_eq!(d.as_slice().len(), 2);
     }
 }
+
+#[cfg(test)]
+mod e2_time_report_tests {
+    use super::*;
+
+    struct Counts(&'static str, usize);
+    impl Check for Counts {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn checked_files(&self) -> Option<usize> {
+            Some(self.1)
+        }
+    }
+
+    fn audited_lint() -> Lint {
+        let config = Config {
+            rpmlintrc_filters: vec!["stale-filter".to_string()],
+            rpmlintrc_setbadness: vec!["x.spec line 1: setBadness".to_string()],
+            ..Default::default()
+        };
+        let mut lint = Lint::new(config, vec![], Color::for_tty(false), 80).unwrap();
+        lint.last_pkg = Some(("pkg".to_string(), Some("x86_64".to_string()), false));
+        lint
+    }
+
+    #[test]
+    fn e2_unused_filters_keep_nonempty_arch() {
+        // lint.rs:231 delete `!`: a real arch survives the audit.
+        let mut lint = audited_lint();
+        lint.audit_unused_filters();
+        let arches: Vec<Option<String>> = lint
+            .filter
+            .findings()
+            .iter()
+            .map(|f| f.arch.clone())
+            .collect();
+        assert_eq!(arches, [Some("x86_64".to_string())], "{arches:?}");
+    }
+
+    #[test]
+    fn e2_setbadness_report_keeps_nonempty_arch() {
+        // lint.rs:262 delete `!`: same gate, setbadness report path.
+        let mut lint = audited_lint();
+        lint.report_rpmlintrc_setbadness();
+        let arches: Vec<Option<String>> = lint
+            .filter
+            .findings()
+            .iter()
+            .map(|f| f.arch.clone())
+            .collect();
+        assert_eq!(arches, [Some("x86_64".to_string())], "{arches:?}");
+    }
+
+    #[test]
+    fn e2_time_report_hides_zero_file_checks() {
+        // lint.rs:307 `>` -> `<` / `==`: only walked checks are listed.
+        let config = Config::default();
+        let mut lint = Lint::new(
+            config,
+            vec![
+                Box::new(Counts("aaa-walked", 5)),
+                Box::new(Counts("zzz-idle", 0)),
+            ],
+            Color::for_tty(false),
+            80,
+        )
+        .unwrap();
+        lint.check_duration.add("aaa-walked", 5.0);
+        lint.check_duration.add("zzz-idle", 5.0);
+        let report = lint.time_report();
+        let walked = report
+            .lines()
+            .find(|l| l.contains("aaa-walked"))
+            .expect("walked row");
+        assert!(
+            walked.trim_end().ends_with('5'),
+            "walked count must render: {report:?}"
+        );
+        let idle = report
+            .lines()
+            .find(|l| l.contains("zzz-idle"))
+            .expect("idle row");
+        assert!(
+            !idle.trim_end().ends_with('5'),
+            "idle check walks no files: {report:?}"
+        );
+    }
+
+    #[test]
+    fn e2_unused_filter_finding_shape() {
+        // Sanity anchor: the audit emits the unused-filter warning itself.
+        let mut lint = audited_lint();
+        lint.audit_unused_filters();
+        assert!(
+            lint.filter
+                .findings()
+                .iter()
+                .any(|f| f.check == "unused-rpmlintrc-filter"),
+            "{:?}",
+            lint.filter.findings()
+        );
+    }
+}

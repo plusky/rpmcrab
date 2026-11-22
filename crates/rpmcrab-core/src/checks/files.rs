@@ -27158,6 +27158,81 @@ x /etc/sysconfig/f - - - -
         ));
     }
 
+    // --- E2 mutation-killing tests (FINAL_missed/timeout unions) ---
+    // Each test pins one surviving mutant's distinguishing behaviour;
+
+    #[test]
+    fn e2_manpage_limit_pins_8mib() {
+        // files.rs:136 `8 * 1024 * 1024` -> `8 + 1024 * 1024`.
+        assert_eq!(MANPAGE_TEXT_LIMIT, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn e2_is_shell_name_rejects_empty() {
+        // files.rs:1029 `-> true`, files.rs:1030 `&&` -> `||`:
+        // both mutants accept "" (vacuous `all` + `||`).
+        assert!(!is_shell_name(""));
+        assert!(is_shell_name("foo"));
+        assert!(!is_shell_name("1bad"));
+    }
+
+    #[test]
+    fn e2_is_shell_name_underscore_first() {
+        // files.rs:1033 `== '_'` -> `!= '_'` (first-char class).
+        assert!(is_shell_name("_x1"));
+    }
+
+    #[test]
+    fn e2_shell_fn_span_needs_both_parens() {
+        // files.rs:1594 `&&` -> `||`: `foo(` alone must not open a span.
+        let toks = vec![
+            ShellTok::Word("foo".to_string()),
+            ShellTok::LParen,
+            ShellTok::Newline,
+            ShellTok::LBrace,
+            ShellTok::RBrace,
+        ];
+        assert_eq!(shell_function_body_span(&toks, 0), None);
+    }
+
+    #[test]
+    fn e2_shell_fn_span_redir_target_skipped() {
+        // files.rs:1616 (delete Redir arm -> None),
+        // files.rs:1617 `+=` -> `-=` (underflow/None).
+        let toks = vec![
+            ShellTok::Word("foo".to_string()),
+            ShellTok::LParen,
+            ShellTok::RParen,
+            ShellTok::Redir,
+            ShellTok::Word("log".to_string()),
+            ShellTok::LBrace,
+            ShellTok::RBrace,
+        ];
+        assert_eq!(shell_function_body_span(&toks, 0), Some((5, 6)));
+    }
+
+    #[test]
+    fn e2_fragment_proof_limit_exact() {
+        // files.rs:1797 `>` -> `==`: a LIMIT-sized file still scans.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let base = "#!/bin/sh\nreturn 0\n";
+        let mut content = base.to_string();
+        content.push_str(&"#".repeat(FRAGMENT_PROOF_SCAN_LIMIT as usize - base.len()));
+        assert_eq!(content.len() as u64, FRAGMENT_PROOF_SCAN_LIMIT);
+        let path = dir.path().join("frag.sh");
+        std::fs::write(&path, &content).expect("write");
+        let pkgfile = PkgFile {
+            path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(non_executable_script_is_provable_fragment(
+            &pkgfile,
+            "/usr/share/doc/x/frag.sh",
+            "/bin/sh",
+            ""
+        ));
+    }
+
     #[test]
     fn shell_scanner_mut_expand_unbraced() {
         // `$foo` followed by a name character is one variable.
@@ -27168,5 +27243,459 @@ x /etc/sysconfig/f - - - -
         assert_eq!(expand_unbraced_once("$foo$foo", "foo", "X"), "X$foo");
         // No occurrence leaves the link alone.
         assert_eq!(expand_unbraced_once("plain", "foo", "X"), "plain");
+    }
+
+    #[test]
+    fn e2_fragment_proof_limit_plus_one() {
+        // files.rs:1794 `LIMIT + 1` -> `LIMIT * 1`: a LIMIT+1 file is over.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let base = "#!/bin/sh\nreturn 0\n";
+        let mut content = base.to_string();
+        content.push_str(&"#".repeat(FRAGMENT_PROOF_SCAN_LIMIT as usize - base.len() + 1));
+        assert_eq!(content.len() as u64, FRAGMENT_PROOF_SCAN_LIMIT + 1);
+        let path = dir.path().join("frag.sh");
+        std::fs::write(&path, &content).expect("write");
+        let pkgfile = PkgFile {
+            path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(!non_executable_script_is_provable_fragment(
+            &pkgfile,
+            "/usr/share/doc/x/frag.sh",
+            "/bin/sh",
+            ""
+        ));
+    }
+
+    #[test]
+    fn e2_find_word_advances_past_rejected() {
+        // files.rs:1957 `+` -> `*` (misses the later match -> None),
+        // files.rs:1957 `+` -> `-` (usize underflow panic on at < len).
+        assert_eq!(find_word("?Zabcd abcd!", "abcd"), Some(7));
+    }
+
+    #[test]
+    fn e2_find_shell_keyword_needs_meta_edges() {
+        // files.rs:1981 `+` -> `*`: the later keyword must still be found.
+        assert_eq!(find_shell_keyword("12xfoo foo", "foo"), Some(7));
+    }
+
+    #[test]
+    fn e2_strip_comment_trailing_backslash_in_comment() {
+        // files.rs:2009 `+` -> `*`/`-`, files.rs:2013 `+` -> `*`:
+        // trailing backslash in a comment is literal, never OOB.
+        assert_eq!(strip_comment_tails("#a\\"), "");
+    }
+
+    #[test]
+    fn e2_strip_comment_backslash_word_in_quotes() {
+        // files.rs:2036 `&&` -> `||`: `\B` inside quotes is no continuation.
+        assert_eq!(strip_comment_tails("\"a\\B\""), "\"a\\B\"");
+    }
+
+    #[test]
+    fn e2_strip_comment_continuation_in_quotes() {
+        // Regression anchor: a real continuation inside quotes joins.
+        assert_eq!(strip_comment_tails("\"a\\\nB\""), "\"aB\"");
+    }
+
+    #[test]
+    fn e2_strip_comment_unterminated_quote_backslash() {
+        // files.rs:2036 `+` -> `-` and `<` -> `<=`: no OOB read at the end.
+        assert_eq!(strip_comment_tails("\"a\\"), "\"a\\");
+    }
+
+    #[test]
+    fn e2_strip_comment_trailing_backslash_code() {
+        // files.rs:2060 `+` -> `*` and `<` -> `<=`: same at code level.
+        assert_eq!(strip_comment_tails("a\\"), "a\\");
+    }
+
+    #[test]
+    fn e2_strip_comment_hash_after_word_survives() {
+        // files.rs:2072 guard -> true: `#` after a word char is no comment.
+        assert_eq!(strip_comment_tails("a#b"), "a#b");
+    }
+
+    #[test]
+    fn e2_for_without_in_skips_three_chars() {
+        // files.rs:2297 `+` -> `*`: the second loop must still be entered.
+        assert!(scriptlet_creates_symlink(
+            "x for for j in c; do ln -s /t /d/${j}; done",
+            "/d/c"
+        ));
+    }
+
+    #[test]
+    fn e2_for_no_semi_leading_space() {
+        // files.rs:2302 `+` -> `-`: `1 - 3` panics (usize underflow).
+        assert!(!scriptlet_creates_symlink(
+            " for i in a b do echo done",
+            "/d/d"
+        ));
+    }
+
+    #[test]
+    fn e2_for_no_semi_long_prefix() {
+        // files.rs:2302 `+` -> `*`: `12 * 3` overshoots the short rest.
+        assert!(!scriptlet_creates_symlink(
+            "ln -s /x /y\nfor i in x do y",
+            "/d/d"
+        ));
+    }
+
+    #[test]
+    fn e2_clean_path_drops_curdir() {
+        // files.rs:2343 delete `Component::CurDir` arm.
+        assert_eq!(clean_path("./a"), "a");
+    }
+
+    #[test]
+    fn e2_ghost_scriptlet_text_reads_post() {
+        // files.rs:3370 `-> "xyzzy"` / `-> String::new()`: the fixture's
+        // preinstall/postinstall bodies must be visible, not replaced.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/atomic-scriptlet-fires-1.0-1.noarch.rpm");
+        let pkg = Pkg::open(&rpm, dir.path(), true).expect("open fixture");
+        assert!(
+            ghost_scriptlet_text(&pkg).contains("atomic-fixture"),
+            "scriptlet bodies must be concatenated"
+        );
+    }
+
+    #[test]
+    fn e2_scriptlet_appends_tail_braced_at_zero() {
+        // files.rs:3435 `open + 2` -> `open - 2`: `0 - 2` panics.
+        assert!(scriptlet_appends_tail("${x}/ls-R", "ls-R"));
+    }
+
+    #[test]
+    fn e2_names_path_start_is_from_plus_rel() {
+        // files.rs:3396 `+` -> `*`: occurrence at rel 11 is boundary-fenced.
+        assert!(!scriptlet_names_path("ab!xxxxxxxx/a END", "/a"));
+    }
+
+    #[test]
+    fn e2_fillup_stray_conf_does_not_create() {
+        // files.rs:3871 `&&` -> `||`: a non-tmpfiles.d `.conf` names nothing.
+        let unit = "[Service]\nEnvironmentFile=-/etc/sysconfig/demo\nExecStart=/usr/bin/demo\n";
+        let (pkg, _src, _extract) = fillup_test_pkg(
+            "demo",
+            &[
+                ("/usr/share/fillup-templates/sysconfig.demo", "# template\n"),
+                ("/usr/lib/systemd/system/demo.service", unit),
+                ("/etc/stray.conf", "f /etc/sysconfig/demo\n"),
+            ],
+            &[],
+            &|_| {},
+        );
+        assert_eq!(fillup_findings(&pkg).len(), 1);
+    }
+
+    #[test]
+    fn e2_strip_quotes_removes() {
+        // files.rs:4165 `-> String::new()`: matches must be deleted.
+        let re = Regex::new("['\"]").expect("static regex");
+        assert_eq!(strip_quotes(&re, "a\"b'c"), "abc");
+    }
+
+    #[test]
+    fn e2_bindir_singleton_without_digest_is_quiet() {
+        // files.rs:4502 `>` -> `>=`: a singleton path is never a duplicate.
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.files = vec![PkgFile {
+            name: "/usr/bin/exe".to_string(),
+            path: "/usr/bin/exe".to_string(),
+            mode: 0o100755,
+            ..Default::default()
+        }];
+        let mut st = PkgState::default();
+        st.bindir_exes
+            .insert("exe".to_string(), vec!["/usr/bin/exe".to_string()]);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_bindir_exes(&pkg, &st, &mut out);
+        assert!(
+            !out.results()
+                .iter()
+                .any(|(n, _)| n == "duplicate-executable"),
+            "singleton must stay silent: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn e2_documented_alias_needs_other_man_name() {
+        // files.rs:4575 `&&` -> `||`: self-name in man pages is no alias.
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        let mut st = PkgState::default();
+        st.bindir_inodes.insert("/usr/bin/exe".to_string(), (1, 1));
+        st.inode_basenames.insert((1, 1), vec!["exe".to_string()]);
+        st.man_basenames.insert("exe".to_string());
+        assert!(!check.documented_alias("exe", &["/usr/bin/exe".to_string()], &st));
+    }
+
+    #[test]
+    fn e2_parse_license_tag_fallback_parens() {
+        // files.rs:5349 `==` -> `!=` ("("), 5350 `==` -> `!=` (")"),
+        // 5351/5352 `||` -> `&&`: fallback drops operators and parens.
+        let ids = parse_license_tag("(MIT))");
+        assert_eq!(ids.len(), 1, "parens must not leak: {ids:?}");
+        assert_eq!(ids[0].key, "mit");
+        let ids = parse_license_tag("(MIT");
+        assert!(ids.iter().any(|id| id.key == "mit"), "{ids:?}");
+    }
+
+    #[test]
+    fn e2_scan_grant_version_rejects_triple() {
+        // files.rs:5555 `&&` -> `||` (x2): `2.0.1` is no license version...
+        assert_eq!(scan_grant_version("2.0.1"), None);
+        // ...and a non-digit after the second dot keeps the tail.
+        assert_eq!(scan_grant_version("2.0.a"), Some(("2.0".to_string(), ".a")));
+    }
+
+    #[test]
+    fn e2_scan_grant_version_digit_loop_hang() {
+        // files.rs:5537 `+=` -> `*=`: `i *= 1` never advances (hangs).
+        // Terminates on unmutated code; verified FAIL by timeout on mutant.
+        assert_eq!(scan_grant_version("2.0"), Some(("2.0".to_string(), "")));
+    }
+
+    #[test]
+    fn e2_gnu_grant_b_lesser() {
+        // files.rs:5629 `||` -> `&&`: Lesser/Library prefix must map to LGPL.
+        let t = "terms of the GNU Lesser General Public License version 2 as published by the Free Software Foundation.";
+        let at = t.find("General Public License").expect("grant");
+        let grant = gnu_grant_b(t, at);
+        assert!(grant.is_some(), "lesser grant must parse");
+        assert_eq!(grant.unwrap().0, "LGPL-2.0-only");
+    }
+
+    #[test]
+    fn e2_license_unit_tag_names() {
+        // files.rs:5719 `-> ""`: both units keep their distinct tags.
+        assert_eq!(
+            LicenseUnitKind::Spdx.tag_name(),
+            "spdx-license-not-in-license-tag"
+        );
+        assert_eq!(
+            LicenseUnitKind::Grant.tag_name(),
+            "license-grant-not-in-license-tag"
+        );
+    }
+
+    #[test]
+    fn e2_license_grants_window_advances_hang() {
+        // files.rs:5685 `+` -> `*`: `from = at * 1` never advances (hangs).
+        // Terminates on unmutated code; verified FAIL by timeout on mutant.
+        assert!(license_grants_in_window("General Public License").is_empty());
+    }
+
+    #[test]
+    fn e2_ldconfig_skips_subdir_confs() {
+        // files.rs:5802 `||` -> `&&`: a subdir path never registers.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[
+                ("/etc/ld.so.conf.d/sub/x.conf", "/opt/lib\n"),
+                ("/etc/ld.so.conf.d/y.conf", "/opt/lib2\n"),
+            ],
+        );
+        let dirs = ldconfig_conf_dirs(&pkg);
+        assert!(!dirs.contains("/opt/lib"), "{dirs:?}");
+        assert!(dirs.contains("/opt/lib2"), "{dirs:?}");
+    }
+
+    #[test]
+    fn e2_peek_pdf_name_without_magic_is_text() {
+        // files.rs:5841 `&&` -> `||`: name alone is not binary.
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(&dir, &[("/doc/x.pdf", "plain text\n")]);
+        let pkgfile = pkg
+            .files
+            .iter()
+            .find(|f| f.name == "/doc/x.pdf")
+            .expect("file")
+            .clone();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let (_, istext) = check.peek(&pkg, &pkgfile, &mut out);
+        assert!(istext);
+    }
+
+    #[test]
+    fn e2_peek_ri_without_ri_path_is_text() {
+        // files.rs:5845 `&&` -> `||`: both conditions are required.
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(&dir, &[("/srv/other/x.ri", "plain text\n")]);
+        let pkgfile = pkg
+            .files
+            .iter()
+            .find(|f| f.name == "/srv/other/x.ri")
+            .expect("file")
+            .clone();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let (_, istext) = check.peek(&pkg, &pkgfile, &mut out);
+        assert!(istext);
+    }
+
+    #[test]
+    fn e2_fsf_address_needs_license() {
+        // files.rs:5914 `&&` -> `||`: the address alone is no FSF finding.
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let pkg = content_pkg(
+            &dir,
+            &[("/usr/share/doc/x/note.txt", "contact: 51 Franklin Street\n")],
+        );
+        let pkgfile = pkg
+            .files
+            .iter()
+            .find(|f| f.name == "/usr/share/doc/x/note.txt")
+            .expect("file")
+            .clone();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        assert!(!check.fsf_address_matches(&pkg, &pkgfile, &mut out));
+    }
+
+    #[test]
+    fn e2_is_python_program_versions() {
+        // files.rs:599 `-> true`, files.rs:601 `==` -> `!=`.
+        assert!(is_python_program("python3.13"));
+        assert!(is_python_program("python"));
+        assert!(!is_python_program("perl"));
+        assert!(!is_python_program("pythonwibble"));
+    }
+
+    #[test]
+    fn e2_is_flavour_base_name_underscore_arch() {
+        // files.rs:6179 `== '_'` -> `!= '_'`.
+        assert!(is_flavour_base_name("python313-base(x86_64-1)"));
+        assert!(!is_flavour_base_name("python3-base"));
+    }
+
+    #[test]
+    fn e2_dep_name_matches_arch_bits() {
+        // files.rs:6261 delete `!`: empty arch must not match.
+        assert!(dep_name_matches("python3-base(x86-64)", "python3-base"));
+        assert!(!dep_name_matches("python3-base", "python4-base"));
+    }
+
+    #[test]
+    fn e2_udev_quoted_comma_is_one_value() {
+        // files.rs:6620 `%` -> `+`: an even backslash run still quotes.
+        // The quoted value carries `=`, so a split would also parse.
+        let assigns = udev_assignments("TAG+=\"a=b,c=d\"");
+        assert_eq!(assigns.len(), 1);
+        assert_eq!(assigns[0].key, "TAG");
+        assert_eq!(assigns[0].value, "a=b,c=d");
+    }
+
+    #[test]
+    fn e2_info_dir_file_fires() {
+        // files.rs:7164 `||` -> `&&`: either path fires.
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_file_info_dir_file(&pkg, "/usr/info/dir", &mut out);
+        assert!(
+            out.results().iter().any(|(n, _)| n == "info-dir-file"),
+            "{:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn e2_crond_plain_file_is_quiet() {
+        // files.rs:7416 `!=` -> `==`: non-executable crontab stays silent.
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let pkgfile = PkgFile {
+            name: "/etc/cron.d/job".to_string(),
+            path: "/etc/cron.d/job".to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        };
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_file_crond(&pkg, "/etc/cron.d/job", &pkgfile, &mut out);
+        assert!(
+            !out.results()
+                .iter()
+                .any(|(n, _)| n == "executable-crontab-file"),
+            "{:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn e2_report_dangling_empty_exception_is_none() {
+        // files.rs:7550 guard -> true: a nameless exception still dangles.
+        let mut config = test_config();
+        config.configuration.insert(
+            "DanglingSymlinkExceptions".to_string(),
+            toml::Value::Table(
+                [(
+                    "e".to_string(),
+                    toml::Value::Table(
+                        [(
+                            "path".to_string(),
+                            toml::Value::String("nonexistent-target-.*".to_string()),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    ),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+        );
+        let check = FilesCheck::new(&config);
+        let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.report_dangling(&pkg, "/usr/bin/x", "/nonexistent-target-123", &mut out);
+        assert!(
+            out.results().iter().any(|(n, _)| n == "dangling-symlink"),
+            "{:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn e2_nonexec_data_two_components() {
+        // files.rs:769 `<` -> `<=`: len 2 still evaluates the shapes.
+        let config = test_config();
+        let check = FilesCheck::new(&config);
+        assert!(non_executable_script_is_data(
+            "/etc/profile",
+            "/bin/sh",
+            "",
+            &[],
+            &check.python_lib_tree_re,
+        ));
+    }
+
+    #[test]
+    fn e2_test_data_testsuite_component() {
+        // files.rs:896 `<` -> `<=`, 902/903/904 `||` -> `&&`.
+        assert!(script_is_test_data("foo", "/testsuite/x"));
+        assert!(!script_is_test_data("foo", "/usr/bin/x"));
     }
 }

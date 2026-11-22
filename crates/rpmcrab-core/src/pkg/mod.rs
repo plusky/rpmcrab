@@ -1891,4 +1891,39 @@ mod rich_dep_fixture_tests {
             vec!["rpmlib(RichDependencies)".to_string()]
         );
     }
+
+    #[test]
+    fn e2_is_no_source_needs_ghosts() {
+        // pkg/mod.rs:801 `&&` -> `||`: a ghost-free source tree is not NoSource.
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fsf-address-fixture-1.0-1.noarch.rpm");
+        let mut pkg = crate::pkg::Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        pkg.is_source = true;
+        assert!(
+            pkg.ghost_files.iter().next().is_none(),
+            "fixture carries no ghosts"
+        );
+        assert!(!pkg.is_no_source());
+        pkg.ghost_files = vec!["ghost".to_string()].into();
+        assert!(pkg.is_no_source());
+    }
+
+    #[test]
+    fn e2_guarded_restores_panic_hook() {
+        // pkg/mod.rs:155 `-=` -> `+=` / `/=`: the nesting count must fall
+        // back to zero so the previous hook is restored afterwards.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let count = Arc::new(AtomicUsize::new(0));
+        let probe = count.clone();
+        std::panic::set_hook(Box::new(move |_| {
+            probe.fetch_add(1, Ordering::SeqCst);
+        }));
+        let _ = crate::pkg::guarded(|| Ok::<(), crate::pkg::PkgError>(()));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panic!("e2 probe panic");
+        }));
+        let _ = std::panic::take_hook();
+        assert_eq!(count.load(Ordering::SeqCst), 1, "hook must be restored");
+    }
 }

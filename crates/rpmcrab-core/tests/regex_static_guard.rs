@@ -116,6 +116,9 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("buildroot_and_date.rs", "lookslikebuildroot", "ctor-once"),
     // Unit-test shape assertion for the run-day string.
     ("buildroot_and_date.rs", "^[A-Z][a-z]{2}", "test"),
+    // files.rs: unit test `e2_strip_quotes_removes` compiles the
+    // quote-strip pattern once per test run; never on a hot path.
+    ("files.rs", "Regex::new(\"['\\\"]\")", "test"),
     // buildroot_and_date.rs (#1180): the SDE stamp pattern embeds the
     // package's own SOURCE_DATE_EPOCH (runtime data), so it cannot be a
     // static; compiled once per package in check_files, never per file.

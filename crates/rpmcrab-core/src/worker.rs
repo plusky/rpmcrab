@@ -1255,4 +1255,22 @@ mod tests {
             "one check set per worker, no more"
         );
     }
+
+    #[test]
+    fn e2_rpm_arch_survives_inner_result() {
+        // worker.rs:231 delete `!`: a non-empty arch stays `Some(arch)`.
+        let config = Config::default();
+        let color = Color::for_tty(false);
+        let mut worker = Worker::new(&config, vec![], color);
+        let rpm = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fsf-address-fixture-1.0-1.noarch.rpm");
+        let result = worker.check_package_inner(Task::File(rpm.clone()), "display");
+        assert!(result.fatal.is_none(), "{:?}", result.fatal);
+        assert_eq!(
+            result.pkg_arch,
+            Some("noarch".to_string()),
+            "{:?}",
+            result.display
+        );
+    }
 }
