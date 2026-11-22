@@ -1944,4 +1944,254 @@ mod tests {
             .expect("has compile info");
         assert_eq!(info.source.as_deref(), Some(source));
     }
+
+    /// Depth is per-branch, not cumulative: 130 sibling terms parse
+    /// fine, and both float tags decode as opaque terms.
+    #[test]
+    fn many_sibling_terms_parse_within_depth_cap() {
+        let mut t = vec![108, 0, 0, 0, 130];
+        for _ in 0..130 {
+            t.extend_from_slice(&[97, 1]);
+        }
+        t.push(106);
+        let parsed = TermParser::new(&t)
+            .parse_term()
+            .expect("130 siblings must parse");
+        match parsed {
+            Term::List(items) => assert_eq!(items.len(), 130),
+            other => panic!("expected list, got {other:?}"),
+        }
+        let float70: Vec<u8> = std::iter::once(70)
+            .chain(std::iter::repeat_n(0, 31))
+            .collect();
+        assert!(
+            matches!(TermParser::new(&float70).parse_term(), Some(Term::Other)),
+            "FLOAT_EXT must decode"
+        );
+        let float99: Vec<u8> = std::iter::once(99)
+            .chain(std::iter::repeat_n(0, 8))
+            .collect();
+        assert!(
+            matches!(TermParser::new(&float99).parse_term(), Some(Term::Other)),
+            "NEW_FLOAT_EXT must decode"
+        );
+    }
+
+    /// A bad magic on either side of the FOR1 header is not a BEAM
+    /// file, even when the other side is intact.
+    #[test]
+    fn one_sided_bad_magic_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let good = beam_with_cinf(&compile_info_term(119));
+        let path = tmp.path().join("good.beam");
+        std::fs::write(&path, &good).unwrap();
+        assert!(
+            read_compile_info(path.to_str().unwrap())
+                .expect("reads")
+                .is_some()
+        );
+        let mut bad_beam = good.clone();
+        bad_beam[8..12].copy_from_slice(b"BEAX");
+        let path = tmp.path().join("badbeam.beam");
+        std::fs::write(&path, &bad_beam).unwrap();
+        assert!(read_compile_info(path.to_str().unwrap()).is_err());
+        let mut bad_for1 = good;
+        bad_for1[0..4].copy_from_slice(b"FORX");
+        let path = tmp.path().join("badfor1.beam");
+        std::fs::write(&path, &bad_for1).unwrap();
+        assert!(read_compile_info(path.to_str().unwrap()).is_err());
+    }
+
+    /// The CInf chunk is found after a padding chunk: chunk sizes are
+    /// read from the right bytes.
+    #[test]
+    fn cinf_after_padding_chunk_is_found() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let beam = beam_with_chunks(&[(b"PAD!", &[1, 2, 3]), (b"CInf", &compile_info_term(119))]);
+        let path = tmp.path().join("padded.beam");
+        std::fs::write(&path, &beam).unwrap();
+        let info = read_compile_info(path.to_str().unwrap())
+            .expect("reads")
+            .expect("has compile info");
+        assert_eq!(
+            info.source.as_deref(),
+            Some("/home/abuild/rpmbuild/BUILD/foo.erl")
+        );
+    }
+
+    /// `chunk_range` finds CInf after a padding chunk too.
+    #[test]
+    fn chunk_range_after_padding_chunk() {
+        let term = compile_info_term(119);
+        let beam = beam_with_chunks(&[(b"PAD!", &[1, 2, 3]), (b"CInf", &term)]);
+        // Header (12) + PAD! chunk (8 header + 3 payload + 1 pad):
+        // the CInf payload starts at 32.
+        assert_eq!(chunk_range(&beam, b"CInf"), Some((32, 32 + term.len())));
+    }
+
+    /// An unaligned chunk before CInf, followed by an aligned padding
+    /// chunk and then CInf: the walker lands on the aligned chunk, not
+    /// on the raw end of the unaligned one.
+    fn unaligned_cinf_beam() -> (Vec<u8>, usize, usize) {
+        let term = compile_info_term(119);
+        let mut beam = Vec::new();
+        beam.extend_from_slice(b"FOR1");
+        beam.extend_from_slice(&[0, 0, 0, 0]);
+        beam.extend_from_slice(b"BEAM");
+        beam.extend_from_slice(b"PAD!");
+        beam.extend_from_slice(&1u32.to_be_bytes());
+        beam.push(0xaa); // one payload byte: chunk A ends at 21
+        beam.extend_from_slice(&[0, 0, 0]); // pad to the aligned 24
+        beam.extend_from_slice(b"BBBB"); // aligned filler chunk
+        beam.extend_from_slice(&0u32.to_be_bytes());
+        let cinf_at = beam.len();
+        beam.extend_from_slice(b"CInf");
+        beam.extend_from_slice(&(term.len() as u32).to_be_bytes());
+        beam.extend_from_slice(&term);
+        let size = (beam.len() - 8) as u32;
+        beam[4..8].copy_from_slice(&size.to_be_bytes());
+        (beam, cinf_at + 8, term.len())
+    }
+
+    /// The unaligned chunk is skipped on the compile-info path too.
+    #[test]
+    fn unaligned_chunk_before_cinf_is_skipped_on_read() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let (beam, _, _) = unaligned_cinf_beam();
+        let path = tmp.path().join("unaligned.beam");
+        std::fs::write(&path, &beam).unwrap();
+        let info = read_compile_info(path.to_str().unwrap())
+            .expect("reads")
+            .expect("has compile info");
+        assert_eq!(
+            info.source.as_deref(),
+            Some("/home/abuild/rpmbuild/BUILD/foo.erl")
+        );
+    }
+
+    /// ... and on the range path.
+    #[test]
+    fn unaligned_chunk_before_cinf_is_skipped_on_range() {
+        let (beam, payload_at, term_len) = unaligned_cinf_beam();
+        assert_eq!(
+            chunk_range(&beam, b"CInf"),
+            Some((payload_at, payload_at + term_len))
+        );
+    }
+
+    /// Option-less compile info (no `options` key) still consults the
+    /// Dbgi chunk for the debug-info verdict.
+    #[test]
+    fn optionless_compile_info_falls_back_to_dbgi_chunk() {
+        let source = b"/home/abuild/rpmbuild/BUILD/foo.erl";
+        let mut t = vec![131];
+        t.extend_from_slice(&[108, 0, 0, 0, 1]); // LIST_EXT, len 1
+        t.extend_from_slice(&[104, 2]); // {source, Binary}
+        push_atom(&mut t, 119, b"source");
+        t.extend_from_slice(&[109]); // BINARY_EXT
+        t.extend_from_slice(&(source.len() as u32).to_be_bytes());
+        t.extend_from_slice(source);
+        t.push(106);
+        // With a real Dbgi payload: silent.
+        let beam = beam_with_chunks(&[(b"CInf", &t), (b"Dbgi", &dbgi_erlang_real())]);
+        assert_eq!(finding_ids_for_beam(&beam), Vec::<String>::new());
+        // Without any Dbgi chunk: the finding fires.
+        let beam = beam_with_cinf(&t);
+        assert_eq!(
+            finding_ids_for_beam(&beam),
+            vec!["beam-compiled-without-debuginfo".to_string()]
+        );
+    }
+
+    /// The `debug_info_v1` envelope head is mandatory: a tuple headed
+    /// by another atom earns no credit even with a real payload.
+    #[test]
+    fn wrong_envelope_head_with_real_data_earns_no_credit() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut t = vec![131, 104, 3];
+        push_atom(&mut t, 119, b"not_debug_info");
+        push_atom(&mut t, 119, b"erl_abstract_code");
+        t.extend_from_slice(&[108, 0, 0, 0, 1]); // real abstract forms
+        t.extend_from_slice(&[104, 4]);
+        push_atom(&mut t, 119, b"attribute");
+        t.extend_from_slice(&[97, 1]);
+        push_atom(&mut t, 119, b"module");
+        push_atom(&mut t, 119, b"foo");
+        t.push(106);
+        let path = tmp.path().join("x.beam");
+        std::fs::write(&path, beam_with_chunks(&[(b"Dbgi", &t)])).unwrap();
+        assert!(!has_real_dbgi_payload(path.to_str().unwrap()));
+    }
+
+    /// `{elixir_v1, non-map}` earns no credit even when trailing bytes
+    /// make the remainder long: the map-head check is not a length
+    /// check.
+    #[test]
+    fn elixir_tuple_without_map_and_trailing_bytes_earns_no_credit() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut d = vec![104, 2];
+        push_atom(&mut d, 119, b"elixir_v1");
+        d.extend_from_slice(&[97, 42]);
+        d.extend_from_slice(&[0, 0, 0]); // trailing bytes, not terms
+        let path = tmp.path().join("x.beam");
+        std::fs::write(
+            &path,
+            beam_with_chunks(&[(b"Dbgi", &dbgi_with_raw_data(&d))]),
+        )
+        .unwrap();
+        assert!(!has_real_dbgi_payload(path.to_str().unwrap()));
+    }
+
+    /// An empty CInf chunk fails as a bad version, with its own
+    /// message — not as a generic term failure.
+    #[test]
+    fn empty_cinf_fails_as_bad_version() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("empty.beam");
+        std::fs::write(&path, beam_with_cinf(&[])).unwrap();
+        assert_eq!(
+            read_compile_info(path.to_str().unwrap()).err().as_deref(),
+            Some("bad external term version")
+        );
+    }
+
+    /// A compressed Dbgi chunk whose inflation fails past the
+    /// classification head earns no credit: truncation must fail
+    /// closed, not fall back to the head bytes.
+    #[test]
+    fn truncated_compressed_dbgi_earns_no_credit() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        // Random-looking incompressible payload so truncation lands
+        // late in the inflated stream, past the head.
+        let mut body = dbgi_erlang_real();
+        let mut x: u32 = 0x12345678;
+        for _ in 0..3000 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            body.push((x & 0xff) as u8);
+        }
+        let full = compressed_term(&body);
+        // Drop part of the compressed tail: inflation produces the
+        // head, then fails.
+        let truncated = full[..full.len() - full.len() / 4].to_vec();
+        // Sanity: the truncated stream still inflates past the 1088
+        // byte fallback bound, so the two bounds observably disagree.
+        {
+            use std::io::Read as _;
+            let rest = &truncated[1..];
+            let Some(zipped) = rest.get(5..) else {
+                panic!("bad test fixture");
+            };
+            let mut out = Vec::new();
+            let res = flate2::read::ZlibDecoder::new(zipped)
+                .take(10_000_000)
+                .read_to_end(&mut out);
+            assert!(res.is_err(), "fixture must fail inflation");
+            assert!(out.len() > 1088, "fixture must inflate past the bound");
+        }
+        let path = tmp.path().join("x.beam");
+        std::fs::write(&path, beam_with_chunks(&[(b"Dbgi", &truncated)])).unwrap();
+        assert!(!has_real_dbgi_payload(path.to_str().unwrap()));
+    }
 }
