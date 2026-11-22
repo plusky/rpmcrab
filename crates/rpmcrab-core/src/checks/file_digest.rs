@@ -3106,4 +3106,291 @@ hash = "{expected}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// `[` with no closing bracket is a literal: it matches only
+    /// itself, it does not open a class that swallows the rest.
+    #[test]
+    fn glob_lone_bracket_is_literal() {
+        assert!(!glob_match("[", "x"));
+        assert!(glob_match("[", "["));
+    }
+
+    /// Comment and blank lines in a socket unit are skipped, not
+    /// parsed as keys: both `#` and `;` comments must vanish.
+    #[test]
+    fn socket_comments_and_blank_lines_are_skipped() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-socket-comments");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let unit = write_temp(
+            &dir,
+            "a.socket",
+            b"[Socket]\n# a comment\nListenStream=/run/a.sock\n\n; another\nSocketUser=root\n",
+        );
+        let digester = SocketUnitDigester;
+        assert_eq!(
+            digester.digest(&unit, "sha256").expect("digest"),
+            sha256_hex(b"ListenStream=/run/a.sock\nSocketUser=root\n")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A two-char `[]` line is not a section: without `=` it fails the
+    /// parse, and a failed parse counts as restricted.
+    #[test]
+    fn empty_bracket_line_is_not_a_section() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-socket-empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let unit = write_temp(
+            &dir,
+            "a.socket",
+            b"[Socket]\n[]\nFileDescriptorName=varlink-x\n",
+        );
+        assert!(VarlinkServiceCheck::is_restricted(&unit));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `sha384` names a supported hasher.
+    #[test]
+    fn sha384_hasher_is_supported() {
+        assert!(new_hasher("sha384").is_ok());
+    }
+
+    /// An exact duplicate path is not a conflict; a strict prefix of a
+    /// restricted location is.
+    #[test]
+    fn trie_conflicts_exact_path_is_not_a_conflict() {
+        let mut trie = TrieNode::default();
+        trie.insert("/etc/dbus-1");
+        assert!(trie.conflicts("/etc"));
+        assert!(!trie.conflicts("/etc/dbus-1"));
+        assert!(!trie.conflicts("/etc/other"));
+    }
+
+    /// A present string-array setting is honoured, not dropped.
+    #[test]
+    fn cfg_string_array_keeps_present_values() {
+        let table: toml::Table = toml::from_str("NamePatterns = [\"x\", \"y\"]").expect("toml");
+        assert_eq!(
+            FileDigestCheck::cfg_string_array(&table, "pam", "NamePatterns"),
+            vec!["x".to_string(), "y".to_string()]
+        );
+    }
+
+    /// The line-zero versioned shebang is normalized to `python3`,
+    /// pinned by an independently computed hash (not by the digester
+    /// under test).
+    #[test]
+    fn shell_digest_normalizes_versioned_shebang() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-shell-pin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let ondisk = write_temp(&dir, "login", b"#!/usr/bin/python3.11\necho hi\n");
+        assert_eq!(
+            Digester::digest(&ShellDigester, &ondisk, "sha256").expect("digest"),
+            sha256_hex(b"#!/usr/bin/python3\necho hi\n")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `python3.N` string on a non-shebang first line is left alone:
+    /// normalization applies to the shebang only.
+    #[test]
+    fn shell_digest_leaves_non_shebang_first_line_alone() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-shell-pin2");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content = b"echo python3.11\nsecond\n";
+        let ondisk = write_temp(&dir, "login", content);
+        assert_eq!(
+            Digester::digest(&ShellDigester, &ondisk, "sha256").expect("digest"),
+            sha256_hex(content)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The symlink finding names the non-excepted link: the exception
+    /// check must not be inverted.
+    #[test]
+    fn symlink_finding_names_the_non_excepted_link() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-exc-pin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+
+        let config = test_config("");
+        let mut pkg = fixture_pkg();
+        let link_allowed = pkgfile("/etc/pam.d/link-allowed", "/nonexistent", 0o120777);
+        let link_denied = pkgfile("/etc/pam.d/link-denied", "/nonexistent", 0o120777);
+        pkg.files = vec![link_allowed, link_denied];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        let line = results
+            .iter()
+            .find(|(n, _)| *n == "pam-file-symlink")
+            .map(|(_, l)| l.as_str())
+            .expect("one symlink finding");
+        assert!(
+            line.contains("/etc/pam.d/link-denied"),
+            "finding must name the denied link: {line}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lone plain socket is skipped by the varlink content check:
+    /// resolution must find the file itself, not a non-matching one.
+    #[test]
+    fn plain_socket_without_varlink_is_skipped() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-content-pin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let plain = write_temp(&dir, "b.socket", b"[Socket]\nListenStream=/run/b.sock\n");
+
+        let extra = r#"
+[FileDigestLocation.sock]
+Locations = ["/usr/lib/systemd/system"]
+NamePatterns = ["*.socket"]
+FollowSymlinks = false
+Recursive = true
+ContentCheck = "VarlinkServiceCheck"
+"#;
+        let config = test_config(extra);
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![pkgfile(
+            "/usr/lib/systemd/system/b.socket",
+            &plain,
+            0o100644,
+        )];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            results.is_empty(),
+            "plain socket must be silent: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `calc_digest` serves the `systemd-socket` digester.
+    #[test]
+    fn calc_digest_serves_systemd_socket_digester() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-calc-sock");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let unit = write_temp(&dir, "a.socket", b"[Socket]\nListenStream=/run/a.sock\n");
+        let config = Config::default();
+        let mut check = FileDigestCheck::new(&config);
+        assert!(check.calc_digest("systemd-socket", &unit, "sha256").is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A literal arch matches only itself.
+    #[test]
+    fn arch_matches_exclusion_literal_arch() {
+        assert!(FileDigestCheck::arch_matches_exclusion("x86_64", "x86_64"));
+        assert!(!FileDigestCheck::arch_matches_exclusion(
+            "x86_64", "aarch64"
+        ));
+    }
+
+    /// An unrelated mismatch with no verified file in the group stays
+    /// silent: the merge needs a clean restricted path. The login entry
+    /// is present but stale too, so the group genuinely fails — yet the
+    /// unrelated sibling must not be reported without a clean file.
+    #[test]
+    fn unrelated_mismatch_without_valid_file_is_suppressed() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-unrelated-pin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let login_content = b"auth required pam_unix.so\n";
+        let login_disk = write_temp(&dir, "login", login_content);
+        let sibling_disk = write_temp(&dir, "sibling", b"sibling data\n");
+
+        let extra = r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "default"
+hash = "deadbeef"
+[[FileDigestGroup.digests]]
+path = "/etc/unrelated/sibling"
+algorithm = "sha256"
+digester = "default"
+hash = "deadbeef"
+"#
+        .to_string();
+        let config = test_config(&extra);
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![
+            pkgfile("/etc/pam.d/login", &login_disk, 0o100644),
+            pkgfile("/etc/unrelated/sibling", &sibling_disk, 0o100644),
+        ];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        // The stale login is reported; the unrelated sibling stays silent.
+        assert!(
+            results
+                .iter()
+                .any(|(n, l)| *n == "pam-file-digest-mismatch" && l.contains("/etc/pam.d/login")),
+            "stale login must be reported: {results:?}"
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|(n, l)| *n == "pam-file-digest-mismatch"
+                    && l.contains("/etc/unrelated/sibling")),
+            "unrelated mismatch must stay silent: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path matching one group entry is verified even when another
+    /// entry for the same path mismatches: the verified path draws no
+    /// finding.
+    #[test]
+    fn matching_entry_with_stale_sibling_entry_is_silent() {
+        let dir = std::env::temp_dir().join("rpmcrab-fd-samesilent");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let content = b"auth required pam_unix.so\n";
+        let ondisk = write_temp(&dir, "login", content);
+
+        let extra = format!(
+            r#"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "default"
+hash = "{}"
+[[FileDigestGroup]]
+type = "pam"
+package = "testpkg"
+[[FileDigestGroup.digests]]
+path = "/etc/pam.d/login"
+algorithm = "sha256"
+digester = "default"
+hash = "deadbeef"
+"#,
+            sha256_hex(content)
+        );
+        let config = test_config(&extra);
+        let mut pkg = fixture_pkg();
+        pkg.files = vec![pkgfile("/etc/pam.d/login", &ondisk, 0o100644)];
+
+        let mut check = FileDigestCheck::new(&config);
+        let results = run_check(&pkg, &config, &mut check);
+        assert!(
+            results.is_empty(),
+            "verified path must stay silent: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

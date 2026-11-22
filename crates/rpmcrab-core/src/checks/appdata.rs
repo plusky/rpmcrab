@@ -1118,4 +1118,56 @@ mod tests {
         check.reset();
         assert_eq!(check.checked_files(), Some(0));
     }
+
+    /// `type='...'` (single quotes) carries the type like `"..."` does:
+    /// the quote-style check must accept both quote characters.
+    #[test]
+    fn single_quoted_type_attribute_is_captured() {
+        let shape =
+            walk_xml("<component type='desktop-application'><id>x</id></component>").unwrap();
+        assert_eq!(shape.component_type.as_deref(), Some("desktop-application"));
+    }
+
+    /// An unterminated open tag currently panics slicing past the end
+    /// of input (`attrs_start..i` with `i == n + 1`): pin the message so
+    /// the attribute-scan mutants stay observable here.
+    #[test]
+    #[should_panic(expected = "range end index")]
+    fn unterminated_open_tag_panics_past_end_of_input() {
+        let _ = walk_xml("<component /");
+    }
+
+    /// A predefined entity reference in text is accepted: the
+    /// reference scanner resolves `&amp;` instead of failing it.
+    #[test]
+    fn entity_reference_in_text_is_accepted() {
+        let shape = walk_xml("<component><id>&amp;</id></component>").unwrap();
+        assert!(shape.children.contains("id"));
+    }
+
+    /// `/` and `/>` inside an attribute value neither end the tag nor
+    /// self-close it: quote tracking must survive value content.
+    #[test]
+    fn slash_sequences_inside_attribute_values_are_not_closers() {
+        let shape = walk_xml("<component note=\"a/b\"><id>x</id></component>").unwrap();
+        assert!(shape.children.contains("id"));
+        let shape = walk_xml("<component note=\"a/>b\"><id>x</id></component>").unwrap();
+        assert!(shape.children.contains("id"));
+    }
+
+    /// `checked_files` counts the appdata files actually validated.
+    #[test]
+    fn checked_files_counts_validated_files() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let (pkg, tool_dir) = appdata_pkg(
+            dir.path(),
+            &[("usr/share/metainfo/org.example.foo.metainfo.xml", COMPLETE)],
+        );
+        let config = Config::default();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = AppDataCheck::with_tool_dir(Some(tool_dir.path()));
+        check.check_binary(&pkg, &config, &mut out);
+        assert!(out.results().is_empty(), "results: {:?}", out.results());
+        assert_eq!(check.checked_files(), Some(1));
+    }
 }

@@ -1470,4 +1470,77 @@ mod tests {
         );
         assert_eq!(canon("<r/> <?p d?>").unwrap(), "<r></r>\n<?p d?>");
     }
+
+    /// A `"` inside an attribute value is escaped on emission: the
+    /// escaper must handle the quote character itself.
+    #[test]
+    fn double_quote_inside_attribute_value_is_escaped() {
+        assert_eq!(
+            canon("<r a='\"x\"'/>").unwrap(),
+            "<r a=\"&quot;x&quot;\"></r>"
+        );
+    }
+
+    /// A long subset comment is skipped past its terminator: the skip
+    /// must advance, not rewind into the comment.
+    #[test]
+    fn long_subset_comment_is_skipped() {
+        assert_eq!(
+            canon("<!DOCTYPE r [<!--12345678--><!ENTITY e \"v\">]><r>&e;</r>").unwrap(),
+            "<r>v</r>"
+        );
+    }
+
+    /// A `<!--` nested inside a subset comment does not reopen one:
+    /// the re-entry would swallow the entity declaration that follows.
+    #[test]
+    fn nested_comment_opener_inside_subset_comment_is_inert() {
+        assert_eq!(
+            canon("<!DOCTYPE r [<!--a<!--><!ENTITY e \"v\">]><r>&e;</r>").unwrap(),
+            "<r>v</r>"
+        );
+    }
+
+    /// A parameter-entity declaration running to end of input stops
+    /// there: the skip must not read past the end.
+    #[test]
+    fn unterminated_parameter_entity_declaration_stops_at_end() {
+        assert!(
+            Canonicalizer::new()
+                .parse_doctype_entities("<!ENTITY % pe \"v")
+                .is_ok()
+        );
+    }
+
+    /// A parameter-entity declaration may span quoted `>`s hiding an
+    /// entity-looking span: skipping it must neither define that
+    /// entity (broken quotes) nor stop early (index reset).
+    #[test]
+    fn parameter_entity_hides_nested_entity_lookalike() {
+        let err = canon("<!DOCTYPE r [<!ENTITY % a \"junk> <!ENTITY b \"v>more\">]><r>&b;</r>")
+            .expect_err("b must stay undefined");
+        assert!(err.contains("undefined entity"), "unexpected error: {err}");
+    }
+
+    /// An unterminated entity value at end of input is a parse error,
+    /// not a read past the end.
+    #[test]
+    fn unterminated_entity_value_at_end_of_input_is_rejected() {
+        assert!(
+            Canonicalizer::new()
+                .parse_doctype_entities("<!ENTITY x \"abc")
+                .is_err()
+        );
+    }
+
+    /// A declaration scan that ends exactly at end of input stops
+    /// there: trailing whitespace must not read past the end.
+    #[test]
+    fn trailing_whitespace_declaration_scan_stops_at_end() {
+        assert!(
+            Canonicalizer::new()
+                .parse_doctype_entities("<!ENTITY ")
+                .is_ok()
+        );
+    }
 }
