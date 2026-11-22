@@ -29449,4 +29449,1138 @@ description = "explicit priority string bypasses the system crypto policy"
         info.fill_from_elf(&elf, &bytes);
         assert_eq!(info.go_toolchains.len(), 2);
     }
+
+    #[test]
+    fn dotted_version_at_five_digit_part_rejected() {
+        // The digit loop caps a part at five chars; the count gate
+        // rejects the fifth, so a longer run is not a version.
+        assert_eq!(dotted_version_at(b"1.2.12345", 0), None);
+    }
+
+    #[test]
+    fn dotted_version_at_four_digit_part_accepted() {
+        // Exactly four digits is the widest valid part.
+        assert_eq!(
+            dotted_version_at(b"1.234.5678", 0),
+            Some(("1.234.5678", 10))
+        );
+    }
+
+    #[test]
+    fn dotted_version_at_truncated_run_rejected() {
+        // A part cut off by the end of input wants a dot it cannot have.
+        assert_eq!(dotted_version_at(b"1.2", 0), None);
+    }
+
+    #[test]
+    fn dotted_version_at_exact_end_accepted() {
+        // A version ending exactly at the end of input parses.
+        assert_eq!(dotted_version_at(b"1.2.3", 0), Some(("1.2.3", 5)));
+    }
+
+    #[test]
+    fn dotted_version_at_fourth_component_rejected() {
+        // The token stops at three components; a fourth dot rejects.
+        assert_eq!(dotted_version_at(b"1.2.3.4", 0), None);
+    }
+
+    #[test]
+    fn dotted_version_at_trailing_junk_rejected() {
+        // A fourth dot-led component rejects the token.
+        assert_eq!(dotted_version_at(b"1.2.3.4x", 0), None);
+    }
+
+    #[test]
+    fn dotted_version_at_digit_run_to_end_rejected() {
+        // Four digits with no dot behind them is not a dotted version.
+        assert_eq!(dotted_version_at(b"1234", 0), None);
+    }
+
+    #[test]
+    fn x86_feature_1_and_wrong_name_truncated_is_absent() {
+        // A truncated note whose name is not GNU is not a property
+        // note; its lost tail proves nothing, so the state is Absent.
+        let mut note = Vec::new();
+        note.extend_from_slice(&4u32.to_le_bytes());
+        note.extend_from_slice(&8u32.to_le_bytes());
+        note.extend_from_slice(&5u32.to_le_bytes());
+        note.extend_from_slice(b"GNUX");
+        note.extend_from_slice(&0xdead_beefu32.to_le_bytes());
+        assert_eq!(parse_x86_feature_1_and(&note, true), X86Feature1And::Absent);
+    }
+
+    #[test]
+    fn x86_feature_1_and_second_entry_overrun_is_absent() {
+        // A non-feature entry overrunning the desc ends the walk;
+        // the desc here ends cleanly after two entries, so the
+        // state is Absent rather than Unreadable.
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&1u32.to_le_bytes());
+        desc.extend_from_slice(&4u32.to_le_bytes());
+        desc.extend_from_slice(b"abcd");
+        desc.extend_from_slice(&[0; 4]);
+        desc.extend_from_slice(&2u32.to_le_bytes());
+        desc.extend_from_slice(&8u32.to_le_bytes());
+        desc.extend_from_slice(b"12345678");
+        let note = gnu_note_with_desc(&desc, None);
+        assert_eq!(parse_x86_feature_1_and(&note, true), X86Feature1And::Absent);
+    }
+
+    #[test]
+    fn x86_feature_1_and_wide_first_entry_parses() {
+        // The second entry is read at the aligned offset of the
+        // first entry's full width, not at width minus datasize.
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&1u32.to_le_bytes());
+        desc.extend_from_slice(&16u32.to_le_bytes());
+        desc.extend_from_slice(b"abcdefghijklmnop");
+        desc.extend_from_slice(&GNU_PROPERTY_X86_FEATURE_1_AND.to_le_bytes());
+        desc.extend_from_slice(&4u32.to_le_bytes());
+        desc.extend_from_slice(&3u32.to_le_bytes());
+        desc.extend_from_slice(&[0; 4]);
+        let note = gnu_note_with_desc(&desc, None);
+        assert_eq!(
+            parse_x86_feature_1_and(&note, true),
+            X86Feature1And::Present(3)
+        );
+    }
+
+    #[test]
+    fn ld_so_cache_rejects_short_input() {
+        // Shorter than the magic check: not a cache, never a read
+        // past the end of the input.
+        assert!(parse_ld_so_cache(&[]).is_none());
+        assert!(parse_ld_so_cache(&[0u8; 17]).is_none());
+        assert!(parse_ld_so_cache(&[0u8; 48]).is_none());
+    }
+
+    #[test]
+    fn go_buildinfo_string_multibyte_length() {
+        // One-byte lengths are the common case; a 200-byte string
+        // exercises the uvarint continuation path.
+        assert_eq!(
+            read_go_buildinfo_string(b"\x07go1.23."),
+            Some(("go1.23.".to_string(), 8))
+        );
+        let mut bytes = vec![0xc8u8, 0x01];
+        bytes.extend(std::iter::repeat_n(b'a', 200));
+        assert_eq!(
+            read_go_buildinfo_string(&bytes),
+            Some(("a".repeat(200), 202))
+        );
+    }
+
+    #[test]
+    fn ghc_version_stamp_offset_shapes() {
+        assert!(comment_has_ghc_version(b"GHC 9.2"));
+        // A stamp after a separator counts; the offset is nonzero.
+        assert!(comment_has_ghc_version(b"\x00GHC 9.2"));
+        // No digits, no version.
+        assert!(!comment_has_ghc_version(b"GHC x"));
+        assert!(!comment_has_ghc_version(b"\x00GHC x"));
+        // Embedded in a longer word, not a stamp.
+        assert!(!comment_has_ghc_version(b"xGHC 9.2"));
+    }
+
+    /// A legacy-format `.go.buildinfo` ELF whose PT_LOAD maps file
+    /// offset `off` to address `base + off`: the identity mapping
+    /// the shared helper builds, shifted to a nonzero base so the
+    /// resolve arithmetic is exercised.
+    fn go_buildinfo_legacy_elf_at_base(version: &str, base: u64) -> Vec<u8> {
+        let shstrtab: &[u8] = b"\0.go.buildinfo\0.shstrtab\0";
+        let buildinfo_off = 120u64;
+        let version_off = buildinfo_off + 32;
+        let strhdr_off = version_off + version.len() as u64;
+        let shstrtab_off = strhdr_off + 16;
+        let mut shoff = shstrtab_off + shstrtab.len() as u64;
+        while !shoff.is_multiple_of(8) {
+            shoff += 1;
+        }
+        let total = shoff + 3 * 64;
+
+        let mut buf = vec![0u8; 64];
+        let mut ph = vec![0u8; 56];
+        ph[0..4].copy_from_slice(&1u32.to_le_bytes());
+        ph[4..8].copy_from_slice(&5u32.to_le_bytes());
+        ph[8..16].copy_from_slice(&0u64.to_le_bytes());
+        ph[16..24].copy_from_slice(&base.to_le_bytes());
+        ph[24..32].copy_from_slice(&base.to_le_bytes());
+        ph[32..40].copy_from_slice(&total.to_le_bytes());
+        ph[40..48].copy_from_slice(&total.to_le_bytes());
+        ph[48..56].copy_from_slice(&0x1000u64.to_le_bytes());
+        buf.extend(ph);
+
+        let mut section = Vec::new();
+        section.extend_from_slice(b"\xff Go buildinf:");
+        section.push(8);
+        section.push(0);
+        section.extend_from_slice(&(base + strhdr_off).to_le_bytes());
+        section.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(section.len(), 32);
+        buf.extend(section);
+        buf.extend_from_slice(version.as_bytes());
+        buf.extend_from_slice(&(base + version_off).to_le_bytes());
+        buf.extend_from_slice(&(version.len() as u64).to_le_bytes());
+        buf.extend_from_slice(shstrtab);
+        while !buf.len().is_multiple_of(8) {
+            buf.push(0);
+        }
+        assert_eq!(buf.len() as u64, shoff);
+
+        let shdr = |name: u32, ty: u32, off: u64, size: u64| -> Vec<u8> {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&name.to_le_bytes());
+            h[4..8].copy_from_slice(&ty.to_le_bytes());
+            h[24..32].copy_from_slice(&off.to_le_bytes());
+            h[32..40].copy_from_slice(&size.to_le_bytes());
+            h[48..56].copy_from_slice(&1u64.to_le_bytes());
+            h
+        };
+        buf.extend(vec![0u8; 64]);
+        buf.extend(shdr(1, 1, buildinfo_off, 32));
+        buf.extend(shdr(15, 3, shstrtab_off, shstrtab.len() as u64));
+
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2;
+        ehdr[5] = 1;
+        ehdr[6] = 1;
+        ehdr[16..18].copy_from_slice(&2u16.to_le_bytes());
+        ehdr[18..20].copy_from_slice(&62u16.to_le_bytes());
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[32..40].copy_from_slice(&64u64.to_le_bytes());
+        ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[52..54].copy_from_slice(&64u16.to_le_bytes());
+        ehdr[54..56].copy_from_slice(&56u16.to_le_bytes());
+        ehdr[56..58].copy_from_slice(&1u16.to_le_bytes());
+        ehdr[58..60].copy_from_slice(&64u16.to_le_bytes());
+        ehdr[60..62].copy_from_slice(&3u16.to_le_bytes());
+        ehdr[62..64].copy_from_slice(&2u16.to_le_bytes());
+        buf[0..64].copy_from_slice(&ehdr);
+        buf
+    }
+
+    #[test]
+    fn go_buildinfo_inline_256_within_bound() {
+        // A 256-byte inline version string is within the bound.
+        let version = format!("go1.23.{}", "4".repeat(249));
+        assert_eq!(version.len(), 256);
+        let mut inline = Vec::new();
+        inline.extend_from_slice(b"\xff Go buildinf:");
+        inline.push(8);
+        inline.push(2);
+        inline.extend_from_slice(&[0u8; 16]);
+        inline.extend_from_slice(&[0x80, 0x02]);
+        inline.extend_from_slice(version.as_bytes());
+        inline.extend_from_slice(&[0x1a]);
+        inline.extend_from_slice(b"path\texample.invalid/tool\n");
+        let probe = go_buildinfo_legacy_elf("go1.23.8");
+        let probe_elf = parse_elf(&probe).expect("probe ELF parses");
+        assert_eq!(
+            parse_go_buildinfo(&inline, &probe, &probe_elf),
+            Some(version.clone())
+        );
+    }
+
+    #[test]
+    fn go_buildinfo_legacy_nonzero_base_within_bound() {
+        // The legacy pointer path resolves through the nonzero load
+        // base; a 256-byte version string is within the bound.
+        let version = format!("go1.23.{}", "4".repeat(249));
+        let file = go_buildinfo_legacy_elf_at_base(&version, 0x40_0000);
+        let elf = parse_elf(&file).expect("shifted ELF parses");
+        let section = file[120..152].to_vec();
+        assert_eq!(
+            parse_go_buildinfo(&section, &file, &elf),
+            Some(version.clone())
+        );
+    }
+
+    #[test]
+    fn go_buildinfo_below_base_resolves_none() {
+        // A header pointer below the load base resolves to nothing.
+        let version = format!("go1.23.{}", "4".repeat(249));
+        let file = go_buildinfo_legacy_elf_at_base(&version, 0x40_0000);
+        let mut dangling = file.clone();
+        dangling[136..144].copy_from_slice(&0x3f_fff8u64.to_le_bytes());
+        let dangling_elf = parse_elf(&dangling).expect("patched ELF parses");
+        let dangling_section = dangling[120..152].to_vec();
+        assert_eq!(
+            parse_go_buildinfo(&dangling_section, &dangling, &dangling_elf),
+            None
+        );
+    }
+
+    #[test]
+    fn systemd_next_token_unclosed_quote_is_none() {
+        assert_eq!(
+            systemd_next_token("\"foo bar\" --flag"),
+            Some(("foo bar".to_string(), "--flag"))
+        );
+        // An unterminated quote never yields a token.
+        assert_eq!(systemd_next_token("\"unterminated"), None);
+    }
+
+    #[test]
+    fn is_env_assignment_underscore_lead() {
+        assert!(is_env_assignment("FOO=bar"));
+        assert!(is_env_assignment("_X=1"));
+        assert!(!is_env_assignment("1X=2"));
+        assert!(!is_env_assignment("foo"));
+    }
+
+    #[test]
+    fn resolve_exec_token_execute_only_matches() {
+        // A file carrying exactly the execute bits matches the
+        // bare-name rule; the xor form would read it as empty.
+        let empty_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let empty_targets: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut tool = syn_file("/usr/bin/tool", "ELF 64-bit LSB executable");
+        tool.mode = 0o111;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![tool]);
+        assert_eq!(
+            resolve_exec_token("tool", &pkg, &empty_names, &empty_targets),
+            (vec!["/usr/bin/tool".to_string()], true)
+        );
+    }
+
+    #[test]
+    fn resolve_exec_token_non_exec_is_unresolved() {
+        // A non-executable file never matches a bare name, even when
+        // it is the only file with that basename.
+        let empty_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let empty_targets: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let tool = syn_file("/usr/bin/tool", "ELF 64-bit LSB executable");
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![tool]);
+        assert_eq!(
+            resolve_exec_token("tool", &pkg, &empty_names, &empty_targets),
+            (Vec::new(), true)
+        );
+    }
+
+    #[test]
+    fn daemon_units_ignore_ghost_listed() {
+        // A unit named only by the ghost list is not a daemon unit;
+        // a shipped unit of the same name is.
+        let mut pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/a.service", "ASCII text")],
+        );
+        pkg.ghost_files
+            .push("/usr/lib/systemd/system/a.service".to_string());
+        assert!(!pkg_ships_daemon_units(&pkg));
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/systemd/system/a.service", "ASCII text")],
+        );
+        assert!(pkg_ships_daemon_units(&pkg));
+    }
+
+    #[test]
+    fn dep_capture_linked_records_package() {
+        // The linked-against capture records the package on the first
+        // file; the dedup gate must not drop it.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_dynamically_linked = true;
+        check.defer_undefined = true;
+        let mut ldd = syn_ldd();
+        ldd.dependencies = vec!["libfoo.so.1".to_string()];
+        let info = syn_info();
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/bin/tool", "ELF 64-bit LSB executable")],
+        );
+        let pkgfile = &pkg.files[0];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, pkgfile, &info, &ldd, &mut out);
+        let state = check.pending_state.as_ref().expect("capture recorded");
+        assert_eq!(state.linked_packages.len(), 1);
+        assert_eq!(state.linked_packages[0].files[0].file_name, "/usr/bin/tool");
+    }
+
+    #[test]
+    fn dep_capture_skips_empty_dependencies() {
+        // A file with no DT_NEEDED captures nothing for the
+        // unused-dependency producer.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_dynamically_linked = true;
+        check.defer_undefined = true;
+        let ldd = syn_ldd();
+        let info = syn_info();
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/bin/tool", "ELF 64-bit LSB executable")],
+        );
+        let pkgfile = &pkg.files[0];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, pkgfile, &info, &ldd, &mut out);
+        assert!(
+            check.pending_state.is_none(),
+            "no capture for a file without dependencies"
+        );
+    }
+
+    #[test]
+    fn dep_capture_skips_archives() {
+        // Archives never reach the undefined-symbol capture, even when
+        // the file shape alone would qualify.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_dynamically_linked = true;
+        check.defer_undefined = true;
+        check.is_archive = true;
+        let mut ldd = syn_ldd();
+        ldd.dependencies = vec!["libfoo.so.1".to_string()];
+        ldd.undefined_symbols = vec!["foo_sym".to_string()];
+        let mut info = syn_info();
+        info.is_shlib = true;
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/libfoo.a", "current ar archive")],
+        );
+        let pkgfile = &pkg.files[0];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_dependency(&pkg, pkgfile, &info, &ldd, &mut out);
+        assert!(
+            check.pending_state.is_none(),
+            "no undefined capture for archives"
+        );
+    }
+
+    #[test]
+    fn provider_index_finds_basename_key() {
+        // A provider keyed under the basename satisfies a slashed
+        // SONAME spelling.
+        use std::sync::Arc;
+        let owner = (
+            "needy".to_string(),
+            "x86_64".to_string(),
+            "needy.rpm".to_string(),
+        );
+        let provider_id = (
+            "provider".to_string(),
+            "x86_64".to_string(),
+            "provider.rpm".to_string(),
+        );
+        let provider = Arc::new(SymbolProvider {
+            path: std::path::PathBuf::from("/usr/lib64/libfoo.so"),
+            defined: ["foo_sym".to_string()].into_iter().collect(),
+            needs: Vec::new(),
+            origin: std::path::PathBuf::from("/usr/lib64"),
+            rpath: Vec::new(),
+            runpath: Vec::new(),
+            has_runpath: false,
+        });
+        let mut map = std::collections::HashMap::new();
+        map.insert("libfoo.so".to_string(), provider);
+        let index = ProviderIndex {
+            sets: vec![(provider_id, map)],
+        };
+        assert!(index.find_set("sub/libfoo.so", &owner).is_some());
+        assert!(index.find_set("sub/other.so", &owner).is_none());
+    }
+
+    #[test]
+    fn go_buildinfo_flag_needs_section_evidence() {
+        // A Go-looking byte run elsewhere in the file does not set the
+        // flag while the sections already prove the toolchain: only
+        // the section test sets it there.
+        let mut magic = GO_BUILDINFO_MAGIC.to_vec();
+        magic.push(8);
+        magic.extend_from_slice(&[0u8; 18]);
+        let bytes = craft_elf_sections(&[(".note.go.buildid", b"abc"), (".text", &magic)]);
+        let elf = parse_elf(&bytes).expect("go flag ELF parses");
+        let mut info = ReadelfInfo::empty("probe");
+        info.fill_from_elf(&elf, &bytes);
+        assert!(info.is_go_binary());
+        assert!(!info.go_buildinfo);
+    }
+
+    #[test]
+    fn elf_analysis_skips_ldd_for_static_files() {
+        // A statically linked file carries no DT_NEEDED by
+        // construction; no ldd info is parsed for it.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let path = dir.path().join("tool");
+        std::fs::write(&path, elf_with_machine(62)).expect("write elf");
+        let mut pkgfile = syn_file(
+            "/usr/bin/tool",
+            "ELF 64-bit LSB executable, statically linked",
+        );
+        pkgfile.path = path.to_string_lossy().into_owned();
+        let analysis = ElfAnalysis::parse(&pkgfile);
+        assert!(analysis.ldd.is_none());
+    }
+
+    #[test]
+    fn soname_loop_catches_nonstandard_versions() {
+        // `validso` misses `libfoo.so.0d`, so the `.so.`-scan arm
+        // decides: a leading digit is a version component.
+        assert!(soname_has_version_component("libfoo.so.0d"));
+        assert!(soname_has_version_component("x.so.so.1"));
+        // No leading digit behind `.so.`, no version.
+        assert!(!soname_has_version_component("libfoo.so.d0"));
+        // Advancing past a miss must still terminate.
+        assert!(!soname_has_version_component("a.so.x1"));
+    }
+
+    #[test]
+    fn parse_elf_rejects_bad_dynamic_size() {
+        // A PT_DYNAMIC running past the end of the file is malformed;
+        // only the dangling-hash shape is retried permissively.
+        let mut bytes = craft_dynamic_elf(&[(1, "libfoo.so.1")]);
+        bytes[152..160].copy_from_slice(&0xffffu64.to_le_bytes());
+        assert!(parse_elf(&bytes).is_err());
+    }
+
+    #[test]
+    fn elf_machine_class_host_tokens() {
+        // Each host spelling classifies Host on its own.
+        assert_eq!(
+            elf_machine_class_from_magic("ELF 64-bit LSB executable, x86-64, version 1 (SYSV)"),
+            ElfMachineClass::Host
+        );
+        assert_eq!(
+            elf_machine_class_from_magic(
+                "ELF 32-bit LSB executable, Intel 80386, version 1 (SYSV)"
+            ),
+            ElfMachineClass::Host
+        );
+    }
+
+    #[test]
+    fn archive_class_all_foreign_members() {
+        // Every ELF member foreign: the archive is foreign payload.
+        let members = craft_gnu_ar_archive(&[
+            ("a.o", &elf_with_machine(183)),
+            ("b.o", &elf_with_machine(183)),
+        ]);
+        assert!(
+            matches!(
+                archive_elf_class_for_arch(&members, "x86_64"),
+                ArchiveElfClass::AllForeign
+            ),
+            "all-foreign members must classify AllForeign"
+        );
+    }
+
+    #[test]
+    fn archive_class_binary_member_counts() {
+        // A binary non-ELF member is payload the host loader reads.
+        let members = craft_gnu_ar_archive(&[("data.bin", &[0u8, 1, 2, 3])]);
+        assert!(
+            matches!(
+                archive_elf_class_for_arch(&members, "x86_64"),
+                ArchiveElfClass::HasHostOrUnknown
+            ),
+            "binary payload must classify HasHostOrUnknown"
+        );
+    }
+
+    #[test]
+    fn grub_dynsym_zero_entsize_uses_fallback() {
+        // A zero `sh_entsize` falls back to the ELF-class width; the
+        // defined `grub_main` entry is still found.
+        let mut symtab = vec![0u8; 24];
+        symtab.extend_from_slice(&1u32.to_le_bytes());
+        symtab.push(0x12);
+        symtab.push(0);
+        symtab.extend_from_slice(&1u16.to_le_bytes());
+        symtab.extend_from_slice(&0u64.to_le_bytes());
+        symtab.extend_from_slice(&0u64.to_le_bytes());
+        let mut bytes = craft_elf_sections(&[(".dynsym", &symtab), (".strtab", b"\0grub_main\0")]);
+        let shoff = u64::from_le_bytes(bytes[40..48].try_into().expect("e_shoff")) as usize;
+        bytes[shoff + 64 + 4..shoff + 64 + 8].copy_from_slice(&11u32.to_le_bytes());
+        bytes[shoff + 64 + 40..shoff + 64 + 44].copy_from_slice(&2u32.to_le_bytes());
+        let elf = parse_elf(&bytes).expect("grub ELF parses");
+        assert!(dynsym_section_defines_grub_main(&elf, &bytes));
+    }
+
+    #[test]
+    fn lto_no_text_set_member_is_text() {
+        // A text-like section from the LTO set counts as text even
+        // without a `.text` prefix.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut info = syn_info();
+        info.sections = vec![vec![sec(".gnu.lto_.opts"), sec(".preinit_array")]];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_no_text_in_archive(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "set-member section must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn libdep_archive_is_silent() {
+        // Archives never reach the library-dependency finding, even
+        // with DT_NEEDED entries of their own.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib64/libfoo.a", "current ar archive");
+        let mut info = syn_info();
+        info.needed = vec!["libfoo.so.1".to_string()];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_library_dependency(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "archive must be silent: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn gplib_index_name_must_be_bare_slash() {
+        // A slash-led multi-char name is not the symbol index: its
+        // payload still needs the COFF magic.
+        let coff = b"\x40\x12\x02\x00\x2a\xf3\x66\x6a";
+        let members = gplib_archive(&[("/x/", b"GARBAGE!"), ("foo.o/", coff)]);
+        assert!(!is_gplib_archive(&members));
+    }
+
+    #[test]
+    fn gplib_bare_magic_is_not_an_archive() {
+        // The header alone names no members.
+        assert!(!is_gplib_archive(b"!<arch>\n"));
+    }
+
+    #[test]
+    fn register_contributor_same_triple_counts() {
+        // A package already recorded as captured counts as a
+        // contributor even when its analyses carry no ldd info.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.defer_undefined = true;
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/bin/tool", "ELF 64-bit LSB executable")],
+        );
+        let mut state = BinariesState::default();
+        state.packages.push(PackageConsumers {
+            pkg_name: "testpkg".to_string(),
+            pkg_arch: "x86_64".to_string(),
+            pkg_filename: pkg.filename.clone(),
+            files: Vec::new(),
+        });
+        check.pending_state = Some(state);
+        let analyses = vec![None];
+        check.register_contributor(&pkg, &analyses);
+        let state = check.pending_state.as_ref().expect("state kept");
+        assert_eq!(state.contributors.len(), 1);
+        assert_eq!(state.contributors[0].0, "testpkg");
+    }
+
+    #[test]
+    fn copy_reloc_type_parisc() {
+        use goblin::elf::header::EM_PARISC;
+        assert_eq!(copy_reloc_type(EM_PARISC), Some(128));
+    }
+
+    #[test]
+    fn copy_reloc_type_ia64() {
+        use goblin::elf::header::EM_IA_64;
+        assert_eq!(copy_reloc_type(EM_IA_64), Some(0x84));
+    }
+
+    #[test]
+    fn arch_tables_cover_minor_host_machines() {
+        use goblin::elf::header::{EM_68K, EM_PPC, EM_PPC64, EM_S390};
+        assert_eq!(host_elf_machines("ppc"), &[EM_PPC]);
+        assert_eq!(host_elf_machines("ppc64"), &[EM_PPC64]);
+        assert_eq!(host_elf_machines("ppc64le"), &[EM_PPC64]);
+        assert_eq!(host_elf_machines("s390"), &[EM_S390]);
+        assert_eq!(host_elf_machines("s390x"), &[EM_S390]);
+        assert_eq!(host_elf_machines("alpha"), &[36902]);
+        assert_eq!(host_elf_machines("m68k"), &[EM_68K]);
+    }
+
+    #[test]
+    fn arch_tables_cover_minor_pkg_families() {
+        assert_eq!(pkg_arch_family("sparc"), Some("sparc"));
+        assert_eq!(pkg_arch_family("sparc64"), Some("sparc"));
+        assert_eq!(pkg_arch_family("sh4"), Some("sh"));
+        assert_eq!(pkg_arch_family("avr"), Some("avr"));
+    }
+
+    #[test]
+    fn arch_tables_cover_alpha_machine() {
+        assert_eq!(elf_machine_family(36902), Some("alpha"));
+    }
+
+    #[test]
+    fn dt_textrel_sets_non_pic_flag() {
+        use goblin::elf::dynamic::{DT_NEEDED, DT_TEXTREL};
+        let info = parse_elf_bytes("textrel", &craft_dynamic_elf(&[(DT_TEXTREL, "")]));
+        assert!(info.has_textrel, "DT_TEXTREL must set the flag");
+        let info = parse_elf_bytes(
+            "textrel-clean",
+            &craft_dynamic_elf(&[(DT_NEEDED, "libfoo.so.1")]),
+        );
+        assert!(!info.has_textrel);
+    }
+
+    #[test]
+    fn hpc_locations_lists_mpi_and_hpc_prefixes() {
+        let config = Config::default();
+        let check = BinariesCheck::new(&config);
+        assert_eq!(
+            check.hpc_locations(),
+            &["/usr/lib/mpi/", "/usr/lib64/mpi/", "/usr/lib/hpc/"]
+        );
+    }
+
+    #[test]
+    fn checked_files_counts_binaries() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![
+                syn_file("/usr/bin/a", "ELF 64-bit LSB executable"),
+                syn_file("/usr/bin/b", "ELF 64-bit LSB executable"),
+            ],
+        );
+        check.check_binary(&pkg, &config, &mut out);
+        assert_eq!(check.checked_files(), Some(2));
+    }
+
+    #[test]
+    fn reset_clears_invocation_state() {
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.defer_undefined = true;
+        check.pending_state = Some(BinariesState::default());
+        check.reset();
+        assert!(check.pending_state.is_none());
+        assert!(!check.defer_undefined);
+        assert!(check.installed_providers.is_none());
+    }
+
+    #[test]
+    fn ldd_weak_undefined_symbols_deduplicate() {
+        // A weak name repeated across version references is
+        // reported once, like the strong-undefined dedup beside it.
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let elf_path = dir.path().join("libweakdup.so");
+        let elf = craft_shlib_elf(
+            false,
+            None,
+            Some("libweakdup.so"),
+            &[("weak_undef", 2, 0, 0), ("weak_undef", 2, 0, 0)],
+        );
+        std::fs::write(&elf_path, elf).expect("write elf");
+        let ldd = LddInfo::parse(&elf_path.to_string_lossy(), true);
+        assert_eq!(ldd.weak_undefined_symbols, ["weak_undef"]);
+    }
+
+    /// A minimal ELF64 with a `.dynsym` string table and a `.rel.dyn`
+    /// section applying COPY relocations: `dynsyms[0]` is the null
+    /// entry, and each reloc names a symbol by index.
+    fn craft_copy_reloc_elf(dynsyms: &[&str], relocs: &[(u32, u32)]) -> Vec<u8> {
+        use goblin::elf::dynamic::{
+            DT_HASH, DT_NULL, DT_REL, DT_RELENT, DT_RELSZ, DT_STRSZ, DT_STRTAB, DT_SYMENT,
+            DT_SYMTAB,
+        };
+        let shstrtab = b"\0.dynstr\0.dynsym\0.rel.dyn\0.dynamic\0.hash\0.shstrtab\0";
+        let mut dynstr = vec![0u8];
+        let mut sym_offs = Vec::new();
+        for s in dynsyms {
+            sym_offs.push(dynstr.len() as u32);
+            dynstr.extend_from_slice(s.as_bytes());
+            dynstr.push(0);
+        }
+        let mut dynsym = Vec::new();
+        for off in std::iter::once(0).chain(sym_offs) {
+            dynsym.extend_from_slice(&off.to_le_bytes());
+            dynsym.push(0x10);
+            dynsym.push(0);
+            dynsym.extend_from_slice(&1u16.to_le_bytes());
+            dynsym.extend_from_slice(&0u64.to_le_bytes());
+            dynsym.extend_from_slice(&0u64.to_le_bytes());
+        }
+        let mut rel = Vec::new();
+        for (sym, ty) in relocs {
+            rel.extend_from_slice(&0u64.to_le_bytes());
+            rel.extend_from_slice(&(((u64::from(*sym)) << 32) | u64::from(*ty)).to_le_bytes());
+        }
+        let mut dynamic = Vec::new();
+        let mut dyn_entry = |tag: u64, val: u64| {
+            dynamic.extend_from_slice(&(tag as i64).to_le_bytes());
+            dynamic.extend_from_slice(&val.to_le_bytes());
+        };
+
+        let mut out = vec![0u8; 64];
+        let dynstr_off = out.len() as u64;
+        out.extend_from_slice(&dynstr);
+        while !out.len().is_multiple_of(8) {
+            out.push(0);
+        }
+        let dynsym_off = out.len() as u64;
+        out.extend_from_slice(&dynsym);
+        let rel_off = out.len() as u64;
+        out.extend_from_slice(&rel);
+        while !out.len().is_multiple_of(8) {
+            out.push(0);
+        }
+        let dynamic_off = out.len() as u64;
+        // SysV hash so goblin finds the symbol count via DT_HASH.
+        let n = 1 + dynsyms.len();
+        let mut hash = Vec::new();
+        hash.extend_from_slice(&1u32.to_le_bytes());
+        hash.extend_from_slice(&(n as u32).to_le_bytes());
+        hash.extend_from_slice(&1u32.to_le_bytes());
+        for i in 0..n {
+            let next = if i + 1 < n { (i + 1) as u32 } else { 0 };
+            hash.extend_from_slice(&next.to_le_bytes());
+        }
+        let hash_off = dynamic_off + (10 * 16) as u64;
+        dyn_entry(DT_STRTAB, dynstr_off);
+        dyn_entry(DT_STRSZ, dynstr.len() as u64);
+        dyn_entry(DT_SYMTAB, dynsym_off);
+        dyn_entry(DT_SYMENT, 24);
+        dyn_entry(DT_HASH, hash_off);
+        dyn_entry(DT_REL, rel_off);
+        dyn_entry(DT_RELSZ, rel.len() as u64);
+        dyn_entry(DT_RELENT, 16);
+        dyn_entry(DT_NULL, 0);
+        dyn_entry(DT_NULL, 0);
+        out.extend_from_slice(&dynamic);
+        out.extend_from_slice(&hash);
+        while !out.len().is_multiple_of(8) {
+            out.push(0);
+        }
+        let shstrtab_off = out.len() as u64;
+        out.extend_from_slice(shstrtab);
+        while !out.len().is_multiple_of(8) {
+            out.push(0);
+        }
+        let phoff = out.len() as u64;
+        // PT_LOAD covering the file, so goblin's vaddr-to-offset
+        // translation resolves the dynamic addresses below, which
+        // are file offsets.
+        let mut load = vec![0u8; 56];
+        load[0..4].copy_from_slice(&1u32.to_le_bytes());
+        load[4..8].copy_from_slice(&4u32.to_le_bytes());
+        let mut ph = vec![0u8; 56];
+        ph[0..4].copy_from_slice(&2u32.to_le_bytes());
+        ph[4..8].copy_from_slice(&6u32.to_le_bytes());
+        ph[8..16].copy_from_slice(&dynamic_off.to_le_bytes());
+        ph[16..24].copy_from_slice(&dynamic_off.to_le_bytes());
+        ph[24..32].copy_from_slice(&dynamic_off.to_le_bytes());
+        let dynamic_len = out.len() as u64 - dynamic_off;
+        ph[32..40].copy_from_slice(&dynamic_len.to_le_bytes());
+        ph[40..48].copy_from_slice(&dynamic_len.to_le_bytes());
+        out.extend_from_slice(&ph);
+        out.extend_from_slice(&load);
+        let shoff = out.len() as u64;
+
+        // NULL, .dynstr, .dynsym, .rel.dyn, .dynamic, .hash, .shstrtab.
+        let shdr = |name: u32,
+                    ty: u32,
+                    flags: u64,
+                    off: u64,
+                    size: u64,
+                    link: u32,
+                    info: u32,
+                    align: u64,
+                    entsize: u64| {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&name.to_le_bytes());
+            h[4..8].copy_from_slice(&ty.to_le_bytes());
+            h[8..16].copy_from_slice(&flags.to_le_bytes());
+            h[24..32].copy_from_slice(&off.to_le_bytes());
+            h[32..40].copy_from_slice(&size.to_le_bytes());
+            h[40..44].copy_from_slice(&link.to_le_bytes());
+            h[44..48].copy_from_slice(&info.to_le_bytes());
+            h[48..56].copy_from_slice(&align.to_le_bytes());
+            h[56..64].copy_from_slice(&entsize.to_le_bytes());
+            h
+        };
+        out.extend(vec![0u8; 64]);
+        out.extend(shdr(1, 3, 0, dynstr_off, dynstr.len() as u64, 0, 0, 1, 0));
+        out.extend(shdr(9, 11, 0, dynsym_off, dynsym.len() as u64, 1, 1, 8, 24));
+        out.extend(shdr(17, 9, 0, rel_off, rel.len() as u64, 2, 0, 8, 16));
+        out.extend(shdr(
+            26,
+            6,
+            0,
+            dynamic_off,
+            dynamic.len() as u64,
+            1,
+            0,
+            8,
+            16,
+        ));
+        out.extend(shdr(35, 5, 0, hash_off, hash.len() as u64, 2, 0, 4, 4));
+        out.extend(shdr(
+            41,
+            3,
+            0,
+            shstrtab_off,
+            shstrtab.len() as u64,
+            0,
+            0,
+            1,
+            0,
+        ));
+
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2;
+        ehdr[5] = 1;
+        ehdr[6] = 1;
+        ehdr[16..18].copy_from_slice(&3u16.to_le_bytes());
+        ehdr[18..20].copy_from_slice(&62u16.to_le_bytes());
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[32..40].copy_from_slice(&phoff.to_le_bytes());
+        ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[52..54].copy_from_slice(&64u16.to_le_bytes());
+        ehdr[54..56].copy_from_slice(&56u16.to_le_bytes());
+        ehdr[56..58].copy_from_slice(&2u16.to_le_bytes());
+        ehdr[58..60].copy_from_slice(&64u16.to_le_bytes());
+        ehdr[60..62].copy_from_slice(&7u16.to_le_bytes());
+        ehdr[62..64].copy_from_slice(&6u16.to_le_bytes());
+        out[0..64].copy_from_slice(&ehdr);
+        // The PT_LOAD spans the whole file; its size is only known now.
+        let load_at = phoff as usize + 56;
+        let total = out.len() as u64;
+        out[load_at + 32..load_at + 40].copy_from_slice(&total.to_le_bytes());
+        out[load_at + 40..load_at + 48].copy_from_slice(&total.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn ldd_copy_symbols_only_copy_mapping() {
+        // A file whose only relocations are COPYs still captures the
+        // copied names; the gate must not require a non-COPY reloc.
+        use goblin::elf::reloc::R_X86_64_COPY;
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let elf_path = dir.path().join("libcopyonly.so");
+        let elf = craft_copy_reloc_elf(&["copied_sym"], &[(1, R_X86_64_COPY)]);
+        std::fs::write(&elf_path, elf).expect("write elf");
+        let ldd = LddInfo::parse(&elf_path.to_string_lossy(), true);
+        assert_eq!(ldd.copy_symbols, ["copied_sym"]);
+    }
+
+    #[test]
+    fn ldd_copy_symbols_deduplicate() {
+        use goblin::elf::reloc::R_X86_64_COPY;
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let elf_path = dir.path().join("libcopydup.so");
+        let elf = craft_copy_reloc_elf(
+            &["first_sym", "second_sym"],
+            &[(1, R_X86_64_COPY), (2, R_X86_64_COPY), (1, R_X86_64_COPY)],
+        );
+        std::fs::write(&elf_path, elf).expect("write elf");
+        let ldd = LddInfo::parse(&elf_path.to_string_lossy(), true);
+        assert_eq!(ldd.copy_symbols, ["first_sym", "second_sym"]);
+    }
+
+    #[test]
+    fn ldd_copy_symbols_distinct_repeat() {
+        // A repeat of one name after a distinct name is still a repeat.
+        use goblin::elf::reloc::R_X86_64_COPY;
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let elf_path = dir.path().join("libcopyrep.so");
+        let elf = craft_copy_reloc_elf(
+            &["first_sym", "second_sym"],
+            &[(1, R_X86_64_COPY), (2, R_X86_64_COPY), (1, R_X86_64_COPY)],
+        );
+        std::fs::write(&elf_path, elf).expect("write elf");
+        let ldd = LddInfo::parse(&elf_path.to_string_lossy(), true);
+        assert_eq!(ldd.copy_symbols.len(), 2);
+    }
+
+    #[test]
+    fn ldd_copy_symbols_empty_name_skipped() {
+        // A COPY reloc against the null-adjacent empty name captures nothing.
+        // A non-COPY reloc rides along so the gate does not decide the outcome.
+        use goblin::elf::reloc::{R_X86_64_64, R_X86_64_COPY};
+        let dir = tempfile::TempDir::new().expect("tmpdir");
+        let elf_path = dir.path().join("libcopyempty.so");
+        let elf = craft_copy_reloc_elf(
+            &["", "real_sym"],
+            &[(2, R_X86_64_COPY), (1, R_X86_64_COPY), (2, R_X86_64_64)],
+        );
+        std::fs::write(&elf_path, elf).expect("write elf");
+        let ldd = LddInfo::parse(&elf_path.to_string_lossy(), true);
+        assert_eq!(ldd.copy_symbols, ["real_sym"]);
+    }
+
+    #[test]
+    fn dwarf_section_bound_rejects_over_inflate() {
+        // A 2MB section inflates under the bound; the bound is what
+        // keeps a corrupt size field from inflating without limit.
+        let raw = vec![0u8; 2_000_000];
+        let section = shf_compressed(&raw, 1);
+        let shstrtab = b"\0.debug_info\0.shstrtab\0";
+        let mut out = vec![0u8; 64];
+        let info_off = out.len() as u64;
+        out.extend_from_slice(&section);
+        let shstrtab_off = out.len() as u64;
+        out.extend_from_slice(shstrtab);
+        while !out.len().is_multiple_of(8) {
+            out.push(0);
+        }
+        let shoff = out.len() as u64;
+        out.extend(vec![0u8; 64]);
+        let shdr = |name: u32, flags: u64, off: u64, size: u64| {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&name.to_le_bytes());
+            h[4..8].copy_from_slice(&1u32.to_le_bytes());
+            h[8..16].copy_from_slice(&flags.to_le_bytes());
+            h[24..32].copy_from_slice(&off.to_le_bytes());
+            h[32..40].copy_from_slice(&size.to_le_bytes());
+            h[48..56].copy_from_slice(&1u64.to_le_bytes());
+            h
+        };
+        out.extend(shdr(1, 0x800, info_off, section.len() as u64));
+        out.extend(shdr(13, 3, shstrtab_off, shstrtab.len() as u64));
+        let mut ehdr = vec![0u8; 64];
+        ehdr[0..4].copy_from_slice(b"\x7fELF");
+        ehdr[4] = 2;
+        ehdr[5] = 1;
+        ehdr[6] = 1;
+        ehdr[16..18].copy_from_slice(&2u16.to_le_bytes());
+        ehdr[18..20].copy_from_slice(&62u16.to_le_bytes());
+        ehdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+        ehdr[40..48].copy_from_slice(&shoff.to_le_bytes());
+        ehdr[58..60].copy_from_slice(&64u16.to_le_bytes());
+        ehdr[60..62].copy_from_slice(&3u16.to_le_bytes());
+        ehdr[62..64].copy_from_slice(&2u16.to_le_bytes());
+        out[0..64].copy_from_slice(&ehdr);
+        let elf = parse_elf(&out).expect("dwarf bound ELF parses");
+        let bytes = dwarf_section_bytes(&elf, &out, ".debug_info").expect("2MB inflates");
+        assert_eq!(bytes.len(), 2_000_000);
+    }
+
+    #[test]
+    fn object_files_skip_elf_checks() {
+        // A relocatable object is not judged: the gate skips it
+        // before any finding emission.
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file(
+                "/usr/lib/foo.o",
+                "ELF 64-bit LSB relocatable, x86-64",
+            )],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "relocatable object must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn go_sources_skip_elf_checks() {
+        // A Go source file is not judged: no finding names it. (A
+        // source-only package still reports no-binary; that
+        // accounting is separate from the per-file ELF checks.)
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg(
+            "testpkg",
+            "x86_64",
+            vec![syn_file("/usr/lib/foo.go", "ELF 64-bit LSB executable")],
+        );
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_binary(&pkg, &config, &mut out);
+        assert!(
+            !out.results()
+                .iter()
+                .any(|(_, line)| line.contains("foo.go")),
+            "go source must draw no finding: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn dynsym_version_hidden_marks_single_at() {
+        // A hidden default version prints `@`, a visible one `@@`.
+        let versym: &[u8] = &[0, 0, 0x02, 0x80, 0x02, 0x00];
+        let bytes = craft_elf_sections(&[(".gnu.version", versym)]);
+        let mut bytes = bytes;
+        let shoff = u64::from_le_bytes(bytes[40..48].try_into().expect("e_shoff")) as usize;
+        bytes[shoff + 64 + 4..shoff + 64 + 8].copy_from_slice(&0x6fff_ffffu32.to_le_bytes());
+        let elf = parse_elf(&bytes).expect("versym ELF parses");
+        let verdefs: std::collections::HashMap<u16, &str> = [(2u16, "VER_1")].into_iter().collect();
+        let verneeds: std::collections::HashMap<u16, &str> = std::collections::HashMap::new();
+        assert_eq!(
+            dynsym_version_decoration(&elf, 1, true, &verdefs, &verneeds),
+            "@VER_1"
+        );
+        assert_eq!(
+            dynsym_version_decoration(&elf, 2, true, &verdefs, &verneeds),
+            "@@VER_1"
+        );
+    }
+
+    #[test]
+    fn executable_stack_skips_unmapped_arch() {
+        // Architectures outside the default set are not judged: the
+        // arch gate returns before the programme headers are read.
+        use goblin::elf::header::{EM_AVR, ET_EXEC};
+        let config = test_config();
+        let check = BinariesCheck::with_tool_dir(&config, None);
+        let pkg = synthetic_pkg("testpkg", "avr", vec![]);
+        let pkgfile = syn_file("/usr/bin/tool", "ELF 32-bit LSB executable, Atmel AVR");
+        let mut info = syn_info();
+        info.elf_type = ET_EXEC;
+        info.elf_machine = EM_AVR;
+        info.program_headers = vec![phdr("LOAD", "R E")];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_executable_stack(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "unmapped arch must be quiet: {:?}",
+            out.results()
+        );
+    }
+
+    #[test]
+    fn executable_stack_skips_archives() {
+        // Archives carry no programme headers of their own; the
+        // archive gate returns before the header table is read.
+        use goblin::elf::header::ET_EXEC;
+        let config = test_config();
+        let mut check = BinariesCheck::with_tool_dir(&config, None);
+        check.is_archive = true;
+        let pkg = synthetic_pkg("testpkg", "x86_64", vec![]);
+        let pkgfile = syn_file("/usr/lib/libfoo.a", "current ar archive");
+        let mut info = syn_info();
+        info.elf_type = ET_EXEC;
+        info.program_headers = vec![phdr("LOAD", "R E")];
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        check.check_executable_stack(&pkg, &pkgfile, &info, &mut out);
+        assert!(
+            out.results().is_empty(),
+            "archive must be quiet: {:?}",
+            out.results()
+        );
+    }
 }
