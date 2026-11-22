@@ -27282,9 +27282,10 @@ x /etc/sysconfig/f - - - -
 
     #[test]
     fn e2_strip_comment_trailing_backslash_in_comment() {
-        // files.rs:2009 `+` -> `*`/`-`, files.rs:2013 `+` -> `*`:
-        // trailing backslash in a comment is literal, never OOB.
-        assert_eq!(strip_comment_tails("#a\\"), "");
+        // files.rs:2009 `+` -> `*`: paired backslashes advance past both;
+        // files.rs:2013 `+` -> `*`: backslash-newline joins, not ends.
+        assert_eq!(strip_comment_tails("#\\\n\nX"), "\nX");
+        assert_eq!(strip_comment_tails("#ab\\\\\nX"), "\nX");
     }
 
     #[test]
@@ -27307,8 +27308,10 @@ x /etc/sysconfig/f - - - -
 
     #[test]
     fn e2_strip_comment_trailing_backslash_code() {
-        // files.rs:2060 `+` -> `*` and `<` -> `<=`: same at code level.
+        // files.rs:2060 `+` -> `*`: backslash-newline joins the lines;
+        // `<` -> `<=`: trailing backslash is literal, never OOB.
         assert_eq!(strip_comment_tails("a\\"), "a\\");
+        assert_eq!(strip_comment_tails("a\\\nB"), "aB");
     }
 
     #[test]
@@ -27319,9 +27322,10 @@ x /etc/sysconfig/f - - - -
 
     #[test]
     fn e2_for_without_in_skips_three_chars() {
-        // files.rs:2297 `+` -> `*`: the second loop must still be entered.
+        // files.rs:2297 `+` -> `*`: the second loop must still be entered
+        // (first `for` past offset 2 so `*3` and `+3` land apart).
         assert!(scriptlet_creates_symlink(
-            "x for for j in c; do ln -s /t /d/${j}; done",
+            "xx for for j in c; do ln -s /t /d/${j}; done",
             "/d/c"
         ));
     }
@@ -27402,7 +27406,9 @@ x /etc/sysconfig/f - - - -
 
     #[test]
     fn e2_bindir_singleton_without_digest_is_quiet() {
-        // files.rs:4502 `>` -> `>=`: a singleton path is never a duplicate.
+        // Behaviour pin (not a kill): files.rs:4502 `>` -> `>=` is
+        // equivalent here — `identical` is only consulted under
+        // `paths.len() > 1`, where `>= 1` and `> 1` agree.
         let config = test_config();
         let check = FilesCheck::new(&config);
         let rpm = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -27680,11 +27686,12 @@ x /etc/sysconfig/f - - - -
 
     #[test]
     fn e2_nonexec_data_two_components() {
-        // files.rs:769 `<` -> `<=`: len 2 still evaluates the shapes.
+        // files.rs:769 `<` -> `<=`: len 2 still evaluates the shapes
+        // (`/rootfs/x` reaches the gate; `/etc/profile` returns early).
         let config = test_config();
         let check = FilesCheck::new(&config);
         assert!(non_executable_script_is_data(
-            "/etc/profile",
+            "/rootfs/x",
             "/bin/sh",
             "",
             &[],
