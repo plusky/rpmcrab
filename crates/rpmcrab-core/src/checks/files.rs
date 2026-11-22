@@ -27283,7 +27283,9 @@ x /etc/sysconfig/f - - - -
     #[test]
     fn e2_strip_comment_trailing_backslash_in_comment() {
         // files.rs:2009 `+` -> `*`: paired backslashes advance past both;
-        // files.rs:2013 `+` -> `*`: backslash-newline joins, not ends.
+        // files.rs:2013 `+` -> `*`: backslash-newline joins, not ends;
+        // `<` -> `<=` at both guards: trailing backslash panics past end.
+        assert_eq!(strip_comment_tails("#a\\"), "");
         assert_eq!(strip_comment_tails("#\\\n\nX"), "\nX");
         assert_eq!(strip_comment_tails("#ab\\\\\nX"), "\nX");
     }
