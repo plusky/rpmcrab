@@ -29510,10 +29510,9 @@ description = "explicit priority string bypasses the system crypto policy"
     }
 
     #[test]
-    fn x86_feature_1_and_second_entry_overrun_is_absent() {
-        // A non-feature entry overrunning the desc ends the walk;
-        // the desc here ends cleanly after two entries, so the
-        // state is Absent rather than Unreadable.
+    fn x86_feature_1_and_exact_fit_second_entry_is_absent() {
+        // The desc ends exactly after two entries (no overrun tail),
+        // so the state is Absent rather than Unreadable.
         let mut desc = Vec::new();
         desc.extend_from_slice(&1u32.to_le_bytes());
         desc.extend_from_slice(&4u32.to_le_bytes());
@@ -30169,6 +30168,7 @@ description = "explicit priority string bypasses the system crypto policy"
         let mut check = BinariesCheck::with_tool_dir(&config, None);
         check.defer_undefined = true;
         check.pending_state = Some(BinariesState::default());
+        check.installed_providers = Some(ProviderIndex::new(vec![]));
         check.reset();
         assert!(check.pending_state.is_none());
         assert!(!check.defer_undefined);
@@ -30426,12 +30426,10 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(ldd.copy_symbols, ["real_sym"]);
     }
 
-    #[test]
-    fn dwarf_section_bound_rejects_over_inflate() {
-        // A 2MB section inflates under the bound; the bound is what
-        // keeps a corrupt size field from inflating without limit.
-        let raw = vec![0u8; 2_000_000];
-        let section = shf_compressed(&raw, 1);
+    /// ELF with one SHF_COMPRESSED `.debug_info` of `raw.len()` bytes:
+    /// the inflate bound is what keeps a corrupt size field in check.
+    fn dwarf_bound_elf(raw: &[u8]) -> Vec<u8> {
+        let section = shf_compressed(raw, 1);
         let shstrtab = b"\0.debug_info\0.shstrtab\0";
         let mut out = vec![0u8; 64];
         let info_off = out.len() as u64;
@@ -30468,9 +30466,28 @@ description = "explicit priority string bypasses the system crypto policy"
         ehdr[60..62].copy_from_slice(&3u16.to_le_bytes());
         ehdr[62..64].copy_from_slice(&2u16.to_le_bytes());
         out[0..64].copy_from_slice(&ehdr);
+        out
+    }
+
+    #[test]
+    fn dwarf_section_inflates_within_bound() {
+        // A 2MB section inflates under the 16MiB bound.
+        let raw = vec![0u8; 2_000_000];
+        let out = dwarf_bound_elf(&raw);
         let elf = parse_elf(&out).expect("dwarf bound ELF parses");
         let bytes = dwarf_section_bytes(&elf, &out, ".debug_info").expect("2MB inflates");
         assert_eq!(bytes.len(), 2_000_000);
+    }
+
+    #[test]
+    fn dwarf_section_rejects_over_inflate_bound() {
+        // MAX+1 bytes inflate past the take+len guards (4200, 4285,
+        // 4310 takes; 4274, 4288, 4313 length checks): the section is
+        // rejected instead of inflating without limit.
+        let raw = vec![0u8; (MAX_DWARF_SECTION_INFLATE + 1) as usize];
+        let out = dwarf_bound_elf(&raw);
+        let elf = parse_elf(&out).expect("dwarf bound ELF parses");
+        assert!(dwarf_section_bytes(&elf, &out, ".debug_info").is_err());
     }
 
     #[test]
