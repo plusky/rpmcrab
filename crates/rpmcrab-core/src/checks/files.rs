@@ -26878,4 +26878,295 @@ x /etc/sysconfig/f - - - -
         );
         config
     }
+
+    fn sb(s: &str) -> usize {
+        scan_balanced(&s.chars().collect::<Vec<_>>(), 0)
+    }
+
+    fn sw(s: &str, i: usize) -> (String, usize) {
+        scan_shell_word(&s.chars().collect::<Vec<_>>(), i)
+    }
+
+    fn skipped_heredoc(s: &str, delim: &str, strip: bool) -> usize {
+        skip_heredoc_body(&s.chars().collect::<Vec<_>>(), 0, delim, strip)
+    }
+
+    fn word_tok(s: &str) -> ShellTok {
+        ShellTok::Word(s.to_string())
+    }
+
+    #[test]
+    fn shell_scanner_mut_scan_balanced_quotes_escapes() {
+        // A backslash escapes the bracket behind it: the span only
+        // closes at the second `)`.
+        assert_eq!(sb("(\\))"), 4);
+        // A trailing backslash escapes nothing and ends the span.
+        assert_eq!(sb("(a\\"), 3);
+        // A plain close still closes.
+        assert_eq!(sb("(a)"), 3);
+        // Punctuation with no word characters is skipped whole.
+        assert_eq!(sb("($)"), 3);
+        // Quoted brackets never count: the span runs past them.
+        assert_eq!(sb("(')') )"), 5);
+        assert_eq!(sb("(\")\") )"), 5);
+        // An escaped quote inside quotes stays content: without
+        // the two-character skip the quote would end early and the
+        // `)` behind it would close the span.
+        assert_eq!(sb("(\"a\\\")x\")"), 9);
+        // Unterminated quotes run to the end of the input.
+        assert_eq!(sb("(\"abc"), 5);
+        assert_eq!(sb("('abc"), 5);
+        assert_eq!(sb("(\"ab\\"), 5);
+        // An unterminated comment runs to the end too.
+        assert_eq!(sb("(# abc"), 6);
+        // A backslash-newline continues the comment past the
+        // newline, so the `)` on the next line stays inside it.
+        assert_eq!(sb("(# a\\\n) b)"), 10);
+    }
+
+    #[test]
+    fn shell_scanner_mut_scan_balanced_backquote() {
+        // An escaped backtick inside backquotes stays content: the
+        // substitution ends at the second backtick.
+        assert_eq!(sb("(`a`)x)"), 5);
+        // An unterminated backquote substitution runs to the end.
+        assert_eq!(sb("(`a\\"), 4);
+        // The closing backquote is consumed whole: the `)` behind a
+        // complete substitution still closes the span.
+        assert_eq!(sb("(`a`))"), 5);
+    }
+
+    #[test]
+    fn shell_scanner_mut_scan_balanced_case_tracking() {
+        // Newlines and `;` keep command position, so `case`
+        // tracking survives them and the span runs whole.
+        let whole = "(;\ncase x in a) b;; esac)";
+        assert_eq!(sb(whole), whole.chars().count());
+        // A two-pattern case only spans whole when `;;` flips the
+        // phase back: without the flip the second `)` closes early.
+        let two = "(case x in a) b;; c) d;; esac)";
+        assert_eq!(sb(two), two.chars().count());
+        // `case` read as an argument starts no pattern list: the
+        // first `)` still closes.
+        assert_eq!(sb("(echo case in a) b)"), 16);
+        // A lone `;` at the end of the span ends it.
+        assert_eq!(sb("(a;"), 3);
+        assert_eq!(sb("(;"), 2);
+        // A single `;` inside a pattern item flips nothing: the `)`
+        // after it still closes the span, unlike the `;;` form.
+        assert_eq!(sb("(case x in a) b; ) c)"), 18);
+        // `esac` with the span still open pops exactly once: the `)`
+        // behind it closes.
+        assert_eq!(sb("(case x in a) b;; esac) tail)"), 23);
+        // `esac` read as an argument pops nothing: the `)` behind it
+        // ends a pattern list instead of the span.
+        assert_eq!(sb("(case x in a) b;; x esac) y)"), 28);
+    }
+
+    #[test]
+    fn shell_scanner_mut_scan_shell_word() {
+        // A trailing backslash escapes nothing.
+        assert_eq!(sw("a\\", 1), ("".to_string(), 2));
+        // An escaped char resolves to itself.
+        assert_eq!(sw("\\x", 0), ("x".to_string(), 2));
+        // A backslash-newline vanishes, joining the word.
+        assert_eq!(sw("a\\\nb", 1), ("b".to_string(), 4));
+        // Single quotes span to their closer; unterminated ones run
+        // to the end.
+        assert_eq!(sw("'abc", 0), ("abc".to_string(), 4));
+        assert_eq!(sw("'a'b", 0), ("ab".to_string(), 4));
+        // Double quotes resolve escapes for `"`, `\`, `$`, backtick
+        // and newline only; other backslashes stay literal, and a
+        // backslash-newline vanishes.
+        assert_eq!(sw("\"a\\nb\"", 0), ("a\\nb".to_string(), 6));
+        assert_eq!(sw("\"a\\\nb\"", 0), ("ab".to_string(), 6));
+        assert_eq!(sw("\"a\\\"b\"", 0), ("a\"b".to_string(), 6));
+        assert_eq!(sw("\"abc", 0), ("abc".to_string(), 4));
+        // An escaped closer resolves to one quote character.
+        assert_eq!(sw("\"\\\"\"", 0), ("\"".to_string(), 4));
+        // Backquote pairs are opaque: escapes pair inside them, and
+        // the word runs past an escaped backtick.
+        assert_eq!(sw("`a\\", 0), ("`a\\".to_string(), 3));
+        assert_eq!(sw("`a\\`b`", 0), ("`a\\`b`".to_string(), 6));
+        // Command and parameter substitutions are opaque words.
+        assert_eq!(sw("$(echo hi)", 0), ("$(echo hi)".to_string(), 10));
+    }
+
+    #[test]
+    fn shell_scanner_mut_skip_heredoc_body() {
+        // The body ends past the delimiter line.
+        assert_eq!(skipped_heredoc("x\nEOF\nrest", "EOF", false), 6);
+        // Without a trailing newline the end of input ends it.
+        assert_eq!(skipped_heredoc("x\nEOF", "EOF", false), 5);
+        // `<<-` strips leading tabs before comparing.
+        assert_eq!(skipped_heredoc("\tEOF\nx", "EOF", true), 5);
+        // A non-delimiter line never ends it.
+        assert_eq!(skipped_heredoc("x\nEOF\nrest", "NOPE", false), 10);
+    }
+
+    #[test]
+    fn shell_scanner_mut_lex_shell_operators() {
+        // `&` splits; `&&` is one operator; a trailing `&` still splits.
+        assert_eq!(
+            lex_shell("a&b"),
+            vec![word_tok("a"), ShellTok::Semi, word_tok("b")]
+        );
+        assert_eq!(
+            lex_shell("a&&b"),
+            vec![word_tok("a"), ShellTok::AndOr, word_tok("b")]
+        );
+        assert_eq!(lex_shell("&&b"), vec![ShellTok::AndOr, word_tok("b")]);
+        assert_eq!(lex_shell("a&"), vec![word_tok("a"), ShellTok::Semi]);
+        // `|` splits; `||` is one operator; `|&` is one pipe.
+        assert_eq!(
+            lex_shell("a|b"),
+            vec![word_tok("a"), ShellTok::Pipe, word_tok("b")]
+        );
+        assert_eq!(
+            lex_shell("a||b"),
+            vec![word_tok("a"), ShellTok::AndOr, word_tok("b")]
+        );
+        assert_eq!(
+            lex_shell("a|&b"),
+            vec![word_tok("a"), ShellTok::Pipe, word_tok("b")]
+        );
+        assert_eq!(lex_shell("a|"), vec![word_tok("a"), ShellTok::Pipe]);
+        assert_eq!(lex_shell("|&b"), vec![ShellTok::Pipe, word_tok("b")]);
+        // Comments vanish whole, even unterminated; a
+        // backslash-newline continues past the newline.
+        assert_eq!(lex_shell("# abc"), vec![]);
+        assert_eq!(lex_shell("\\\n"), vec![]);
+        assert_eq!(lex_shell("\\\nreturn"), vec![word_tok("return")]);
+        // `(( ... ))` collapses to one opaque word, even unterminated.
+        assert_eq!(lex_shell("(("), vec![word_tok("((arith))")]);
+        assert_eq!(lex_shell("("), vec![ShellTok::LParen]);
+        assert_eq!(
+            lex_shell("((a)) ((b))"),
+            vec![word_tok("((arith))"), word_tok("((arith))")]
+        );
+        // A comment with a backslash pair consumes both characters.
+        assert_eq!(
+            lex_shell("# a\\b\nx"),
+            vec![ShellTok::Newline, word_tok("x")]
+        );
+    }
+
+    #[test]
+    fn shell_scanner_mut_lex_shell_redir_heredoc() {
+        assert_eq!(
+            lex_shell("a<b"),
+            vec![word_tok("a"), ShellTok::Redir, word_tok("b")]
+        );
+        assert_eq!(
+            lex_shell("a<&b"),
+            vec![word_tok("a"), ShellTok::Redir, word_tok("b")]
+        );
+        assert_eq!(
+            lex_shell("a>b"),
+            vec![word_tok("a"), ShellTok::Redir, word_tok("b")]
+        );
+        assert_eq!(
+            lex_shell("a>>b"),
+            vec![word_tok("a"), ShellTok::Redir, word_tok("b")]
+        );
+        assert_eq!(
+            lex_shell("a>>&b"),
+            vec![word_tok("a"), ShellTok::Redir, word_tok("b")]
+        );
+        assert_eq!(lex_shell("a>"), vec![word_tok("a"), ShellTok::Redir]);
+        assert_eq!(
+            lex_shell("echo >&2"),
+            vec![word_tok("echo"), ShellTok::Redir, word_tok("2")]
+        );
+        assert_eq!(
+            lex_shell("echo >|f"),
+            vec![word_tok("echo"), ShellTok::Redir, word_tok("f")]
+        );
+        // Process substitutions are whole words, not redirections.
+        assert_eq!(
+            lex_shell("cat <(x)"),
+            vec![word_tok("cat"), word_tok("<(x)")]
+        );
+        assert_eq!(
+            lex_shell("cat >(x) y"),
+            vec![word_tok("cat"), word_tok(">(x)"), word_tok("y")]
+        );
+        // `<<` opens a heredoc, `<<<` is a redirection alone.
+        assert_eq!(lex_shell("cat <<"), vec![word_tok("cat"), ShellTok::Redir]);
+        assert_eq!(
+            lex_shell("cat <<<x"),
+            vec![word_tok("cat"), ShellTok::Redir, word_tok("x")]
+        );
+        assert_eq!(
+            lex_shell("<<EOF\nbody\nEOF\n"),
+            vec![ShellTok::Redir, word_tok("EOF"), ShellTok::Newline]
+        );
+        assert_eq!(
+            lex_shell("<<-EOF\n\tbody\n\tEOF\nx\n"),
+            vec![
+                ShellTok::Redir,
+                word_tok("EOF"),
+                ShellTok::Newline,
+                word_tok("x"),
+                ShellTok::Newline
+            ]
+        );
+        assert_eq!(lex_shell("a<<"), vec![word_tok("a"), ShellTok::Redir]);
+        assert_eq!(lex_shell("<"), vec![ShellTok::Redir]);
+        assert_eq!(
+            lex_shell("cat <<EOF\nbody\nEOF\n"),
+            vec![
+                word_tok("cat"),
+                ShellTok::Redir,
+                word_tok("EOF"),
+                ShellTok::Newline
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_scanner_mut_lex_shell_braces() {
+        // Braces are words unless reserved: `{x}` is one word, a lone
+        // `}` at command position is a brace token.
+        assert_eq!(lex_shell("{x}"), vec![word_tok("{x}")]);
+        assert_eq!(lex_shell("}"), vec![ShellTok::RBrace]);
+        assert_eq!(
+            lex_shell("{ echo; }"),
+            vec![
+                ShellTok::LBrace,
+                word_tok("echo"),
+                ShellTok::Semi,
+                ShellTok::RBrace
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_scanner_mut_recheck_brace_fd_target() {
+        // A redirection target is never a command: `return` behind
+        // `>f` stays an argument, as does one behind a brace the
+        // recheck demoted to a word.
+        assert!(!shell_script_has_top_level_return(
+            "#!/bin/sh\necho >f return 0\n"
+        ));
+        assert!(!shell_script_has_top_level_return(
+            "#!/bin/sh\necho >f } return 0\n"
+        ));
+        // A real top-level return still reads as one.
+        assert!(shell_script_has_top_level_return(
+            "#!/bin/sh\necho hi\nreturn 0\n"
+        ));
+    }
+
+    #[test]
+    fn shell_scanner_mut_expand_unbraced() {
+        // `$foo` followed by a name character is one variable.
+        assert_eq!(expand_unbraced_once("$foobar", "foo", "X"), "$foobar");
+        assert_eq!(expand_unbraced_once("a$foo_", "foo", "X"), "a$foo_");
+        // A bare occurrence expands exactly once.
+        assert_eq!(expand_unbraced_once("$foo bar", "foo", "X"), "X bar");
+        assert_eq!(expand_unbraced_once("$foo$foo", "foo", "X"), "X$foo");
+        // No occurrence leaves the link alone.
+        assert_eq!(expand_unbraced_once("plain", "foo", "X"), "plain");
+    }
 }
