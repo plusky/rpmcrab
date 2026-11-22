@@ -1919,4 +1919,90 @@ mod tests {
         assert!(modules.contains(&"pygobject"));
         assert!(modules.contains(&"pyxdg"));
     }
+
+    #[test]
+    fn e2_extract_dir_reads_config() {
+        // config.rs:288 `-> Default::default()`: a set ExtractDir wins.
+        let cfg = config_with_toml("ExtractDir = \"/tmp/e2-extract\"\n");
+        assert_eq!(
+            cfg.extract_dir(),
+            std::path::PathBuf::from("/tmp/e2-extract")
+        );
+        let cfg = Config::default();
+        assert_eq!(cfg.extract_dir(), std::env::temp_dir());
+    }
+
+    /// Child probe for `e2_xdg_config_dirs_dedupes`: prints the resolved
+    /// dirs under controlled env. Split out because env is process-global
+    /// and `set_var` is unavailable (edition 2024 `unsafe` ban).
+    #[test]
+    fn e2_xdg_child_probe() {
+        if std::env::var("RPMCRAB_E2_XDG_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        let dirs = xdg_config_dirs();
+        println!(
+            "RPMCRAB-E2-XDG: {}",
+            dirs.iter()
+                .map(|d| d.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("\nRPMCRAB-E2-XDG: ")
+        );
+    }
+
+    #[test]
+    fn e2_xdg_config_dirs_dedupes() {
+        // config.rs:427 `-> vec![]`, 443 delete `!` and `&&` -> `||`:
+        // dup entries collapse, empties drop, HOME leads.
+        if std::env::var("RPMCRAB_E2_XDG_CHILD").as_deref() == Ok("1") {
+            return;
+        }
+        let exe = std::env::current_exe().expect("test exe");
+        let out = std::process::Command::new(exe)
+            .args(["--nocapture", "e2_xdg_child_probe"])
+            .env("RPMCRAB_E2_XDG_CHILD", "1")
+            .env("XDG_CONFIG_HOME", "/tmp/e2home")
+            .env("XDG_CONFIG_DIRS", "/etc/xdg:/etc/xdg:")
+            .output()
+            .expect("spawn probe");
+        assert!(
+            out.status.success(),
+            "probe failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        let dirs: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("RPMCRAB-E2-XDG: "))
+            .collect();
+        assert_eq!(dirs, ["/tmp/e2home", "/etc/xdg"], "{dirs:?}");
+    }
+
+    #[test]
+    fn e2_glob_toml_star_matches_dotless() {
+        // config.rs:470 `&&` -> `||`: only regular `.toml`-suffixed files.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.toml"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("footoml"), "x = 1\n").unwrap();
+        std::fs::create_dir(dir.path().join("d.toml")).unwrap();
+        let mut found: Vec<String> = glob_toml(dir.path(), true, true)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(found, ["a.toml", "footoml"], "{found:?}");
+    }
+
+    #[test]
+    fn e2_glob_toml_plain_uses_extension() {
+        // config.rs:474 `==` -> `!=`: plain glob keeps real `.toml` files.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.toml"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x = 1\n").unwrap();
+        let found: Vec<String> = glob_toml(dir.path(), false, true)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(found, ["a.toml"], "{found:?}");
+    }
 }

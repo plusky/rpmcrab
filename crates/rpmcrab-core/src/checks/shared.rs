@@ -820,4 +820,10 @@ mod sde_tests {
     fn out_of_range_epoch_is_no_sde() {
         assert!(source_date_epoch_from_parts(Some("reproducible"), Some(i64::MAX), None).is_none());
     }
+
+    #[test]
+    fn e2_python_str_repr_escapes_newline() {
+        // shared.rs:334 delete `'\n'` arm: newline keeps `\n`, not `\x0a`.
+        assert_eq!(super::python_str_repr("a\nb"), "'a\\nb'");
+    }
 }

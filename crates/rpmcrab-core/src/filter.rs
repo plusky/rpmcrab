@@ -1437,4 +1437,44 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn e2_filter_title_suppresses_without_counter_drift() {
+        // filter.rs:337 `+=` -> `-=`: title suppression counts up, not down.
+        let cfg = Config {
+            filter_titles: vec!["gated-check".to_string()],
+            ..Default::default()
+        };
+        let mut f = Filter::new(&cfg, Color::for_tty(false)).unwrap();
+        f.add_info(finding("gated-check", Level::Warning));
+        assert_eq!(f.filtered_out, 1);
+        assert!(f.results().is_empty());
+    }
+
+    #[test]
+    fn e2_render_results_quiet_without_info() {
+        // filter.rs:486 `&&` -> `||`: no descriptions unless `-v`.
+        let cfg = Config::default();
+        let mut f = Filter::new(&cfg, Color::for_tty(false)).unwrap();
+        f.add_info(finding("a-check", Level::Warning));
+        f.add_info(finding("b-check", Level::Warning));
+        let output = f.render_results(&cfg);
+        assert!(
+            !output.contains("Unknown message"),
+            "descriptions leak without info: {output:?}"
+        );
+    }
+
+    #[test]
+    fn e2_merge_from_sums_infos() {
+        // filter.rs:503 `+=` -> `*=`: per-level counters add across workers.
+        let cfg = cfg();
+        let mut a = Filter::new(&cfg, Color::for_tty(false)).unwrap();
+        let b = Filter::new(&cfg, Color::for_tty(false)).unwrap();
+        a.printed_infos = 2;
+        let mut other = b;
+        other.printed_infos = 3;
+        a.merge_from(other);
+        assert_eq!(a.printed_infos, 5);
+    }
 }
