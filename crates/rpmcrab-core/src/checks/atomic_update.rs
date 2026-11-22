@@ -3092,4 +3092,110 @@ fi
             assert_eq!(hits, vec![(tool, body.to_string())], "must fire: {body}");
         }
     }
+
+    #[test]
+    fn tokenize_dquote_escape_and_dynamic_suffix() {
+        // Inside double quotes a backslash escapes only `"`, `$`,
+        // backtick and itself (the escaped quote stays in the word
+        // and closes nothing), while `$`/backtick mark the word
+        // dynamic no matter which of the two appears.
+        for (body, expected) in [
+            ("mkdir \"/var/lib/a\\\"b\"", &["/var/lib/a\"b"][..]),
+            ("mkdir \"/var/lib/$SUFFIX\"", &[]),
+            ("mkdir \"/var/lib/`hostname`\"", &[]),
+            ("mkdir \"/var/lib/a\\", &["/var/lib/a\\"][..]),
+        ] {
+            assert_eq!(&scan_scriptlet(body), expected, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn tokenize_trailing_backslash_is_literal() {
+        // A backslash with no next character escapes nothing: it
+        // stays a literal word character instead of reading past
+        // the input.
+        let body = "mkdir /var/lib/foo\\";
+        assert_eq!(&scan_scriptlet(body), &["/var/lib/foo\\"], "body: {body}");
+    }
+
+    #[test]
+    fn tokenize_percent_without_brace_is_literal() {
+        // Only `%{`/`%(` open a macro: a trailing `%` or `%x` is a
+        // literal word character.
+        for (body, expected) in [
+            ("mkdir /var/lib/foo%", &["/var/lib/foo%"][..]),
+            ("mkdir /var/lib/%foo", &["/var/lib/%foo"][..]),
+        ] {
+            assert_eq!(&scan_scriptlet(body), expected, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn tokenize_pipe_separator_forms() {
+        // A trailing `|` is a separator like any other, a glued
+        // single `|` still separates (the next word keeps its
+        // first character), and a leading `|` is not an escape
+        // opener that reads before the input.
+        for (body, expected) in [
+            ("mkdir /var/lib/a |", &["/var/lib/a"][..]),
+            ("gen|tee /var/log/pipe", &["/var/log/pipe"][..]),
+            ("| tee /var/log/lead", &["/var/log/lead"][..]),
+        ] {
+            assert_eq!(&scan_scriptlet(body), expected, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn tokenize_amp_separator_forms() {
+        // `&&` separates like `;`, `&>` redirects to its target,
+        // a trailing `&` backgrounds nothing the scan cares about,
+        // and a leading `&` reads no character before the input.
+        for (body, expected) in [
+            ("false && mkdir /var/lib/andcase", &["/var/lib/andcase"][..]),
+            ("echo x &> /var/log/f", &["/var/log/f"][..]),
+            ("mkdir /var/lib/a &", &["/var/lib/a"][..]),
+            ("& mkdir /var/lib/lead", &["/var/lib/lead"][..]),
+        ] {
+            assert_eq!(&scan_scriptlet(body), expected, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn tokenize_redirect_at_end_and_fd_glue() {
+        // A redirect with no target names nothing, and an `&`-glued
+        // fd target (`2>&...`) is still the redirect's target.
+        for (body, expected) in [
+            ("echo x >", &[][..]),
+            ("somecmd 2>&/var/log/err", &["/var/log/err"][..]),
+        ] {
+            assert_eq!(&scan_scriptlet(body), expected, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn function_definitions_with_decoration_are_quiet() {
+        // The decoration skip (keywords, assignments) applies
+        // before the definition test too: a decorated header still
+        // names a command instead of invoking one.
+        assert!(segment_defines_function("time useradd() { :; }"));
+        assert!(segment_is_function_definition("time rcfoo() { :; }"));
+        assert!(service_restarts_in_body("time rcfoo() { :; }").is_empty());
+        assert!(direct_user_creation_in_body("time useradd() { :; }").is_empty());
+    }
+
+    #[test]
+    fn service_and_systemctl_arities_and_post_verb_options() {
+        // Arity guards hold: a lone `service` name names no verb,
+        // and a verb-less `systemctl` names no verb and no unit, so
+        // neither panics nor fires.
+        assert!(service_restarts_in_body("service foo").is_empty());
+        assert_eq!(systemctl_verb(&["--quiet"]), None);
+        assert!(!systemctl_timer_only(&["--quiet"]));
+        // Options after the units are stepped over like the ones
+        // before the verb: the timer-only invocation stays quiet.
+        assert!(
+            service_restarts_in_body("systemctl restart a.timer --quiet").is_empty(),
+            "post-unit option must be stepped over"
+        );
+    }
 }
