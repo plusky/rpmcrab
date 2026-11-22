@@ -1438,6 +1438,19 @@ mod rpmlintrc_tests {
         let files = vec![PathBuf::from("*.rpm")];
         assert_eq!(dedup_files(&files), vec![PathBuf::from("*.rpm")]);
     }
+
+    /// `-j` defaults to the machine's parallelism (`os.cpu_count or 1`),
+    /// falling back to 1 only where the count is unavailable. Mutation
+    /// guard: `default_jobs -> 1` (vacuous on a single-CPU runner, where
+    /// the fallback is 1 anyway).
+    #[test]
+    fn default_jobs_matches_available_parallelism() {
+        let expect = std::thread::available_parallelism()
+            .map(|n| n.get() as i32)
+            .unwrap_or(1);
+        assert_eq!(default_jobs(), expect);
+        assert!(default_jobs() >= 1);
+    }
 }
 
 #[cfg(test)]

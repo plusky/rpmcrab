@@ -235,6 +235,55 @@ mod tests {
         assert_eq!(textwrap_fill("one two three", 7), "one two\nthree");
     }
 
+    /// A chunk exactly as wide as the column still fits the line: the
+    /// over-long test is `> width`, so the boundary itself wraps normally.
+    /// Mutation guard: `>=` would needlessly break the line.
+    #[test]
+    fn textwrap_boundary_chunk_fills_line_exactly() {
+        assert_eq!(textwrap_fill("aa bbb", 3), "aa\nbbb");
+    }
+
+    /// A tab after a newline starts from column zero: the column resets on
+    /// every `\n` / `\r`. Mutation guard: dropping the newline arm keeps
+    /// the old column, so the tab stops short.
+    #[test]
+    fn expand_tabs_resets_column_after_newline() {
+        assert_eq!(expand_tabs("a\n\t"), "a\n        ");
+        assert_eq!(expand_tabs("a\r\t"), "a\r        ");
+    }
+
+    /// `$COLUMNS=0` is not a width: it is invalid like an unset or
+    /// unparsable value, so the tty probe (or the 80 fallback on a pipe)
+    /// decides instead. Re-executes this test binary in a child: the
+    /// variable is process-global and this crate forbids `unsafe`, so
+    /// in-process mutation is unavailable (same pattern as
+    /// `BuildRootAndDateCheck`'s TZ probe).
+    #[test]
+    fn terminal_width_ignores_zero_columns() {
+        if std::env::var("RPMCRAB_COLUMNS_PROBE_CHILD").as_deref() == Ok("1") {
+            assert_ne!(terminal_width(), 0, "COLUMNS=0 must fall through");
+            return;
+        }
+        assert!(
+            std::env::var("RPMCRAB_COLUMNS_PROBE_CHILD").is_err(),
+            "RPMCRAB_COLUMNS_PROBE_CHILD must not be set in the ambient environment"
+        );
+        let module = module_path!();
+        let test_path = module
+            .split_once("::")
+            .map(|(_, rest)| rest)
+            .unwrap_or(module);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(format!("{test_path}::terminal_width_ignores_zero_columns"))
+            .arg("--nocapture")
+            .env("RPMCRAB_COLUMNS_PROBE_CHILD", "1")
+            .env("COLUMNS", "0")
+            .output()
+            .expect("spawn COLUMNS probe");
+        assert!(out.status.success(), "COLUMNS probe failed: {out:?}");
+    }
+
     #[test]
     fn session_banner_names_prog() {
         // The session banner identifies the program itself; the header must

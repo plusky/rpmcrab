@@ -579,6 +579,20 @@ mod tests {
         assert_eq!(c.max_severity(), Level::Error);
     }
 
+    /// The default is no file walking: `None`, not a zero count. A `Some`
+    /// (even `Some(0)`) would credit the check in the `-t` totals.
+    /// Mutation guard: `checked_files -> Some(0)`.
+    #[test]
+    fn checked_files_defaults_to_none() {
+        struct Walkless;
+        impl Check for Walkless {
+            fn name(&self) -> &'static str {
+                "Walkless"
+            }
+        }
+        assert_eq!(Walkless.checked_files(), None);
+    }
+
     #[test]
     fn synthetic_max_severity_follows_findings() {
         let w = SyntheticCheck::new("w", "p", None, vec![(Level::Warning, "w-check", vec![])]);

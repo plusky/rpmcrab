@@ -778,6 +778,42 @@ mod menu_icon_xdg_tests {
     /// but the compiled pattern is byte-identical, so it proves nothing.
     /// The mutation that genuinely adds a trailing `"` to the pattern
     /// needs an escaped normal string; these tests fail on that.
+    /// An `ExtraMenuNeeds` value is not strange: `gnome` is not in the
+    /// hardcoded x11/text/wm arm, so it reaches the `ExtraMenuNeeds` gate,
+    /// which lists exactly it. Mutation guard: `==` becoming `!=` fires
+    /// `strange-needs` here (with a single list entry every other value
+    /// differs, so the inverted gate opens).
+    #[test]
+    fn extra_menu_needs_value_is_not_strange() {
+        let table: toml::Table =
+            toml::from_str("ValidMenuSections = [\"Apps\"]\nExtraMenuNeeds = [\"gnome\"]\n")
+                .expect("parse test config");
+        let mut config = Config {
+            configuration: table,
+            ..Default::default()
+        };
+        config.finalize().unwrap();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let check = MenuCheck::new(&config);
+        let pkg = menu_test_pkg();
+        let line = "?package(menu-test): needs=\"gnome\" section=\"Apps\" \
+            command=/usr/bin/menu-test title=\"Menu Test\" longtitle=\"Menu Test Long\" \
+            icon=\"foo.png\" xdg=\"true\"";
+        check.check_menu_line(
+            &pkg,
+            &mut out,
+            "menu-test",
+            line,
+            &["/usr/bin/menu-test"],
+            &[],
+        );
+        assert!(
+            !out.results().iter().any(|(n, _)| n == "strange-needs"),
+            "unexpected: {:?}",
+            out.results()
+        );
+    }
+
     #[test]
     fn sibling_prefix_of_menu_dir_is_quiet() {
         let config = menu_test_config();
@@ -800,6 +836,40 @@ mod menu_icon_xdg_tests {
         crate::check::Check::check_binary(&mut check, &pkg, &config, &mut out);
         assert!(
             out.results().iter().any(|(n, _)| n == "menu-in-wrong-dir"),
+            "unexpected: {:?}",
+            out.results()
+        );
+    }
+
+    /// A menu file whose postin lacks `update-menus` reports it: the
+    /// non-empty postin takes the `else if` arm. Mutation guard: dropping
+    /// the `!` in the postin guard silences it.
+    #[test]
+    fn menu_file_with_postin_lacking_update_menus_reports() {
+        // `scriptlet-empty-post` carries no postin body, so the check sees
+        // the `-p` interpreter (`/bin/sh`): non-empty and without
+        // `update-menus`.
+        let mut pkg = Pkg::open(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/parity/pkg/inputs/scriptlet-empty-post-1.0-1.noarch.rpm"),
+            &std::env::temp_dir(),
+            true,
+        )
+        .expect("open fixture pkg");
+        pkg.name = "menu-test".to_string();
+        pkg.arch = "noarch".to_string();
+        pkg.files = vec![crate::pkg::pkgfile::PkgFile {
+            name: "/usr/lib/menu/menu-test".to_string(),
+            mode: 0o100644,
+            ..Default::default()
+        }];
+        let config = menu_test_config();
+        let mut out = Filter::new(&config, Color::for_tty(false)).unwrap();
+        let mut check = MenuCheck::new(&config);
+        crate::check::Check::check_binary(&mut check, &pkg, &config, &mut out);
+        let names: Vec<&str> = out.results().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"postin-without-update-menus"),
             "unexpected: {:?}",
             out.results()
         );
