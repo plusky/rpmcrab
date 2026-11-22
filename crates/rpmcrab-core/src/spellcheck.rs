@@ -1005,6 +1005,62 @@ SFX N 0 en [^ey]\n";
         );
     }
 
+    /// The hasher is FNV-1a over the input bytes: published test vectors.
+    /// Mutation guard: `finish -> 1` or `write -> ()` both break these.
+    #[test]
+    fn fnv1a_matches_published_test_vectors() {
+        use std::hash::Hasher;
+        let mut h = Fnv1aHasher(0xcbf2_9ce4_8422_2325);
+        h.write(b"foobar");
+        assert_eq!(h.finish(), 0x8594_4171_f739_67e8);
+        let mut h = Fnv1aHasher(0xcbf2_9ce4_8422_2325);
+        h.write(b"");
+        assert_eq!(h.finish(), 0xcbf2_9ce4_8422_2325);
+    }
+
+    /// Every fixed-width integer write feeds its little-endian encoding
+    /// into the hash, so no hash input depends on the target. Mutation
+    /// guard: replacing any one of these with `()` leaves the state at
+    /// the offset basis while the encoding-fed twin moves on.
+    #[test]
+    fn integer_writes_feed_the_hash_like_their_le_bytes() {
+        use std::hash::Hasher;
+        fn digest(write: impl FnOnce(&mut Fnv1aHasher)) -> u64 {
+            let mut h = Fnv1aHasher(0xcbf2_9ce4_8422_2325);
+            write(&mut h);
+            h.finish()
+        }
+        assert_eq!(
+            digest(|h| h.write_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10)),
+            digest(|h| h.write(&0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10u128.to_le_bytes()))
+        );
+        assert_eq!(
+            digest(|h| h.write_i8(-0x12)),
+            digest(|h| h.write(&[(-0x12i8) as u8]))
+        );
+        assert_eq!(
+            digest(|h| h.write_i16(0x1234)),
+            digest(|h| h.write(&0x1234i16.to_le_bytes()))
+        );
+        assert_eq!(
+            digest(|h| h.write_i32(-0x1234_5678)),
+            digest(|h| h.write(&(-0x1234_5678i32).to_le_bytes()))
+        );
+        assert_eq!(
+            digest(|h| h.write_isize(-0x1234)),
+            digest(|h| h.write(&(-0x1234i64).to_le_bytes()))
+        );
+    }
+
+    /// `byte_offset - 3` lands inside `é`, so the advance loop must step
+    /// forward to the boundary: the context is ". " and the word is at a
+    /// sentence start. Mutation guard: `+=` becoming `*=` stalls the
+    /// advance (the value never changes) and hangs instead of terminating.
+    #[test]
+    fn sentence_start_advance_terminates_on_multibyte_context() {
+        assert!(at_sentence_start("aé. Wrld", 5));
+    }
+
     /// Marker that turns `new_env_switch_child` from a no-op (when
     /// the suite runs it directly) into the child half of the
     /// env-switch pin.

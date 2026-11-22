@@ -214,6 +214,55 @@ mod tests {
         );
     }
 
+    /// The quit colour: red with any error, else yellow with any warning,
+    /// else bold. Needs a tty palette: piped output has no codes to tell
+    /// apart. Mutation guard: `errors >= 0` is always red; `warnings` with
+    /// `<`, `==` or `>=` inverts or flattens the yellow/bold split.
+    #[test]
+    fn footer_quit_color_boundaries() {
+        let color = Color::for_tty(true);
+        let quit = |errors, warnings| {
+            footer(&FooterParams {
+                packages: 1,
+                specfiles: 0,
+                errors,
+                warnings,
+                filtered: 0,
+                duration_secs: 0.1,
+                color: &color,
+                width: 80,
+            })
+        };
+        assert!(quit(1, 0).starts_with(color.red));
+        assert!(quit(0, 1).starts_with(color.yellow));
+        assert!(quit(0, 0).starts_with(color.bold));
+    }
+
+    /// The per-row fraction colour: red above 25%, yellow above 5%, plain
+    /// below. One fraction sits exactly on the red cut-off (25 of 100), so
+    /// `<`, `==` and `>=` each recolour a row. Needs a tty palette.
+    #[test]
+    fn time_report_pct_color_boundaries() {
+        let color = Color::for_tty(true);
+        let out = time_report(
+            &durations(&[("Big", 70.0), ("Mid", 25.0), ("Small", 5.0)]),
+            &BTreeMap::new(),
+            &color,
+        );
+        let line = |name: &str| {
+            out.lines()
+                .find(|l| l.contains(name))
+                .unwrap_or_else(|| panic!("no row for {name}:\n{out}"))
+                .to_string()
+        };
+        assert!(line("Big").contains(color.red), "75% is red:\n{out}");
+        assert!(line("Mid").contains(color.yellow), "20% is yellow:\n{out}");
+        assert!(
+            !line("Small").contains(color.red) && !line("Small").contains(color.yellow),
+            "5% is plain:\n{out}"
+        );
+    }
+
     /// The durations in the order the given pairs name them, which is the
     /// insertion order the report preserves for ties.
     fn durations(pairs: &[(&str, f64)]) -> Vec<(String, f64)> {
@@ -270,6 +319,22 @@ mod tests {
         );
         assert!(out.contains("BigCheck"));
         assert!(!out.contains("TinyCheck"));
+    }
+
+    /// A row at exactly 1% is kept: the cut-off is `fraction < 1.0`, so the
+    /// boundary itself is shown. Mutation guard: `<=` or `==` would drop it.
+    #[test]
+    fn time_report_shows_row_at_exactly_one_percent() {
+        let out = time_report(
+            &durations(&[("BigCheck", 99.0), ("TinyCheck", 1.0)]),
+            &BTreeMap::new(),
+            &Color::for_tty(false),
+        );
+        assert!(out.contains("BigCheck"));
+        assert!(
+            out.contains("TinyCheck"),
+            "1% is not under the cut-off:\n{out}"
+        );
     }
 
     #[test]
