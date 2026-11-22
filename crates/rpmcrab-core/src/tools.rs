@@ -148,6 +148,21 @@ pub(crate) fn test_source(dir: Option<&Path>) -> ToolSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn e3_spawn_with_retry_fails_fast_on_permanent_errors() {
+        let calls = Cell::new(0);
+        let err = spawn_with_retry(|| {
+            calls.set(calls.get() + 1);
+            Err::<std::process::Output, _>(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "nope",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(calls.get(), 1, "permanent errors must not be retried");
+    }
     use std::cell::Cell;
     use std::io;
 

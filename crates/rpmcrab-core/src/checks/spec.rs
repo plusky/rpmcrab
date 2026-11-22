@@ -5668,6 +5668,22 @@ fn soundness_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn e3_copy_docdir_honours_long_target_directory() {
+        assert_eq!(
+            segment_copy_docdir("cp --target-directory $RPM_BUILD_ROOT%{_docdir}/pkg COPYING"),
+            Some("%{_docdir}/pkg".to_string())
+        );
+        assert_eq!(segment_copy_docdir("cp a b"), None);
+    }
+
+    #[test]
+    fn e3_scan_comment_text_bounds_bracket_expression() {
+        let mut found = Vec::new();
+        scan_comment_text("%[foo]", 0, 0, false, &mut found);
+        assert!(found.is_empty(), "{found:?}");
+    }
     use crate::color::Color;
 
     fn config_mini() -> Config {

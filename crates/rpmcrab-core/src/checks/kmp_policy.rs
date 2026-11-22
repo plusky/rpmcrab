@@ -261,6 +261,14 @@ impl Check for KMPPolicyCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn e3_is_wrapped_rejects_trailing_material() {
+        assert!(KMPPolicyCheck::is_wrapped("(a)"));
+        assert!(KMPPolicyCheck::is_wrapped("((a))"));
+        assert!(!KMPPolicyCheck::is_wrapped("(a)+(b)"));
+        assert!(!KMPPolicyCheck::is_wrapped("a"));
+    }
     use std::path::Path;
 
     use crate::color::Color;

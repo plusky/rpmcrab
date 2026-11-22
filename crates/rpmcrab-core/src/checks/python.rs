@@ -3080,6 +3080,114 @@ mod tests {
     use super::*;
 
     #[test]
+    fn e3_classify_atom_splits_version_tail() {
+        assert!(matches!(
+            PythonCheck::classify_atom("python3-foo>=1.0", &["python3-foo".to_string()]),
+            Some(AtomMatch::Full)
+        ));
+        assert!(PythonCheck::classify_atom("python3-foo", &["other".to_string()]).is_none());
+    }
+
+    #[test]
+    fn e3_require_branches_caps_cartesian_blowup() {
+        use crate::pkg::dep::DepInfo;
+        let left = (1..=10)
+            .map(|i| format!("a{i}"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        let mid = (1..=6)
+            .map(|i| format!("b{i}"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        let right = (1..=10)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        let dep = DepInfo {
+            name: format!("(({left}) and ({mid})) or ({right})"),
+            flags: 0,
+            epoch: None,
+            version: None,
+            release: None,
+        };
+        let out = PythonCheck::require_branches(&dep);
+        assert_eq!(out.len(), 1, "capped walk falls back to leaves: {out:?}");
+    }
+
+    #[test]
+    fn e3_leaf_floor_grades_bounds() {
+        use crate::pkg::dep::{DepLeaf, RPMSENSE_GREATER, RPMSENSE_LESS};
+        let leaf = |flags: u32| DepLeaf {
+            name: "x".to_string(),
+            qualifier: None,
+            flags,
+            epoch: None,
+            version: Some("1.0".to_string()),
+            release: None,
+        };
+        assert!(matches!(
+            PythonCheck::leaf_floor(&leaf(RPMSENSE_GREATER)),
+            LeafFloor::Floor(_)
+        ));
+        assert!(matches!(
+            PythonCheck::leaf_floor(&leaf(RPMSENSE_LESS)),
+            LeafFloor::Versioned
+        ));
+    }
+
+    #[test]
+    fn e3_strip_strings_and_comments_keeps_continuation_newline() {
+        let out = strip_strings_and_comments("'a\\\nB'");
+        assert!(out.contains('\n'), "continuation newline lost: {out:?}");
+    }
+
+    #[test]
+    fn e3_malformed_marker_needs_balance() {
+        assert!(PythonCheck::is_malformed_marker("(("));
+        assert!(!PythonCheck::is_malformed_marker("(x)"));
+    }
+
+    #[test]
+    fn e3_marker_non_holding_comparisons_fail() {
+        assert!(!PythonCheck::marker_atom_holds(
+            "python_version <= \"3.10\"",
+            "3.12"
+        ));
+        assert!(!PythonCheck::marker_atom_holds(
+            "python_version != \"3.12\"",
+            "3.12"
+        ));
+        assert!(PythonCheck::marker_atom_holds(
+            "python_version <= \"3.12\"",
+            "3.12"
+        ));
+    }
+
+    #[test]
+    fn e3_find_top_level_skips_quoted_operators() {
+        assert_eq!(find_top_level("'a or b' or c", "or"), Some(9));
+        assert_eq!(find_top_level("a or b", "or"), Some(2));
+    }
+
+    #[test]
+    fn e3_scan_imports_flushes_unclosed_paren_tail() {
+        use crate::pkg::pkgfile::PkgFile;
+        let rpm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/pkg/inputs/fcprobe-1-1.noarch.rpm");
+        let mut pkg = Pkg::open_no_extract(&rpm).expect("open fixture pkg");
+        let name = "/usr/lib/python3.13/site-packages/proofpkg/tail.py";
+        let disk = pkg.dir_name().join(name.trim_start_matches('/'));
+        std::fs::create_dir_all(disk.parent().unwrap()).expect("test dirs");
+        std::fs::write(&disk, "from azure.mgmt import (\n    network,\n").expect("test file");
+        pkg.files = vec![PkgFile {
+            name: name.to_string(),
+            ..Default::default()
+        }];
+        let got = PythonCheck::scan_imports(&pkg);
+        assert!(got.contains("azure.mgmt.network"), "{got:?}");
+    }
+
+    #[test]
     fn requires_txt_parses_names() {
         let content = "backcall\ndecorator\njedi>=0.16\n";
         let reqs = PythonCheck::parse_requirements(content, false, "3.12");
