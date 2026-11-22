@@ -30426,11 +30426,18 @@ description = "explicit priority string bypasses the system crypto policy"
         assert_eq!(ldd.copy_symbols, ["real_sym"]);
     }
 
-    /// ELF with one SHF_COMPRESSED `.debug_info` of `raw.len()` bytes:
+    /// ELF with one compressed debug section of `raw.len()` bytes:
     /// the inflate bound is what keeps a corrupt size field in check.
-    fn dwarf_bound_elf(raw: &[u8]) -> Vec<u8> {
-        let section = shf_compressed(raw, 1);
-        let shstrtab = b"\0.debug_info\0.shstrtab\0";
+    /// `sh_name` selects `.debug_info` (SHF_COMPRESSED) or
+    /// `.zdebug_info` (legacy GNU zlib); `ch_type` selects the
+    /// SHF_COMPRESSED stream (1 = zlib, 2 = zstd).
+    fn dwarf_bound_elf(raw: &[u8], zdebug: bool, ch_type: u32) -> Vec<u8> {
+        let section = if zdebug {
+            gnu_zdebug(raw)
+        } else {
+            shf_compressed(raw, ch_type)
+        };
+        let shstrtab = b"\0.debug_info\0.zdebug_info\0.shstrtab\0";
         let mut out = vec![0u8; 64];
         let info_off = out.len() as u64;
         out.extend_from_slice(&section);
@@ -30451,8 +30458,11 @@ description = "explicit priority string bypasses the system crypto policy"
             h[48..56].copy_from_slice(&1u64.to_le_bytes());
             h
         };
-        out.extend(shdr(1, 0x800, info_off, section.len() as u64));
-        out.extend(shdr(13, 3, shstrtab_off, shstrtab.len() as u64));
+        // `.debug_info` lives at shstrtab+1, `.zdebug_info` at +13,
+        // `.shstrtab` at +26; only SHF_COMPRESSED sections carry 0x800.
+        let (name_off, flags) = if zdebug { (13, 0) } else { (1, 0x800) };
+        out.extend(shdr(name_off, flags, info_off, section.len() as u64));
+        out.extend(shdr(26, 3, shstrtab_off, shstrtab.len() as u64));
         let mut ehdr = vec![0u8; 64];
         ehdr[0..4].copy_from_slice(b"\x7fELF");
         ehdr[4] = 2;
@@ -30471,9 +30481,9 @@ description = "explicit priority string bypasses the system crypto policy"
 
     #[test]
     fn dwarf_section_inflates_within_bound() {
-        // A 2MB section inflates under the 16MiB bound.
+        // A 2MB zlib section inflates under the 16MiB bound.
         let raw = vec![0u8; 2_000_000];
-        let out = dwarf_bound_elf(&raw);
+        let out = dwarf_bound_elf(&raw, false, 1);
         let elf = parse_elf(&out).expect("dwarf bound ELF parses");
         let bytes = dwarf_section_bytes(&elf, &out, ".debug_info").expect("2MB inflates");
         assert_eq!(bytes.len(), 2_000_000);
@@ -30481,11 +30491,31 @@ description = "explicit priority string bypasses the system crypto policy"
 
     #[test]
     fn dwarf_section_rejects_over_inflate_bound() {
-        // MAX+1 bytes inflate past the take+len guards (4200, 4285,
-        // 4310 takes; 4274, 4288, 4313 length checks): the section is
+        // MAX+1 bytes inflate past the take+len guards (4271/4285
+        // zlib takes, 4310 zdebug take; 4274, 4288, 4313 length
+        // checks): each arm is pinned below, so the section is
         // rejected instead of inflating without limit.
         let raw = vec![0u8; (MAX_DWARF_SECTION_INFLATE + 1) as usize];
-        let out = dwarf_bound_elf(&raw);
+        let out = dwarf_bound_elf(&raw, false, 1);
+        let elf = parse_elf(&out).expect("dwarf bound ELF parses");
+        assert!(dwarf_section_bytes(&elf, &out, ".debug_info").is_err());
+    }
+
+    #[test]
+    fn dwarf_section_rejects_over_inflate_bound_zstd() {
+        // Same bound through the zstd take+len pair (4285/4288).
+        let raw = vec![0u8; (MAX_DWARF_SECTION_INFLATE + 1) as usize];
+        let out = dwarf_bound_elf(&raw, false, 2);
+        let elf = parse_elf(&out).expect("dwarf bound ELF parses");
+        assert!(dwarf_section_bytes(&elf, &out, ".debug_info").is_err());
+    }
+
+    #[test]
+    fn dwarf_section_rejects_over_inflate_bound_zdebug() {
+        // Same bound through the legacy `.zdebug` take+len pair
+        // (4310/4313); looked up as `.debug_info` via the gnu name.
+        let raw = vec![0u8; (MAX_DWARF_SECTION_INFLATE + 1) as usize];
+        let out = dwarf_bound_elf(&raw, true, 1);
         let elf = parse_elf(&out).expect("dwarf bound ELF parses");
         assert!(dwarf_section_bytes(&elf, &out, ".debug_info").is_err());
     }
