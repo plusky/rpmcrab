@@ -508,6 +508,19 @@ fn has_digit_adjacent(text: &str, start: usize, end: usize) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn fnv1a_finish_reflects_written_bytes() {
+        use std::hash::Hasher;
+        let mut fresh = Fnv1aHasher(0xcbf2_9ce4_8422_2325);
+        let untouched = fresh.finish();
+        fresh.write(b"en_US");
+        let after_write = fresh.finish();
+        assert_ne!(untouched, after_write);
+        let mut other = Fnv1aHasher(0xcbf2_9ce4_8422_2325);
+        other.write(b"en_UK");
+        assert_ne!(after_write, other.finish());
+    }
+
     const TEST_AFF: &str = "SET UTF-8\n";
 
     /// The pinned en_US affix rules for the flags the bundled wordlist
