@@ -5,7 +5,7 @@
 
 [![CI](https://github.com/plusky/rpmcrab/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/plusky/rpmcrab/actions/workflows/ci.yml)
 [![License: GPL-2.0-or-later](https://img.shields.io/badge/License-GPL--2.0--or--later-blue.svg)](LICENSE)
-[![rustc 1.88+](https://img.shields.io/badge/rustc-1.88+-orange.svg)](https://www.rust-lang.org)
+[![rustc 1.89+](https://img.shields.io/badge/rustc-1.89+-orange.svg)](https://www.rust-lang.org)
 
 A drop-in replacement for [`rpmlint`](https://github.com/rpm-software-management/rpmlint)
 (2.10.0, openSUSE flavour, `checks: 43`), rewritten in Rust.
