@@ -82,7 +82,10 @@ extend-glob = ["**/spellcheck.rs"]
 # somethin is a deliberate truncation in the spellcheck package-name-skip
 # tests in the same file: it proves a truncated fragment is not skipped
 # for the full package name.
-extend-words = { informations = "informations", libary = "libary", somethin = "somethin" }
+# prefered and untill are deliberate misspellings in the golden-suggestion
+# test in the same file: they are the tie-order probes that pin the
+# dictionary hasher distribution (issue #1599).
+extend-words = { informations = "informations", libary = "libary", somethin = "somethin", prefered = "prefered", untill = "untill" }
 
 # patern is a deliberate misspelling in the unknown-class tests in
 # defect_pattern.rs: a plausible user typo of the real defect-pattern
