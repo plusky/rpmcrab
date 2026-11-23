@@ -12,7 +12,7 @@ members = [
 [workspace.package]
 version = "0.4.3"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/plusky/rpmcrab"
 homepage = "https://github.com/plusky/rpmcrab"
