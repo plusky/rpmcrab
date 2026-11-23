@@ -1018,6 +1018,31 @@ SFX N 0 en [^ey]\n";
         assert_eq!(h.finish(), 0xcbf2_9ce4_8422_2325);
     }
 
+    /// The dictionary hasher distributes: distinct words hash to
+    /// distinct values. Mutation guard: `finish -> 1` or `write -> ()`
+    /// collapse every hash to one constant, so the 49k-stem dictionary
+    /// lands in a single bucket and every lookup scans the whole table
+    /// (issue #1599: per-package spellcheck 26 ms -> ~1.5 s median).
+    /// The test-vector pins already kill both mutants on two fixed
+    /// points; this pins the distributional property the performance
+    /// depends on — distinct words must land in distinct buckets —
+    /// directly, in microseconds, with no dictionary build.
+    #[test]
+    fn dictionary_hasher_distributes_distinct_words() {
+        use std::hash::BuildHasher;
+        const WORDS: usize = 5000;
+        let hasher = DictionaryBuildHasher;
+        let mut seen = std::collections::HashSet::with_capacity(WORDS);
+        for i in 0..WORDS {
+            seen.insert(hasher.hash_one(format!("stem{i:05}")));
+        }
+        assert!(
+            seen.len() >= 4500,
+            "only {} distinct hashes for 5000 distinct words: the dictionary hasher does not distribute",
+            seen.len()
+        );
+    }
+
     /// Every fixed-width integer write feeds its little-endian encoding
     /// into the hash, so no hash input depends on the target. Mutation
     /// guard: replacing any one of these with `()` leaves the state at
@@ -1329,6 +1354,48 @@ SFX N 0 en [^ey]\n";
                 "{line:?} must not produce spelling findings"
             );
         }
+    }
+
+    /// The ngram suggester's tied candidates for the measured probe
+    /// words (issue #1599): under a collapsed dictionary hash the
+    /// scan order changes and the kept ties change — `prefered` loses
+    /// `prefer-ed` and gains `prefaced` under both constant-hash
+    /// mutants, `untill` loses `untimely` under `write -> ()`. Skips
+    /// when no system dictionary is installed (CI installs the pinned
+    /// pair); the distribution test above pins the hasher in every
+    /// environment.
+    #[test]
+    fn golden_suggestions_for_tie_order_probes() {
+        let Some(checker) = Spellchecker::new() else {
+            return;
+        };
+        let checker = checker.with_ngram_suggestions(true);
+        // untill first: it alone kills write -> (), while prefered
+        // kills both mutants.
+        assert_eq!(
+            checker.check("untill", "testpkg", &[]),
+            vec![(
+                "untill".to_string(),
+                vec![
+                    "until".to_string(),
+                    "until l".to_string(),
+                    "untimely".to_string(),
+                ]
+            )],
+            "suggestions for untill changed"
+        );
+        assert_eq!(
+            checker.check("prefered", "testpkg", &[]),
+            vec![(
+                "prefered".to_string(),
+                vec![
+                    "prefer".to_string(),
+                    "prefer ed".to_string(),
+                    "prefer-ed".to_string(),
+                ]
+            )],
+            "suggestions for prefered changed"
+        );
     }
 
     #[test]
