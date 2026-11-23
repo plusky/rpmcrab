@@ -15,7 +15,7 @@ Files the daily upstream-whitelist-sync job owns (SYNC_MANAGED_FILES in
 the generator) advance at branch tip on their own cadence and are
 excluded from the comparison, mirroring the generator's --check split;
 the PROVENANCE comparison likewise drops the sync-owned whitelist pin
-lines on both sides.
+lines and the per-flavour pin lines on both sides.
 
 The report names the upstream commits in the pin range (pin..tip) and
 the vendored files a refresh rewrites, so the refresh stays a reviewed,
@@ -196,14 +196,32 @@ def commits_in_range(old, new, ref_dir):
     )
 
 
+def strip_pin_lines(text):
+    """Drop per-flavour pin lines for drift comparison.
+
+    The pin records which upstream commit a flavour was generated
+    from; it moves whenever upstream moves, even when the
+    regeneration diff is empty. A pin-only PROVENANCE difference is
+    bookkeeping, not drift — the same ownership split as
+    strip_sync_owned_provenance, which drops the sync-owned
+    whitelist pin lines.
+    """
+    prefixes = tuple(f"# {flavor}: " for flavor in gen.PINS)
+    return "\n".join(
+        line for line in text.splitlines() if not line.startswith(prefixes)
+    )
+
+
 def compute_drift(ref_dir, tip_pins):
     """Regenerate at the tip pins; diff the generator-owned artefacts.
 
     Returns [(label, unified diff)] in a stable order. Sync-managed
     whitelist files are skipped (the daily sync owns them at tip), and
     the PROVENANCE comparison strips the sync-owned whitelist pin
-    lines on both sides — the same ownership split as the generator's
-    --check, whose diff labels this mirrors.
+    lines and the per-flavour pin lines on both sides — the same
+    ownership split as the generator's --check, whose diff labels
+    this mirrors. A pin-only PROVENANCE difference is bookkeeping,
+    not drift.
     """
     (
         result,
@@ -249,10 +267,14 @@ def compute_drift(ref_dir, tip_pins):
     if not shipped_prov_path.exists():
         drift.append(("PROVENANCE", "missing vendored file: PROVENANCE"))
     else:
-        shipped_prov = gen.strip_sync_owned_provenance(
-            shipped_prov_path.read_text(encoding="utf-8")
+        shipped_prov = strip_pin_lines(
+            gen.strip_sync_owned_provenance(
+                shipped_prov_path.read_text(encoding="utf-8")
+            )
         )
-        tip_prov = gen.strip_sync_owned_provenance(provenance)
+        tip_prov = strip_pin_lines(
+            gen.strip_sync_owned_provenance(provenance)
+        )
         if shipped_prov != tip_prov:
             drift.append(
                 (
@@ -449,6 +471,17 @@ def main():
             )
 
     drift = compute_drift(ref_dir, tip_pins)
+    if not drift:
+        for m in movements:
+            print(
+                f"watch-summary: {m['flavor']}: {m['branch']} "
+                f"{m['old_sha'][:12]}..{m['new_sha'][:12]} "
+                f"commits={m['total_commits']} drifted-files=0 "
+                "(pins moved, no vendored file differs)"
+            )
+        print("CHANGED=false")
+        _signal_changed(False)
+        return 0
     report = render_report(movements, drift)
     print(report)
     for m in movements:
