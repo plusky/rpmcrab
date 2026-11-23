@@ -6,17 +6,20 @@ contract the watch mirrors), but every network seam — tip resolution,
 commit enumeration and generate() itself — is stubbed, and the shipped
 tree is a temp dir. The git-range test builds a throwaway repository
 so the local-checkout path runs end to end. Each test guards a way the
-watch could misreport: crying drift on sync-owned files, losing the
-commit list, or signalling the wrong CHANGED value to the workflow.
+watch could misreport: crying drift on sync-owned files, on a pin-only
+PROVENANCE difference, losing the commit list, or signalling the wrong
+CHANGED value to the workflow.
 
 Run:  python3 scripts/test_watch_upstream_configs.py
 """
 
 import importlib.util
+import io
 import os
 import subprocess
 import sys
 import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -106,9 +109,9 @@ def _fake_generate(files, provenance):
 
 
 def test_compute_drift_ownership_split():
-    """Drift covers generator-owned files and the pin line of
-    PROVENANCE; a sync-managed file and the sync-owned whitelist pin
-    line never read as drift."""
+    """Drift covers generator-owned files; a sync-managed file, the
+    sync-owned whitelist pin line and the per-flavour pin lines
+    never read as drift."""
     files = {
         "opensuse.toml": "new text\n",
         "users-groups.toml": "same text\n",
@@ -138,7 +141,7 @@ def test_compute_drift_ownership_split():
             mock.patch.object(gen, "GENERATED_RS", rs_path):
             drift = watch.compute_drift(None, {"opensuse": ("0" * 40, "2026-01-01")})
     labels = [label for label, _ in drift]
-    assert labels == ["opensuse/opensuse.toml", "PROVENANCE"], labels
+    assert labels == ["opensuse/opensuse.toml"], labels
 
 
 def test_compute_drift_clean_tree():
@@ -161,6 +164,110 @@ def test_compute_drift_clean_tree():
             mock.patch.object(gen, "GENERATED_RS", rs_path):
             drift = watch.compute_drift(None, {"opensuse": ("0" * 40, "2026-01-01")})
     assert drift == [], drift
+
+
+def test_compute_drift_pin_only_provenance():
+    """A pin-only PROVENANCE difference is bookkeeping, not drift:
+    upstream moved, the regeneration is otherwise identical, so no
+    drift entry — the #1611 shape."""
+    files = {"opensuse.toml": "same\n"}
+    provenance = (
+        "# opensuse: opensuse @ tip (2026-01-01)\n"
+        "#   Filters: added 'x' (reason)\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        distro = Path(tmp)
+        flavor_dir = distro / "opensuse"
+        flavor_dir.mkdir()
+        (flavor_dir / "opensuse.toml").write_text("same\n", encoding="utf-8")
+        (distro / "PROVENANCE").write_text(
+            "# opensuse: opensuse @ pin (2025-01-01)\n"
+            "#   Filters: added 'x' (reason)\n",
+            encoding="utf-8",
+        )
+        rs_path = Path(tmp) / "distro_files_generated.rs"
+        rs_path.write_text(gen.emit_rs(sorted(files)), encoding="utf-8")
+        with mock.patch.object(gen, "generate", _fake_generate(files, provenance)), \
+            mock.patch.object(gen, "DISTRO_DIR", distro), \
+            mock.patch.object(gen, "GENERATED_RS", rs_path):
+            drift = watch.compute_drift(None, {"opensuse": ("0" * 40, "2026-01-01")})
+    assert drift == [], drift
+
+
+def test_compute_drift_provenance_non_pin_difference():
+    """A genuine non-pin PROVENANCE difference still reads as drift,
+    and the reported diff carries only the real difference — the pin
+    lines never appear in it."""
+    files = {"opensuse.toml": "same\n"}
+    provenance = (
+        "# opensuse: opensuse @ tip (2026-01-01)\n"
+        "#   Filters: added 'x' (reason)\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        distro = Path(tmp)
+        flavor_dir = distro / "opensuse"
+        flavor_dir.mkdir()
+        (flavor_dir / "opensuse.toml").write_text("same\n", encoding="utf-8")
+        (distro / "PROVENANCE").write_text(
+            "# opensuse: opensuse @ pin (2025-01-01)\n"
+            "#   Filters: added 'x' (reason)\n"
+            "#   Filters: added 'y' (other reason)\n",
+            encoding="utf-8",
+        )
+        rs_path = Path(tmp) / "distro_files_generated.rs"
+        rs_path.write_text(gen.emit_rs(sorted(files)), encoding="utf-8")
+        with mock.patch.object(gen, "generate", _fake_generate(files, provenance)), \
+            mock.patch.object(gen, "DISTRO_DIR", distro), \
+            mock.patch.object(gen, "GENERATED_RS", rs_path):
+            drift = watch.compute_drift(None, {"opensuse": ("0" * 40, "2026-01-01")})
+    labels = [label for label, _ in drift]
+    assert labels == ["PROVENANCE"], labels
+    assert "@ pin" not in drift[0][1] and "@ tip" not in drift[0][1], drift
+
+
+def test_main_movement_without_drift():
+    """Upstream moved but the regeneration differs only in the
+    PROVENANCE pin line (#1611): changed=false, no report file."""
+    old_sha, _old_date, _branch = next(iter(gen.PINS.values()))
+    new_sha = "e" * 40
+    files = {"opensuse.toml": "same\n"}
+    provenance = f"# opensuse: opensuse @ {new_sha} (2026-01-02)\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        distro = Path(tmp)
+        flavor_dir = distro / "opensuse"
+        flavor_dir.mkdir()
+        (flavor_dir / "opensuse.toml").write_text("same\n", encoding="utf-8")
+        (distro / "PROVENANCE").write_text(
+            f"# opensuse: opensuse @ {old_sha} (2025-01-01)\n",
+            encoding="utf-8",
+        )
+        rs_path = Path(tmp) / "distro_files_generated.rs"
+        rs_path.write_text(gen.emit_rs(sorted(files)), encoding="utf-8")
+        gh_out = Path(tmp) / "github-output"
+        report = Path(tmp) / "report.md"
+        with mock.patch.object(
+            watch, "resolve_tip", lambda branch, ref_dir: (new_sha, "2026-01-02")
+        ), mock.patch.object(
+            watch,
+            "commits_in_range",
+            lambda old, new, ref_dir: ([], [], None, 0),
+        ), mock.patch.object(
+            gen, "generate", _fake_generate(files, provenance)
+        ), mock.patch.object(
+            gen, "DISTRO_DIR", distro
+        ), mock.patch.object(
+            gen, "GENERATED_RS", rs_path
+        ):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = _run_main(
+                    ["watch-upstream-configs.py", "--report-file", str(report)],
+                    {"GITHUB_OUTPUT": str(gh_out)},
+                )
+        assert rc == 0
+        assert gh_out.read_text(encoding="utf-8") == "changed=false\n"
+        assert not report.exists()
+        assert "pins moved, no vendored file differs" in buf.getvalue(), buf.getvalue()
 
 
 def _run_main(argv, env_extra=None):
