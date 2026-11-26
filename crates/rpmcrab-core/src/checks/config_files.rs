@@ -389,9 +389,10 @@ mod tests {
     fn staged_descriptions_carry_deliberate_rewords() {
         // Staged for the M2 `--explain` wiring (see data/descriptions/README.md).
         // `non-etc-or-var-file-marked-as-conffile` carries the reword from
-        // upstream #1606 (dropping `%config` named as an option, not just
-        // moving files), byte-identical to the reference (pinned
-        // rpmlint@84848c0). `conffile-without-noreplace-flag` carries the
+        // upstream #1606 as amended after Neal's review (move the file
+        // first; drop `%config` only if marked by mistake), matching
+        // rpmlint#1606 head 63a7b807 ahead of the pinned reference
+        // (rpmlint@84848c0). `conffile-without-noreplace-flag` carries the
         // rpmcrab#556 reword: both `%config` forms are valid, and
         // the text lays out the .rpmsave/.rpmnew upgrade semantics the
         // choice turns on instead of prescribing noreplace; ledgered in
@@ -401,9 +402,10 @@ mod tests {
         assert_eq!(
             table["non-etc-or-var-file-marked-as-conffile"].as_str(),
             Some(
-                "A file not in /etc or /var is marked as being a configuration file (%config).\n\
-                 Put your configuration files in /etc or /var, or remove the %config attribute\n\
-                 from the corresponding line in the %files section.\n"
+                "A configuration file (%config) is stored outside /etc or /var.\n\
+                 Move the file to /etc or /var, or remove the %config attribute\n\
+                 from the corresponding line in the %files section if it was marked\n\
+                 as a configuration file by mistake.\n"
             )
         );
         assert_eq!(

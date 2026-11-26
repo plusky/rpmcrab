@@ -6,7 +6,7 @@
 case = "global"
 check = "ConfigFilesCheck"
 kind = "detail"
-reason = "`non-etc-or-var-file-marked-as-conffile` carries the upstream rpmlint#1606 reword (drop `%config` named as an option, not just moving files) ahead of the pinned reference, per the fix-in-port rule; the check behaviour is unchanged. Provenance: `crates/rpmcrab-core/data/descriptions/README.md`."
+reason = "`non-etc-or-var-file-marked-as-conffile` carries the upstream rpmlint#1606 reword as amended after Neal's review (move the file to /etc or /var first; drop `%config` only if marked by mistake) ahead of the pinned reference, per the fix-in-port rule; the check behaviour is unchanged. Provenance: `crates/rpmcrab-core/data/descriptions/README.md`."
 since = "0.1.0"
 
 [[divergence]]
