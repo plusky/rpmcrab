@@ -45,7 +45,7 @@ Provenance, verified against the pinned reference (`84848c0`):
   block that `checks/i18n.rs` emits.
 - `ConfigFilesCheck.toml` — the reference file, except
   `non-etc-or-var-file-marked-as-conffile` carries the reword from upstream
-  #1606 (drop `%config` named as an option), staged ahead of the reference
+  #1606 as amended after Neal's review (move the file first; drop `%config` only if marked by mistake), staged ahead of the reference
   per the fix-in-port rule, and `conffile-without-noreplace-flag` carries
   the reword from rpmcrab#556 (both `%config` forms valid; the text
   lays out the .rpmsave/.rpmnew upgrade semantics and asks for a per-file
