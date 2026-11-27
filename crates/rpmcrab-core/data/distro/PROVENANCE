@@ -172,7 +172,7 @@
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'foomuuri' (removed from Factory (bsc#1254385))
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'foomuuri-firewalld' (removed from Factory (bsc#1254385))
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'snapd' (removed from Factory (bsc#1256175, bsc#1248682, bsc#1261739))
-#   whitelist: dropped [[FileDigestGroup]] stanza for 'txnupd-maintenance-tools' (removed from Factory (bsc#1268577))
+#   whitelist: KEPT [[FileDigestGroup]] stanza for txnupd-maintenance-tools — package present in Factory, needs a fresh audit before any allowance is trusted
 #   whitelist: dropped [[DeviceFilesWhitelist]] stanza for 'rpmlint-integration-test' (rpmlint’s own synthetic integration-test package; not real distro policy, not shipped in Factory or Leap)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam_userpass' (removed from Factory; legacy: not audited)
 #   whitelist: dropped [[FileDigestGroup]] stanza for 'pam-ssh-agent' (removed from Factory (bsc#1274633))
