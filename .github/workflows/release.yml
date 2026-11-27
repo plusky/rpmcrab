@@ -34,7 +34,7 @@ jobs:
   # Derive the release version and refuse anything that disagrees with the
   # manifest, so a mistyped tag can never ship the wrong version string.
   check-version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -69,12 +69,15 @@ jobs:
     needs: check-version
     strategy:
       fail-fast: false
+      # Pinned runner images: the binaries link the system
+      # librpm, so the runner image sets the linked SONAME.
+      # A floating ubuntu-latest changes it without warning.
       matrix:
         include:
           # librpm is Linux-only; there is no macOS build.
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-26.04, target: x86_64-unknown-linux-gnu }
           # Native arm64 runner: no cross toolchain to maintain.
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-26.04-arm, target: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -129,7 +132,7 @@ jobs:
     # Pinned runner image: the A/B comparison happens on one runner by
     # design, and a fixed OS image keeps the environment comparable
     # across runs.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -141,7 +144,7 @@ jobs:
           path: dist
           if-no-files-found: error
       # Before the smoke test: rpmcrab shells out to `file` and to
-      # `rpm -Kv` (SignatureCheck), and a fresh ubuntu-24.04 image has
+      # `rpm -Kv` (SignatureCheck), and a fresh ubuntu-26.04 image has
       # no rpm, so install both up front.
       - name: Install runtime deps
         run: sudo apt-get update && sudo apt-get install -y file rpm
@@ -151,11 +154,18 @@ jobs:
           mkdir -p /tmp/candidate
           tar -xzf dist/rpmcrab-*.tar.gz -C /tmp/candidate
           /tmp/candidate/rpmcrab --version
-      # The baseline is the previous published release's binary, fetched
-      # from its release assets: the newest release whose tag is not this
-      # run's tag. Resolution and download failures fail the job; the
-      # gate reports "no-baseline" only when no previous release exists.
-      - name: Resolve and fetch the baseline (previous release)
+      # The baseline is the previous release's source, rebuilt on this
+      # runner: the published binary links the librpm SONAME of the
+      # runner it was built on, and a rebuild links this runner's
+      # SONAME like the candidate does. Resolution and build failures
+      # fail the job; the gate reports "no-baseline" only when no
+      # previous release exists.
+      # The baseline is rebuilt from source below, so the job needs the
+      # same pinned toolchain as the build job (1.99.0, not floating).
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: 1.99.0
+      - name: Resolve and rebuild the baseline (previous release)
         id: baseline
         env:
           GH_TOKEN: ${{ github.token }}
@@ -172,11 +182,12 @@ jobs:
             exit 0
           fi
           echo "baseline release: $tag"
-          mkdir -p /tmp/baseline-dist /tmp/baseline
-          gh release download "$tag" \
-            --pattern 'rpmcrab-*-x86_64-unknown-linux-gnu.tar.gz' \
-            --dir /tmp/baseline-dist
-          tar -xzf /tmp/baseline-dist/rpmcrab-*.tar.gz -C /tmp/baseline
+          mkdir -p /tmp/baseline
+          git clone --depth 1 --branch "$tag" \
+            "https://github.com/${{ github.repository }}.git" /tmp/baseline-src
+          sudo apt-get install -y librpm-dev
+          cargo build --release --locked -p rpmcrab --manifest-path /tmp/baseline-src/Cargo.toml
+          cp /tmp/baseline-src/target/release/rpmcrab /tmp/baseline/rpmcrab
           /tmp/baseline/rpmcrab --version
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
@@ -207,7 +218,7 @@ jobs:
     # Tag pushes only: a dispatch run is a dry-run and stops after build.
     if: github.event_name == 'push'
     needs: [check-version, build, benchmark]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: write
@@ -336,7 +347,7 @@ jobs:
   post-release-bump:
     if: github.event_name == 'push'
     needs: [check-version, release]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: write
