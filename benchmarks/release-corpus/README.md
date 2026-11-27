@@ -27,7 +27,7 @@ timing a different corpus.
 
 - **Candidate** — the binary this release run built (`RPMCRAB_BIN`).
 - **Baseline** — the previous release's binary (`BASELINE_BIN`); the
-  workflow fetches it from that release's assets.
+  workflow rebuilds it from that release's tagged source on the same runner.
 
 Timing runs per package, interleaved: each round walks the corpus and
 runs baseline and candidate back to back on every package, alternating
@@ -111,7 +111,7 @@ runner metadata (OS, CPU model, core count, date, rpmcrab git SHA).
 `.github/workflows/release.yml` runs the gate after the build on every
 release run (tag push and manual dispatch). The baseline step resolves
 the newest published release whose tag differs from the run's tag and
-downloads its x86_64 binary from the release assets. The release job
+rebuilds its binary from the tagged source on the same runner. The release job
 depends on the benchmark job, so a fail verdict blocks publication.
 The verdict JSON is uploaded as a workflow artifact on every run, and
 on tag runs it rides the release-create call, landing on the GitHub
