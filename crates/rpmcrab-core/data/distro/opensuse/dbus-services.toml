@@ -1692,6 +1692,16 @@ digester = "xml"
 hash     = "9f285cc77c7b39ab5b826268a8d60a54286458f31e06dbaac52863027ab0ee00"
 
 [[FileDigestGroup]]
+package  = "txnupd-maintenance-tools"
+note     = "forwards signals from transactional-update to a session D-Bus daemon"
+bug      = "bsc#1268577"
+type     = "dbus"
+[[FileDigestGroup.digests]]
+path     = "/usr/share/dbus-1/system.d/org.opensuse.tukit.Updated.conf"
+digester = "xml"
+hash     = "abf27e413feacafdb95e5b48ae2d75f501d506feb6a0a46a96fab338bde1fd13"
+
+[[FileDigestGroup]]
 package  = "cosmic-greeter"
 note     = "supplies user account and configuration info for cosmic greeter"
 bug      = "bsc#1259401"
